@@ -1,0 +1,13 @@
+{
+    "name": "Onstage2426/fuzor",
+    "type": "library",
+    "description": "",
+    "license": "MIT",
+    "require": {
+    },
+    "autoload": {
+        "psr-4": {
+            "Fuzor\\": "src"
+        }
+    }
+}
