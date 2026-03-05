@@ -1,9 +1,10 @@
 {
-    "name": "Onstage2426/fuzor",
+    "name": "onstage2426/fuzor",
     "type": "library",
-    "description": "",
+    "description": "A basic SQLite index and search engine",
     "license": "MIT",
     "require": {
+        "php": ">=8.5"
     },
     "autoload": {
         "psr-4": {
