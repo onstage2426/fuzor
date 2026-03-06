@@ -250,33 +250,35 @@ class SqliteEngine
      */
     public function delete(int $documentId): void
     {
-        $this->prepareAndExecuteStatement(
-            'WITH doc_terms AS (
-                 SELECT term_id, hit_count FROM doclist WHERE doc_id = :documentId
-             )
-             UPDATE wordlist SET
-                 num_docs = num_docs - 1,
-                 num_hits = num_hits - (SELECT hit_count FROM doc_terms WHERE term_id = wordlist.id)
-             WHERE id IN (SELECT term_id FROM doc_terms)',
-            [':documentId' => $documentId]
-        );
+        $this->wrapInTransaction(function () use ($documentId): void {
+            $this->prepareAndExecuteStatement(
+                'WITH doc_terms AS (
+                     SELECT term_id, hit_count FROM doclist WHERE doc_id = :documentId
+                 )
+                 UPDATE wordlist SET
+                     num_docs = num_docs - 1,
+                     num_hits = num_hits - (SELECT hit_count FROM doc_terms WHERE term_id = wordlist.id)
+                 WHERE id IN (SELECT term_id FROM doc_terms)',
+                [':documentId' => $documentId]
+            );
 
-        $deleted = $this->prepareAndExecuteStatement(
-            'DELETE FROM doclist WHERE doc_id = :documentId',
-            [':documentId' => $documentId]
-        )->rowCount();
+            $deleted = $this->prepareAndExecuteStatement(
+                'DELETE FROM doclist WHERE doc_id = :documentId',
+                [':documentId' => $documentId]
+            )->rowCount();
 
-        $this->prepareAndExecuteStatement('DELETE FROM wordlist WHERE num_hits = 0');
+            $this->prepareAndExecuteStatement('DELETE FROM wordlist WHERE num_hits = 0');
 
-        $this->prepareAndExecuteStatement(
-            'DELETE FROM doc_lengths WHERE doc_id = :documentId',
-            [':documentId' => $documentId]
-        );
+            $this->prepareAndExecuteStatement(
+                'DELETE FROM doc_lengths WHERE doc_id = :documentId',
+                [':documentId' => $documentId]
+            );
 
-        if ($deleted) {
-            $this->updateInfoTable('total_documents', $this->totalDocumentsInCollection() - 1);
-            $this->updateInfoTable('avg_doc_length', $this->index->query('SELECT AVG(length) FROM doc_lengths')->fetchColumn() ?: 0);
-        }
+            if ($deleted) {
+                $this->updateInfoTable('total_documents', $this->totalDocumentsInCollection() - 1);
+                $this->updateInfoTable('avg_doc_length', $this->index->query('SELECT AVG(length) FROM doc_lengths')->fetchColumn() ?: 0);
+            }
+        });
     }
 
     /**
@@ -594,8 +596,10 @@ class SqliteEngine
      */
     public function update(int $id, array $document): void
     {
-        $this->delete($id);
-        $this->insert($document);
+        $this->wrapInTransaction(function () use ($id, $document): void {
+            $this->delete($id);
+            $this->insert($document);
+        });
     }
 
     /**
@@ -608,8 +612,34 @@ class SqliteEngine
      */
     public function insert(array $document): void
     {
-        $this->processDocument($document);
-        $this->updateInfoTable('total_documents', $this->totalDocumentsInCollection() + 1);
-        $this->updateInfoTable('avg_doc_length', $this->index->query('SELECT AVG(length) FROM doc_lengths')->fetchColumn() ?: 0);
+        $this->wrapInTransaction(function () use ($document): void {
+            $this->processDocument($document);
+            $this->updateInfoTable('total_documents', $this->totalDocumentsInCollection() + 1);
+            $this->updateInfoTable('avg_doc_length', $this->index->query('SELECT AVG(length) FROM doc_lengths')->fetchColumn() ?: 0);
+        });
+    }
+
+    /**
+     * Run $fn inside a transaction, committing on success and rolling back on exception.
+     *
+     * When already inside a transaction (e.g. update() calling delete() + insert()),
+     * the callback runs in the existing transaction rather than starting a nested one.
+     *
+     * @param callable(): void $fn
+     */
+    private function wrapInTransaction(callable $fn): void
+    {
+        if ($this->index->inTransaction()) {
+            $fn();
+            return;
+        }
+        $this->index->beginTransaction();
+        try {
+            $fn();
+            $this->index->commit();
+        } catch (\Throwable $e) {
+            $this->index->rollBack();
+            throw $e;
+        }
     }
 }
