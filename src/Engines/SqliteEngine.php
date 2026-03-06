@@ -180,9 +180,9 @@ class SqliteEngine
     /**
      * Upsert terms from tokenised document stems into the wordlist table.
      *
-     * Uses SQLite's ON CONFLICT DO UPDATE with RETURNING to atomically insert
-     * or increment each term and retrieve its ID in a single round-trip per term.
-     * No exception-based duplicate detection; no in-memory ID cache required.
+     * Uses a single batched INSERT … ON CONFLICT … RETURNING id, term to upsert
+     * all terms for a document in one round-trip per chunk (chunks respect
+     * SQLite's 999-variable limit at 2 params per term).
      *
      * @param  array<string, string[]> $stems Tokenised fields (field name → token list).
      * @return array<string, array{hits: int, id: int|string}> Terms with resolved wordlist IDs.
@@ -202,19 +202,29 @@ class SqliteEngine
             }
         }
 
-        $stmt = $this->index->prepare(
-            'INSERT INTO wordlist (term, num_hits, num_docs) VALUES (:keyword, :hits, 1)
-             ON CONFLICT(term) DO UPDATE SET
-                 num_hits = num_hits + excluded.num_hits,
-                 num_docs = num_docs + 1
-             RETURNING id'
-        );
+        if (empty($terms)) {
+            return $terms;
+        }
 
-        foreach ($terms as $key => $term) {
-            $stmt->bindValue(':keyword', $key);
-            $stmt->bindValue(':hits', $term['hits']);
-            $stmt->execute();
-            $terms[$key]['id'] = $stmt->fetchColumn();
+        foreach (array_chunk(array_keys($terms), 499) as $chunk) {
+            $placeholders = [];
+            $params       = [];
+            foreach ($chunk as $i => $key) {
+                $placeholders[] = "(:k{$i}, :h{$i}, 1)";
+                $params[":k{$i}"] = $key;
+                $params[":h{$i}"] = $terms[$key]['hits'];
+            }
+            $stmt = $this->index->prepare(
+                'INSERT INTO wordlist (term, num_hits, num_docs) VALUES ' . implode(',', $placeholders) . '
+                 ON CONFLICT(term) DO UPDATE SET
+                     num_hits = num_hits + excluded.num_hits,
+                     num_docs = num_docs + 1
+                 RETURNING id, term'
+            );
+            $stmt->execute($params);
+            foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
+                $terms[$row['term']]['id'] = $row['id'];
+            }
         }
 
         return $terms;
@@ -223,22 +233,29 @@ class SqliteEngine
     /**
      * Write term→document hit counts to the doclist table.
      *
+     * Uses a single batched INSERT per chunk (3 params per term; chunks respect
+     * SQLite's 999-variable limit).
+     *
      * @param array<string, array{hits: int, id: int|string}> $terms Terms with resolved wordlist IDs.
      * @param int                                               $docId Document ID.
-     * @throws \RuntimeException On insert failure.
      */
     public function saveDoclist(array $terms, int $docId): void
     {
-        $stmt = $this->index->prepare('INSERT INTO doclist (term_id, doc_id, hit_count) VALUES (:id, :doc, :hits)');
-        foreach ($terms as $term) {
-            $stmt->bindValue(':id', $term['id']);
-            $stmt->bindValue(':doc', $docId);
-            $stmt->bindValue(':hits', $term['hits']);
-            try {
-                $stmt->execute();
-            } catch (\Exception $e) {
-                throw new \RuntimeException("Error while saving doclist: " . $e->getMessage(), 0, $e);
+        if (empty($terms)) {
+            return;
+        }
+
+        foreach (array_chunk(array_values($terms), 333) as $chunk) {
+            $placeholders = implode(',', array_fill(0, count($chunk), '(?,?,?)'));
+            $params = [];
+            foreach ($chunk as $term) {
+                $params[] = $term['id'];
+                $params[] = $docId;
+                $params[] = $term['hits'];
             }
+            $this->index->prepare(
+                "INSERT INTO doclist (term_id, doc_id, hit_count) VALUES {$placeholders}"
+            )->execute($params);
         }
     }
 
