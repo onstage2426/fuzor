@@ -61,9 +61,9 @@ class SqliteEngine
     /**
      * Create a new SQLite index file and initialise the schema.
      *
-     * Any existing file with the same name is deleted first. WAL journal mode
-     * is enabled, and indexes are created on both wordlist(term) and
-     * doclist(term_id, doc_id).
+     * Any existing file with the same name is deleted first. Performance pragmas
+     * are applied via applyPragmas(), and indexes are created on both
+     * wordlist(term) and doclist(term_id, doc_id).
      *
      * @param  string $indexName Filename for the SQLite database (e.g. 'articles.db').
      * @return static
@@ -75,7 +75,7 @@ class SqliteEngine
 
         $this->index = new PDO('sqlite:' . $this->storagePath . $indexName);
         $this->index->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
-        $this->index->exec("PRAGMA journal_mode=wal;");
+        $this->applyPragmas();
 
         $this->index->exec(
             "CREATE TABLE IF NOT EXISTS wordlist (
@@ -365,6 +365,7 @@ class SqliteEngine
         }
         $this->index = new PDO('sqlite:' . $path);
         $this->index->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+        $this->applyPragmas();
     }
 
     /**
@@ -662,6 +663,24 @@ class SqliteEngine
             $oldAvg   = (float) ($this->getValueFromInfoTable('avg_doc_length') ?: 0);
             $this->updateInfoTable('avg_doc_length', ($oldAvg * $oldCount + $length) / $newCount);
         });
+    }
+
+    /**
+     * Apply connection-level SQLite pragmas for optimal performance.
+     *
+     * - journal_mode=WAL: concurrent readers, faster commits.
+     * - synchronous=NORMAL: safe with WAL (no data loss on crash), far fewer fsyncs than FULL.
+     * - cache_size=-16000: 16 MB page cache (negative value = kibibytes).
+     * - temp_store=MEMORY: sort/index temp tables stay in RAM.
+     */
+    private function applyPragmas(): void
+    {
+        $this->index->exec('
+            PRAGMA journal_mode = WAL;
+            PRAGMA synchronous  = NORMAL;
+            PRAGMA cache_size   = -16000;
+            PRAGMA temp_store   = MEMORY;
+        ');
     }
 
     /**
