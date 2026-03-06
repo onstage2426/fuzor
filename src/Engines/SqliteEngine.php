@@ -291,7 +291,6 @@ class SqliteEngine
             $this->prepareAndExecuteStatement('DELETE FROM wordlist WHERE num_hits = 0');
 
             if ($deleted) {
-                $oldCount = $this->totalDocumentsInCollection();
                 $oldAvg   = (float) ($this->getValueFromInfoTable('avg_doc_length') ?: 0);
                 $length   = (int) $this->prepareAndExecuteStatement(
                     'SELECT length FROM doc_lengths WHERE doc_id = :documentId',
@@ -303,8 +302,8 @@ class SqliteEngine
                     [':documentId' => $documentId]
                 );
 
-                $newCount = $oldCount - 1;
-                $this->updateInfoTable('total_documents', $newCount);
+                $newCount = $this->adjustTotalDocuments(-1);
+                $oldCount = $newCount + 1;
                 $this->updateInfoTable('avg_doc_length', $newCount > 0 ? ($oldAvg * $oldCount - $length) / $newCount : 0);
             } else {
                 $this->prepareAndExecuteStatement(
@@ -333,13 +332,23 @@ class SqliteEngine
     }
 
     /**
-     * Return the total number of documents currently in the index.
+     * Atomically increment or decrement total_documents and return the new value.
      *
-     * Reads the 'total_documents' row from the info table; returns 0 if unset.
+     * Uses UPDATE … RETURNING (requires SQLite 3.35+) to avoid a separate SELECT.
+     *
+     * @param  int $delta +1 for insert, -1 for delete.
+     * @return int        New total_documents value after adjustment.
      */
-    public function totalDocumentsInCollection(): int
+    private function adjustTotalDocuments(int $delta): int
     {
-        return (int) $this->getValueFromInfoTable('total_documents');
+        $stmt = $this->index->prepare(
+            "UPDATE info SET value = CAST(value AS INTEGER) + :delta
+             WHERE key = 'total_documents'
+             RETURNING CAST(value AS INTEGER) AS value"
+        );
+        $stmt->bindValue(':delta', $delta, PDO::PARAM_INT);
+        $stmt->execute();
+        return (int) $stmt->fetchColumn();
     }
 
     /**
@@ -648,10 +657,9 @@ class SqliteEngine
     {
         $this->wrapInTransaction(function () use ($document): void {
             $length   = $this->processDocument($document);
-            $oldCount = $this->totalDocumentsInCollection();
+            $newCount = $this->adjustTotalDocuments(1);
+            $oldCount = $newCount - 1;
             $oldAvg   = (float) ($this->getValueFromInfoTable('avg_doc_length') ?: 0);
-            $newCount = $oldCount + 1;
-            $this->updateInfoTable('total_documents', $newCount);
             $this->updateInfoTable('avg_doc_length', ($oldAvg * $oldCount + $length) / $newCount);
         });
     }
