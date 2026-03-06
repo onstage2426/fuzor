@@ -366,7 +366,7 @@ class SqliteEngine
      *
      * When $asYouType is true and $isLastWord is true, a trailing-wildcard LIKE
      * query is used instead of an exact match, preferring shorter terms.
-     * When $fuzziness is true and no exact match is found (or $noLimit forces
+     * When $fuzzy is true and no exact match is found (or $noLimit forces
      * expansion), fuzzySearch() is called as a fallback.
      *
      * @param  string                    $keyword    Term to look up.
@@ -378,8 +378,15 @@ class SqliteEngine
     public function getWordlistByKeyword(string $keyword, bool $isLastWord = false, bool $noLimit = false, bool $fuzzy = false): array
     {
         [$sql, $bind] = $this->asYouType && $isLastWord
-            ? ['SELECT id, term, num_hits, num_docs FROM wordlist WHERE term LIKE :keyword ORDER BY length(term) ASC, num_hits DESC LIMIT 1;', mb_strtolower($keyword) . '%']
-            : ['SELECT id, term, num_hits, num_docs FROM wordlist WHERE term = :keyword LIMIT 1;', mb_strtolower($keyword)];
+            ? [
+                'SELECT id, term, num_hits, num_docs FROM wordlist'
+                    . ' WHERE term LIKE :keyword ORDER BY length(term) ASC, num_hits DESC LIMIT 1;',
+                mb_strtolower($keyword) . '%',
+            ]
+            : [
+                'SELECT id, term, num_hits, num_docs FROM wordlist WHERE term = :keyword LIMIT 1;',
+                mb_strtolower($keyword),
+            ];
 
         $stmt = $this->index->prepare($sql);
         $stmt->bindValue(':keyword', $bind);
@@ -398,7 +405,7 @@ class SqliteEngine
      *
      * @param  list<array<string, mixed>> $word    Single-element wordlist result from getWordlistByKeyword().
      * @param  bool                       $noLimit When true, the $maxDocs cap is not applied.
-     * @return list<array<string, mixed>>          Doclist rows with term_id, doc_id, hit_count.
+     * @return list<array<string, mixed>>          Doclist rows with term_id, doc_id, hit_count, doc_length.
      */
     public function getAllDocumentsForStrictKeyword(array $word, bool $noLimit): array
     {
@@ -430,7 +437,9 @@ class SqliteEngine
         if (!isset($word[0])) {
             return [];
         }
-        $query = 'SELECT * FROM doclist WHERE doc_id NOT IN (SELECT doc_id FROM doclist WHERE term_id = :id) GROUP BY doc_id ORDER BY hit_count DESC'
+        $query = 'SELECT * FROM doclist'
+                 . ' WHERE doc_id NOT IN (SELECT doc_id FROM doclist WHERE term_id = :id)'
+                 . ' GROUP BY doc_id ORDER BY hit_count DESC'
                  . ($noLimit ? '' : ' LIMIT :maxDocs');
         $stmt = $this->index->prepare($query);
         $stmt->bindValue(':id', $word[0]['id']);
@@ -510,7 +519,7 @@ class SqliteEngine
      * Find wordlist candidates within Levenshtein edit distance of the keyword.
      *
      * Queries the wordlist for all terms sharing the same prefix
-     * ($fuzzy_prefix_length chars), then filters by $fuzzy_distance and sorts
+     * ($fuzzyPrefixLength chars), then filters by $fuzzyDistance and sorts
      * by edit distance ascending, then num_hits descending.
      *
      * @param  string                    $keyword Search term to find fuzzy matches for.

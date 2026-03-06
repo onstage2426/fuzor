@@ -71,6 +71,10 @@ class Index
 
     // ------------------------------------------------------------------------
 
+    /**
+     * @param SqliteEngine $engine       Configured engine bound to the index file.
+     * @param string       $resolvedPath Canonical absolute path to the index file.
+     */
     private function __construct(SqliteEngine $engine, string $resolvedPath)
     {
         $this->engine       = $engine;
@@ -86,6 +90,10 @@ class Index
      * Resolve a path to a canonical string, even if the file does not yet exist.
      *
      * Uses realpath() on the directory (which must exist) and appends the filename.
+     *
+     * @param  string $path Absolute or relative path to resolve.
+     * @return string       Canonical absolute path.
+     * @throws \RuntimeException If the parent directory does not exist.
      */
     private static function resolvePath(string $path): string
     {
@@ -97,6 +105,9 @@ class Index
     }
 
     /**
+     * Register a resolved path as in-use, preventing duplicate Index instances.
+     *
+     * @param  string $resolved Canonical absolute path returned by resolvePath().
      * @throws \RuntimeException If the path is already open in another Index instance.
      */
     private static function claimPath(string $resolved): void
@@ -178,7 +189,7 @@ class Index
      *
      * @param  string $phrase       Raw search phrase; will be tokenised.
      * @param  int    $numOfResults Maximum number of document IDs to return.
-     * @return array{ids: list<int>, hits: int, docScores: array<int, float>, duration: float}
+     * @return array{ids: list<int>, hits: int, docScores: array<int, float>}
      */
     public function search(string $phrase, int $numOfResults = 100): array
     {
@@ -192,7 +203,7 @@ class Index
      *
      * @param  string $phrase       Raw search phrase; will be tokenised.
      * @param  int    $numOfResults Maximum number of document IDs to return.
-     * @return array{ids: list<int>, hits: int, docScores: array<int, float>, duration: float}
+     * @return array{ids: list<int>, hits: int, docScores: array<int, float>}
      */
     public function searchFuzzy(string $phrase, int $numOfResults = 100): array
     {
@@ -209,7 +220,7 @@ class Index
      *
      * @param  string $phrase       Boolean query string.
      * @param  int    $numOfResults Maximum number of document IDs to return.
-     * @return array{ids: list<int>, hits: int, duration: float}
+     * @return array{ids: list<int>, hits: int}
      */
     public function searchBoolean(string $phrase, int $numOfResults = 100): array
     {
@@ -221,8 +232,12 @@ class Index
 
         // Resolve a stack operand to a doc-id list, caching DB lookups by term.
         $resolve = function (string|array|null $operand) use (&$cache): array {
-            if ($operand === null) return [];
-            if (is_array($operand)) return $operand;
+            if ($operand === null) {
+                return [];
+            }
+            if (is_array($operand)) {
+                return $operand;
+            }
             return $cache[$operand] ??= array_column(
                 $this->engine->getAllDocumentsForKeyword($operand, true),
                 'doc_id'
@@ -271,7 +286,7 @@ class Index
      * @param  string $phrase       Raw search phrase; will be tokenised.
      * @param  int    $numOfResults Maximum number of document IDs to return.
      * @param  bool   $fuzzy        When true, Levenshtein fuzzy matching is used.
-     * @return array{ids: list<int>, hits: int, docScores: array<int, float>, duration: float}
+     * @return array{ids: list<int>, hits: int, docScores: array<int, float>}
      */
     private function scorePhrase(string $phrase, int $numOfResults, bool $fuzzy): array
     {
@@ -296,7 +311,8 @@ class Index
                 $docId = $document['doc_id'];
                 $tf    = $document['hit_count'];
                 $dl    = $document['doc_length'];
-                $docScores[$docId] = ($docScores[$docId] ?? 0) + $idf * (($k1 + 1) * $tf) / ($k1 * (1 - $b + $b * $dl / $avgdl) + $tf);
+                $docScores[$docId] = ($docScores[$docId] ?? 0)
+                    + $idf * (($k1 + 1) * $tf) / ($k1 * (1 - $b + $b * $dl / $avgdl) + $tf);
             }
         }
 
@@ -334,7 +350,8 @@ class Index
                 }
             } else {
                 $tokenPriority = $this->expressionPriority($token);
-                while (!empty($stack) && ($top = end($stack)) !== '(' && $this->expressionPriority($top) >= $tokenPriority) {
+                while (!empty($stack) && ($top = end($stack)) !== '('
+                    && $this->expressionPriority($top) >= $tokenPriority) {
                     $postfix[] = array_pop($stack);
                 }
                 $stack[] = $token;
@@ -349,6 +366,9 @@ class Index
 
     /**
      * Return true if the token is an operand (word), false if it is an operator.
+     *
+     * @param  string $char Token to classify.
+     * @return bool         True for word operands, false for |, &, ~, (, ).
      */
     private function isExpressionOperand(string $char): bool
     {
@@ -362,6 +382,9 @@ class Index
      * Return the precedence level of a boolean operator.
      *
      * Higher value binds tighter: ~ (3) > & (2) > | (1).
+     *
+     * @param  string $char Operator or token character.
+     * @return int          Precedence level; 0 for unknown tokens.
      */
     private function expressionPriority(string $char): int
     {
