@@ -270,7 +270,7 @@ class Index
         }
 
         /** @var list<int> $docs */
-        $docs = array_slice(!empty($stack) ? $stack[0] : [], 0, $numOfResults);
+        $docs = array_slice($resolve(array_pop($stack)), 0, $numOfResults);
 
         return [
             'ids'      => $docs,
@@ -401,7 +401,7 @@ class Index
      * Tokenise a raw boolean query string into operators and word operands.
      *
      * Normalises natural-language syntax before splitting:
-     *   " or " → |,   " -" → ~,   " " → &
+     *   " or " → |,   " -" → &~,   " " → &
      *
      * @param  string   $string Raw query string.
      * @return string[]         Alternating word tokens and operator characters.
@@ -409,7 +409,7 @@ class Index
     private function lexExpression(string $string): array
     {
         $string = $string
-            |> (fn(string $s): string => str_replace([' or ', ' -', ' '], ['|', '~', '&'], $s))
+            |> (fn(string $s): string => str_replace([' or ', ' -', ' '], ['|', '&~', '&'], $s))
             |> mb_strtolower(...);
 
         return preg_split('/([|~&()])/', $string, -1, PREG_SPLIT_DELIM_CAPTURE | PREG_SPLIT_NO_EMPTY);
