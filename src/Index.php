@@ -296,8 +296,9 @@ class Index
         /** @var array<int, float> $docScores */
         $docScores = [];
 
-        $count     = $this->engine->getValueFromInfoTable('total_documents');
-        $avgdl     = (float) ($this->engine->getValueFromInfoTable('avg_doc_length') ?: 1);
+        $info      = $this->engine->getInfoValues(['total_documents', 'avg_doc_length']);
+        $count     = $info['total_documents'] ?? 0;
+        $avgdl     = (float) ($info['avg_doc_length'] ?: 1);
         $k1        = $this->engine->k1;
         $b         = $this->engine->b;
         $lastIndex = count($keywords) - 1;
@@ -382,18 +383,18 @@ class Index
      * Return the precedence level of a boolean operator.
      *
      * Higher value binds tighter: ~ (3) > & (2) > | (1).
+     * Parentheses are handled structurally in toPostfix() and are not assigned a precedence.
      *
-     * @param  string $char Operator or token character.
-     * @return int          Precedence level; 0 for unknown tokens.
+     * @param  string $char Operator token.
+     * @return int          Precedence level; 0 for non-operator tokens.
      */
     private function expressionPriority(string $char): int
     {
         return match ($char) {
-            '|'      => 1,
-            '&'      => 2,
-            '~'      => 3,
-            '(', ')' => 4,
-            default  => 0,
+            '|'     => 1,
+            '&'     => 2,
+            '~'     => 3,
+            default => 0,
         };
     }
 

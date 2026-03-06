@@ -299,7 +299,7 @@ class SqliteEngine
             )->rowCount();
 
             if ($deleted) {
-                $oldAvg   = (float) ($this->getValueFromInfoTable('avg_doc_length') ?: 0);
+                $oldAvg   = (float) ($this->getInfoValues(['avg_doc_length'])['avg_doc_length'] ?? 0);
                 $newCount = $this->adjustTotalDocuments(-1);
                 $oldCount = $newCount + 1;
                 $this->updateInfoTable('avg_doc_length', $newCount > 0 ? ($oldAvg * $oldCount - $length) / $newCount : 0);
@@ -468,18 +468,17 @@ class SqliteEngine
     }
 
     /**
-     * Retrieve a value from the info metadata table.
+     * Retrieve multiple values from the info metadata table in a single query.
      *
-     * @param  string      $key Metadata key to look up.
-     * @return string|null      Stored value, or null if the key does not exist.
+     * @param  string[]              $keys  Metadata keys to fetch.
+     * @return array<string, string> Map of key → value for found rows.
      */
-    public function getValueFromInfoTable(string $key): string|null
+    public function getInfoValues(array $keys): array
     {
-        $stmt = $this->index->prepare('SELECT value FROM info WHERE key = :key');
-        $stmt->bindValue(':key', $key);
-        $stmt->execute();
-        $ret = $stmt->fetch(PDO::FETCH_ASSOC);
-        return $ret ? $ret['value'] : null;
+        $placeholders = implode(',', array_fill(0, count($keys), '?'));
+        $stmt = $this->index->prepare("SELECT key, value FROM info WHERE key IN ($placeholders)");
+        $stmt->execute($keys);
+        return array_column($stmt->fetchAll(PDO::FETCH_ASSOC), 'value', 'key');
     }
 
     /**
@@ -593,10 +592,11 @@ class SqliteEngine
         $query = "SELECT d.term_id, d.doc_id, d.hit_count, dl.length AS doc_length
                   FROM doclist d JOIN doc_lengths dl ON dl.doc_id = d.doc_id
                   WHERE d.term_id IN ($placeholders) ORDER BY CASE d.term_id{$whenClauses} END"
-               . ($noLimit ? '' : " LIMIT {$this->maxDocs}");
+               . ($noLimit ? '' : ' LIMIT ?');
 
+        $ids  = array_column($words, 'id');
         $stmt = $this->index->prepare($query);
-        $stmt->execute(array_column($words, 'id'));
+        $stmt->execute($noLimit ? $ids : [...$ids, $this->maxDocs]);
         return $stmt->fetchAll(PDO::FETCH_ASSOC);
     }
 
@@ -668,7 +668,7 @@ class SqliteEngine
             $length   = $this->processDocument($document);
             $newCount = $this->adjustTotalDocuments(1);
             $oldCount = $newCount - 1;
-            $oldAvg   = (float) ($this->getValueFromInfoTable('avg_doc_length') ?: 0);
+            $oldAvg   = (float) ($this->getInfoValues(['avg_doc_length'])['avg_doc_length'] ?? 0);
             $this->updateInfoTable('avg_doc_length', ($oldAvg * $oldCount + $length) / $newCount);
         });
     }
