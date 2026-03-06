@@ -130,9 +130,10 @@ class SqliteEngine
      * The 'id' field is used as the document ID and is excluded from indexing.
      * Empty or whitespace-only field values are skipped.
      *
-     * @param array<string, mixed> $row Document fields; must contain an 'id' key.
+     * @param  array<string, mixed> $row Document fields; must contain an 'id' key.
+     * @return int                       Total token count across all indexed fields.
      */
-    public function processDocument(array $row): void
+    public function processDocument(array $row): int
     {
         $documentId = $row['id'];
 
@@ -142,8 +143,11 @@ class SqliteEngine
             array_diff_key($row, ['id' => null])
         );
 
+        $length = array_sum(array_map(count(...), $stems));
         $this->saveToIndex($stems, $documentId);
-        $this->saveDocLength($documentId, array_sum(array_map(count(...), $stems)));
+        $this->saveDocLength($documentId, $length);
+
+        return $length;
     }
 
     /**
@@ -269,14 +273,27 @@ class SqliteEngine
 
             $this->prepareAndExecuteStatement('DELETE FROM wordlist WHERE num_hits = 0');
 
-            $this->prepareAndExecuteStatement(
-                'DELETE FROM doc_lengths WHERE doc_id = :documentId',
-                [':documentId' => $documentId]
-            );
-
             if ($deleted) {
-                $this->updateInfoTable('total_documents', $this->totalDocumentsInCollection() - 1);
-                $this->updateInfoTable('avg_doc_length', $this->index->query('SELECT AVG(length) FROM doc_lengths')->fetchColumn() ?: 0);
+                $oldCount = $this->totalDocumentsInCollection();
+                $oldAvg   = (float) ($this->getValueFromInfoTable('avg_doc_length') ?: 0);
+                $length   = (int) $this->prepareAndExecuteStatement(
+                    'SELECT length FROM doc_lengths WHERE doc_id = :documentId',
+                    [':documentId' => $documentId]
+                )->fetchColumn();
+
+                $this->prepareAndExecuteStatement(
+                    'DELETE FROM doc_lengths WHERE doc_id = :documentId',
+                    [':documentId' => $documentId]
+                );
+
+                $newCount = $oldCount - 1;
+                $this->updateInfoTable('total_documents', $newCount);
+                $this->updateInfoTable('avg_doc_length', $newCount > 0 ? ($oldAvg * $oldCount - $length) / $newCount : 0);
+            } else {
+                $this->prepareAndExecuteStatement(
+                    'DELETE FROM doc_lengths WHERE doc_id = :documentId',
+                    [':documentId' => $documentId]
+                );
             }
         });
     }
@@ -613,9 +630,12 @@ class SqliteEngine
     public function insert(array $document): void
     {
         $this->wrapInTransaction(function () use ($document): void {
-            $this->processDocument($document);
-            $this->updateInfoTable('total_documents', $this->totalDocumentsInCollection() + 1);
-            $this->updateInfoTable('avg_doc_length', $this->index->query('SELECT AVG(length) FROM doc_lengths')->fetchColumn() ?: 0);
+            $length   = $this->processDocument($document);
+            $oldCount = $this->totalDocumentsInCollection();
+            $oldAvg   = (float) ($this->getValueFromInfoTable('avg_doc_length') ?: 0);
+            $newCount = $oldCount + 1;
+            $this->updateInfoTable('total_documents', $newCount);
+            $this->updateInfoTable('avg_doc_length', ($oldAvg * $oldCount + $length) / $newCount);
         });
     }
 
