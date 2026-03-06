@@ -21,13 +21,13 @@ use PDOStatement;
 class SqliteEngine
 {
     /** Name of the currently active index file (e.g. 'articles.db'). */
-    public string $indexName;
+    private string $indexName;
 
     /** Absolute path to the storage directory (guaranteed trailing slash). */
-    public string $storagePath;
+    private string $storagePath;
 
     /** Active PDO connection to the open SQLite index file. */
-    public PDO $index;
+    private PDO $index;
 
     /** When true, the last search keyword is matched as a prefix (as-you-type behaviour). */
     public bool $asYouType = true;
@@ -84,8 +84,6 @@ class SqliteEngine
                 num_hits INTEGER,
                 num_docs INTEGER)"
         );
-        $this->index->exec("CREATE UNIQUE INDEX 'main'.'index' ON wordlist ('term');");
-
         $this->index->exec(
             "CREATE TABLE IF NOT EXISTS doclist (
                 term_id INTEGER,
@@ -290,26 +288,21 @@ class SqliteEngine
 
             $this->prepareAndExecuteStatement('DELETE FROM wordlist WHERE num_hits = 0');
 
+            $length = (int) $this->prepareAndExecuteStatement(
+                'SELECT length FROM doc_lengths WHERE doc_id = :documentId',
+                [':documentId' => $documentId]
+            )->fetchColumn();
+
+            $this->prepareAndExecuteStatement(
+                'DELETE FROM doc_lengths WHERE doc_id = :documentId',
+                [':documentId' => $documentId]
+            );
+
             if ($deleted) {
                 $oldAvg   = (float) ($this->getValueFromInfoTable('avg_doc_length') ?: 0);
-                $length   = (int) $this->prepareAndExecuteStatement(
-                    'SELECT length FROM doc_lengths WHERE doc_id = :documentId',
-                    [':documentId' => $documentId]
-                )->fetchColumn();
-
-                $this->prepareAndExecuteStatement(
-                    'DELETE FROM doc_lengths WHERE doc_id = :documentId',
-                    [':documentId' => $documentId]
-                );
-
                 $newCount = $this->adjustTotalDocuments(-1);
                 $oldCount = $newCount + 1;
                 $this->updateInfoTable('avg_doc_length', $newCount > 0 ? ($oldAvg * $oldCount - $length) / $newCount : 0);
-            } else {
-                $this->prepareAndExecuteStatement(
-                    'DELETE FROM doc_lengths WHERE doc_id = :documentId',
-                    [':documentId' => $documentId]
-                );
             }
         });
     }
@@ -409,15 +402,15 @@ class SqliteEngine
      */
     public function getAllDocumentsForStrictKeyword(array $word, bool $noLimit): array
     {
-        $query = $noLimit
-            ? 'SELECT d.term_id, d.doc_id, d.hit_count, dl.length AS doc_length
-               FROM doclist d JOIN doc_lengths dl ON dl.doc_id = d.doc_id
-               WHERE d.term_id = :id ORDER BY d.hit_count DESC;'
-            : "SELECT d.term_id, d.doc_id, d.hit_count, dl.length AS doc_length
-               FROM doclist d JOIN doc_lengths dl ON dl.doc_id = d.doc_id
-               WHERE d.term_id = :id ORDER BY d.hit_count DESC LIMIT {$this->maxDocs};";
+        $query = 'SELECT d.term_id, d.doc_id, d.hit_count, dl.length AS doc_length
+                   FROM doclist d JOIN doc_lengths dl ON dl.doc_id = d.doc_id
+                   WHERE d.term_id = :id ORDER BY d.hit_count DESC'
+                 . ($noLimit ? '' : ' LIMIT :maxDocs');
         $stmt = $this->index->prepare($query);
         $stmt->bindValue(':id', $word[0]['id']);
+        if (!$noLimit) {
+            $stmt->bindValue(':maxDocs', $this->maxDocs, PDO::PARAM_INT);
+        }
         $stmt->execute();
         return $stmt->fetchAll(PDO::FETCH_ASSOC);
     }
@@ -437,11 +430,13 @@ class SqliteEngine
         if (!isset($word[0])) {
             return [];
         }
-        $query = $noLimit
-            ? 'SELECT * FROM doclist WHERE doc_id NOT IN (SELECT doc_id FROM doclist WHERE term_id = :id) GROUP BY doc_id ORDER BY hit_count DESC;'
-            : "SELECT * FROM doclist WHERE doc_id NOT IN (SELECT doc_id FROM doclist WHERE term_id = :id) GROUP BY doc_id ORDER BY hit_count DESC LIMIT {$this->maxDocs};";
+        $query = 'SELECT * FROM doclist WHERE doc_id NOT IN (SELECT doc_id FROM doclist WHERE term_id = :id) GROUP BY doc_id ORDER BY hit_count DESC'
+                 . ($noLimit ? '' : ' LIMIT :maxDocs');
         $stmt = $this->index->prepare($query);
         $stmt->bindValue(':id', $word[0]['id']);
+        if (!$noLimit) {
+            $stmt->bindValue(':maxDocs', $this->maxDocs, PDO::PARAM_INT);
+        }
         $stmt->execute();
         return $stmt->fetchAll(PDO::FETCH_ASSOC);
     }
@@ -449,13 +444,13 @@ class SqliteEngine
     /**
      * Retrieve a value from the info metadata table.
      *
-     * @param  string      $value Metadata key to look up.
-     * @return string|null        Stored value, or null if the key does not exist.
+     * @param  string      $key Metadata key to look up.
+     * @return string|null      Stored value, or null if the key does not exist.
      */
-    public function getValueFromInfoTable(string $value): string|null
+    public function getValueFromInfoTable(string $key): string|null
     {
         $stmt = $this->index->prepare('SELECT value FROM info WHERE key = :key');
-        $stmt->bindValue(':key', $value);
+        $stmt->bindValue(':key', $key);
         $stmt->execute();
         $ret = $stmt->fetch(PDO::FETCH_ASSOC);
         return $ret ? $ret['value'] : null;
@@ -484,26 +479,10 @@ class SqliteEngine
     }
 
     /**
-     * Return the number of documents containing a keyword.
-     *
-     * Uses num_docs from the wordlist row, maintained incrementally during
-     * insert and delete operations.
-     *
-     * @param  string $keyword    Term to count documents for.
-     * @param  bool   $isLastWord Whether this is the final token in the query.
-     * @param  bool   $fuzzy      When true, fuzzy wordlist lookup is used.
-     */
-    public function totalMatchingDocuments(string $keyword, bool $isLastWord = false, bool $fuzzy = false): int
-    {
-        $occurrence = $this->getWordlistByKeyword($keyword, $isLastWord, false, $fuzzy);
-        return isset($occurrence[0]) ? (int) $occurrence[0]['num_docs'] : 0;
-    }
-
-    /**
      * Fetch documents and their count for a keyword in a single wordlist lookup.
      *
-     * Combines what totalMatchingDocuments() and getAllDocumentsForKeyword() do
-     * into one call, avoiding a duplicate getWordlistByKeyword() round-trip.
+     * Combines wordlist lookup and document fetch into one call, avoiding a
+     * duplicate getWordlistByKeyword() round-trip.
      *
      * @param  string $keyword       Term to search for.
      * @param  bool   $noLimit       When true, the $maxDocs cap is not applied.

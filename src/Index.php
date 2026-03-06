@@ -152,12 +152,11 @@ class Index
     /**
      * Replace an existing document in the index.
      *
-     * @param int                  $id       ID of the document to replace.
      * @param array<string, mixed> $document New document data; must contain an 'id' key.
      */
-    public function update(int $id, array $document): void
+    public function update(array $document): void
     {
-        $this->engine->update($id, $document);
+        $this->engine->update($document['id'], $document);
     }
 
     /**
@@ -214,8 +213,6 @@ class Index
      */
     public function searchBoolean(string $phrase, int $numOfResults = 100): array
     {
-        $start = microtime(true);
-
         /** @var array<int, string|list<int>> $stack */
         $stack = [];
 
@@ -263,7 +260,6 @@ class Index
         return [
             'ids'      => $docs,
             'hits'     => count($docs),
-            'duration' => microtime(true) - $start,
         ];
     }
 
@@ -279,8 +275,6 @@ class Index
      */
     private function scorePhrase(string $phrase, int $numOfResults, bool $fuzzy): array
     {
-        $start = microtime(true);
-
         /** @var string[] $keywords */
         $keywords = $this->engine->breakIntoTokens($phrase);
 
@@ -312,7 +306,6 @@ class Index
             'ids'       => $docScores |> array_keys(...) |> (fn($k) => array_slice($k, 0, $numOfResults)),
             'hits'      => count($docScores),
             'docScores' => $docScores,
-            'duration'  => microtime(true) - $start,
         ];
     }
 
