@@ -365,7 +365,8 @@ class SqliteEngine
      * Look up a keyword in the wordlist with optional prefix and fuzzy fallback.
      *
      * When $asYouType is true and $isLastWord is true, a trailing-wildcard LIKE
-     * query is used instead of an exact match, preferring shorter terms.
+     * query is used instead of an exact match, returning up to $fuzzyMaxExpansions
+     * candidates ordered by shortest term first, then by num_hits descending.
      * When $fuzzy is true and no exact match is found (or $noLimit forces
      * expansion), fuzzySearch() is called as a fallback.
      *
@@ -377,19 +378,20 @@ class SqliteEngine
      */
     public function getWordlistByKeyword(string $keyword, bool $isLastWord = false, bool $noLimit = false, bool $fuzzy = false): array
     {
-        [$sql, $bind] = $this->asYouType && $isLastWord
-            ? [
+        if ($this->asYouType && $isLastWord) {
+            $stmt = $this->index->prepare(
                 'SELECT id, term, num_hits, num_docs FROM wordlist'
-                    . ' WHERE term LIKE :keyword ORDER BY length(term) ASC, num_hits DESC LIMIT 1;',
-                mb_strtolower($keyword) . '%',
-            ]
-            : [
-                'SELECT id, term, num_hits, num_docs FROM wordlist WHERE term = :keyword LIMIT 1;',
-                mb_strtolower($keyword),
-            ];
+                . ' WHERE term LIKE :keyword ORDER BY length(term) ASC, num_hits DESC LIMIT :maxExpansions;'
+            );
+            $stmt->bindValue(':keyword', mb_strtolower($keyword) . '%');
+            $stmt->bindValue(':maxExpansions', $this->fuzzyMaxExpansions, PDO::PARAM_INT);
+        } else {
+            $stmt = $this->index->prepare(
+                'SELECT id, term, num_hits, num_docs FROM wordlist WHERE term = :keyword LIMIT 1;'
+            );
+            $stmt->bindValue(':keyword', mb_strtolower($keyword));
+        }
 
-        $stmt = $this->index->prepare($sql);
-        $stmt->bindValue(':keyword', $bind);
         $stmt->execute();
 
         /** @var list<array<string, mixed>> $res */
@@ -401,24 +403,39 @@ class SqliteEngine
     }
 
     /**
-     * Fetch all doclist rows for an exact wordlist match, ordered by hit count.
+     * Fetch all doclist rows for one or more exact/prefix wordlist matches, ordered by hit count.
      *
-     * @param  list<array<string, mixed>> $word    Single-element wordlist result from getWordlistByKeyword().
+     * When $words contains a single entry, a named-parameter equality query is used.
+     * When $words contains multiple entries (e.g. as-you-type prefix expansion), an
+     * IN clause with positional parameters is used instead.
+     *
+     * @param  list<array<string, mixed>> $words   Wordlist rows from getWordlistByKeyword().
      * @param  bool                       $noLimit When true, the $maxDocs cap is not applied.
      * @return list<array<string, mixed>>          Doclist rows with term_id, doc_id, hit_count, doc_length.
      */
-    public function getAllDocumentsForStrictKeyword(array $word, bool $noLimit): array
+    public function getAllDocumentsForStrictKeyword(array $words, bool $noLimit): array
     {
-        $query = 'SELECT d.term_id, d.doc_id, d.hit_count, dl.length AS doc_length
-                   FROM doclist d JOIN doc_lengths dl ON dl.doc_id = d.doc_id
-                   WHERE d.term_id = :id ORDER BY d.hit_count DESC'
-                 . ($noLimit ? '' : ' LIMIT :maxDocs');
-        $stmt = $this->index->prepare($query);
-        $stmt->bindValue(':id', $word[0]['id']);
-        if (!$noLimit) {
-            $stmt->bindValue(':maxDocs', $this->maxDocs, PDO::PARAM_INT);
+        if (count($words) === 1) {
+            $query = 'SELECT d.term_id, d.doc_id, d.hit_count, dl.length AS doc_length
+                       FROM doclist d JOIN doc_lengths dl ON dl.doc_id = d.doc_id
+                       WHERE d.term_id = :id ORDER BY d.hit_count DESC'
+                     . ($noLimit ? '' : ' LIMIT :maxDocs');
+            $stmt = $this->index->prepare($query);
+            $stmt->bindValue(':id', $words[0]['id']);
+            if (!$noLimit) {
+                $stmt->bindValue(':maxDocs', $this->maxDocs, PDO::PARAM_INT);
+            }
+            $stmt->execute();
+        } else {
+            $placeholders = implode(',', array_fill(0, count($words), '?'));
+            $query = "SELECT d.term_id, d.doc_id, d.hit_count, dl.length AS doc_length
+                       FROM doclist d JOIN doc_lengths dl ON dl.doc_id = d.doc_id
+                       WHERE d.term_id IN ($placeholders) ORDER BY d.hit_count DESC"
+                     . ($noLimit ? '' : " LIMIT {$this->maxDocs}");
+            $stmt = $this->index->prepare($query);
+            $stmt->execute(array_column($words, 'id'));
         }
-        $stmt->execute();
+
         return $stmt->fetchAll(PDO::FETCH_ASSOC);
     }
 
@@ -508,7 +525,7 @@ class SqliteEngine
         $documents = $fuzzy
             ? $this->getAllDocumentsForFuzzyKeyword($word, $noLimit)
             : $this->getAllDocumentsForStrictKeyword($word, $noLimit);
-        $numDocs = $fuzzy
+        $numDocs = ($fuzzy || count($word) > 1)
             ? array_sum(array_column($word, 'num_docs'))
             : (int) $word[0]['num_docs'];
 
