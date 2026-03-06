@@ -25,7 +25,7 @@ class Index
     private SqliteEngine $engine;
     private string $resolvedPath;
 
-    // --- Engine configuration (proxied via PHP 8.4 property hooks) ----------
+    // --- Engine configuration (proxied via property hooks) ----------
 
     /** When true, the last search keyword is matched as a prefix (as-you-type behaviour). */
     public bool $asYouType {

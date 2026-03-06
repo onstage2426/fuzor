@@ -99,7 +99,7 @@ class SqliteEngine
                 length INTEGER)"
         );
 
-        $this->index->exec("CREATE TABLE IF NOT EXISTS info (key TEXT, value TEXT)");
+        $this->index->exec("CREATE TABLE IF NOT EXISTS info (key TEXT PRIMARY KEY, value TEXT)");
         $this->index->prepare("INSERT INTO info (key, value) VALUES (:key, :value)")
             ->execute([':key' => 'total_documents', ':value' => 0]);
         $this->index->prepare("INSERT INTO info (key, value) VALUES (:key, :value)")
@@ -281,10 +281,10 @@ class SqliteEngine
                 [':documentId' => $documentId]
             );
 
-            $deleted = $this->prepareAndExecuteStatement(
+            $this->prepareAndExecuteStatement(
                 'DELETE FROM doclist WHERE doc_id = :documentId',
                 [':documentId' => $documentId]
-            )->rowCount();
+            );
 
             $this->prepareAndExecuteStatement('DELETE FROM wordlist WHERE num_hits = 0');
 
@@ -293,10 +293,10 @@ class SqliteEngine
                 [':documentId' => $documentId]
             )->fetchColumn();
 
-            $this->prepareAndExecuteStatement(
+            $deleted = $this->prepareAndExecuteStatement(
                 'DELETE FROM doc_lengths WHERE doc_id = :documentId',
                 [':documentId' => $documentId]
-            );
+            )->rowCount();
 
             if ($deleted) {
                 $oldAvg   = (float) ($this->getValueFromInfoTable('avg_doc_length') ?: 0);
@@ -584,17 +584,20 @@ class SqliteEngine
     }
 
     /**
-     * Delete an index file from disk.
+     * Delete an index file and its WAL sidecar files from disk.
      *
-     * No-ops silently if the file does not exist.
+     * Removes the main file plus the `-wal` and `-shm` companions created by
+     * WAL journal mode. No-ops silently for any file that does not exist.
      *
      * @param string $indexName Filename of the index to delete.
      */
     public function flushIndex(string $indexName): void
     {
         $path = $this->storagePath . $indexName;
-        if (file_exists($path)) {
-            unlink($path);
+        foreach ([$path, $path . '-wal', $path . '-shm'] as $file) {
+            if (file_exists($file)) {
+                unlink($file);
+            }
         }
     }
 
