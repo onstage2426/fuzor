@@ -376,8 +376,10 @@ class Index
                 }
             } else {
                 $tokenPriority = $this->expressionPriority($token);
-                while (!empty($stack) && ($top = end($stack)) !== '('
-                    && $this->expressionPriority($top) >= $tokenPriority) {
+                while (
+                    !empty($stack) && ($top = end($stack)) !== '('
+                    && $this->expressionPriority($top) >= $tokenPriority
+                ) {
                     $postfix[] = array_pop($stack);
                 }
                 $stack[] = $token;

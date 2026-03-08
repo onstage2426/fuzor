@@ -180,7 +180,8 @@ class SqliteEngine
             $oldAvg   = (float) $avgStmt->fetchColumn();
             $newCount = $this->adjustTotalDocuments(1);
             $oldCount = $newCount - 1;
-            $this->stmt('updateAvgDocLength',
+            $this->stmt(
+                'updateAvgDocLength',
                 "UPDATE info SET value = :value WHERE key = 'avg_doc_length'"
             )->execute([':value' => ($oldAvg * $oldCount + $length) / $newCount]);
         });
@@ -251,7 +252,8 @@ class SqliteEngine
     {
         $this->wrapInTransaction(function () use ($documentId): void {
             // Decrement wordlist stats and collect IDs of newly-orphaned terms (num_hits → 0).
-            $updateStmt = $this->stmt('wordlistDecrementByDoc',
+            $updateStmt = $this->stmt(
+                'wordlistDecrementByDoc',
                 'WITH doc_terms AS (
                      SELECT term_id, hit_count FROM doclist WHERE doc_id = :documentId
                  )
@@ -276,7 +278,10 @@ class SqliteEngine
                 $this->index->prepare("DELETE FROM wordlist WHERE id IN ($placeholders)")->execute($orphanIds);
             }
 
-            $delStmt = $this->stmt('docLengthsDelete', 'DELETE FROM doc_lengths WHERE doc_id = :documentId RETURNING length');
+            $delStmt = $this->stmt(
+                'docLengthsDelete',
+                'DELETE FROM doc_lengths WHERE doc_id = :documentId RETURNING length'
+            );
             $delStmt->execute([':documentId' => $documentId]);
             $length = $delStmt->fetchColumn();
 
@@ -288,7 +293,8 @@ class SqliteEngine
                 $newCount = $this->adjustTotalDocuments(-1);
                 $oldCount = $newCount + 1;
                 $newAvg   = $newCount > 0 ? ($oldAvg * $oldCount - $length) / $newCount : 0;
-                $this->stmt('updateAvgDocLength',
+                $this->stmt(
+                    'updateAvgDocLength',
                     "UPDATE info SET value = :value WHERE key = 'avg_doc_length'"
                 )->execute([':value' => $newAvg]);
             }
@@ -414,7 +420,8 @@ class SqliteEngine
      */
     private function saveDocLength(int $docId, int $length): void
     {
-        $this->stmt('saveDocLength',
+        $this->stmt(
+            'saveDocLength',
             'INSERT INTO doc_lengths (doc_id, length) VALUES (:id, :len)
              ON CONFLICT(doc_id) DO UPDATE SET length = excluded.length'
         )->execute([':id' => $docId, ':len' => $length]);
@@ -430,7 +437,8 @@ class SqliteEngine
      */
     private function adjustTotalDocuments(int $delta): int
     {
-        $stmt = $this->stmt('adjustTotalDocuments',
+        $stmt = $this->stmt(
+            'adjustTotalDocuments',
             "UPDATE info SET value = CAST(value AS INTEGER) + :delta
              WHERE key = 'total_documents'
              RETURNING CAST(value AS INTEGER) AS value"
@@ -454,8 +462,12 @@ class SqliteEngine
      * @param  bool   $fuzzy         When true, Levenshtein fuzzy matching is used.
      * @return array{documents: list<array<string, mixed>>, numDocs: int}
      */
-    public function getDocumentsAndCount(string $keyword, bool $noLimit = false, bool $isLastKeyword = false, bool $fuzzy = false): array
-    {
+    public function getDocumentsAndCount(
+        string $keyword,
+        bool $noLimit = false,
+        bool $isLastKeyword = false,
+        bool $fuzzy = false
+    ): array {
         $word = $this->getWordlistByKeyword($keyword, $isLastKeyword, $noLimit, $fuzzy);
         if (!isset($word[0])) {
             return ['documents' => [], 'numDocs' => 0];
@@ -488,12 +500,16 @@ class SqliteEngine
             return [];
         }
         if ($noLimit) {
-            $stmt = $this->stmt('keywordNotUnlimited',
-                'SELECT DISTINCT doc_id FROM doclist WHERE doc_id NOT IN (SELECT doc_id FROM doclist WHERE term_id = :id)'
+            $stmt = $this->stmt(
+                'keywordNotUnlimited',
+                'SELECT DISTINCT doc_id FROM doclist'
+                . ' WHERE doc_id NOT IN (SELECT doc_id FROM doclist WHERE term_id = :id)'
             );
         } else {
-            $stmt = $this->stmt('keywordNotLimited',
-                'SELECT DISTINCT doc_id FROM doclist WHERE doc_id NOT IN (SELECT doc_id FROM doclist WHERE term_id = :id) LIMIT :maxDocs'
+            $stmt = $this->stmt(
+                'keywordNotLimited',
+                'SELECT DISTINCT doc_id FROM doclist'
+                . ' WHERE doc_id NOT IN (SELECT doc_id FROM doclist WHERE term_id = :id) LIMIT :maxDocs'
             );
             $stmt->bindValue(':maxDocs', $this->maxDocs, PDO::PARAM_INT);
         }
@@ -533,18 +549,24 @@ class SqliteEngine
      * @param  bool                      $fuzzy      When true, fall through to Levenshtein fuzzy search on no match.
      * @return list<array<string, mixed>>            Matching wordlist rows.
      */
-    private function getWordlistByKeyword(string $keyword, bool $isLastWord = false, bool $noLimit = false, bool $fuzzy = false): array
-    {
+    private function getWordlistByKeyword(
+        string $keyword,
+        bool $isLastWord = false,
+        bool $noLimit = false,
+        bool $fuzzy = false
+    ): array {
         $kw = mb_strtolower($keyword);
         if ($this->asYouType && $isLastWord) {
-            $stmt = $this->stmt('wordlistPrefix',
+            $stmt = $this->stmt(
+                'wordlistPrefix',
                 'SELECT id, term, num_hits, num_docs FROM wordlist'
                 . ' WHERE term LIKE :keyword ORDER BY length(term) ASC, num_hits DESC LIMIT :maxExpansions;'
             );
             $stmt->bindValue(':keyword', $kw . '%');
             $stmt->bindValue(':maxExpansions', $this->fuzzyMaxExpansions, PDO::PARAM_INT);
         } else {
-            $stmt = $this->stmt('wordlistExact',
+            $stmt = $this->stmt(
+                'wordlistExact',
                 'SELECT id, term, num_hits, num_docs FROM wordlist WHERE term = :keyword LIMIT 1;'
             );
             $stmt->bindValue(':keyword', $kw);
@@ -576,14 +598,16 @@ class SqliteEngine
     {
         if (count($words) === 1) {
             if ($noLimit) {
-                $stmt = $this->stmt('strictDocsUnlimited',
+                $stmt = $this->stmt(
+                    'strictDocsUnlimited',
                     'SELECT d.term_id, d.doc_id, d.hit_count, dl.length AS doc_length
                       FROM doclist d JOIN doc_lengths dl ON dl.doc_id = d.doc_id
                       WHERE d.term_id = :id ORDER BY d.hit_count DESC'
                 );
                 $stmt->bindValue(':id', $words[0]['id']);
             } else {
-                $stmt = $this->stmt('strictDocsLimited',
+                $stmt = $this->stmt(
+                    'strictDocsLimited',
                     'SELECT d.term_id, d.doc_id, d.hit_count, dl.length AS doc_length
                       FROM doclist d JOIN doc_lengths dl ON dl.doc_id = d.doc_id
                       WHERE d.term_id = :id ORDER BY d.hit_count DESC LIMIT :maxDocs'
@@ -651,7 +675,8 @@ class SqliteEngine
         $keyword = mb_strtolower($keyword);
         $kwLen   = mb_strlen($keyword);
 
-        $stmt = $this->stmt('fuzzyWordlistLookup',
+        $stmt = $this->stmt(
+            'fuzzyWordlistLookup',
             "SELECT id, term, num_hits, num_docs FROM wordlist
              WHERE term LIKE :keyword
                AND length(term) BETWEEN :min AND :max
