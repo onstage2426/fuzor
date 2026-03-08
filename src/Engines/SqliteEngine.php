@@ -101,10 +101,7 @@ class SqliteEngine
         );
 
         $this->index->exec("CREATE TABLE IF NOT EXISTS info (key TEXT PRIMARY KEY, value TEXT)");
-        $this->index->prepare("INSERT INTO info (key, value) VALUES (:key, :value)")
-            ->execute([':key' => 'total_documents', ':value' => 0]);
-        $this->index->prepare("INSERT INTO info (key, value) VALUES (:key, :value)")
-            ->execute([':key' => 'avg_doc_length', ':value' => 0]);
+        $this->index->exec("INSERT INTO info (key, value) VALUES ('total_documents', 0), ('avg_doc_length', 0)");
 
         return $this;
     }
