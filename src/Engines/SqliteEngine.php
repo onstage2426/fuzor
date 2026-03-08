@@ -4,7 +4,6 @@ namespace Fuzor\Engines;
 
 use Fuzor\Tokenizer;
 use PDO;
-use PDOStatement;
 
 /**
  * SQLite-backed full-text search engine.
@@ -242,61 +241,38 @@ class SqliteEngine
     public function delete(int $documentId): void
     {
         $this->wrapInTransaction(function () use ($documentId): void {
-            $this->prepareAndExecuteStatement(
+            $this->index->prepare(
                 'WITH doc_terms AS (
                      SELECT term_id, hit_count FROM doclist WHERE doc_id = :documentId
                  )
                  UPDATE wordlist SET
                      num_docs = num_docs - 1,
                      num_hits = num_hits - (SELECT hit_count FROM doc_terms WHERE term_id = wordlist.id)
-                 WHERE id IN (SELECT term_id FROM doc_terms)',
-                [':documentId' => $documentId]
-            );
+                 WHERE id IN (SELECT term_id FROM doc_terms)'
+            )->execute([':documentId' => $documentId]);
 
-            $this->prepareAndExecuteStatement(
-                'DELETE FROM doclist WHERE doc_id = :documentId',
-                [':documentId' => $documentId]
-            );
+            $this->index->prepare(
+                'DELETE FROM doclist WHERE doc_id = :documentId'
+            )->execute([':documentId' => $documentId]);
 
-            $this->prepareAndExecuteStatement('DELETE FROM wordlist WHERE num_hits = 0');
+            $this->index->exec('DELETE FROM wordlist WHERE num_hits = 0');
 
-            $length = (int) $this->prepareAndExecuteStatement(
-                'SELECT length FROM doc_lengths WHERE doc_id = :documentId',
-                [':documentId' => $documentId]
-            )->fetchColumn();
+            $stmt = $this->index->prepare('SELECT length FROM doc_lengths WHERE doc_id = :documentId');
+            $stmt->execute([':documentId' => $documentId]);
+            $length = (int) $stmt->fetchColumn();
 
-            $deleted = $this->prepareAndExecuteStatement(
-                'DELETE FROM doc_lengths WHERE doc_id = :documentId',
-                [':documentId' => $documentId]
-            )->rowCount();
+            $stmt = $this->index->prepare('DELETE FROM doc_lengths WHERE doc_id = :documentId');
+            $stmt->execute([':documentId' => $documentId]);
 
-            if ($deleted) {
+            if ($stmt->rowCount()) {
                 $oldAvg   = (float) ($this->getInfoValues(['avg_doc_length'])['avg_doc_length'] ?? 0);
                 $newCount = $this->adjustTotalDocuments(-1);
                 $oldCount = $newCount + 1;
-                $this->prepareAndExecuteStatement(
-                    "UPDATE info SET value = :value WHERE key = 'avg_doc_length'",
-                    [':value' => $newCount > 0 ? ($oldAvg * $oldCount - $length) / $newCount : 0]
-                );
+                $this->index->prepare(
+                    "UPDATE info SET value = :value WHERE key = 'avg_doc_length'"
+                )->execute([':value' => $newCount > 0 ? ($oldAvg * $oldCount - $length) / $newCount : 0]);
             }
         });
-    }
-
-    /**
-     * Prepare, bind, and execute a parameterised SQL statement.
-     *
-     * @param  string               $query  SQL query with named placeholders.
-     * @param  array<string, mixed> $params Map of placeholder → value (e.g. [':id' => 1]).
-     * @return PDOStatement                 Executed statement (ready for fetch calls).
-     */
-    public function prepareAndExecuteStatement(string $query, array $params = []): PDOStatement
-    {
-        $stmt = $this->index->prepare($query);
-        foreach ($params as $key => $value) {
-            $stmt->bindValue($key, $value);
-        }
-        $stmt->execute();
-        return $stmt;
     }
 
     /**
@@ -602,10 +578,9 @@ class SqliteEngine
             $newCount = $this->adjustTotalDocuments(1);
             $oldCount = $newCount - 1;
             $oldAvg   = (float) ($this->getInfoValues(['avg_doc_length'])['avg_doc_length'] ?? 0);
-            $this->prepareAndExecuteStatement(
-                "UPDATE info SET value = :value WHERE key = 'avg_doc_length'",
-                [':value' => ($oldAvg * $oldCount + $length) / $newCount]
-            );
+            $this->index->prepare(
+                "UPDATE info SET value = :value WHERE key = 'avg_doc_length'"
+            )->execute([':value' => ($oldAvg * $oldCount + $length) / $newCount]);
         });
     }
 
