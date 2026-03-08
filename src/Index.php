@@ -168,7 +168,7 @@ class Index
      */
     public function update(array $document): void
     {
-        $this->engine->update($document['id'], $document);
+        $this->engine->update($document);
     }
 
     /**
@@ -240,7 +240,7 @@ class Index
                 return $operand;
             }
             return $cache[$operand] ??= array_column(
-                $this->engine->getAllDocumentsForKeyword($operand, true),
+                $this->engine->getDocumentsAndCount($operand, true)['documents'],
                 'doc_id'
             );
         };
@@ -344,7 +344,7 @@ class Index
         $stack = [];
 
         foreach ($this->lexExpression($exp) as $token) {
-            if ($this->isExpressionOperand($token)) {
+            if (!in_array($token, ['|', '&', '~', '(', ')'], true)) {
                 $postfix[] = $token;
             } elseif ($token === ')') {
                 while (($top = array_pop($stack)) !== '(' && !empty($top)) {
@@ -364,20 +364,6 @@ class Index
         }
 
         return $postfix;
-    }
-
-    /**
-     * Return true if the token is an operand (word), false if it is an operator.
-     *
-     * @param  string $char Token to classify.
-     * @return bool         True for word operands, false for |, &, ~, (, ).
-     */
-    private function isExpressionOperand(string $char): bool
-    {
-        return match ($char) {
-            '|', '&', '~', '(', ')' => false,
-            default => true,
-        };
     }
 
     /**

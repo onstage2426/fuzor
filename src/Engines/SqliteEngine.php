@@ -143,7 +143,7 @@ class SqliteEngine
         );
 
         $length = array_sum(array_map(count(...), $stems));
-        $this->saveToIndex($stems, $documentId);
+        $this->saveDoclist($this->saveWordlist($stems), $documentId);
         $this->saveDocLength($documentId, $length);
 
         return $length;
@@ -162,18 +162,6 @@ class SqliteEngine
              ON CONFLICT(doc_id) DO UPDATE SET length = excluded.length'
         );
         $stmt->execute([':id' => $docId, ':len' => $length]);
-    }
-
-    /**
-     * Persist tokenised stems for a document to the wordlist and doclist tables.
-     *
-     * @param array<string, string[]> $stems Tokenised fields keyed by field name.
-     * @param int                     $docId Document ID to associate terms with.
-     */
-    public function saveToIndex(array $stems, int $docId): void
-    {
-        $terms = $this->saveWordlist($stems);
-        $this->saveDoclist($terms, $docId);
     }
 
     /**
@@ -483,28 +471,6 @@ class SqliteEngine
     }
 
     /**
-     * Dispatch document retrieval to strict or fuzzy mode based on engine config.
-     *
-     * Returns an empty array if the keyword is not present in the wordlist.
-     *
-     * @param  string                    $keyword       Term to search for.
-     * @param  bool                      $noLimit       When true, the $maxDocs cap is not applied.
-     * @param  bool                      $isLastKeyword Whether this is the final token in the query.
-     * @param  bool                      $fuzzy         When true, Levenshtein fuzzy matching is used.
-     * @return list<array<string, mixed>>               Doclist rows ordered by relevance.
-     */
-    public function getAllDocumentsForKeyword(string $keyword, bool $noLimit = false, bool $isLastKeyword = false, bool $fuzzy = false): array
-    {
-        $word = $this->getWordlistByKeyword($keyword, $isLastKeyword, $noLimit, $fuzzy);
-        if (!isset($word[0])) {
-            return [];
-        }
-        return $fuzzy
-            ? $this->getAllDocumentsForFuzzyKeyword($word, $noLimit)
-            : $this->getAllDocumentsForStrictKeyword($word, $noLimit);
-    }
-
-    /**
      * Fetch documents and their count for a keyword in a single wordlist lookup.
      *
      * Combines wordlist lookup and document fetch into one call, avoiding a
@@ -625,13 +591,12 @@ class SqliteEngine
      * Equivalent to delete($id) followed by insert($document). The total
      * document count is unchanged: delete decrements it, insert increments it.
      *
-     * @param int                  $id       ID of the document to replace.
      * @param array<string, mixed> $document New document data; must contain an 'id' key.
      */
-    public function update(int $id, array $document): void
+    public function update(array $document): void
     {
-        $this->wrapInTransaction(function () use ($id, $document): void {
-            $this->delete($id);
+        $this->wrapInTransaction(function () use ($document): void {
+            $this->delete($document['id']);
             $this->insert($document);
         });
     }
