@@ -10,5 +10,10 @@
         "psr-4": {
             "Fuzor\\": "src"
         }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Fuzor\\Tests\\": "tests"
+        }
     }
 }

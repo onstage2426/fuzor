@@ -3,6 +3,7 @@
     <description>PSR-12 with 120-char line limit for the Fuzor library.</description>
 
     <file>src</file>
+    <file>tests</file>
     <exclude-pattern>vendor/*</exclude-pattern>
 
     <arg name="basepath" value="."/>

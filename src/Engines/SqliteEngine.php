@@ -175,9 +175,8 @@ class SqliteEngine
     {
         $this->wrapInTransaction(function () use ($document): void {
             $length   = $this->processDocument($document);
-            $avgStmt  = $this->stmt('readAvgDocLength', "SELECT value FROM info WHERE key = 'avg_doc_length'");
-            $avgStmt->execute();
-            $oldAvg   = (float) $avgStmt->fetchColumn();
+            $info     = $this->getInfoValues(['avg_doc_length']);
+            $oldAvg   = (float) ($info['avg_doc_length'] ?? 0);
             $newCount = $this->adjustTotalDocuments(1);
             $oldCount = $newCount - 1;
             $this->stmt(
@@ -284,12 +283,12 @@ class SqliteEngine
             );
             $delStmt->execute([':documentId' => $documentId]);
             $length = $delStmt->fetchColumn();
+            $delStmt->closeCursor();
 
             if ($length !== false) {
-                $length = (int) $length;
-                $avgStmt = $this->stmt('readAvgDocLength', "SELECT value FROM info WHERE key = 'avg_doc_length'");
-                $avgStmt->execute();
-                $oldAvg   = (float) $avgStmt->fetchColumn();
+                $length  = (int) $length;
+                $info    = $this->getInfoValues(['avg_doc_length']);
+                $oldAvg  = (float) ($info['avg_doc_length'] ?? 0);
                 $newCount = $this->adjustTotalDocuments(-1);
                 $oldCount = $newCount + 1;
                 $newAvg   = $newCount > 0 ? ($oldAvg * $oldCount - $length) / $newCount : 0;
@@ -445,7 +444,9 @@ class SqliteEngine
         );
         $stmt->bindValue(':delta', $delta, PDO::PARAM_INT);
         $stmt->execute();
-        return (int) $stmt->fetchColumn();
+        $value = (int) $stmt->fetchColumn();
+        $stmt->closeCursor();
+        return $value;
     }
 
     // --- Public read operations ---------------------------------------------
