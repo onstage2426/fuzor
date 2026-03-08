@@ -2,6 +2,7 @@
 
 namespace Fuzor\Engines;
 
+use Fuzor\Tokenizer;
 use PDO;
 use PDOStatement;
 
@@ -137,7 +138,7 @@ class SqliteEngine
 
         /** @var array<string, string[]> $stems */
         $stems = array_map(
-            fn($col) => trim((string) $col) === '' ? [] : $this->breakIntoTokens((string) $col),
+            fn($col) => trim((string) $col) === '' ? [] : Tokenizer::tokenize((string) $col),
             array_diff_key($row, ['id' => null])
         );
 
@@ -616,25 +617,6 @@ class SqliteEngine
                 unlink($file);
             }
         }
-    }
-
-    /**
-     * Split text into lowercase tokens.
-     *
-     * Fast path for ASCII-only input: avoids Unicode property classes and
-     * mb_strtolower, both of which carry significant overhead.
-     * Falls back to a full Unicode-aware scan for non-ASCII text.
-     *
-     * @param  string   $text Raw input text.
-     * @return string[]       Lowercase token list.
-     */
-    public function breakIntoTokens(string $text): array
-    {
-        if (!preg_match('/[^\x00-\x7F]/', $text)) {
-            return preg_split('/[^\w@]+/', strtolower($text), -1, PREG_SPLIT_NO_EMPTY);
-        }
-        preg_match_all('/[\p{L}\p{N}\p{Pc}\p{Pd}@]+/u', mb_strtolower($text, 'UTF-8'), $m);
-        return $m[0];
     }
 
     /**

@@ -3,6 +3,7 @@
 namespace Fuzor;
 
 use Fuzor\Engines\SqliteEngine;
+use Fuzor\Tokenizer;
 
 /**
  * Represents a single Fuzor index.
@@ -291,7 +292,7 @@ class Index
     private function scorePhrase(string $phrase, int $numOfResults, bool $fuzzy): array
     {
         /** @var string[] $keywords */
-        $keywords = $this->engine->breakIntoTokens($phrase);
+        $keywords = Tokenizer::tokenize($phrase);
 
         /** @var array<int, float> $docScores */
         $docScores = [];
