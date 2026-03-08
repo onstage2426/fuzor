@@ -107,20 +107,6 @@ class SqliteEngine
     }
 
     /**
-     * Persist a key/value pair to the info metadata table.
-     *
-     * @param string $key   Metadata key (e.g. 'total_documents').
-     * @param mixed  $value Value to store.
-     */
-    public function updateInfoTable(string $key, mixed $value): void
-    {
-        $stmt = $this->index->prepare('UPDATE info SET value = :value WHERE key = :key');
-        $stmt->bindValue(':key', $key);
-        $stmt->bindValue(':value', $value);
-        $stmt->execute();
-    }
-
-    /**
      * Tokenise every field of a document row and write the result to the index.
      *
      * The 'id' field is used as the document ID and is excluded from indexing.
@@ -288,7 +274,10 @@ class SqliteEngine
                 $oldAvg   = (float) ($this->getInfoValues(['avg_doc_length'])['avg_doc_length'] ?? 0);
                 $newCount = $this->adjustTotalDocuments(-1);
                 $oldCount = $newCount + 1;
-                $this->updateInfoTable('avg_doc_length', $newCount > 0 ? ($oldAvg * $oldCount - $length) / $newCount : 0);
+                $this->prepareAndExecuteStatement(
+                    "UPDATE info SET value = :value WHERE key = 'avg_doc_length'",
+                    [':value' => $newCount > 0 ? ($oldAvg * $oldCount - $length) / $newCount : 0]
+                );
             }
         });
     }
@@ -613,7 +602,10 @@ class SqliteEngine
             $newCount = $this->adjustTotalDocuments(1);
             $oldCount = $newCount - 1;
             $oldAvg   = (float) ($this->getInfoValues(['avg_doc_length'])['avg_doc_length'] ?? 0);
-            $this->updateInfoTable('avg_doc_length', ($oldAvg * $oldCount + $length) / $newCount);
+            $this->prepareAndExecuteStatement(
+                "UPDATE info SET value = :value WHERE key = 'avg_doc_length'",
+                [':value' => ($oldAvg * $oldCount + $length) / $newCount]
+            );
         });
     }
 
