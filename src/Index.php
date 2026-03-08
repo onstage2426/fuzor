@@ -129,8 +129,13 @@ class Index
     {
         $resolved = self::resolvePath($path);
         self::claimPath($resolved);
-        $engine = new SqliteEngine(dirname($resolved));
-        $engine->selectIndex(basename($resolved));
+        try {
+            $engine = new SqliteEngine(dirname($resolved));
+            $engine->selectIndex(basename($resolved));
+        } catch (\Throwable $e) {
+            unset(self::$openPaths[$resolved]);
+            throw $e;
+        }
         return new static($engine, $resolved);
     }
 
@@ -144,8 +149,13 @@ class Index
     {
         $resolved = self::resolvePath($path);
         self::claimPath($resolved);
-        $engine = new SqliteEngine(dirname($resolved));
-        $engine->createIndex(basename($resolved));
+        try {
+            $engine = new SqliteEngine(dirname($resolved));
+            $engine->createIndex(basename($resolved));
+        } catch (\Throwable $e) {
+            unset(self::$openPaths[$resolved]);
+            throw $e;
+        }
         return new static($engine, $resolved);
     }
 
@@ -245,6 +255,8 @@ class Index
             );
         };
 
+        // Prepend "|" so the Shunting-Yard algorithm always has a left-hand operand
+        // on the stack. OR with an empty set is the identity, so it does not affect the result.
         /** @var string[] $postfix */
         $postfix = $this->toPostfix("|" . $phrase);
 
@@ -299,7 +311,7 @@ class Index
 
         $info      = $this->engine->getInfoValues(['total_documents', 'avg_doc_length']);
         $count     = $info['total_documents'] ?? 0;
-        $avgdl     = (float) ($info['avg_doc_length'] ?: 1);
+        $avgdl     = max(1.0, (float) ($info['avg_doc_length'] ?? 0));
         $k1        = $this->engine->k1;
         $b         = $this->engine->b;
         $lastIndex = count($keywords) - 1;

@@ -114,17 +114,18 @@ class SqliteEngine
      * @param  array<string, mixed> $row Document fields; must contain an 'id' key.
      * @return int                       Total token count across all indexed fields.
      */
-    public function processDocument(array $row): int
+    private function processDocument(array $row): int
     {
         $documentId = $row['id'];
 
         /** @var array<string, string[]> $stems */
         $stems = array_map(
-            fn($col) => trim((string) $col) === '' ? [] : Tokenizer::tokenize((string) $col),
+            fn($col) => trim((string) $col) !== '' ? Tokenizer::tokenize((string) $col) : [],
             array_diff_key($row, ['id' => null])
         );
 
         $length = array_sum(array_map(count(...), $stems));
+
         $this->saveDoclist($this->saveWordlist($stems), $documentId);
         $this->saveDocLength($documentId, $length);
 
@@ -137,13 +138,12 @@ class SqliteEngine
      * @param int $docId  Document ID.
      * @param int $length Total number of tokens across all indexed fields.
      */
-    public function saveDocLength(int $docId, int $length): void
+    private function saveDocLength(int $docId, int $length): void
     {
-        $stmt = $this->index->prepare(
+        $this->index->prepare(
             'INSERT INTO doc_lengths (doc_id, length) VALUES (:id, :len)
              ON CONFLICT(doc_id) DO UPDATE SET length = excluded.length'
-        );
-        $stmt->execute([':id' => $docId, ':len' => $length]);
+        )->execute([':id' => $docId, ':len' => $length]);
     }
 
     /**
@@ -156,7 +156,7 @@ class SqliteEngine
      * @param  array<string, string[]> $stems Tokenised fields (field name → token list).
      * @return array<string, array{hits: int, id: int|string}> Terms with resolved wordlist IDs.
      */
-    public function saveWordlist(array $stems): array
+    private function saveWordlist(array $stems): array
     {
         /** @var array<string, array{hits: int, id: int|string}> $terms */
         $terms = [];
@@ -208,7 +208,7 @@ class SqliteEngine
      * @param array<string, array{hits: int, id: int|string}> $terms Terms with resolved wordlist IDs.
      * @param int                                               $docId Document ID.
      */
-    public function saveDoclist(array $terms, int $docId): void
+    private function saveDoclist(array $terms, int $docId): void
     {
         if (empty($terms)) {
             return;
@@ -268,9 +268,10 @@ class SqliteEngine
                 $oldAvg   = (float) ($this->getInfoValues(['avg_doc_length'])['avg_doc_length'] ?? 0);
                 $newCount = $this->adjustTotalDocuments(-1);
                 $oldCount = $newCount + 1;
+                $newAvg   = $newCount > 0 ? ($oldAvg * $oldCount - $length) / $newCount : 0;
                 $this->index->prepare(
                     "UPDATE info SET value = :value WHERE key = 'avg_doc_length'"
-                )->execute([':value' => $newCount > 0 ? ($oldAvg * $oldCount - $length) / $newCount : 0]);
+                )->execute([':value' => $newAvg]);
             }
         });
     }
@@ -327,7 +328,7 @@ class SqliteEngine
      * @param  bool                      $fuzzy      When true, fall through to Levenshtein fuzzy search on no match.
      * @return list<array<string, mixed>>            Matching wordlist rows.
      */
-    public function getWordlistByKeyword(string $keyword, bool $isLastWord = false, bool $noLimit = false, bool $fuzzy = false): array
+    private function getWordlistByKeyword(string $keyword, bool $isLastWord = false, bool $noLimit = false, bool $fuzzy = false): array
     {
         if ($this->asYouType && $isLastWord) {
             $stmt = $this->index->prepare(
@@ -348,9 +349,10 @@ class SqliteEngine
         /** @var list<array<string, mixed>> $res */
         $res = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
-        return $fuzzy && (!isset($res[0]) || $noLimit)
-            ? $this->fuzzySearch($keyword)
-            : $res;
+        if ($fuzzy && (!isset($res[0]) || $noLimit)) {
+            return $this->fuzzySearch($keyword);
+        }
+        return $res;
     }
 
     /**
@@ -364,7 +366,7 @@ class SqliteEngine
      * @param  bool                       $noLimit When true, the $maxDocs cap is not applied.
      * @return list<array<string, mixed>>          Doclist rows with term_id, doc_id, hit_count, doc_length.
      */
-    public function getAllDocumentsForStrictKeyword(array $words, bool $noLimit): array
+    private function getAllDocumentsForStrictKeyword(array $words, bool $noLimit): array
     {
         if (count($words) === 1) {
             $query = 'SELECT d.term_id, d.doc_id, d.hit_count, dl.length AS doc_length
@@ -405,9 +407,8 @@ class SqliteEngine
         if (!isset($word[0])) {
             return [];
         }
-        $query = 'SELECT * FROM doclist'
+        $query = 'SELECT DISTINCT doc_id FROM doclist'
                  . ' WHERE doc_id NOT IN (SELECT doc_id FROM doclist WHERE term_id = :id)'
-                 . ' GROUP BY doc_id ORDER BY hit_count DESC'
                  . ($noLimit ? '' : ' LIMIT :maxDocs');
         $stmt = $this->index->prepare($query);
         $stmt->bindValue(':id', $word[0]['id']);
@@ -450,9 +451,11 @@ class SqliteEngine
         if (!isset($word[0])) {
             return ['documents' => [], 'numDocs' => 0];
         }
+
         $documents = $fuzzy
             ? $this->getAllDocumentsForFuzzyKeyword($word, $noLimit)
             : $this->getAllDocumentsForStrictKeyword($word, $noLimit);
+
         $numDocs = ($fuzzy || count($word) > 1)
             ? array_sum(array_column($word, 'num_docs'))
             : (int) $word[0]['num_docs'];
@@ -470,7 +473,7 @@ class SqliteEngine
      * @param  string                    $keyword Search term to find fuzzy matches for.
      * @return list<array<string, mixed>>         Matching wordlist rows with an added 'distance' key.
      */
-    public function fuzzySearch(string $keyword): array
+    private function fuzzySearch(string $keyword): array
     {
         $kwLen = mb_strlen($keyword);
 
@@ -510,7 +513,7 @@ class SqliteEngine
      * @param  bool                       $noLimit When true, the $maxDocs cap is not applied.
      * @return list<array<string, mixed>>          Doclist rows in fuzzy-match order.
      */
-    public function getAllDocumentsForFuzzyKeyword(array $words, bool $noLimit): array
+    private function getAllDocumentsForFuzzyKeyword(array $words, bool $noLimit): array
     {
         $placeholders = implode(',', array_fill(0, count($words), '?'));
         $whenClauses  = implode('', array_map(
@@ -523,9 +526,10 @@ class SqliteEngine
                   WHERE d.term_id IN ($placeholders) ORDER BY CASE d.term_id{$whenClauses} END"
                . ($noLimit ? '' : ' LIMIT ?');
 
-        $ids  = array_column($words, 'id');
-        $stmt = $this->index->prepare($query);
-        $stmt->execute($noLimit ? $ids : [...$ids, $this->maxDocs]);
+        $ids    = array_column($words, 'id');
+        $params = $noLimit ? $ids : [...$ids, $this->maxDocs];
+        $stmt   = $this->index->prepare($query);
+        $stmt->execute($params);
         return $stmt->fetchAll(PDO::FETCH_ASSOC);
     }
 
@@ -537,7 +541,7 @@ class SqliteEngine
      *
      * @param string $indexName Filename of the index to delete.
      */
-    public function flushIndex(string $indexName): void
+    private function flushIndex(string $indexName): void
     {
         $path = $this->storagePath . $indexName;
         foreach ([$path, $path . '-wal', $path . '-shm'] as $file) {
@@ -575,9 +579,9 @@ class SqliteEngine
     {
         $this->wrapInTransaction(function () use ($document): void {
             $length   = $this->processDocument($document);
+            $oldAvg   = (float) ($this->getInfoValues(['avg_doc_length'])['avg_doc_length'] ?? 0);
             $newCount = $this->adjustTotalDocuments(1);
             $oldCount = $newCount - 1;
-            $oldAvg   = (float) ($this->getInfoValues(['avg_doc_length'])['avg_doc_length'] ?? 0);
             $this->index->prepare(
                 "UPDATE info SET value = :value WHERE key = 'avg_doc_length'"
             )->execute([':value' => ($oldAvg * $oldCount + $length) / $newCount]);
