@@ -1,7 +1,8 @@
 {
     "name": "onstage2426/fuzor",
     "type": "library",
-    "description": "A basic SQLite index and search engine",
+    "description": "Lightweight full-text search for PHP — tokenises documents, stores an inverted index in SQLite, and ranks results with Okapi BM25. No external services required.",
+    "keywords": ["full-text-search", "sqlite", "bm25", "inverted-index", "search", "fuzzy-search"],
     "license": "MIT",
     "require": {
         "php": ">=8.5"
