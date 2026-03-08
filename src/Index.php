@@ -172,6 +172,18 @@ class Index
     }
 
     /**
+     * Index multiple documents in a single transaction with one stats update.
+     *
+     * Substantially faster than calling insert() in a loop for bulk loads.
+     *
+     * @param array<array<string, mixed>> $documents Documents to index; each must contain an 'id' key.
+     */
+    public function insertMany(array $documents): void
+    {
+        $this->engine->insertMany($documents);
+    }
+
+    /**
      * Replace an existing document in the index.
      *
      * @param array<string, mixed> $document New document data; must contain an 'id' key.

@@ -29,6 +29,9 @@ class SqliteEngine
     /** Active PDO connection to the open SQLite index file. */
     private PDO $index;
 
+    /** @var array<string, \PDOStatement> Prepared statement cache; invalidated when the connection changes. */
+    private array $stmtCache = [];
+
     /** When true, the last search keyword is matched as a prefix (as-you-type behaviour). */
     public bool $asYouType = true;
 
@@ -49,6 +52,8 @@ class SqliteEngine
 
     /** BM25 document length normalisation weight. 0 = no normalisation, 1 = full normalisation. */
     public float $b = 0.75;
+
+    // --- Connection management ----------------------------------------------
 
     /**
      * @param string $storagePath Writable directory where index files are stored.
@@ -75,6 +80,7 @@ class SqliteEngine
 
         $this->index = new PDO('sqlite:' . $this->storagePath . $indexName);
         $this->index->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+        $this->stmtCache = [];
         $this->applyPragmas();
 
         $this->index->exec(
@@ -106,6 +112,202 @@ class SqliteEngine
     }
 
     /**
+     * Open an existing index file for searching.
+     *
+     * @param  string $indexName Filename of the index to open (e.g. 'articles.db').
+     * @throws \RuntimeException If the index file does not exist.
+     */
+    public function selectIndex(string $indexName): void
+    {
+        $path = $this->storagePath . $indexName;
+        if (!file_exists($path)) {
+            throw new \RuntimeException("Index {$path} does not exist", 1);
+        }
+        $this->index = new PDO('sqlite:' . $path);
+        $this->index->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+        $this->stmtCache = [];
+        $this->applyPragmas();
+    }
+
+    /**
+     * Delete an index file and its WAL sidecar files from disk.
+     *
+     * Removes the main file plus the `-wal` and `-shm` companions created by
+     * WAL journal mode. No-ops silently for any file that does not exist.
+     *
+     * @param string $indexName Filename of the index to delete.
+     */
+    private function flushIndex(string $indexName): void
+    {
+        $path = $this->storagePath . $indexName;
+        foreach ([$path, $path . '-wal', $path . '-shm'] as $file) {
+            if (file_exists($file)) {
+                unlink($file);
+            }
+        }
+    }
+
+    /**
+     * Apply connection-level SQLite pragmas for optimal performance.
+     *
+     * - journal_mode=WAL: concurrent readers, faster commits.
+     * - synchronous=NORMAL: safe with WAL (no data loss on crash), far fewer fsyncs than FULL.
+     * - cache_size=-16000: 16 MB page cache (negative value = kibibytes).
+     * - temp_store=MEMORY: sort/index temp tables stay in RAM.
+     */
+    private function applyPragmas(): void
+    {
+        $this->index->exec('
+            PRAGMA journal_mode = WAL;
+            PRAGMA synchronous  = NORMAL;
+            PRAGMA cache_size   = -16000;
+            PRAGMA temp_store   = MEMORY;
+        ');
+    }
+
+    // --- Public write operations --------------------------------------------
+
+    /**
+     * Index a new document and increment the total document count.
+     *
+     * Tokenises all fields via processDocument() and updates the
+     * total_documents counter in the info table.
+     *
+     * @param array<string, mixed> $document Document fields; must contain an 'id' key.
+     */
+    public function insert(array $document): void
+    {
+        $this->wrapInTransaction(function () use ($document): void {
+            $length   = $this->processDocument($document);
+            $avgStmt  = $this->stmt('readAvgDocLength', "SELECT value FROM info WHERE key = 'avg_doc_length'");
+            $avgStmt->execute();
+            $oldAvg   = (float) $avgStmt->fetchColumn();
+            $newCount = $this->adjustTotalDocuments(1);
+            $oldCount = $newCount - 1;
+            $this->stmt('updateAvgDocLength',
+                "UPDATE info SET value = :value WHERE key = 'avg_doc_length'"
+            )->execute([':value' => ($oldAvg * $oldCount + $length) / $newCount]);
+        });
+    }
+
+    /**
+     * Index multiple documents in a single transaction with one stats update.
+     *
+     * Substantially faster than calling insert() in a loop: the transaction and
+     * avg_doc_length / total_documents writes happen once for the entire batch
+     * instead of once per document.
+     *
+     * @param array<array<string, mixed>> $documents Documents to index; each must contain an 'id' key.
+     */
+    public function insertMany(array $documents): void
+    {
+        if (empty($documents)) {
+            return;
+        }
+
+        $this->wrapInTransaction(function () use ($documents): void {
+            $avgStmt = $this->stmt('readAvgDocLength', "SELECT value FROM info WHERE key = 'avg_doc_length'");
+            $avgStmt->execute();
+            $oldAvg = (float) $avgStmt->fetchColumn();
+
+            $countStmt = $this->stmt('readTotalDocuments', "SELECT value FROM info WHERE key = 'total_documents'");
+            $countStmt->execute();
+            $oldCount = (int) $countStmt->fetchColumn();
+
+            $totalLength = 0;
+            foreach ($documents as $document) {
+                $totalLength += $this->processDocument($document);
+            }
+
+            $newCount = $oldCount + count($documents);
+            $newAvg   = ($oldAvg * $oldCount + $totalLength) / $newCount;
+
+            $this->stmt('setTotalDocuments', "UPDATE info SET value = :value WHERE key = 'total_documents'")
+                ->execute([':value' => $newCount]);
+            $this->stmt('updateAvgDocLength', "UPDATE info SET value = :value WHERE key = 'avg_doc_length'")
+                ->execute([':value' => $newAvg]);
+        });
+    }
+
+    /**
+     * Replace a document in the index.
+     *
+     * Equivalent to delete($id) followed by insert($document). The total
+     * document count is unchanged: delete decrements it, insert increments it.
+     *
+     * @param array<string, mixed> $document New document data; must contain an 'id' key.
+     */
+    public function update(array $document): void
+    {
+        $this->wrapInTransaction(function () use ($document): void {
+            $this->delete($document['id']);
+            $this->insert($document);
+        });
+    }
+
+    /**
+     * Remove a document from the index.
+     *
+     * Decrements num_hits and num_docs on every wordlist term the document
+     * contributed to via a single CTE-based UPDATE, removes all doclist rows
+     * for the document, prunes zero-hit orphan terms, and decrements
+     * total_documents.
+     *
+     * @param int $documentId ID of the document to remove.
+     */
+    public function delete(int $documentId): void
+    {
+        $this->wrapInTransaction(function () use ($documentId): void {
+            // Decrement wordlist stats and collect IDs of newly-orphaned terms (num_hits → 0).
+            $updateStmt = $this->stmt('wordlistDecrementByDoc',
+                'WITH doc_terms AS (
+                     SELECT term_id, hit_count FROM doclist WHERE doc_id = :documentId
+                 )
+                 UPDATE wordlist SET
+                     num_docs = num_docs - 1,
+                     num_hits = num_hits - (SELECT hit_count FROM doc_terms WHERE term_id = wordlist.id)
+                 WHERE id IN (SELECT term_id FROM doc_terms)
+                 RETURNING id, num_hits'
+            );
+            $updateStmt->execute([':documentId' => $documentId]);
+            $orphanIds = array_column(
+                array_filter($updateStmt->fetchAll(PDO::FETCH_ASSOC), fn($r) => (int) $r['num_hits'] === 0),
+                'id'
+            );
+
+            $this->stmt('doclistDeleteByDoc', 'DELETE FROM doclist WHERE doc_id = :documentId')
+                ->execute([':documentId' => $documentId]);
+
+            // Targeted delete: only remove terms that became orphans, avoiding a full table scan.
+            if ($orphanIds) {
+                $placeholders = implode(',', array_fill(0, count($orphanIds), '?'));
+                $this->index->prepare("DELETE FROM wordlist WHERE id IN ($placeholders)")->execute($orphanIds);
+            }
+
+            $selStmt = $this->stmt('docLengthsSelect', 'SELECT length FROM doc_lengths WHERE doc_id = :documentId');
+            $selStmt->execute([':documentId' => $documentId]);
+            $length = (int) $selStmt->fetchColumn();
+
+            $delStmt = $this->stmt('docLengthsDelete', 'DELETE FROM doc_lengths WHERE doc_id = :documentId');
+            $delStmt->execute([':documentId' => $documentId]);
+
+            if ($delStmt->rowCount()) {
+                $avgStmt = $this->stmt('readAvgDocLength', "SELECT value FROM info WHERE key = 'avg_doc_length'");
+                $avgStmt->execute();
+                $oldAvg   = (float) $avgStmt->fetchColumn();
+                $newCount = $this->adjustTotalDocuments(-1);
+                $oldCount = $newCount + 1;
+                $newAvg   = $newCount > 0 ? ($oldAvg * $oldCount - $length) / $newCount : 0;
+                $this->stmt('updateAvgDocLength',
+                    "UPDATE info SET value = :value WHERE key = 'avg_doc_length'"
+                )->execute([':value' => $newAvg]);
+            }
+        });
+    }
+
+    // --- Private write helpers ----------------------------------------------
+
+    /**
      * Tokenise every field of a document row and write the result to the index.
      *
      * The 'id' field is used as the document ID and is excluded from indexing.
@@ -120,7 +322,7 @@ class SqliteEngine
 
         /** @var array<string, string[]> $stems */
         $stems = array_map(
-            fn($col) => trim((string) $col) !== '' ? Tokenizer::tokenize((string) $col) : [],
+            fn($col) => ($text = trim((string) $col)) !== '' ? Tokenizer::tokenize($text) : [],
             array_diff_key($row, ['id' => null])
         );
 
@@ -130,20 +332,6 @@ class SqliteEngine
         $this->saveDocLength($documentId, $length);
 
         return $length;
-    }
-
-    /**
-     * Persist a document's total token count for BM25 length normalisation.
-     *
-     * @param int $docId  Document ID.
-     * @param int $length Total number of tokens across all indexed fields.
-     */
-    private function saveDocLength(int $docId, int $length): void
-    {
-        $this->index->prepare(
-            'INSERT INTO doc_lengths (doc_id, length) VALUES (:id, :len)
-             ON CONFLICT(doc_id) DO UPDATE SET length = excluded.length'
-        )->execute([':id' => $docId, ':len' => $length]);
     }
 
     /**
@@ -229,51 +417,17 @@ class SqliteEngine
     }
 
     /**
-     * Remove a document from the index.
+     * Persist a document's total token count for BM25 length normalisation.
      *
-     * Decrements num_hits and num_docs on every wordlist term the document
-     * contributed to via a single CTE-based UPDATE, removes all doclist rows
-     * for the document, prunes zero-hit orphan terms, and decrements
-     * total_documents.
-     *
-     * @param int $documentId ID of the document to remove.
+     * @param int $docId  Document ID.
+     * @param int $length Total number of tokens across all indexed fields.
      */
-    public function delete(int $documentId): void
+    private function saveDocLength(int $docId, int $length): void
     {
-        $this->wrapInTransaction(function () use ($documentId): void {
-            $this->index->prepare(
-                'WITH doc_terms AS (
-                     SELECT term_id, hit_count FROM doclist WHERE doc_id = :documentId
-                 )
-                 UPDATE wordlist SET
-                     num_docs = num_docs - 1,
-                     num_hits = num_hits - (SELECT hit_count FROM doc_terms WHERE term_id = wordlist.id)
-                 WHERE id IN (SELECT term_id FROM doc_terms)'
-            )->execute([':documentId' => $documentId]);
-
-            $this->index->prepare(
-                'DELETE FROM doclist WHERE doc_id = :documentId'
-            )->execute([':documentId' => $documentId]);
-
-            $this->index->exec('DELETE FROM wordlist WHERE num_hits = 0');
-
-            $stmt = $this->index->prepare('SELECT length FROM doc_lengths WHERE doc_id = :documentId');
-            $stmt->execute([':documentId' => $documentId]);
-            $length = (int) $stmt->fetchColumn();
-
-            $stmt = $this->index->prepare('DELETE FROM doc_lengths WHERE doc_id = :documentId');
-            $stmt->execute([':documentId' => $documentId]);
-
-            if ($stmt->rowCount()) {
-                $oldAvg   = (float) ($this->getInfoValues(['avg_doc_length'])['avg_doc_length'] ?? 0);
-                $newCount = $this->adjustTotalDocuments(-1);
-                $oldCount = $newCount + 1;
-                $newAvg   = $newCount > 0 ? ($oldAvg * $oldCount - $length) / $newCount : 0;
-                $this->index->prepare(
-                    "UPDATE info SET value = :value WHERE key = 'avg_doc_length'"
-                )->execute([':value' => $newAvg]);
-            }
-        });
+        $this->stmt('saveDocLength',
+            'INSERT INTO doc_lengths (doc_id, length) VALUES (:id, :len)
+             ON CONFLICT(doc_id) DO UPDATE SET length = excluded.length'
+        )->execute([':id' => $docId, ':len' => $length]);
     }
 
     /**
@@ -286,7 +440,7 @@ class SqliteEngine
      */
     private function adjustTotalDocuments(int $delta): int
     {
-        $stmt = $this->index->prepare(
+        $stmt = $this->stmt('adjustTotalDocuments',
             "UPDATE info SET value = CAST(value AS INTEGER) + :delta
              WHERE key = 'total_documents'
              RETURNING CAST(value AS INTEGER) AS value"
@@ -296,22 +450,80 @@ class SqliteEngine
         return (int) $stmt->fetchColumn();
     }
 
+    // --- Public read operations ---------------------------------------------
+
     /**
-     * Open an existing index file for searching.
+     * Fetch documents and their count for a keyword in a single wordlist lookup.
      *
-     * @param  string $indexName Filename of the index to open (e.g. 'articles.db').
-     * @throws \RuntimeException If the index file does not exist.
+     * Combines wordlist lookup and document fetch into one call, avoiding a
+     * duplicate getWordlistByKeyword() round-trip.
+     *
+     * @param  string $keyword       Term to search for.
+     * @param  bool   $noLimit       When true, the $maxDocs cap is not applied.
+     * @param  bool   $isLastKeyword Whether this is the final token in the query.
+     * @param  bool   $fuzzy         When true, Levenshtein fuzzy matching is used.
+     * @return array{documents: list<array<string, mixed>>, numDocs: int}
      */
-    public function selectIndex(string $indexName): void
+    public function getDocumentsAndCount(string $keyword, bool $noLimit = false, bool $isLastKeyword = false, bool $fuzzy = false): array
     {
-        $path = $this->storagePath . $indexName;
-        if (!file_exists($path)) {
-            throw new \RuntimeException("Index {$path} does not exist", 1);
+        $word = $this->getWordlistByKeyword($keyword, $isLastKeyword, $noLimit, $fuzzy);
+        if (!isset($word[0])) {
+            return ['documents' => [], 'numDocs' => 0];
         }
-        $this->index = new PDO('sqlite:' . $path);
-        $this->index->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
-        $this->applyPragmas();
+
+        $documents = $fuzzy
+            ? $this->getAllDocumentsForFuzzyKeyword($word, $noLimit)
+            : $this->getAllDocumentsForStrictKeyword($word, $noLimit);
+
+        $numDocs = ($fuzzy || count($word) > 1)
+            ? array_sum(array_column($word, 'num_docs'))
+            : (int) $word[0]['num_docs'];
+
+        return ['documents' => $documents, 'numDocs' => $numDocs];
     }
+
+    /**
+     * Fetch all documents that do NOT contain a given keyword.
+     *
+     * Returns an empty array if the keyword is not in the wordlist at all.
+     *
+     * @param  string                    $keyword Term to exclude.
+     * @param  bool                      $noLimit When true, the $maxDocs cap is not applied.
+     * @return list<array<string, mixed>>         Doclist rows for non-matching documents.
+     */
+    public function getAllDocumentsForWhereKeywordNot(string $keyword, bool $noLimit = false): array
+    {
+        $word = $this->getWordlistByKeyword($keyword);
+        if (!isset($word[0])) {
+            return [];
+        }
+        $query = 'SELECT DISTINCT doc_id FROM doclist'
+                 . ' WHERE doc_id NOT IN (SELECT doc_id FROM doclist WHERE term_id = :id)'
+                 . ($noLimit ? '' : ' LIMIT :maxDocs');
+        $stmt = $this->index->prepare($query);
+        $stmt->bindValue(':id', $word[0]['id']);
+        if (!$noLimit) {
+            $stmt->bindValue(':maxDocs', $this->maxDocs, PDO::PARAM_INT);
+        }
+        $stmt->execute();
+        return $stmt->fetchAll(PDO::FETCH_ASSOC);
+    }
+
+    /**
+     * Retrieve multiple values from the info metadata table in a single query.
+     *
+     * @param  string[]              $keys  Metadata keys to fetch.
+     * @return array<string, string> Map of key → value for found rows.
+     */
+    public function getInfoValues(array $keys): array
+    {
+        $placeholders = implode(',', array_fill(0, count($keys), '?'));
+        $stmt = $this->index->prepare("SELECT key, value FROM info WHERE key IN ($placeholders)");
+        $stmt->execute($keys);
+        return array_column($stmt->fetchAll(PDO::FETCH_ASSOC), 'value', 'key');
+    }
+
+    // --- Private read helpers -----------------------------------------------
 
     /**
      * Look up a keyword in the wordlist with optional prefix and fuzzy fallback.
@@ -393,74 +605,33 @@ class SqliteEngine
     }
 
     /**
-     * Fetch all documents that do NOT contain a given keyword.
+     * Fetch doclist rows for a set of fuzzy-matched wordlist entries.
      *
-     * Returns an empty array if the keyword is not in the wordlist at all.
+     * Results are ordered to match the relevance ranking of $words (closest
+     * Levenshtein match first) using a SQL CASE expression.
      *
-     * @param  string                    $keyword Term to exclude.
-     * @param  bool                      $noLimit When true, the $maxDocs cap is not applied.
-     * @return list<array<string, mixed>>         Doclist rows for non-matching documents.
+     * @param  list<array<string, mixed>> $words   Wordlist rows from fuzzySearch(), ordered by relevance.
+     * @param  bool                       $noLimit When true, the $maxDocs cap is not applied.
+     * @return list<array<string, mixed>>          Doclist rows in fuzzy-match order.
      */
-    public function getAllDocumentsForWhereKeywordNot(string $keyword, bool $noLimit = false): array
+    private function getAllDocumentsForFuzzyKeyword(array $words, bool $noLimit): array
     {
-        $word = $this->getWordlistByKeyword($keyword);
-        if (!isset($word[0])) {
-            return [];
-        }
-        $query = 'SELECT DISTINCT doc_id FROM doclist'
-                 . ' WHERE doc_id NOT IN (SELECT doc_id FROM doclist WHERE term_id = :id)'
-                 . ($noLimit ? '' : ' LIMIT :maxDocs');
-        $stmt = $this->index->prepare($query);
-        $stmt->bindValue(':id', $word[0]['id']);
-        if (!$noLimit) {
-            $stmt->bindValue(':maxDocs', $this->maxDocs, PDO::PARAM_INT);
-        }
-        $stmt->execute();
+        $placeholders = implode(',', array_fill(0, count($words), '?'));
+        $whenClauses  = implode('', array_map(
+            fn($w, $i) => " WHEN {$w['id']} THEN $i",
+            $words,
+            range(1, count($words))
+        ));
+        $query = "SELECT d.term_id, d.doc_id, d.hit_count, dl.length AS doc_length
+                  FROM doclist d JOIN doc_lengths dl ON dl.doc_id = d.doc_id
+                  WHERE d.term_id IN ($placeholders) ORDER BY CASE d.term_id{$whenClauses} END"
+               . ($noLimit ? '' : ' LIMIT ?');
+
+        $ids    = array_column($words, 'id');
+        $params = $noLimit ? $ids : [...$ids, $this->maxDocs];
+        $stmt   = $this->index->prepare($query);
+        $stmt->execute($params);
         return $stmt->fetchAll(PDO::FETCH_ASSOC);
-    }
-
-    /**
-     * Retrieve multiple values from the info metadata table in a single query.
-     *
-     * @param  string[]              $keys  Metadata keys to fetch.
-     * @return array<string, string> Map of key → value for found rows.
-     */
-    public function getInfoValues(array $keys): array
-    {
-        $placeholders = implode(',', array_fill(0, count($keys), '?'));
-        $stmt = $this->index->prepare("SELECT key, value FROM info WHERE key IN ($placeholders)");
-        $stmt->execute($keys);
-        return array_column($stmt->fetchAll(PDO::FETCH_ASSOC), 'value', 'key');
-    }
-
-    /**
-     * Fetch documents and their count for a keyword in a single wordlist lookup.
-     *
-     * Combines wordlist lookup and document fetch into one call, avoiding a
-     * duplicate getWordlistByKeyword() round-trip.
-     *
-     * @param  string $keyword       Term to search for.
-     * @param  bool   $noLimit       When true, the $maxDocs cap is not applied.
-     * @param  bool   $isLastKeyword Whether this is the final token in the query.
-     * @param  bool   $fuzzy         When true, Levenshtein fuzzy matching is used.
-     * @return array{documents: list<array<string, mixed>>, numDocs: int}
-     */
-    public function getDocumentsAndCount(string $keyword, bool $noLimit = false, bool $isLastKeyword = false, bool $fuzzy = false): array
-    {
-        $word = $this->getWordlistByKeyword($keyword, $isLastKeyword, $noLimit, $fuzzy);
-        if (!isset($word[0])) {
-            return ['documents' => [], 'numDocs' => 0];
-        }
-
-        $documents = $fuzzy
-            ? $this->getAllDocumentsForFuzzyKeyword($word, $noLimit)
-            : $this->getAllDocumentsForStrictKeyword($word, $noLimit);
-
-        $numDocs = ($fuzzy || count($word) > 1)
-            ? array_sum(array_column($word, 'num_docs'))
-            : (int) $word[0]['num_docs'];
-
-        return ['documents' => $documents, 'numDocs' => $numDocs];
     }
 
     /**
@@ -503,107 +674,20 @@ class SqliteEngine
         return $resultSet;
     }
 
-    /**
-     * Fetch doclist rows for a set of fuzzy-matched wordlist entries.
-     *
-     * Results are ordered to match the relevance ranking of $words (closest
-     * Levenshtein match first) using a SQL CASE expression.
-     *
-     * @param  list<array<string, mixed>> $words   Wordlist rows from fuzzySearch(), ordered by relevance.
-     * @param  bool                       $noLimit When true, the $maxDocs cap is not applied.
-     * @return list<array<string, mixed>>          Doclist rows in fuzzy-match order.
-     */
-    private function getAllDocumentsForFuzzyKeyword(array $words, bool $noLimit): array
-    {
-        $placeholders = implode(',', array_fill(0, count($words), '?'));
-        $whenClauses  = implode('', array_map(
-            fn($w, $i) => " WHEN {$w['id']} THEN $i",
-            $words,
-            range(1, count($words))
-        ));
-        $query = "SELECT d.term_id, d.doc_id, d.hit_count, dl.length AS doc_length
-                  FROM doclist d JOIN doc_lengths dl ON dl.doc_id = d.doc_id
-                  WHERE d.term_id IN ($placeholders) ORDER BY CASE d.term_id{$whenClauses} END"
-               . ($noLimit ? '' : ' LIMIT ?');
-
-        $ids    = array_column($words, 'id');
-        $params = $noLimit ? $ids : [...$ids, $this->maxDocs];
-        $stmt   = $this->index->prepare($query);
-        $stmt->execute($params);
-        return $stmt->fetchAll(PDO::FETCH_ASSOC);
-    }
+    // --- Infrastructure -----------------------------------------------------
 
     /**
-     * Delete an index file and its WAL sidecar files from disk.
+     * Return a cached prepared statement, preparing it on first use.
      *
-     * Removes the main file plus the `-wal` and `-shm` companions created by
-     * WAL journal mode. No-ops silently for any file that does not exist.
+     * The cache is keyed by a stable string identifier and is invalidated whenever
+     * the PDO connection changes (createIndex / selectIndex).
      *
-     * @param string $indexName Filename of the index to delete.
+     * @param string $key Stable cache key (never interpolated into SQL).
+     * @param string $sql SQL to prepare on first use.
      */
-    private function flushIndex(string $indexName): void
+    private function stmt(string $key, string $sql): \PDOStatement
     {
-        $path = $this->storagePath . $indexName;
-        foreach ([$path, $path . '-wal', $path . '-shm'] as $file) {
-            if (file_exists($file)) {
-                unlink($file);
-            }
-        }
-    }
-
-    /**
-     * Replace a document in the index.
-     *
-     * Equivalent to delete($id) followed by insert($document). The total
-     * document count is unchanged: delete decrements it, insert increments it.
-     *
-     * @param array<string, mixed> $document New document data; must contain an 'id' key.
-     */
-    public function update(array $document): void
-    {
-        $this->wrapInTransaction(function () use ($document): void {
-            $this->delete($document['id']);
-            $this->insert($document);
-        });
-    }
-
-    /**
-     * Index a new document and increment the total document count.
-     *
-     * Tokenises all fields via processDocument() and updates the
-     * total_documents counter in the info table.
-     *
-     * @param array<string, mixed> $document Document fields; must contain an 'id' key.
-     */
-    public function insert(array $document): void
-    {
-        $this->wrapInTransaction(function () use ($document): void {
-            $length   = $this->processDocument($document);
-            $oldAvg   = (float) ($this->getInfoValues(['avg_doc_length'])['avg_doc_length'] ?? 0);
-            $newCount = $this->adjustTotalDocuments(1);
-            $oldCount = $newCount - 1;
-            $this->index->prepare(
-                "UPDATE info SET value = :value WHERE key = 'avg_doc_length'"
-            )->execute([':value' => ($oldAvg * $oldCount + $length) / $newCount]);
-        });
-    }
-
-    /**
-     * Apply connection-level SQLite pragmas for optimal performance.
-     *
-     * - journal_mode=WAL: concurrent readers, faster commits.
-     * - synchronous=NORMAL: safe with WAL (no data loss on crash), far fewer fsyncs than FULL.
-     * - cache_size=-16000: 16 MB page cache (negative value = kibibytes).
-     * - temp_store=MEMORY: sort/index temp tables stay in RAM.
-     */
-    private function applyPragmas(): void
-    {
-        $this->index->exec('
-            PRAGMA journal_mode = WAL;
-            PRAGMA synchronous  = NORMAL;
-            PRAGMA cache_size   = -16000;
-            PRAGMA temp_store   = MEMORY;
-        ');
+        return $this->stmtCache[$key] ??= $this->index->prepare($sql);
     }
 
     /**
