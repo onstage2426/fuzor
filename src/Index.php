@@ -345,7 +345,7 @@ class Index
         arsort($docScores);
 
         return [
-            'ids'       => $docScores |> array_keys(...) |> (fn($k) => array_slice($k, 0, $numOfResults)),
+            'ids'       => array_slice(array_keys($docScores), 0, $numOfResults),
             'hits'      => count($docScores),
             'docScores' => $docScores,
         ];

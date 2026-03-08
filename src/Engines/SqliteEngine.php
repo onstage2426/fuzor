@@ -20,9 +20,6 @@ use PDO;
  */
 class SqliteEngine
 {
-    /** Name of the currently active index file (e.g. 'articles.db'). */
-    private string $indexName;
-
     /** Absolute path to the storage directory (guaranteed trailing slash). */
     private string $storagePath;
 
@@ -75,7 +72,6 @@ class SqliteEngine
      */
     public function createIndex(string $indexName): static
     {
-        $this->indexName = $indexName;
         $this->flushIndex($indexName);
 
         $this->index = new PDO('sqlite:' . $this->storagePath . $indexName);
@@ -86,7 +82,7 @@ class SqliteEngine
         $this->index->exec(
             "CREATE TABLE IF NOT EXISTS wordlist (
                 id INTEGER PRIMARY KEY,
-                term TEXT UNIQUE COLLATE nocase,
+                term TEXT UNIQUE,
                 num_hits INTEGER,
                 num_docs INTEGER)"
         );
@@ -206,13 +202,9 @@ class SqliteEngine
         }
 
         $this->wrapInTransaction(function () use ($documents): void {
-            $avgStmt = $this->stmt('readAvgDocLength', "SELECT value FROM info WHERE key = 'avg_doc_length'");
-            $avgStmt->execute();
-            $oldAvg = (float) $avgStmt->fetchColumn();
-
-            $countStmt = $this->stmt('readTotalDocuments', "SELECT value FROM info WHERE key = 'total_documents'");
-            $countStmt->execute();
-            $oldCount = (int) $countStmt->fetchColumn();
+            $info     = $this->getInfoValues(['avg_doc_length', 'total_documents']);
+            $oldAvg   = (float) ($info['avg_doc_length'] ?? 0);
+            $oldCount = (int) ($info['total_documents'] ?? 0);
 
             $totalLength = 0;
             foreach ($documents as $document) {
@@ -284,14 +276,12 @@ class SqliteEngine
                 $this->index->prepare("DELETE FROM wordlist WHERE id IN ($placeholders)")->execute($orphanIds);
             }
 
-            $selStmt = $this->stmt('docLengthsSelect', 'SELECT length FROM doc_lengths WHERE doc_id = :documentId');
-            $selStmt->execute([':documentId' => $documentId]);
-            $length = (int) $selStmt->fetchColumn();
-
-            $delStmt = $this->stmt('docLengthsDelete', 'DELETE FROM doc_lengths WHERE doc_id = :documentId');
+            $delStmt = $this->stmt('docLengthsDelete', 'DELETE FROM doc_lengths WHERE doc_id = :documentId RETURNING length');
             $delStmt->execute([':documentId' => $documentId]);
+            $length = $delStmt->fetchColumn();
 
-            if ($delStmt->rowCount()) {
+            if ($length !== false) {
+                $length = (int) $length;
                 $avgStmt = $this->stmt('readAvgDocLength', "SELECT value FROM info WHERE key = 'avg_doc_length'");
                 $avgStmt->execute();
                 $oldAvg   = (float) $avgStmt->fetchColumn();
@@ -497,14 +487,17 @@ class SqliteEngine
         if (!isset($word[0])) {
             return [];
         }
-        $query = 'SELECT DISTINCT doc_id FROM doclist'
-                 . ' WHERE doc_id NOT IN (SELECT doc_id FROM doclist WHERE term_id = :id)'
-                 . ($noLimit ? '' : ' LIMIT :maxDocs');
-        $stmt = $this->index->prepare($query);
-        $stmt->bindValue(':id', $word[0]['id']);
-        if (!$noLimit) {
+        if ($noLimit) {
+            $stmt = $this->stmt('keywordNotUnlimited',
+                'SELECT DISTINCT doc_id FROM doclist WHERE doc_id NOT IN (SELECT doc_id FROM doclist WHERE term_id = :id)'
+            );
+        } else {
+            $stmt = $this->stmt('keywordNotLimited',
+                'SELECT DISTINCT doc_id FROM doclist WHERE doc_id NOT IN (SELECT doc_id FROM doclist WHERE term_id = :id) LIMIT :maxDocs'
+            );
             $stmt->bindValue(':maxDocs', $this->maxDocs, PDO::PARAM_INT);
         }
+        $stmt->bindValue(':id', $word[0]['id']);
         $stmt->execute();
         return $stmt->fetchAll(PDO::FETCH_ASSOC);
     }
@@ -542,18 +535,19 @@ class SqliteEngine
      */
     private function getWordlistByKeyword(string $keyword, bool $isLastWord = false, bool $noLimit = false, bool $fuzzy = false): array
     {
+        $kw = mb_strtolower($keyword);
         if ($this->asYouType && $isLastWord) {
-            $stmt = $this->index->prepare(
+            $stmt = $this->stmt('wordlistPrefix',
                 'SELECT id, term, num_hits, num_docs FROM wordlist'
                 . ' WHERE term LIKE :keyword ORDER BY length(term) ASC, num_hits DESC LIMIT :maxExpansions;'
             );
-            $stmt->bindValue(':keyword', mb_strtolower($keyword) . '%');
+            $stmt->bindValue(':keyword', $kw . '%');
             $stmt->bindValue(':maxExpansions', $this->fuzzyMaxExpansions, PDO::PARAM_INT);
         } else {
-            $stmt = $this->index->prepare(
+            $stmt = $this->stmt('wordlistExact',
                 'SELECT id, term, num_hits, num_docs FROM wordlist WHERE term = :keyword LIMIT 1;'
             );
-            $stmt->bindValue(':keyword', mb_strtolower($keyword));
+            $stmt->bindValue(':keyword', $kw);
         }
 
         $stmt->execute();
@@ -581,17 +575,25 @@ class SqliteEngine
     private function getAllDocumentsForStrictKeyword(array $words, bool $noLimit): array
     {
         if (count($words) === 1) {
-            $query = 'SELECT d.term_id, d.doc_id, d.hit_count, dl.length AS doc_length
-                       FROM doclist d JOIN doc_lengths dl ON dl.doc_id = d.doc_id
-                       WHERE d.term_id = :id ORDER BY d.hit_count DESC'
-                     . ($noLimit ? '' : ' LIMIT :maxDocs');
-            $stmt = $this->index->prepare($query);
-            $stmt->bindValue(':id', $words[0]['id']);
-            if (!$noLimit) {
+            if ($noLimit) {
+                $stmt = $this->stmt('strictDocsUnlimited',
+                    'SELECT d.term_id, d.doc_id, d.hit_count, dl.length AS doc_length
+                      FROM doclist d JOIN doc_lengths dl ON dl.doc_id = d.doc_id
+                      WHERE d.term_id = :id ORDER BY d.hit_count DESC'
+                );
+                $stmt->bindValue(':id', $words[0]['id']);
+            } else {
+                $stmt = $this->stmt('strictDocsLimited',
+                    'SELECT d.term_id, d.doc_id, d.hit_count, dl.length AS doc_length
+                      FROM doclist d JOIN doc_lengths dl ON dl.doc_id = d.doc_id
+                      WHERE d.term_id = :id ORDER BY d.hit_count DESC LIMIT :maxDocs'
+                );
+                $stmt->bindValue(':id', $words[0]['id']);
                 $stmt->bindValue(':maxDocs', $this->maxDocs, PDO::PARAM_INT);
             }
             $stmt->execute();
         } else {
+            // Dynamic IN clause: variable placeholder count prevents statement caching.
             $placeholders = implode(',', array_fill(0, count($words), '?'));
             $query = "SELECT d.term_id, d.doc_id, d.hit_count, dl.length AS doc_length
                        FROM doclist d JOIN doc_lengths dl ON dl.doc_id = d.doc_id
@@ -646,18 +648,20 @@ class SqliteEngine
      */
     private function fuzzySearch(string $keyword): array
     {
-        $kwLen = mb_strlen($keyword);
+        $keyword = mb_strtolower($keyword);
+        $kwLen   = mb_strlen($keyword);
 
-        $stmt = $this->index->prepare(
+        $stmt = $this->stmt('fuzzyWordlistLookup',
             "SELECT id, term, num_hits, num_docs FROM wordlist
              WHERE term LIKE :keyword
                AND length(term) BETWEEN :min AND :max
              ORDER BY num_hits DESC
-             LIMIT {$this->fuzzyMaxExpansions};"
+             LIMIT :maxExpansions"
         );
-        $stmt->bindValue(':keyword', mb_strtolower(mb_substr($keyword, 0, $this->fuzzyPrefixLength)) . '%');
+        $stmt->bindValue(':keyword', mb_substr($keyword, 0, $this->fuzzyPrefixLength) . '%');
         $stmt->bindValue(':min', max(1, $kwLen - $this->fuzzyDistance), PDO::PARAM_INT);
         $stmt->bindValue(':max', $kwLen + $this->fuzzyDistance, PDO::PARAM_INT);
+        $stmt->bindValue(':maxExpansions', $this->fuzzyMaxExpansions, PDO::PARAM_INT);
         $stmt->execute();
 
         /** @var list<array<string, mixed>> $resultSet */
