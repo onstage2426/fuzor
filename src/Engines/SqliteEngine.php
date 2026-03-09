@@ -264,7 +264,7 @@ class SqliteEngine
             );
             $updateStmt->execute([':documentId' => $documentId]);
             $orphanIds = array_column(
-                array_filter($updateStmt->fetchAll(PDO::FETCH_ASSOC), fn($r) => (int) $r['num_hits'] === 0),
+                array_filter($updateStmt->fetchAll(PDO::FETCH_ASSOC), fn($row) => (int) $row['num_hits'] === 0),
                 'id'
             );
 
@@ -315,15 +315,18 @@ class SqliteEngine
     {
         $documentId = $row['id'];
 
-        /** @var array<string, string[]> $stems */
-        $stems = array_map(
-            fn($col) => ($text = trim((string) $col)) !== '' ? Tokenizer::tokenize($text) : [],
-            array_diff_key($row, ['id' => null])
-        );
+        $fieldTokens  = [];
+        $length = 0;
+        foreach (array_diff_key($row, ['id' => null]) as $col) {
+            $text = trim((string) $col);
+            if ($text !== '') {
+                $tokens  = Tokenizer::tokenize($text);
+                $fieldTokens[] = $tokens;
+                $length += count($tokens);
+            }
+        }
 
-        $length = array_sum(array_map(count(...), $stems));
-
-        $this->saveDoclist($this->saveWordlist($stems), $documentId);
+        $this->saveDoclist($documentId, $this->saveWordlist($fieldTokens));
         $this->saveDocLength($documentId, $length);
 
         return $length;
@@ -336,16 +339,16 @@ class SqliteEngine
      * all terms for a document in one round-trip per chunk (chunks respect
      * SQLite's 999-variable limit at 2 params per term).
      *
-     * @param  array<string, string[]> $stems Tokenised fields (field name → token list).
+     * @param  list<string[]> $fieldTokens Tokenised fields as a list of token arrays.
      * @return array<string, array{hits: int, id: int|string}> Terms with resolved wordlist IDs.
      */
-    private function saveWordlist(array $stems): array
+    private function saveWordlist(array $fieldTokens): array
     {
         /** @var array<string, array{hits: int, id: int|string}> $terms */
         $terms = [];
 
-        foreach ($stems as $column) {
-            foreach ($column as $term) {
+        foreach ($fieldTokens as $tokens) {
+            foreach ($tokens as $term) {
                 if (array_key_exists($term, $terms)) {
                     $terms[$term]['hits']++;
                 } else {
@@ -388,10 +391,10 @@ class SqliteEngine
      * Uses a single batched INSERT per chunk (3 params per term; chunks respect
      * SQLite's 999-variable limit).
      *
+     * @param int                                               $documentId Document ID.
      * @param array<string, array{hits: int, id: int|string}> $terms Terms with resolved wordlist IDs.
-     * @param int                                               $docId Document ID.
      */
-    private function saveDoclist(array $terms, int $docId): void
+    private function saveDoclist(int $documentId, array $terms): void
     {
         if (empty($terms)) {
             return;
@@ -402,7 +405,7 @@ class SqliteEngine
             $params = [];
             foreach ($chunk as $term) {
                 $params[] = $term['id'];
-                $params[] = $docId;
+                $params[] = $documentId;
                 $params[] = $term['hits'];
             }
             $this->index->prepare(
@@ -414,16 +417,16 @@ class SqliteEngine
     /**
      * Persist a document's total token count for BM25 length normalisation.
      *
-     * @param int $docId  Document ID.
+     * @param int $documentId  Document ID.
      * @param int $length Total number of tokens across all indexed fields.
      */
-    private function saveDocLength(int $docId, int $length): void
+    private function saveDocLength(int $documentId, int $length): void
     {
         $this->stmt(
             'saveDocLength',
             'INSERT INTO doc_lengths (doc_id, length) VALUES (:id, :len)
              ON CONFLICT(doc_id) DO UPDATE SET length = excluded.length'
-        )->execute([':id' => $docId, ':len' => $length]);
+        )->execute([':id' => $documentId, ':len' => $length]);
     }
 
     /**
@@ -556,32 +559,34 @@ class SqliteEngine
         bool $noLimit = false,
         bool $fuzzy = false
     ): array {
-        $kw = mb_strtolower($keyword);
+        $keyword = mb_strtolower($keyword);
+
         if ($this->asYouType && $isLastWord) {
             $stmt = $this->stmt(
                 'wordlistPrefix',
                 'SELECT id, term, num_hits, num_docs FROM wordlist'
                 . ' WHERE term LIKE :keyword ORDER BY length(term) ASC, num_hits DESC LIMIT :maxExpansions;'
             );
-            $stmt->bindValue(':keyword', $kw . '%');
+            $stmt->bindValue(':keyword', $keyword . '%');
             $stmt->bindValue(':maxExpansions', $this->fuzzyMaxExpansions, PDO::PARAM_INT);
         } else {
             $stmt = $this->stmt(
                 'wordlistExact',
                 'SELECT id, term, num_hits, num_docs FROM wordlist WHERE term = :keyword LIMIT 1;'
             );
-            $stmt->bindValue(':keyword', $kw);
+            $stmt->bindValue(':keyword', $keyword);
         }
 
         $stmt->execute();
 
-        /** @var list<array<string, mixed>> $res */
-        $res = $stmt->fetchAll(PDO::FETCH_ASSOC);
+        /** @var list<array<string, mixed>> $wordlistRows */
+        $wordlistRows = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
-        if ($fuzzy && (!isset($res[0]) || $noLimit)) {
+        if ($fuzzy && (!isset($wordlistRows[0]) || $noLimit)) {
             return $this->fuzzySearch($keyword);
         }
-        return $res;
+
+        return $wordlistRows;
     }
 
     /**
@@ -644,11 +649,12 @@ class SqliteEngine
     private function getAllDocumentsForFuzzyKeyword(array $words, bool $noLimit): array
     {
         $placeholders = implode(',', array_fill(0, count($words), '?'));
-        $whenClauses  = implode('', array_map(
-            fn($w, $i) => " WHEN {$w['id']} THEN $i",
-            $words,
-            range(1, count($words))
-        ));
+
+        $whenClauses  = '';
+        foreach ($words as $i => $word) {
+            $whenClauses .= " WHEN {$word['id']} THEN " . ($i + 1);
+        }
+
         $query = "SELECT d.term_id, d.doc_id, d.hit_count, dl.length AS doc_length
                   FROM doclist d JOIN doc_lengths dl ON dl.doc_id = d.doc_id
                   WHERE d.term_id IN ($placeholders) ORDER BY CASE d.term_id{$whenClauses} END"
@@ -673,8 +679,8 @@ class SqliteEngine
      */
     private function fuzzySearch(string $keyword): array
     {
-        $keyword = mb_strtolower($keyword);
-        $kwLen   = mb_strlen($keyword);
+        $keyword       = mb_strtolower($keyword);
+        $keywordLength = mb_strlen($keyword);
 
         $stmt = $this->stmt(
             'fuzzyWordlistLookup',
@@ -685,8 +691,8 @@ class SqliteEngine
              LIMIT :maxExpansions"
         );
         $stmt->bindValue(':keyword', mb_substr($keyword, 0, $this->fuzzyPrefixLength) . '%');
-        $stmt->bindValue(':min', max(1, $kwLen - $this->fuzzyDistance), PDO::PARAM_INT);
-        $stmt->bindValue(':max', $kwLen + $this->fuzzyDistance, PDO::PARAM_INT);
+        $stmt->bindValue(':min', max(1, $keywordLength - $this->fuzzyDistance), PDO::PARAM_INT);
+        $stmt->bindValue(':max', $keywordLength + $this->fuzzyDistance, PDO::PARAM_INT);
         $stmt->bindValue(':maxExpansions', $this->fuzzyMaxExpansions, PDO::PARAM_INT);
         $stmt->execute();
 

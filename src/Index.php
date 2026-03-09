@@ -322,7 +322,7 @@ class Index
         $docScores = [];
 
         $info      = $this->engine->getInfoValues(['total_documents', 'avg_doc_length']);
-        $count     = $info['total_documents'] ?? 0;
+        $totalDocuments = $info['total_documents'] ?? 0;
         $avgdl     = max(1.0, (float) ($info['avg_doc_length'] ?? 0));
         $k1        = $this->engine->k1;
         $b         = $this->engine->b;
@@ -331,13 +331,13 @@ class Index
         foreach ($keywords as $index => $term) {
             $isLastKeyword = $lastIndex === $index;
             $result = $this->engine->getDocumentsAndCount($term, false, $isLastKeyword, $fuzzy);
-            $idf    = log($count / max(1, $result['numDocs']));
+            $idf    = log($totalDocuments / max(1, $result['numDocs']));
             // Full Okapi BM25: IDF * ((k1 + 1) * tf) / (k1 * (1 - b + b * dl/avgdl) + tf)
             foreach ($result['documents'] as $document) {
-                $docId = $document['doc_id'];
+                $documentId = $document['doc_id'];
                 $tf    = $document['hit_count'];
                 $dl    = $document['doc_length'];
-                $docScores[$docId] = ($docScores[$docId] ?? 0)
+                $docScores[$documentId] = ($docScores[$documentId] ?? 0)
                     + $idf * (($k1 + 1) * $tf) / ($k1 * (1 - $b + $b * $dl / $avgdl) + $tf);
             }
         }
@@ -356,10 +356,10 @@ class Index
      *
      * Uses the Shunting-Yard algorithm. Operator precedence: ~ (3) > & (2) > | (1).
      *
-     * @param  string   $exp Infix expression containing operators |, &, ~, (, ).
+     * @param  string   $expression Infix expression containing operators |, &, ~, (, ).
      * @return string[]      Tokens in postfix order.
      */
-    private function toPostfix(string $exp): array
+    private function toPostfix(string $expression): array
     {
         /** @var string[] $postfix */
         $postfix = [];
@@ -367,7 +367,7 @@ class Index
         /** @var string[] $stack */
         $stack = [];
 
-        foreach ($this->lexExpression($exp) as $token) {
+        foreach ($this->lexExpression($expression) as $token) {
             if (!in_array($token, ['|', '&', '~', '(', ')'], true)) {
                 $postfix[] = $token;
             } elseif ($token === ')') {
@@ -398,12 +398,12 @@ class Index
      * Higher value binds tighter: ~ (3) > & (2) > | (1).
      * Parentheses are handled structurally in toPostfix() and are not assigned a precedence.
      *
-     * @param  string $char Operator token.
+     * @param  string $operator Operator token.
      * @return int          Precedence level; 0 for non-operator tokens.
      */
-    private function expressionPriority(string $char): int
+    private function expressionPriority(string $operator): int
     {
-        return match ($char) {
+        return match ($operator) {
             '|'     => 1,
             '&'     => 2,
             '~'     => 3,
@@ -417,15 +417,15 @@ class Index
      * Normalises natural-language syntax before splitting:
      *   " or " → |,   " -" → &~,   " " → &
      *
-     * @param  string   $string Raw query string.
+     * @param  string   $expression Raw query string.
      * @return string[]         Alternating word tokens and operator characters.
      */
-    private function lexExpression(string $string): array
+    private function lexExpression(string $expression): array
     {
-        $string = $string
+        $expression = $expression
             |> (fn(string $s): string => str_replace([' or ', ' -', ' '], ['|', '&~', '&'], $s))
             |> mb_strtolower(...);
 
-        return preg_split('/([|~&()])/', $string, -1, PREG_SPLIT_DELIM_CAPTURE | PREG_SPLIT_NO_EMPTY);
+        return preg_split('/([|~&()])/', $expression, -1, PREG_SPLIT_DELIM_CAPTURE | PREG_SPLIT_NO_EMPTY);
     }
 }
