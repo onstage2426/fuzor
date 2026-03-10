@@ -225,16 +225,38 @@ class SqliteEngine
     /**
      * Replace a document in the index.
      *
-     * Equivalent to delete($id) followed by insert($document). The total
-     * document count is unchanged: delete decrements it, insert increments it.
+     * Removes the old document's index data and re-indexes the new content in a
+     * single transaction with one avg_doc_length write. total_documents is
+     * unchanged when the document already existed; if the ID is new it is
+     * incremented (upsert semantics matching the previous delete+insert behaviour).
      *
      * @param array<string, mixed> $document New document data; must contain an 'id' key.
      */
     public function update(array $document): void
     {
         $this->wrapInTransaction(function () use ($document): void {
-            $this->delete($document['id']);
-            $this->insert($document);
+            $oldLength = $this->removeDocumentData((int) $document['id']);
+            $newLength = $this->processDocument($document);
+
+            if ($oldLength === false) {
+                // Document did not exist — treat as insert: increment total_documents.
+                $info     = $this->getInfoValues(['avg_doc_length']);
+                $oldAvg   = (float) ($info['avg_doc_length'] ?? 0);
+                $newCount = $this->adjustTotalDocuments(1);
+                $oldCount = $newCount - 1;
+                $newAvg   = ($oldAvg * $oldCount + $newLength) / $newCount;
+            } else {
+                // Replace: total_documents unchanged; adjust avg for the length delta.
+                $info     = $this->getInfoValues(['avg_doc_length', 'total_documents']);
+                $count    = (int) ($info['total_documents'] ?? 0);
+                $oldAvg   = (float) ($info['avg_doc_length'] ?? 0);
+                $newAvg   = $count > 0 ? ($oldAvg * $count - (int) $oldLength + $newLength) / $count : 0;
+            }
+
+            $this->stmt(
+                'updateAvgDocLength',
+                "UPDATE info SET value = :value WHERE key = 'avg_doc_length'"
+            )->execute([':value' => $newAvg]);
         });
     }
 
@@ -251,45 +273,12 @@ class SqliteEngine
     public function delete(int $documentId): void
     {
         $this->wrapInTransaction(function () use ($documentId): void {
-            // Decrement wordlist stats and collect IDs of newly-orphaned terms (num_hits → 0).
-            $updateStmt = $this->stmt(
-                'wordlistDecrementByDoc',
-                'WITH doc_terms AS (
-                     SELECT term_id, hit_count FROM doclist WHERE doc_id = :documentId
-                 )
-                 UPDATE wordlist SET
-                     num_docs = num_docs - 1,
-                     num_hits = num_hits - (SELECT hit_count FROM doc_terms WHERE term_id = wordlist.id)
-                 WHERE id IN (SELECT term_id FROM doc_terms)
-                 RETURNING id, num_hits'
-            );
-            $updateStmt->execute([':documentId' => $documentId]);
-            $orphanIds = array_column(
-                array_filter($updateStmt->fetchAll(PDO::FETCH_ASSOC), fn($row) => (int) $row['num_hits'] === 0),
-                'id'
-            );
-
-            $this->stmt('doclistDeleteByDoc', 'DELETE FROM doclist WHERE doc_id = :documentId')
-                ->execute([':documentId' => $documentId]);
-
-            // Targeted delete: only remove terms that became orphans, avoiding a full table scan.
-            if ($orphanIds) {
-                $placeholders = implode(',', array_fill(0, count($orphanIds), '?'));
-                $this->index->prepare("DELETE FROM wordlist WHERE id IN ($placeholders)")->execute($orphanIds);
-            }
-
-            $delStmt = $this->stmt(
-                'docLengthsDelete',
-                'DELETE FROM doc_lengths WHERE doc_id = :documentId RETURNING length'
-            );
-            $delStmt->execute([':documentId' => $documentId]);
-            $length = $delStmt->fetchColumn();
-            $delStmt->closeCursor();
+            $length = $this->removeDocumentData($documentId);
 
             if ($length !== false) {
-                $length  = (int) $length;
-                $info    = $this->getInfoValues(['avg_doc_length']);
-                $oldAvg  = (float) ($info['avg_doc_length'] ?? 0);
+                $length   = (int) $length;
+                $info     = $this->getInfoValues(['avg_doc_length']);
+                $oldAvg   = (float) ($info['avg_doc_length'] ?? 0);
                 $newCount = $this->adjustTotalDocuments(-1);
                 $oldCount = $newCount + 1;
                 $newAvg   = $newCount > 0 ? ($oldAvg * $oldCount - $length) / $newCount : 0;
@@ -302,6 +291,54 @@ class SqliteEngine
     }
 
     // --- Private write helpers ----------------------------------------------
+
+    /**
+     * Remove a document's index data (wordlist stats, doclist rows, doc_length) without touching
+     * total_documents or avg_doc_length. Returns the document's token length, or false if the
+     * document was not found.
+     *
+     * @param  int        $documentId ID of the document to remove.
+     * @return int|false              Token length of the removed document, or false if not found.
+     */
+    private function removeDocumentData(int $documentId): int|false
+    {
+        // Decrement wordlist stats and collect IDs of newly-orphaned terms (num_hits → 0).
+        $updateStmt = $this->stmt(
+            'wordlistDecrementByDoc',
+            'WITH doc_terms AS (
+                 SELECT term_id, hit_count FROM doclist WHERE doc_id = :documentId
+             )
+             UPDATE wordlist SET
+                 num_docs = num_docs - 1,
+                 num_hits = num_hits - (SELECT hit_count FROM doc_terms WHERE term_id = wordlist.id)
+             WHERE id IN (SELECT term_id FROM doc_terms)
+             RETURNING id, num_hits'
+        );
+        $updateStmt->execute([':documentId' => $documentId]);
+        $orphanIds = array_column(
+            array_filter($updateStmt->fetchAll(PDO::FETCH_ASSOC), fn($row) => (int) $row['num_hits'] === 0),
+            'id'
+        );
+
+        $this->stmt('doclistDeleteByDoc', 'DELETE FROM doclist WHERE doc_id = :documentId')
+            ->execute([':documentId' => $documentId]);
+
+        // Targeted delete: only remove terms that became orphans, avoiding a full table scan.
+        if ($orphanIds) {
+            $placeholders = implode(',', array_fill(0, count($orphanIds), '?'));
+            $this->index->prepare("DELETE FROM wordlist WHERE id IN ($placeholders)")->execute($orphanIds);
+        }
+
+        $delStmt = $this->stmt(
+            'docLengthsDelete',
+            'DELETE FROM doc_lengths WHERE doc_id = :documentId RETURNING length'
+        );
+        $delStmt->execute([':documentId' => $documentId]);
+        $length = $delStmt->fetchColumn();
+        $delStmt->closeCursor();
+
+        return $length === false ? false : (int) $length;
+    }
 
     /**
      * Tokenise every field of a document row and write the result to the index.

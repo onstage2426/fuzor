@@ -186,6 +186,9 @@ class Index
     /**
      * Replace an existing document in the index.
      *
+     * Re-indexes the document in a single transaction with one stats update.
+     * If the ID does not exist it is inserted (upsert semantics).
+     *
      * @param array<string, mixed> $document New document data; must contain an 'id' key.
      */
     public function update(array $document): void
