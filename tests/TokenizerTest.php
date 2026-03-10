@@ -31,6 +31,11 @@ class TokenizerTest extends TestCase
         $this->assertContains('series', $tokens);
     }
 
+    public function testAsciiSplitsOnHyphen(): void
+    {
+        $this->assertSame(['e', 'mail'], Tokenizer::tokenize('e-mail'));
+    }
+
     public function testAsciiEmptyStringReturnsEmptyArray(): void
     {
         $this->assertSame([], Tokenizer::tokenize(''));
@@ -64,6 +69,11 @@ class TokenizerTest extends TestCase
     {
         $tokens = Tokenizer::tokenize('ünïcödé@example.com');
         $this->assertContains('ünïcödé@example', $tokens);
+    }
+
+    public function testUnicodeSplitsOnHyphen(): void
+    {
+        $this->assertSame(['café', 'résumé'], Tokenizer::tokenize('café-résumé'));
     }
 
     public function testUnicodeMixedScripts(): void

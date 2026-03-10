@@ -18,7 +18,7 @@ final class Tokenizer
         if (!preg_match('/[^\x00-\x7F]/', $text)) {
             return preg_split('/[^\w@]+/', strtolower($text), -1, PREG_SPLIT_NO_EMPTY);
         }
-        preg_match_all('/[\p{L}\p{N}\p{Pc}\p{Pd}@]+/u', mb_strtolower($text, 'UTF-8'), $m);
+        preg_match_all('/[\p{L}\p{N}\p{Pc}@]+/u', mb_strtolower($text, 'UTF-8'), $m);
         return $m[0];
     }
 }
