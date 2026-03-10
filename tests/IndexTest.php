@@ -276,6 +276,22 @@ class IndexTest extends TestCase
         $this->assertNotContains(1, $result['ids']);
     }
 
+    public function testSearchBooleanNotRespectsAsYouTypePrefix(): void
+    {
+        $index = Index::create($this->dbPath);
+        $index->insertMany([
+            ['id' => 1, 'title' => 'mercedes sedan', 'body' => ''],
+            ['id' => 2, 'title' => 'audi sedan', 'body' => ''],
+        ]);
+
+        // Both docs match 'sedan', but doc 1 must be excluded because
+        // 'mercedes' starts with 'merc' and asYouType prefix NOT is enabled.
+        $index->asYouType = true;
+        $result = $index->searchBoolean('sedan -merc');
+        $this->assertContains(2, $result['ids']);
+        $this->assertNotContains(1, $result['ids']);
+    }
+
     public function testSearchBooleanDoesNotReturnDocScores(): void
     {
         $index = Index::create($this->dbPath);

@@ -529,6 +529,8 @@ class SqliteEngine
     /**
      * Fetch all documents that do NOT contain a given keyword.
      *
+     * Respects $asYouType prefix expansion: when enabled, all wordlist terms
+     * with matching prefix are excluded, not just exact matches.
      * Returns an empty array if the keyword is not in the wordlist at all.
      *
      * @param  string                    $keyword Term to exclude.
@@ -537,26 +539,40 @@ class SqliteEngine
      */
     public function getAllDocumentsForWhereKeywordNot(string $keyword, bool $noLimit = false): array
     {
-        $word = $this->getWordlistByKeyword($keyword);
+        // isLastWord=true so that $asYouType prefix expansion applies, matching the behaviour
+        // of positive keyword lookups in scorePhrase().
+        $word = $this->getWordlistByKeyword($keyword, isLastWord: true);
         if (!isset($word[0])) {
             return [];
         }
-        if ($noLimit) {
-            $stmt = $this->stmt(
-                'keywordNotUnlimited',
-                'SELECT DISTINCT doc_id FROM doclist'
-                . ' WHERE doc_id NOT IN (SELECT doc_id FROM doclist WHERE term_id = :id)'
-            );
+
+        $ids = array_column($word, 'id');
+
+        if (count($ids) === 1) {
+            if ($noLimit) {
+                $stmt = $this->stmt(
+                    'keywordNotUnlimited',
+                    'SELECT DISTINCT doc_id FROM doclist'
+                    . ' WHERE doc_id NOT IN (SELECT doc_id FROM doclist WHERE term_id = ?)'
+                );
+            } else {
+                $stmt = $this->stmt(
+                    'keywordNotLimited',
+                    'SELECT DISTINCT doc_id FROM doclist'
+                    . ' WHERE doc_id NOT IN (SELECT doc_id FROM doclist WHERE term_id = ?) LIMIT ?'
+                );
+            }
+            $stmt->execute($noLimit ? [$ids[0]] : [$ids[0], $this->maxDocs]);
         } else {
-            $stmt = $this->stmt(
-                'keywordNotLimited',
-                'SELECT DISTINCT doc_id FROM doclist'
-                . ' WHERE doc_id NOT IN (SELECT doc_id FROM doclist WHERE term_id = :id) LIMIT :maxDocs'
-            );
-            $stmt->bindValue(':maxDocs', $this->maxDocs, PDO::PARAM_INT);
+            // Dynamic IN clause for prefix-expanded matches — variable length prevents caching.
+            $placeholders = implode(',', array_fill(0, count($ids), '?'));
+            $query = 'SELECT DISTINCT doc_id FROM doclist'
+                . " WHERE doc_id NOT IN (SELECT doc_id FROM doclist WHERE term_id IN ($placeholders))"
+                . ($noLimit ? '' : ' LIMIT ?');
+            $stmt = $this->index->prepare($query);
+            $stmt->execute($noLimit ? $ids : [...$ids, $this->maxDocs]);
         }
-        $stmt->bindValue(':id', $word[0]['id']);
-        $stmt->execute();
+
         return $stmt->fetchAll(PDO::FETCH_ASSOC);
     }
 
