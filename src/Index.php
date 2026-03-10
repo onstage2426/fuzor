@@ -294,12 +294,13 @@ class Index
             }
         }
 
-        /** @var list<int> $docs */
-        $docs = array_slice($resolve(array_pop($stack)), 0, $numOfResults);
+        /** @var list<int> $all */
+        $all  = $resolve(array_pop($stack));
+        $docs = array_slice($all, 0, $numOfResults);
 
         return [
             'ids'      => $docs,
-            'hits'     => count($docs),
+            'hits'     => count($all),
         ];
     }
 

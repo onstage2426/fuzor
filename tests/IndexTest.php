@@ -33,8 +33,8 @@ class IndexTest extends TestCase
 
     public function testOpenReturnsIndexInstance(): void
     {
-        Index::create($this->dbPath); // create + release via GC
-        unset($index);
+        $idx = Index::create($this->dbPath);
+        unset($idx);
         gc_collect_cycles();
 
         $index = Index::open($this->dbPath);

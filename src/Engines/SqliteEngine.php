@@ -93,7 +93,7 @@ class SqliteEngine
                 doc_id INTEGER,
                 hit_count INTEGER)"
         );
-        $this->index->exec("CREATE INDEX IF NOT EXISTS 'main'.'term_id_index' ON doclist ('term_id' COLLATE BINARY);");
+        $this->index->exec("CREATE INDEX IF NOT EXISTS 'main'.'term_id_hit_count_index' ON doclist ('term_id', 'hit_count' DESC);");
         $this->index->exec("CREATE INDEX IF NOT EXISTS 'main'.'doc_id_index' ON doclist ('doc_id');");
 
         $this->index->exec(
@@ -531,8 +531,9 @@ class SqliteEngine
      */
     public function getInfoValues(array $keys): array
     {
+        sort($keys);
         $placeholders = implode(',', array_fill(0, count($keys), '?'));
-        $stmt = $this->index->prepare("SELECT key, value FROM info WHERE key IN ($placeholders)");
+        $stmt = $this->stmt('info_' . implode(',', $keys), "SELECT key, value FROM info WHERE key IN ($placeholders)");
         $stmt->execute($keys);
         return array_column($stmt->fetchAll(PDO::FETCH_ASSOC), 'value', 'key');
     }
