@@ -2,7 +2,7 @@
 
 namespace Fuzor;
 
-use Fuzor\Engines\SqliteEngine;
+use Fuzor\SqliteEngine;
 use Fuzor\Tokenizer;
 
 /**

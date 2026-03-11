@@ -1,6 +1,6 @@
 <?php
 
-namespace Fuzor\Engines;
+namespace Fuzor;
 
 use Fuzor\Levenshtein;
 use Fuzor\Tokenizer;
