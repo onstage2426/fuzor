@@ -275,7 +275,7 @@ class Index
     // --- Internal -----------------------------------------------------------
 
     /**
-     * Core Okapi BM25 scoring loop shared by search() and searchFuzzy().
+     * Core smoothed Okapi BM25 scoring loop shared by search() and searchFuzzy().
      *
      * @param  string $phrase       Raw search phrase; will be tokenised.
      * @param  int    $numOfResults Maximum number of document IDs to return.
@@ -291,17 +291,19 @@ class Index
         $docScores = [];
 
         $info      = $this->engine->getInfoValues(['total_documents', 'avg_doc_length']);
-        $totalDocuments = $info['total_documents'] ?? 0;
+        $totalDocuments = (int) ($info['total_documents'] ?? 0);
         $avgdl     = max(1.0, (float) ($info['avg_doc_length'] ?? 0));
-        $k1        = $this->engine->k1;
-        $b         = $this->engine->b;
+        $k1        = $this->k1;
+        $b         = $this->b;
         $lastIndex = count($keywords) - 1;
 
         foreach ($keywords as $index => $term) {
             $isLastKeyword = $lastIndex === $index;
             $result = $this->engine->getDocumentsAndCount($term, false, $isLastKeyword, $fuzzy);
-            $idf    = log($totalDocuments / max(1, $result['numDocs']));
-            // Full Okapi BM25: IDF * ((k1 + 1) * tf) / (k1 * (1 - b + b * dl/avgdl) + tf)
+            $df     = $result['numDocs'];
+            // Smoothed BM25 IDF: always ≥ 0, avoids negative weights for common terms.
+            $idf    = log(1 + ($totalDocuments - $df + 0.5) / ($df + 0.5));
+            // Okapi BM25: IDF * ((k1 + 1) * tf) / (k1 * (1 - b + b * dl/avgdl) + tf)
             foreach ($result['documents'] as $document) {
                 $documentId = $document['doc_id'];
                 $tf    = $document['hit_count'];
