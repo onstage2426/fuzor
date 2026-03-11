@@ -531,7 +531,8 @@ class SqliteEngine
      *
      * Respects $asYouType prefix expansion: when enabled, all wordlist terms
      * with matching prefix are excluded, not just exact matches.
-     * Returns an empty array if the keyword is not in the wordlist at all.
+     * When the keyword is not in the wordlist at all, all indexed documents are
+     * returned (complement of an empty set is the full set).
      *
      * @param  string                    $keyword Term to exclude.
      * @param  bool                      $noLimit When true, the $maxDocs cap is not applied.
@@ -543,7 +544,13 @@ class SqliteEngine
         // of positive keyword lookups in scorePhrase().
         $word = $this->getWordlistByKeyword($keyword, isLastWord: true);
         if (!isset($word[0])) {
-            return [];
+            // Term not indexed — all documents satisfy NOT, so return every doc_id.
+            $stmt = $this->stmt(
+                'allDocIds' . ($noLimit ? 'Unlimited' : 'Limited'),
+                'SELECT DISTINCT doc_id FROM doclist' . ($noLimit ? '' : ' LIMIT ?')
+            );
+            $stmt->execute($noLimit ? [] : [$this->maxDocs]);
+            return $stmt->fetchAll(PDO::FETCH_ASSOC);
         }
 
         $ids = array_column($word, 'id');

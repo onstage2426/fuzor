@@ -392,8 +392,8 @@ class Index
     private function lexExpression(string $expression): array
     {
         $expression = $expression
-            |> (fn(string $s): string => str_replace([' or ', ' -', ' '], ['|', '&~', '&'], $s))
-            |> mb_strtolower(...);
+            |> mb_strtolower(...)
+            |> (fn(string $s): string => str_replace([' or ', ' -', ' '], ['|', '&~', '&'], $s));
 
         return preg_split('/([|~&()])/', $expression, -1, PREG_SPLIT_DELIM_CAPTURE | PREG_SPLIT_NO_EMPTY);
     }
