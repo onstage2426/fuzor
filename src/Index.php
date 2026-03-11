@@ -20,9 +20,6 @@ use Fuzor\Tokenizer;
  */
 class Index
 {
-    /** Canonical paths of all currently open index files. */
-    private static array $openPaths = [];
-
     private SqliteEngine $engine;
     private string $resolvedPath;
 
@@ -82,11 +79,6 @@ class Index
         $this->resolvedPath = $resolvedPath;
     }
 
-    public function __destruct()
-    {
-        unset(self::$openPaths[$this->resolvedPath]);
-    }
-
     /**
      * Resolve a path to a canonical string, even if the file does not yet exist.
      *
@@ -106,36 +98,16 @@ class Index
     }
 
     /**
-     * Register a resolved path as in-use, preventing duplicate Index instances.
-     *
-     * @param  string $resolved Canonical absolute path returned by resolvePath().
-     * @throws \RuntimeException If the path is already open in another Index instance.
-     */
-    private static function claimPath(string $resolved): void
-    {
-        if (isset(self::$openPaths[$resolved])) {
-            throw new \RuntimeException("Index already open: {$resolved}");
-        }
-        self::$openPaths[$resolved] = true;
-    }
-
-    /**
      * Open an existing index file.
      *
      * @param  string $path Absolute or relative path to the SQLite index file.
-     * @throws \RuntimeException If the index file does not exist or is already open.
+     * @throws \RuntimeException If the index file does not exist.
      */
     public static function open(string $path): static
     {
         $resolved = self::resolvePath($path);
-        self::claimPath($resolved);
-        try {
-            $engine = new SqliteEngine(dirname($resolved));
-            $engine->selectIndex(basename($resolved));
-        } catch (\Throwable $e) {
-            unset(self::$openPaths[$resolved]);
-            throw $e;
-        }
+        $engine = new SqliteEngine(dirname($resolved));
+        $engine->selectIndex(basename($resolved));
         return new static($engine, $resolved);
     }
 
@@ -143,19 +115,12 @@ class Index
      * Create a new index file, replacing any existing file at the same path.
      *
      * @param  string $path Absolute or relative path for the new SQLite index file.
-     * @throws \RuntimeException If the path is already open in another Index instance.
      */
     public static function create(string $path): static
     {
         $resolved = self::resolvePath($path);
-        self::claimPath($resolved);
-        try {
-            $engine = new SqliteEngine(dirname($resolved));
-            $engine->createIndex(basename($resolved));
-        } catch (\Throwable $e) {
-            unset(self::$openPaths[$resolved]);
-            throw $e;
-        }
+        $engine = new SqliteEngine(dirname($resolved));
+        $engine->createIndex(basename($resolved));
         return new static($engine, $resolved);
     }
 
