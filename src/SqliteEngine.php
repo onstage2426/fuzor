@@ -51,6 +51,24 @@ class SqliteEngine
     /** BM25 document length normalisation weight. 0 = no normalisation, 1 = full normalisation. */
     public float $b = 0.75;
 
+    /** Stopword filter applied during document indexing; null means no filtering. */
+    private ?Stopwords $stopwords = null;
+
+    /**
+     * BCP 47 language tag for stopword filtering (e.g. 'en', 'fr').
+     * Set to enable stopword removal; null (default) disables it entirely.
+     * Throws \InvalidArgumentException if no stopword list exists for the given language.
+     */
+    public ?string $language {
+        get => $this->lang;
+        set {
+            $this->stopwords = $value !== null ? new Stopwords($value) : null;
+            $this->lang      = $value;
+        }
+    }
+
+    private ?string $lang = null;
+
     // --- Connection management ----------------------------------------------
 
     /**
@@ -93,7 +111,9 @@ class SqliteEngine
                 doc_id INTEGER,
                 hit_count INTEGER)"
         );
-        $this->index->exec("CREATE INDEX IF NOT EXISTS 'main'.'term_id_hit_count_index' ON doclist ('term_id', 'hit_count' DESC);");
+        $this->index->exec(
+            "CREATE INDEX IF NOT EXISTS 'main'.'term_id_hit_count_index' ON doclist ('term_id', 'hit_count' DESC);"
+        );
         $this->index->exec("CREATE INDEX IF NOT EXISTS 'main'.'doc_id_index' ON doclist ('doc_id');");
 
         $this->index->exec(
@@ -358,7 +378,9 @@ class SqliteEngine
         foreach (array_diff_key($row, ['id' => null]) as $col) {
             $text = trim((string) $col);
             if ($text !== '') {
-                $tokens  = Tokenizer::tokenize($text);
+                $tokens  = $this->stopwords !== null
+                    ? $this->stopwords->filter(Tokenizer::tokenize($text))
+                    : Tokenizer::tokenize($text);
                 $fieldTokens[] = $tokens;
                 $length += count($tokens);
             }

@@ -1,0 +1,2 @@
+<?php
+return ['aga'=>true,'ei'=>true,'et'=>true,'ja'=>true,'jah'=>true,'kas'=>true,'kui'=>true,'kõik'=>true,'ma'=>true,'me'=>true,'mida'=>true,'midagi'=>true,'mind'=>true,'minu'=>true,'mis'=>true,'mu'=>true,'mul'=>true,'mulle'=>true,'nad'=>true,'nii'=>true,'oled'=>true,'olen'=>true,'oli'=>true,'oma'=>true,'on'=>true,'pole'=>true,'sa'=>true,'seda'=>true,'see'=>true,'selle'=>true,'siin'=>true,'siis'=>true,'ta'=>true,'te'=>true,'ära'=>true];

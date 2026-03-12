@@ -31,5 +31,6 @@
     -->
     <rule ref="PSR2.Classes.PropertyDeclaration">
         <exclude-pattern>src/Index\.php</exclude-pattern>
+        <exclude-pattern>src/SqliteEngine\.php</exclude-pattern>
     </rule>
 </ruleset>

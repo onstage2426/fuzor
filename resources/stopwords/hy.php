@@ -1,0 +1,2 @@
+<?php
+return ['այդ'=>true,'այլ'=>true,'այն'=>true,'այս'=>true,'դու'=>true,'դուք'=>true,'եմ'=>true,'են'=>true,'ենք'=>true,'ես'=>true,'եք'=>true,'է'=>true,'էի'=>true,'էին'=>true,'էինք'=>true,'էիր'=>true,'էիք'=>true,'էր'=>true,'ըստ'=>true,'թ'=>true,'ի'=>true,'ին'=>true,'իսկ'=>true,'իր'=>true,'կամ'=>true,'համար'=>true,'հետ'=>true,'հետո'=>true,'մենք'=>true,'մեջ'=>true,'մի'=>true,'ն'=>true,'նա'=>true,'նաև'=>true,'նրա'=>true,'նրանք'=>true,'որ'=>true,'որը'=>true,'որոնք'=>true,'որպես'=>true,'ու'=>true,'ում'=>true,'պիտի'=>true,'վրա'=>true,'և'=>true];

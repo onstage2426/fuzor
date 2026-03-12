@@ -67,6 +67,16 @@ class Index
         set { $this->engine->b = $value; }
     }
 
+    /**
+     * BCP 47 language tag for stopword filtering (e.g. 'en', 'fr', 'de').
+     * Null (default) disables stopword removal entirely.
+     * Throws \InvalidArgumentException if no stopword list exists for the given language.
+     */
+    public ?string $language {
+        get => $this->engine->language;
+        set { $this->engine->language = $value; }
+    }
+
     // ------------------------------------------------------------------------
 
     /**

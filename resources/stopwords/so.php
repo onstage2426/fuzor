@@ -1,0 +1,2 @@
+<?php
+return ['aad'=>true,'albaabkii'=>true,'atabo'=>true,'ay'=>true,'ayaa'=>true,'ayee'=>true,'ayuu'=>true,'dhan'=>true,'hadana'=>true,'in'=>true,'inuu'=>true,'isku'=>true,'jiray'=>true,'jirtay'=>true,'ka'=>true,'kale'=>true,'kasoo'=>true,'ku'=>true,'kuu'=>true,'lakin'=>true,'markii'=>true,'oo'=>true,'si'=>true,'soo'=>true,'uga'=>true,'ugu'=>true,'uu'=>true,'waa'=>true,'waxa'=>true,'waxuu'=>true];
