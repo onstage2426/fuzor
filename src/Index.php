@@ -183,6 +183,18 @@ class Index
         $this->engine->delete($id);
     }
 
+    /**
+     * Release the underlying database connection.
+     *
+     * Clears the prepared-statement cache and drops the PDO connection, allowing
+     * SQLite to run its WAL checkpoint immediately rather than waiting for GC.
+     * The instance must not be used after calling this method.
+     */
+    public function close(): void
+    {
+        $this->engine->close();
+    }
+
     // --- Search operations --------------------------------------------------
 
     /**

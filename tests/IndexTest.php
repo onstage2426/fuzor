@@ -41,6 +41,17 @@ class IndexTest extends TestCase
         $this->assertInstanceOf(Index::class, $index);
     }
 
+    public function testCloseReleasesConnection(): void
+    {
+        $index = Index::create($this->dbPath);
+        $index->insert(['id' => 1, 'title' => 'sedan']);
+        $index->close();
+
+        // Connection released — a second open on the same file must succeed.
+        $reopened = Index::open($this->dbPath);
+        $this->assertContains(1, $reopened->search('sedan')['ids']);
+    }
+
     public function testOpenNonexistentPathThrows(): void
     {
         $this->expectException(\RuntimeException::class);

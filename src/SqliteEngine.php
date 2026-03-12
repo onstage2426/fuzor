@@ -24,8 +24,8 @@ class SqliteEngine
     /** Absolute path to the storage directory (guaranteed trailing slash). */
     private string $storagePath;
 
-    /** Active PDO connection to the open SQLite index file. */
-    private PDO $index;
+    /** Active PDO connection to the open SQLite index file; null after close(). */
+    private ?PDO $index = null;
 
     /** @var array<string, \PDOStatement> Prepared statement cache; invalidated when the connection changes. */
     private array $stmtCache = [];
@@ -187,6 +187,18 @@ class SqliteEngine
             PRAGMA cache_size   = -16000;
             PRAGMA temp_store   = MEMORY;
         ');
+    }
+
+    /**
+     * Release the PDO connection and clear the statement cache.
+     *
+     * After calling this method the engine instance must not be used again.
+     * The WAL checkpoint will run as part of normal SQLite connection teardown.
+     */
+    public function close(): void
+    {
+        $this->stmtCache = [];
+        $this->index     = null;
     }
 
     // --- Public write operations --------------------------------------------
