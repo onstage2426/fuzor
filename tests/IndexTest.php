@@ -365,13 +365,14 @@ class IndexTest extends TestCase
         $this->assertNotContains(1, $result['ids']);
     }
 
-    public function testSearchBooleanDoesNotReturnDocScores(): void
+    public function testSearchBooleanDocScoresIsNull(): void
     {
         $index = Index::create($this->dbPath);
         $index->insert(['id' => 1, 'title' => 'sedan', 'body' => '']);
 
         $result = $index->searchBoolean('sedan');
-        $this->assertArrayNotHasKey('docScores', $result);
+        $this->assertArrayHasKey('docScores', $result);
+        $this->assertNull($result['docScores']);
         $this->assertArrayHasKey('ids', $result);
         $this->assertArrayHasKey('hits', $result);
     }

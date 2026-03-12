@@ -448,25 +448,29 @@ class SqliteEngine
             }
         }
 
-        $this->saveDoclist($documentId, $this->saveWordlist($fieldTokens));
+        $terms = $this->upsertWordlist($fieldTokens);
+        $this->saveDoclist($documentId, $terms);
         $this->saveDocLength($documentId, $length);
 
         return $length;
     }
 
     /**
-     * Upsert terms from tokenised document stems into the wordlist table.
+     * Upsert terms from tokenised document fields into the wordlist table.
      *
      * Uses a single batched INSERT … ON CONFLICT … RETURNING id, term to upsert
      * all terms for a document in one round-trip per chunk (chunks respect
      * SQLite's 999-variable limit at 2 params per term).
      *
+     * Returns the term map with resolved wordlist IDs so the caller can write
+     * doclist rows without a separate lookup.
+     *
      * @param  list<string[]> $fieldTokens Tokenised fields as a list of token arrays.
-     * @return array<string, array{hits: int, id: int|string}> Terms with resolved wordlist IDs.
+     * @return array<string, array{hits: int, id: ?int}> Terms with resolved wordlist IDs.
      */
-    private function saveWordlist(array $fieldTokens): array
+    private function upsertWordlist(array $fieldTokens): array
     {
-        /** @var array<string, array{hits: int, id: int|string}> $terms */
+        /** @var array<string, array{hits: int, id: ?int}> $terms */
         $terms = [];
 
         foreach ($fieldTokens as $tokens) {
@@ -474,7 +478,7 @@ class SqliteEngine
                 if (array_key_exists($term, $terms)) {
                     $terms[$term]['hits']++;
                 } else {
-                    $terms[$term] = ['hits' => 1, 'id' => 0];
+                    $terms[$term] = ['hits' => 1, 'id' => null];
                 }
             }
         }
@@ -500,7 +504,7 @@ class SqliteEngine
             );
             $stmt->execute($params);
             foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
-                $terms[$row['term']]['id'] = $row['id'];
+                $terms[$row['term']]['id'] = (int) $row['id'];
             }
         }
 
@@ -513,8 +517,8 @@ class SqliteEngine
      * Uses a single batched INSERT per chunk (3 params per term; chunks respect
      * SQLite's 999-variable limit).
      *
-     * @param int                                               $documentId Document ID.
-     * @param array<string, array{hits: int, id: int|string}> $terms Terms with resolved wordlist IDs.
+     * @param int                                          $documentId Document ID.
+     * @param array<string, array{hits: int, id: ?int}> $terms Terms with resolved wordlist IDs.
      */
     private function saveDoclist(int $documentId, array $terms): void
     {
@@ -706,12 +710,11 @@ class SqliteEngine
      * When $asYouType is true and $isLastWord is true, a trailing-wildcard LIKE
      * query is used instead of an exact match, returning up to $fuzzyMaxExpansions
      * candidates ordered by shortest term first, then by num_hits descending.
-     * When $fuzzy is true and no exact match is found (or $noLimit forces
-     * expansion), fuzzySearch() is called as a fallback.
+     * When $fuzzy is true and no match is found, fuzzySearch() is called as a fallback.
      *
      * @param  string                    $keyword    Term to look up.
      * @param  bool                      $isLastWord Whether this is the final token in the query.
-     * @param  bool                      $noLimit    Force fuzzy expansion even when an exact match exists.
+     * @param  bool                      $noLimit    When true, the $maxDocs cap is not applied to document fetches.
      * @param  bool                      $fuzzy      When true, fall through to Levenshtein fuzzy search on no match.
      * @return list<array<string, mixed>>            Matching wordlist rows.
      */
@@ -744,7 +747,7 @@ class SqliteEngine
         /** @var list<array<string, mixed>> $wordlistRows */
         $wordlistRows = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
-        if ($fuzzy && (!isset($wordlistRows[0]) || $noLimit)) {
+        if ($fuzzy && !isset($wordlistRows[0])) {
             return $this->fuzzySearch($keyword);
         }
 

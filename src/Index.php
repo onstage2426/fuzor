@@ -235,7 +235,7 @@ class Index
      *
      * @param  string $phrase       Boolean query string.
      * @param  int    $numOfResults Maximum number of document IDs to return.
-     * @return array{ids: list<int>, hits: int}
+     * @return array{ids: list<int>, hits: int, docScores: null}
      */
     public function searchBoolean(string $phrase, int $numOfResults = 100): array
     {
@@ -291,8 +291,9 @@ class Index
         $docs = array_slice($all, 0, $numOfResults);
 
         return [
-            'ids'      => $docs,
-            'hits'     => count($all),
+            'ids'       => $docs,
+            'hits'      => count($all),
+            'docScores' => null,
         ];
     }
 
