@@ -73,6 +73,58 @@ class IndexTest extends TestCase
 
     // --- insert / search ---
 
+    public function testInsertWithoutIdThrows(): void
+    {
+        $index = Index::create($this->dbPath);
+        $this->expectException(\InvalidArgumentException::class);
+        $index->insert(['title' => 'no id here']);
+    }
+
+    public function testInsertDuplicateIdThrows(): void
+    {
+        $index = Index::create($this->dbPath);
+        $index->insert(['id' => 1, 'title' => 'sedan']);
+
+        $this->expectException(\RuntimeException::class);
+        $index->insert(['id' => 1, 'title' => 'duplicate']);
+    }
+
+    public function testInsertManyWithMissingIdThrows(): void
+    {
+        $index = Index::create($this->dbPath);
+        $this->expectException(\InvalidArgumentException::class);
+        $index->insertMany([
+            ['id' => 1, 'title' => 'sedan'],
+            ['title' => 'no id'],
+        ]);
+    }
+
+    public function testInsertManyWithDuplicateInputIdsThrows(): void
+    {
+        $index = Index::create($this->dbPath);
+        $this->expectException(\InvalidArgumentException::class);
+        $index->insertMany([
+            ['id' => 1, 'title' => 'sedan'],
+            ['id' => 1, 'title' => 'duplicate in same batch'],
+        ]);
+    }
+
+    public function testInsertManyWithExistingIdThrows(): void
+    {
+        $index = Index::create($this->dbPath);
+        $index->insert(['id' => 1, 'title' => 'sedan']);
+
+        $this->expectException(\RuntimeException::class);
+        $index->insertMany([['id' => 1, 'title' => 'already exists']]);
+    }
+
+    public function testUpdateWithoutIdThrows(): void
+    {
+        $index = Index::create($this->dbPath);
+        $this->expectException(\InvalidArgumentException::class);
+        $index->update(['title' => 'no id here']);
+    }
+
     public function testInsertAndSearchReturnsMatchingId(): void
     {
         $index = Index::create($this->dbPath);

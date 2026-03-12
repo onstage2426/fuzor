@@ -198,10 +198,24 @@ class SqliteEngine
      * total_documents counter in the info table.
      *
      * @param array<string, mixed> $document Document fields; must contain an 'id' key.
+     * @throws \InvalidArgumentException If the document has no 'id' key.
+     * @throws \RuntimeException         If a document with the same ID already exists.
      */
     public function insert(array $document): void
     {
+        if (!array_key_exists('id', $document)) {
+            throw new \InvalidArgumentException("Document must contain an 'id' key.");
+        }
+
         $this->wrapInTransaction(function () use ($document): void {
+            $id    = (int) $document['id'];
+            $check = $this->stmt('docExistsCheck', 'SELECT 1 FROM doc_lengths WHERE doc_id = :id LIMIT 1');
+            $check->execute([':id' => $id]);
+            if ($check->fetchColumn() !== false) {
+                throw new \RuntimeException("Document {$id} already exists. Use update() to replace it.");
+            }
+            $check->closeCursor();
+
             $length   = $this->processDocument($document);
             $info     = $this->getInfoValues(['avg_doc_length']);
             $oldAvg   = (float) ($info['avg_doc_length'] ?? 0);
@@ -222,6 +236,9 @@ class SqliteEngine
      * instead of once per document.
      *
      * @param array<array<string, mixed>> $documents Documents to index; each must contain an 'id' key.
+     * @throws \InvalidArgumentException If any document is missing an 'id' key, or if the input
+     *                                   contains duplicate IDs.
+     * @throws \RuntimeException         If any document ID already exists in the index.
      */
     public function insertMany(array $documents): void
     {
@@ -229,7 +246,29 @@ class SqliteEngine
             return;
         }
 
-        $this->wrapInTransaction(function () use ($documents): void {
+        $ids = [];
+        foreach ($documents as $i => $document) {
+            if (!array_key_exists('id', $document)) {
+                throw new \InvalidArgumentException("Document at index {$i} must contain an 'id' key.");
+            }
+            $id = (int) $document['id'];
+            if (isset($ids[$id])) {
+                throw new \InvalidArgumentException("Duplicate id {$id} at index {$i}.");
+            }
+            $ids[$id] = true;
+        }
+
+        $this->wrapInTransaction(function () use ($documents, $ids): void {
+            $placeholders = implode(',', array_fill(0, count($ids), '?'));
+            $stmt = $this->index->prepare("SELECT doc_id FROM doc_lengths WHERE doc_id IN ({$placeholders})");
+            $stmt->execute(array_keys($ids));
+            $existing = $stmt->fetchAll(PDO::FETCH_COLUMN);
+            if ($existing !== []) {
+                throw new \RuntimeException(
+                    "Documents already exist with ids: " . implode(', ', $existing) . ". Use update() to replace them."
+                );
+            }
+
             $info     = $this->getInfoValues(['avg_doc_length', 'total_documents']);
             $oldAvg   = (float) ($info['avg_doc_length'] ?? 0);
             $oldCount = (int) ($info['total_documents'] ?? 0);
@@ -258,9 +297,13 @@ class SqliteEngine
      * incremented (upsert semantics matching the previous delete+insert behaviour).
      *
      * @param array<string, mixed> $document New document data; must contain an 'id' key.
+     * @throws \InvalidArgumentException If the document has no 'id' key.
      */
     public function update(array $document): void
     {
+        if (!array_key_exists('id', $document)) {
+            throw new \InvalidArgumentException("Document must contain an 'id' key.");
+        }
         $this->wrapInTransaction(function () use ($document): void {
             $oldLength = $this->removeDocumentData((int) $document['id']);
             $newLength = $this->processDocument($document);
