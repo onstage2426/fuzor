@@ -122,15 +122,17 @@ class Index
     }
 
     /**
-     * Create a new index file, replacing any existing file at the same path.
+     * Create a new index file.
      *
-     * @param  string $path Absolute or relative path for the new SQLite index file.
+     * @param  string $path  Absolute or relative path for the new SQLite index file.
+     * @param  bool   $force When true, any existing file at that path is overwritten.
+     * @throws \RuntimeException If a file already exists at $path and $force is false.
      */
-    public static function create(string $path): static
+    public static function create(string $path, bool $force = false): static
     {
         $resolved = self::resolvePath($path);
         $engine = new SqliteEngine(dirname($resolved));
-        $engine->createIndex(basename($resolved));
+        $engine->createIndex(basename($resolved), $force);
         return new static($engine, $resolved);
     }
 

@@ -82,15 +82,22 @@ class SqliteEngine
     /**
      * Create a new SQLite index file and initialise the schema.
      *
-     * Any existing file with the same name is deleted first. Performance pragmas
-     * are applied via applyPragmas(), and indexes are created on both
-     * wordlist(term) and doclist(term_id, doc_id).
+     * Performance pragmas are applied via applyPragmas(), and indexes are created
+     * on both wordlist(term) and doclist(term_id, doc_id).
      *
      * @param  string $indexName Filename for the SQLite database (e.g. 'articles.db').
+     * @param  bool   $force     When true, any existing file is deleted before creation.
      * @return static
+     * @throws \RuntimeException If the index file already exists and $force is false.
      */
-    public function createIndex(string $indexName): static
+    public function createIndex(string $indexName, bool $force = false): static
     {
+        $path = $this->storagePath . $indexName;
+        if (!$force && file_exists($path)) {
+            throw new \RuntimeException(
+                "Index already exists: {$path}. Pass force: true to overwrite."
+            );
+        }
         $this->flushIndex($indexName);
 
         $this->index = new PDO('sqlite:' . $this->storagePath . $indexName);

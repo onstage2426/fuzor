@@ -53,12 +53,22 @@ class IndexTest extends TestCase
         Index::create('/nonexistent/dir/index.db');
     }
 
-    public function testDuplicateOpenThrows(): void
+    public function testCreateOnExistingFileThrows(): void
     {
-        $index = Index::create($this->dbPath);
+        Index::create($this->dbPath);
 
         $this->expectException(\RuntimeException::class);
-        Index::open($this->dbPath);
+        Index::create($this->dbPath);
+    }
+
+    public function testCreateWithForceOverwritesExistingFile(): void
+    {
+        $index = Index::create($this->dbPath);
+        $index->insert(['id' => 1, 'title' => 'sedan']);
+        unset($index);
+
+        $fresh = Index::create($this->dbPath, force: true);
+        $this->assertSame([], $fresh->search('sedan')['ids']);
     }
 
     // --- insert / search ---
