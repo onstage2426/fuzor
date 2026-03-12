@@ -606,6 +606,22 @@ class SqliteEngine
     }
 
     /**
+     * Filter stopwords from query tokens, falling back to the original list when
+     * all tokens would be removed (so an all-stopword query still returns results).
+     *
+     * @param  string[] $tokens Tokenised query terms.
+     * @return string[]         Filtered tokens, or the original list if filtering empties it.
+     */
+    public function filterQueryTokens(array $tokens): array
+    {
+        if ($this->stopwords === null) {
+            return $tokens;
+        }
+        $filtered = $this->stopwords->filter($tokens);
+        return $filtered !== [] ? $filtered : $tokens;
+    }
+
+    /**
      * Retrieve multiple values from the info metadata table in a single query.
      *
      * @param  string[]              $keys  Metadata keys to fetch.

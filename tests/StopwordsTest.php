@@ -123,4 +123,17 @@ class StopwordsTest extends TestCase
 
         $this->assertContains(1, $index->search('the')['ids']);
     }
+
+    public function testAllStopwordQueryFallsBackToOriginal(): void
+    {
+        $index           = Index::create($this->dbPath);
+        $index->language = 'en';
+        // index without stopword filtering to ensure 'the' is in the index
+        $index->language = null;
+        $index->insert(['id' => 1, 'body' => 'the']);
+        $index->language = 'en';
+
+        // 'the' is a stopword — but it's the only term, so the search falls back to it
+        $this->assertContains(1, $index->search('the')['ids']);
+    }
 }

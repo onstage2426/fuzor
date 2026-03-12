@@ -295,7 +295,7 @@ class Index
     private function scorePhrase(string $phrase, int $numOfResults, bool $fuzzy): array
     {
         /** @var string[] $keywords */
-        $keywords = Tokenizer::tokenize($phrase);
+        $keywords = $this->engine->filterQueryTokens(Tokenizer::tokenize($phrase));
 
         /** @var array<int, float> $docScores */
         $docScores = [];
