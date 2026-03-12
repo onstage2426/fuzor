@@ -228,15 +228,8 @@ class SqliteEngine
             }
             $check->closeCursor();
 
-            $length   = $this->processDocument($document);
-            $info     = $this->getInfoValues(['avg_doc_length']);
-            $oldAvg   = (float) ($info['avg_doc_length'] ?? 0);
-            $newCount = $this->adjustTotalDocuments(1);
-            $oldCount = $newCount - 1;
-            $this->stmt(
-                'updateAvgDocLength',
-                "UPDATE info SET value = :value WHERE key = 'avg_doc_length'"
-            )->execute([':value' => ($oldAvg * $oldCount + $length) / $newCount]);
+            $length = $this->processDocument($document);
+            $this->adjustStatsInsert(1, $length);
         });
     }
 
@@ -271,9 +264,14 @@ class SqliteEngine
         }
 
         $this->wrapInTransaction(function () use ($documents, $ids): void {
-            $placeholders = implode(',', array_fill(0, count($ids), '?'));
-            $stmt = $this->index->prepare("SELECT doc_id FROM doc_lengths WHERE doc_id IN ({$placeholders})");
+            $n            = count($ids);
+            $placeholders = implode(',', array_fill(0, $n, '?'));
+            $stmt         = $this->stmt(
+                "insertManyExistsCheck_{$n}",
+                "SELECT doc_id FROM doc_lengths WHERE doc_id IN ({$placeholders})"
+            );
             $stmt->execute(array_keys($ids));
+
             $existing = $stmt->fetchAll(PDO::FETCH_COLUMN);
             if ($existing !== []) {
                 throw new \RuntimeException(
@@ -281,22 +279,12 @@ class SqliteEngine
                 );
             }
 
-            $info     = $this->getInfoValues(['avg_doc_length', 'total_documents']);
-            $oldAvg   = (float) ($info['avg_doc_length'] ?? 0);
-            $oldCount = (int) ($info['total_documents'] ?? 0);
-
             $totalLength = 0;
             foreach ($documents as $document) {
                 $totalLength += $this->processDocument($document);
             }
 
-            $newCount = $oldCount + count($documents);
-            $newAvg   = ($oldAvg * $oldCount + $totalLength) / $newCount;
-
-            $this->stmt('setTotalDocuments', "UPDATE info SET value = :value WHERE key = 'total_documents'")
-                ->execute([':value' => $newCount]);
-            $this->stmt('updateAvgDocLength', "UPDATE info SET value = :value WHERE key = 'avg_doc_length'")
-                ->execute([':value' => $newAvg]);
+            $this->adjustStatsInsert(count($documents), $totalLength);
         });
     }
 
@@ -322,23 +310,11 @@ class SqliteEngine
 
             if ($oldLength === false) {
                 // Document did not exist — treat as insert: increment total_documents.
-                $info     = $this->getInfoValues(['avg_doc_length']);
-                $oldAvg   = (float) ($info['avg_doc_length'] ?? 0);
-                $newCount = $this->adjustTotalDocuments(1);
-                $oldCount = $newCount - 1;
-                $newAvg   = ($oldAvg * $oldCount + $newLength) / $newCount;
+                $this->adjustStatsInsert(1, $newLength);
             } else {
                 // Replace: total_documents unchanged; adjust avg for the length delta.
-                $info     = $this->getInfoValues(['avg_doc_length', 'total_documents']);
-                $count    = (int) ($info['total_documents'] ?? 0);
-                $oldAvg   = (float) ($info['avg_doc_length'] ?? 0);
-                $newAvg   = $count > 0 ? ($oldAvg * $count - (int) $oldLength + $newLength) / $count : 0;
+                $this->adjustStatsReplace((int) $oldLength, $newLength);
             }
-
-            $this->stmt(
-                'updateAvgDocLength',
-                "UPDATE info SET value = :value WHERE key = 'avg_doc_length'"
-            )->execute([':value' => $newAvg]);
         });
     }
 
@@ -358,16 +334,7 @@ class SqliteEngine
             $length = $this->removeDocumentData($documentId);
 
             if ($length !== false) {
-                $length   = (int) $length;
-                $info     = $this->getInfoValues(['avg_doc_length']);
-                $oldAvg   = (float) ($info['avg_doc_length'] ?? 0);
-                $newCount = $this->adjustTotalDocuments(-1);
-                $oldCount = $newCount + 1;
-                $newAvg   = $newCount > 0 ? ($oldAvg * $oldCount - $length) / $newCount : 0;
-                $this->stmt(
-                    'updateAvgDocLength',
-                    "UPDATE info SET value = :value WHERE key = 'avg_doc_length'"
-                )->execute([':value' => $newAvg]);
+                $this->adjustStatsDelete((int) $length);
             }
         });
     }
@@ -384,8 +351,8 @@ class SqliteEngine
      */
     private function removeDocumentData(int $documentId): int|false
     {
-        // Decrement wordlist stats and collect IDs of newly-orphaned terms (num_hits → 0).
-        $updateStmt = $this->stmt(
+        // 1. Decrement wordlist stats for every term this document contributed.
+        $this->stmt(
             'wordlistDecrementByDoc',
             'WITH doc_terms AS (
                  SELECT term_id, hit_count FROM doclist WHERE doc_id = :documentId
@@ -393,24 +360,21 @@ class SqliteEngine
              UPDATE wordlist SET
                  num_docs = num_docs - 1,
                  num_hits = num_hits - (SELECT hit_count FROM doc_terms WHERE term_id = wordlist.id)
-             WHERE id IN (SELECT term_id FROM doc_terms)
-             RETURNING id, num_hits'
-        );
-        $updateStmt->execute([':documentId' => $documentId]);
-        $orphanIds = array_column(
-            array_filter($updateStmt->fetchAll(PDO::FETCH_ASSOC), fn($row) => (int) $row['num_hits'] === 0),
-            'id'
-        );
+             WHERE id IN (SELECT term_id FROM doc_terms)'
+        )->execute([':documentId' => $documentId]);
 
+        // 2. Remove any term whose hit count reached zero (doclist rows still present for the lookup).
+        $this->stmt(
+            'wordlistDeleteOrphans',
+            'DELETE FROM wordlist WHERE num_hits <= 0
+               AND id IN (SELECT term_id FROM doclist WHERE doc_id = :documentId)'
+        )->execute([':documentId' => $documentId]);
+
+        // 3. Remove doclist rows for this document.
         $this->stmt('doclistDeleteByDoc', 'DELETE FROM doclist WHERE doc_id = :documentId')
             ->execute([':documentId' => $documentId]);
 
-        // Targeted delete: only remove terms that became orphans, avoiding a full table scan.
-        if ($orphanIds) {
-            $placeholders = implode(',', array_fill(0, count($orphanIds), '?'));
-            $this->index->prepare("DELETE FROM wordlist WHERE id IN ($placeholders)")->execute($orphanIds);
-        }
-
+        // 4. Remove doc_lengths and return the old token count (false if the document was not found).
         $delStmt = $this->stmt(
             'docLengthsDelete',
             'DELETE FROM doc_lengths WHERE doc_id = :documentId RETURNING length'
@@ -488,6 +452,7 @@ class SqliteEngine
         }
 
         foreach (array_chunk(array_keys($terms), 499) as $chunk) {
+            $n            = count($chunk);
             $placeholders = [];
             $params       = [];
             foreach ($chunk as $i => $key) {
@@ -495,7 +460,8 @@ class SqliteEngine
                 $params[":k{$i}"] = $key;
                 $params[":h{$i}"] = $terms[$key]['hits'];
             }
-            $stmt = $this->index->prepare(
+            $stmt = $this->stmt(
+                "upsertWordlist_{$n}",
                 'INSERT INTO wordlist (term, num_hits, num_docs) VALUES ' . implode(',', $placeholders) . '
                  ON CONFLICT(term) DO UPDATE SET
                      num_hits = num_hits + excluded.num_hits,
@@ -527,14 +493,16 @@ class SqliteEngine
         }
 
         foreach (array_chunk(array_values($terms), 333) as $chunk) {
-            $placeholders = implode(',', array_fill(0, count($chunk), '(?,?,?)'));
-            $params = [];
+            $n            = count($chunk);
+            $placeholders = implode(',', array_fill(0, $n, '(?,?,?)'));
+            $params       = [];
             foreach ($chunk as $term) {
                 $params[] = $term['id'];
                 $params[] = $documentId;
                 $params[] = $term['hits'];
             }
-            $this->index->prepare(
+            $this->stmt(
+                "saveDoclist_{$n}",
                 "INSERT INTO doclist (term_id, doc_id, hit_count) VALUES {$placeholders}"
             )->execute($params);
         }
@@ -556,26 +524,83 @@ class SqliteEngine
     }
 
     /**
-     * Atomically increment or decrement total_documents and return the new value.
+     * Update total_documents and avg_doc_length after inserting one or more documents.
      *
-     * Uses UPDATE … RETURNING (requires SQLite 3.35+) to avoid a separate SELECT.
+     * A single CTE-based UPDATE reads and writes both info rows in one round-trip,
+     * replacing the former three-query sequence (SELECT avg, UPDATE total, UPDATE avg).
      *
-     * @param  int $delta +1 for insert, -1 for delete.
-     * @return int        New total_documents value after adjustment.
+     * @param int $docDelta    Number of documents added (≥ 1).
+     * @param int $totalLength Sum of token counts for all added documents.
      */
-    private function adjustTotalDocuments(int $delta): int
+    private function adjustStatsInsert(int $docDelta, int $totalLength): void
     {
         $stmt = $this->stmt(
-            'adjustTotalDocuments',
-            "UPDATE info SET value = CAST(value AS INTEGER) + :delta
-             WHERE key = 'total_documents'
-             RETURNING CAST(value AS INTEGER) AS value"
+            'statsInsert',
+            "WITH c AS (
+                 SELECT CAST(MAX(CASE WHEN key = 'total_documents' THEN value END) AS INTEGER) AS n,
+                        CAST(MAX(CASE WHEN key = 'avg_doc_length'  THEN value END) AS REAL)    AS avg
+                 FROM info WHERE key IN ('total_documents', 'avg_doc_length')
+             )
+             UPDATE info SET value = CASE key
+                 WHEN 'total_documents' THEN CAST((SELECT n + :delta FROM c) AS TEXT)
+                 WHEN 'avg_doc_length'  THEN CAST((SELECT (avg * n + :totalLen) / (n + :delta) FROM c) AS TEXT)
+             END
+             WHERE key IN ('total_documents', 'avg_doc_length')"
         );
-        $stmt->bindValue(':delta', $delta, PDO::PARAM_INT);
+        $stmt->bindValue(':delta',    $docDelta,    PDO::PARAM_INT);
+        $stmt->bindValue(':totalLen', $totalLength, PDO::PARAM_INT);
         $stmt->execute();
-        $value = (int) $stmt->fetchColumn();
-        $stmt->closeCursor();
-        return $value;
+    }
+
+    /**
+     * Update total_documents and avg_doc_length after deleting a document.
+     *
+     * @param int $length Token count of the removed document.
+     */
+    private function adjustStatsDelete(int $length): void
+    {
+        $stmt = $this->stmt(
+            'statsDelete',
+            "WITH c AS (
+                 SELECT CAST(MAX(CASE WHEN key = 'total_documents' THEN value END) AS INTEGER) AS n,
+                        CAST(MAX(CASE WHEN key = 'avg_doc_length'  THEN value END) AS REAL)    AS avg
+                 FROM info WHERE key IN ('total_documents', 'avg_doc_length')
+             )
+             UPDATE info SET value = CASE key
+                 WHEN 'total_documents' THEN CAST((SELECT n - 1 FROM c) AS TEXT)
+                 WHEN 'avg_doc_length'  THEN CAST(
+                     (SELECT CASE WHEN n > 1 THEN (avg * n - :length) / (n - 1) ELSE 0 END FROM c)
+                 AS TEXT)
+             END
+             WHERE key IN ('total_documents', 'avg_doc_length')"
+        );
+        $stmt->bindValue(':length', $length, PDO::PARAM_INT);
+        $stmt->execute();
+    }
+
+    /**
+     * Update avg_doc_length after replacing a document (total_documents is unchanged).
+     *
+     * @param int $oldLength Token count of the document before replacement.
+     * @param int $newLength Token count of the document after replacement.
+     */
+    private function adjustStatsReplace(int $oldLength, int $newLength): void
+    {
+        $stmt = $this->stmt(
+            'statsReplace',
+            "WITH c AS (
+                 SELECT CAST(MAX(CASE WHEN key = 'total_documents' THEN value END) AS INTEGER) AS n,
+                        CAST(MAX(CASE WHEN key = 'avg_doc_length'  THEN value END) AS REAL)    AS avg
+                 FROM info WHERE key IN ('total_documents', 'avg_doc_length')
+             )
+             UPDATE info SET value = CAST(
+                 (SELECT CASE WHEN n > 0 THEN (avg * n - :oldLen + :newLen) / n ELSE 0 END FROM c)
+             AS TEXT)
+             WHERE key = 'avg_doc_length'"
+        );
+        $stmt->bindValue(':oldLen', $oldLength, PDO::PARAM_INT);
+        $stmt->bindValue(':newLen', $newLength, PDO::PARAM_INT);
+        $stmt->execute();
     }
 
     // --- Public read operations ---------------------------------------------
@@ -788,14 +813,16 @@ class SqliteEngine
             }
             $stmt->execute();
         } else {
-            // Dynamic IN clause: variable placeholder count prevents statement caching.
-            $placeholders = implode(',', array_fill(0, count($words), '?'));
-            $query = "SELECT d.term_id, d.doc_id, d.hit_count, dl.length AS doc_length
-                       FROM doclist d JOIN doc_lengths dl ON dl.doc_id = d.doc_id
-                       WHERE d.term_id IN ($placeholders) ORDER BY d.hit_count DESC"
-                     . ($noLimit ? '' : " LIMIT {$this->maxDocs}");
-            $stmt = $this->index->prepare($query);
-            $stmt->execute(array_column($words, 'id'));
+            $n            = count($words);
+            $placeholders = implode(',', array_fill(0, $n, '?'));
+            $limit        = $noLimit ? 'Unlimited' : 'Limited';
+            $query        = "SELECT d.term_id, d.doc_id, d.hit_count, dl.length AS doc_length
+                              FROM doclist d JOIN doc_lengths dl ON dl.doc_id = d.doc_id
+                              WHERE d.term_id IN ($placeholders) ORDER BY d.hit_count DESC"
+                          . ($noLimit ? '' : ' LIMIT ?');
+            $stmt  = $this->stmt("strictDocsMulti{$limit}_{$n}", $query);
+            $ids   = array_column($words, 'id');
+            $stmt->execute($noLimit ? $ids : [...$ids, $this->maxDocs]);
         }
 
         return $stmt->fetchAll(PDO::FETCH_ASSOC);
@@ -813,23 +840,24 @@ class SqliteEngine
      */
     private function getAllDocumentsForFuzzyKeyword(array $words, bool $noLimit): array
     {
-        $placeholders = implode(',', array_fill(0, count($words), '?'));
+        $n            = count($words);
+        $placeholders = implode(',', array_fill(0, $n, '?'));
+        $limit        = $noLimit ? 'Unlimited' : 'Limited';
+        $query        = "SELECT d.term_id, d.doc_id, d.hit_count, dl.length AS doc_length
+                          FROM doclist d JOIN doc_lengths dl ON dl.doc_id = d.doc_id
+                          WHERE d.term_id IN ($placeholders)"
+                      . ($noLimit ? '' : ' LIMIT ?');
 
-        $whenClauses  = '';
-        foreach ($words as $i => $word) {
-            $whenClauses .= " WHEN {$word['id']} THEN " . ($i + 1);
-        }
+        $ids  = array_column($words, 'id');
+        $stmt = $this->stmt("fuzzyDocs{$limit}_{$n}", $query);
+        $stmt->execute($noLimit ? $ids : [...$ids, $this->maxDocs]);
+        $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
-        $query = "SELECT d.term_id, d.doc_id, d.hit_count, dl.length AS doc_length
-                  FROM doclist d JOIN doc_lengths dl ON dl.doc_id = d.doc_id
-                  WHERE d.term_id IN ($placeholders) ORDER BY CASE d.term_id{$whenClauses} END"
-               . ($noLimit ? '' : ' LIMIT ?');
+        // Sort by the relevance rank established by fuzzySearch() (closest match first).
+        $rank = array_flip($ids);
+        usort($rows, fn($a, $b) => $rank[$a['term_id']] <=> $rank[$b['term_id']]);
 
-        $ids    = array_column($words, 'id');
-        $params = $noLimit ? $ids : [...$ids, $this->maxDocs];
-        $stmt   = $this->index->prepare($query);
-        $stmt->execute($params);
-        return $stmt->fetchAll(PDO::FETCH_ASSOC);
+        return $rows;
     }
 
     /**
