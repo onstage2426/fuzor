@@ -397,7 +397,7 @@ class SqliteEngine
      */
     private function processDocument(array $row): int
     {
-        $documentId = $row['id'];
+        $documentId = (int) $row['id'];
 
         $fieldTokens  = [];
         $length = 0;

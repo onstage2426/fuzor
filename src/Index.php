@@ -286,9 +286,9 @@ class Index
                 $stack[] = array_keys(array_flip($left) + array_flip($right));
             } elseif ($token === '~') {
                 // ~ is always preceded by a string operand; the lexer places a term token before every ~
-                $term    = array_pop($stack);
-                $stack[] = array_column(
-                    $this->engine->getAllDocumentsForWhereKeywordNot((string) $term, true),
+                $term    = (string) array_pop($stack);
+                $stack[] = $cache["~{$term}"] ??= array_column(
+                    $this->engine->getAllDocumentsForWhereKeywordNot($term, true),
                     'doc_id'
                 );
             } else {
@@ -429,7 +429,7 @@ class Index
     private function lexExpression(string $expression): array
     {
         $expression = $expression
-            |> mb_strtolower(...)
+            |> (fn(string $s): string => mb_strtolower($s, 'UTF-8'))
             |> (fn(string $s): string => str_replace([' or ', ' -', ' '], ['|', '&~', '&'], $s));
 
         return preg_split('/([|~&()])/', $expression, -1, PREG_SPLIT_DELIM_CAPTURE | PREG_SPLIT_NO_EMPTY);
