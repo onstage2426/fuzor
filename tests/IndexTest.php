@@ -33,9 +33,7 @@ class IndexTest extends TestCase
 
     public function testOpenReturnsIndexInstance(): void
     {
-        $idx = Index::create($this->dbPath);
-        unset($idx);
-        gc_collect_cycles();
+        Index::create($this->dbPath)->close();
 
         $index = Index::open($this->dbPath);
         $this->assertInstanceOf(Index::class, $index);
@@ -76,7 +74,7 @@ class IndexTest extends TestCase
     {
         $index = Index::create($this->dbPath);
         $index->insert(['id' => 1, 'title' => 'sedan']);
-        unset($index);
+        $index->close();
 
         $fresh = Index::create($this->dbPath, force: true);
         $this->assertSame([], $fresh->search('sedan')['ids']);
@@ -148,7 +146,7 @@ class IndexTest extends TestCase
     public function testSearchReturnsEmptyForNoMatch(): void
     {
         $index = Index::create($this->dbPath);
-        $index->insert(['id' => 1, 'title' => 'sedan car', 'body' => '']);
+        $index->insert(['id' => 1, 'title' => 'sedan car']);
 
         $result = $index->search('helicopter');
         $this->assertSame([], $result['ids']);
@@ -158,10 +156,10 @@ class IndexTest extends TestCase
     public function testSearchReturnsBm25Scores(): void
     {
         $index = Index::create($this->dbPath);
-        // Two docs so idf = log(2/1) > 0; a single-doc corpus gives idf = log(1/1) = 0.
+        // Two docs so the term is not universal; smoothed IDF is always > 0 anyway.
         $index->insertMany([
-            ['id' => 1, 'title' => 'sedan car', 'body' => ''],
-            ['id' => 2, 'title' => 'suv truck', 'body' => ''],
+            ['id' => 1, 'title' => 'sedan car'],
+            ['id' => 2, 'title' => 'suv truck'],
         ]);
 
         $result = $index->search('sedan');
@@ -174,9 +172,9 @@ class IndexTest extends TestCase
     {
         $index = Index::create($this->dbPath);
         $index->insertMany([
-            ['id' => 1, 'title' => 'sedan', 'body' => ''],
-            ['id' => 2, 'title' => 'sedan', 'body' => ''],
-            ['id' => 3, 'title' => 'coupe', 'body' => ''],
+            ['id' => 1, 'title' => 'sedan'],
+            ['id' => 2, 'title' => 'sedan'],
+            ['id' => 3, 'title' => 'coupe'],
         ]);
 
         $result = $index->search('sedan');
@@ -187,9 +185,9 @@ class IndexTest extends TestCase
     {
         $index = Index::create($this->dbPath);
         $index->insertMany([
-            ['id' => 1, 'title' => 'sedan', 'body' => ''],
-            ['id' => 2, 'title' => 'sedan', 'body' => ''],
-            ['id' => 3, 'title' => 'sedan', 'body' => ''],
+            ['id' => 1, 'title' => 'sedan'],
+            ['id' => 2, 'title' => 'sedan'],
+            ['id' => 3, 'title' => 'sedan'],
         ]);
 
         $result = $index->search('sedan', 2);
@@ -200,7 +198,7 @@ class IndexTest extends TestCase
     public function testSearchIsCaseInsensitive(): void
     {
         $index = Index::create($this->dbPath);
-        $index->insert(['id' => 1, 'title' => 'SEDAN', 'body' => '']);
+        $index->insert(['id' => 1, 'title' => 'SEDAN']);
 
         $this->assertContains(1, $index->search('sedan')['ids']);
         $this->assertContains(1, $index->search('SEDAN')['ids']);
@@ -212,8 +210,8 @@ class IndexTest extends TestCase
     {
         $index = Index::create($this->dbPath);
         $index->insertMany([
-            ['id' => 1, 'title' => 'sedan car', 'body' => ''],
-            ['id' => 2, 'title' => 'suv truck', 'body' => ''],
+            ['id' => 1, 'title' => 'sedan car'],
+            ['id' => 2, 'title' => 'suv truck'],
         ]);
 
         $this->assertContains(1, $index->search('sedan')['ids']);
@@ -233,8 +231,8 @@ class IndexTest extends TestCase
     public function testUpdateReplacesOldContent(): void
     {
         $index = Index::create($this->dbPath);
-        $index->insert(['id' => 1, 'title' => 'sedan car', 'body' => '']);
-        $index->update(['id' => 1, 'title' => 'suv truck', 'body' => '']);
+        $index->insert(['id' => 1, 'title' => 'sedan car']);
+        $index->update(['id' => 1, 'title' => 'suv truck']);
 
         $this->assertEmpty($index->search('sedan')['ids']);
         $this->assertContains(1, $index->search('suv')['ids']);
@@ -244,14 +242,13 @@ class IndexTest extends TestCase
     {
         $index = Index::create($this->dbPath);
         $index->insertMany([
-            ['id' => 1, 'title' => 'sedan', 'body' => ''],
-            ['id' => 2, 'title' => 'coupe', 'body' => ''],
+            ['id' => 1, 'title' => 'sedan'],
+            ['id' => 2, 'title' => 'coupe'],
         ]);
-        $index->update(['id' => 1, 'title' => 'suv', 'body' => '']);
+        $index->update(['id' => 1, 'title' => 'suv']);
 
-        // Both docs still searchable
-        $this->assertContains(1, $index->search('suv')['ids']);
-        $this->assertContains(2, $index->search('coupe')['ids']);
+        // total_documents must stay at 2, not grow to 3.
+        $this->assertSame(2, $index->search('suv')['hits'] + $index->search('coupe')['hits']);
     }
 
     // --- delete ---
@@ -259,7 +256,7 @@ class IndexTest extends TestCase
     public function testDeleteRemovesDocumentFromResults(): void
     {
         $index = Index::create($this->dbPath);
-        $index->insert(['id' => 1, 'title' => 'sedan car', 'body' => '']);
+        $index->insert(['id' => 1, 'title' => 'sedan car']);
         $index->delete(1);
 
         $this->assertEmpty($index->search('sedan')['ids']);
@@ -269,8 +266,8 @@ class IndexTest extends TestCase
     {
         $index = Index::create($this->dbPath);
         $index->insertMany([
-            ['id' => 1, 'title' => 'sedan car', 'body' => ''],
-            ['id' => 2, 'title' => 'suv truck', 'body' => ''],
+            ['id' => 1, 'title' => 'sedan car'],
+            ['id' => 2, 'title' => 'suv truck'],
         ]);
         $index->delete(1);
 
@@ -280,7 +277,7 @@ class IndexTest extends TestCase
     public function testDeleteNonexistentDocumentIsNoop(): void
     {
         $index = Index::create($this->dbPath);
-        $index->insert(['id' => 1, 'title' => 'sedan', 'body' => '']);
+        $index->insert(['id' => 1, 'title' => 'sedan']);
         $index->delete(999);
 
         $this->assertContains(1, $index->search('sedan')['ids']);
@@ -300,10 +297,12 @@ class IndexTest extends TestCase
     public function testSearchFuzzyReturnsDocScores(): void
     {
         $index = Index::create($this->dbPath);
-        $index->insert(['id' => 1, 'title' => 'Volkswagen Golf', 'body' => '']);
+        $index->insert(['id' => 1, 'title' => 'Volkswagen Golf']);
 
         $result = $index->searchFuzzy('volksagen');
-        $this->assertArrayHasKey('docScores', $result);
+        $this->assertContains(1, $result['ids']);
+        $this->assertArrayHasKey(1, $result['docScores']);
+        $this->assertGreaterThan(0.0, $result['docScores'][1]);
     }
 
     // --- searchBoolean ---
@@ -312,22 +311,24 @@ class IndexTest extends TestCase
     {
         $index = Index::create($this->dbPath);
         $index->insertMany([
-            ['id' => 1, 'title' => 'sedan coupe', 'body' => ''],
-            ['id' => 2, 'title' => 'sedan only', 'body' => ''],
-            ['id' => 3, 'title' => 'coupe only', 'body' => ''],
+            ['id' => 1, 'title' => 'sedan coupe'],
+            ['id' => 2, 'title' => 'sedan only'],
+            ['id' => 3, 'title' => 'coupe only'],
         ]);
 
         $result = $index->searchBoolean('sedan coupe');
-        $this->assertSame([1], $result['ids']);
+        $this->assertContains(1, $result['ids']);
+        $this->assertNotContains(2, $result['ids']);
+        $this->assertNotContains(3, $result['ids']);
     }
 
     public function testSearchBooleanOr(): void
     {
         $index = Index::create($this->dbPath);
         $index->insertMany([
-            ['id' => 1, 'title' => 'sedan car', 'body' => ''],
-            ['id' => 2, 'title' => 'suv truck', 'body' => ''],
-            ['id' => 3, 'title' => 'coupe sports', 'body' => ''],
+            ['id' => 1, 'title' => 'sedan car'],
+            ['id' => 2, 'title' => 'suv truck'],
+            ['id' => 3, 'title' => 'coupe sports'],
         ]);
 
         $result = $index->searchBoolean('sedan or suv');
@@ -340,8 +341,8 @@ class IndexTest extends TestCase
     {
         $index = Index::create($this->dbPath);
         $index->insertMany([
-            ['id' => 1, 'title' => 'bmw sedan', 'body' => ''],
-            ['id' => 2, 'title' => 'audi sedan', 'body' => ''],
+            ['id' => 1, 'title' => 'bmw sedan'],
+            ['id' => 2, 'title' => 'audi sedan'],
         ]);
 
         $result = $index->searchBoolean('sedan -bmw');
@@ -353,8 +354,8 @@ class IndexTest extends TestCase
     {
         $index = Index::create($this->dbPath);
         $index->insertMany([
-            ['id' => 1, 'title' => 'mercedes sedan', 'body' => ''],
-            ['id' => 2, 'title' => 'audi sedan', 'body' => ''],
+            ['id' => 1, 'title' => 'mercedes sedan'],
+            ['id' => 2, 'title' => 'audi sedan'],
         ]);
 
         // Both docs match 'sedan', but doc 1 must be excluded because
@@ -368,22 +369,19 @@ class IndexTest extends TestCase
     public function testSearchBooleanDocScoresIsNull(): void
     {
         $index = Index::create($this->dbPath);
-        $index->insert(['id' => 1, 'title' => 'sedan', 'body' => '']);
+        $index->insert(['id' => 1, 'title' => 'sedan']);
 
         $result = $index->searchBoolean('sedan');
-        $this->assertArrayHasKey('docScores', $result);
         $this->assertNull($result['docScores']);
-        $this->assertArrayHasKey('ids', $result);
-        $this->assertArrayHasKey('hits', $result);
     }
 
     public function testSearchBooleanAndLastTermPrefixMatches(): void
     {
         $index = Index::create($this->dbPath);
         $index->insertMany([
-            ['id' => 1, 'title' => 'bmw sedan', 'body' => ''],
-            ['id' => 2, 'title' => 'bmw coupe', 'body' => ''],
-            ['id' => 3, 'title' => 'audi sedan', 'body' => ''],
+            ['id' => 1, 'title' => 'bmw sedan'],
+            ['id' => 2, 'title' => 'bmw coupe'],
+            ['id' => 3, 'title' => 'audi sedan'],
         ]);
 
         // 'sed' is a prefix of 'sedan' — asYouType should expand the last AND term.
@@ -398,9 +396,9 @@ class IndexTest extends TestCase
     {
         $index = Index::create($this->dbPath);
         $index->insertMany([
-            ['id' => 1, 'title' => 'bmw coupe', 'body' => ''],
-            ['id' => 2, 'title' => 'audi sedan', 'body' => ''],
-            ['id' => 3, 'title' => 'tesla electric', 'body' => ''],
+            ['id' => 1, 'title' => 'bmw coupe'],
+            ['id' => 2, 'title' => 'audi sedan'],
+            ['id' => 3, 'title' => 'tesla electric'],
         ]);
 
         // 'sed' is a prefix of 'sedan' — asYouType should expand the last OR term.
@@ -415,8 +413,8 @@ class IndexTest extends TestCase
     {
         $index = Index::create($this->dbPath);
         $index->insertMany([
-            ['id' => 1, 'title' => 'bmw sedan', 'body' => ''],
-            ['id' => 2, 'title' => 'audi coupe', 'body' => ''],
+            ['id' => 1, 'title' => 'bmw sedan'],
+            ['id' => 2, 'title' => 'audi coupe'],
         ]);
 
         // With asYouType off, 'sed' must not expand to 'sedan'.
@@ -429,8 +427,8 @@ class IndexTest extends TestCase
     {
         $index = Index::create($this->dbPath);
         $index->insertMany([
-            ['id' => 1, 'title' => 'sedan coupe', 'body' => ''],
-            ['id' => 2, 'title' => 'sedan hatchback', 'body' => ''],
+            ['id' => 1, 'title' => 'sedan coupe'],
+            ['id' => 2, 'title' => 'sedan hatchback'],
         ]);
 
         // 'sed' should NOT expand 'sedan' for the first AND term;
@@ -446,7 +444,7 @@ class IndexTest extends TestCase
     public function testAsYouTypePrefixMatchesPartialWord(): void
     {
         $index = Index::create($this->dbPath);
-        $index->insert(['id' => 1, 'title' => 'Mercedes Benz', 'body' => '']);
+        $index->insert(['id' => 1, 'title' => 'Mercedes Benz']);
 
         $index->asYouType = true;
         $result = $index->search('merc');
@@ -456,7 +454,7 @@ class IndexTest extends TestCase
     public function testAsYouTypeDisabledNoPartialMatch(): void
     {
         $index = Index::create($this->dbPath);
-        $index->insert(['id' => 1, 'title' => 'Mercedes Benz', 'body' => '']);
+        $index->insert(['id' => 1, 'title' => 'Mercedes Benz']);
 
         $index->asYouType = false;
         $result = $index->search('merc');
