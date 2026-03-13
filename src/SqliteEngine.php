@@ -407,66 +407,58 @@ class SqliteEngine
     {
         $documentId = intval($row['id']); // @phpstan-ignore argument.type
 
-        $fieldTokens  = [];
+        /** @var array<string, int> $termCounts */
+        $termCounts = [];
         $length = 0;
         foreach (array_diff_key($row, ['id' => null]) as $col) {
             $text = trim(strval($col)); // @phpstan-ignore argument.type
             if ($text !== '') {
-                $tokens  = $this->stopwords !== null
+                $tokens = $this->stopwords !== null
                     ? $this->stopwords->filter(Tokenizer::tokenize($text))
                     : Tokenizer::tokenize($text);
-                $fieldTokens[] = $tokens;
+                foreach ($tokens as $token) {
+                    $termCounts[$token] = ($termCounts[$token] ?? 0) + 1;
+                }
                 $length += count($tokens);
             }
         }
 
-        $terms = $this->upsertWordlist($fieldTokens);
-        $this->saveDoclist($documentId, $terms);
+        $termIds = $this->upsertWordlist($termCounts);
+        $this->saveDoclist($documentId, $termIds);
         $this->saveDocLength($documentId, $length);
 
         return $length;
     }
 
     /**
-     * Upsert terms from tokenised document fields into the wordlist table.
+     * Upsert terms into the wordlist table and return a term_id → hit_count map.
      *
      * Uses a single batched INSERT … ON CONFLICT … RETURNING id, term to upsert
      * all terms for a document in one round-trip per chunk (chunks respect
      * SQLite's 999-variable limit at 2 params per term).
      *
-     * Returns the term map with resolved wordlist IDs so the caller can write
-     * doclist rows without a separate lookup.
-     *
-     * @param  list<string[]> $fieldTokens Tokenised fields as a list of token arrays.
-     * @return array<string, array{hits: int, id: ?int}> Terms with resolved wordlist IDs.
+     * @param  array<string, int> $termCounts Term → hit count for the document.
+     * @return array<int, int>                term_id → hit_count with resolved wordlist IDs.
      */
-    private function upsertWordlist(array $fieldTokens): array
+    private function upsertWordlist(array $termCounts): array
     {
-        /** @var array<string, array{hits: int, id: ?int}> $terms */
-        $terms = [];
-
-        foreach ($fieldTokens as $tokens) {
-            foreach ($tokens as $term) {
-                if (array_key_exists($term, $terms)) {
-                    $terms[$term]['hits']++;
-                } else {
-                    $terms[$term] = ['hits' => 1, 'id' => null];
-                }
-            }
+        if (empty($termCounts)) {
+            return [];
         }
 
-        if (empty($terms)) {
-            return $terms;
-        }
+        /** @var array<int, int> $termIds */
+        $termIds = [];
 
-        foreach (array_chunk(array_keys($terms), 499) as $chunk) {
+        foreach (array_chunk($termCounts, 499, true) as $chunk) {
             $n            = count($chunk);
             $placeholders = [];
             $params       = [];
-            foreach ($chunk as $i => $key) {
+            $i            = 0;
+            foreach ($chunk as $term => $hits) {
                 $placeholders[] = "(:k{$i}, :h{$i}, 1)";
-                $params[":k{$i}"] = $key;
-                $params[":h{$i}"] = $terms[$key]['hits'];
+                $params[":k{$i}"] = $term;
+                $params[":h{$i}"] = $hits;
+                $i++;
             }
             $stmt = $this->stmt(
                 "upsertWordlist_{$n}",
@@ -480,13 +472,11 @@ class SqliteEngine
             /** @var list<array{id: int, term: string}> $upserted */
             $upserted = $stmt->fetchAll(PDO::FETCH_ASSOC);
             foreach ($upserted as $row) {
-                if (array_key_exists($row['term'], $terms)) {
-                    $terms[$row['term']] = ['hits' => $terms[$row['term']]['hits'], 'id' => $row['id']];
-                }
+                $termIds[$row['id']] = $termCounts[$row['term']];
             }
         }
 
-        return $terms;
+        return $termIds;
     }
 
     /**
@@ -495,23 +485,23 @@ class SqliteEngine
      * Uses a single batched INSERT per chunk (3 params per term; chunks respect
      * SQLite's 999-variable limit).
      *
-     * @param int                                          $documentId Document ID.
-     * @param array<string, array{hits: int, id: ?int}> $terms Terms with resolved wordlist IDs.
+     * @param int             $documentId Document ID.
+     * @param array<int, int> $termIds    term_id → hit_count map from upsertWordlist().
      */
-    private function saveDoclist(int $documentId, array $terms): void
+    private function saveDoclist(int $documentId, array $termIds): void
     {
-        if (empty($terms)) {
+        if (empty($termIds)) {
             return;
         }
 
-        foreach (array_chunk(array_values($terms), 333) as $chunk) {
+        foreach (array_chunk($termIds, 333, true) as $chunk) {
             $n            = count($chunk);
             $placeholders = implode(',', array_fill(0, $n, '(?,?,?)'));
             $params       = [];
-            foreach ($chunk as $term) {
-                $params[] = $term['id'];
+            foreach ($chunk as $termId => $hits) {
+                $params[] = $termId;
                 $params[] = $documentId;
-                $params[] = $term['hits'];
+                $params[] = $hits;
             }
             $this->stmt(
                 "saveDoclist_{$n}",
@@ -640,9 +630,8 @@ class SqliteEngine
             return ['documents' => [], 'numDocs' => 0];
         }
 
-        $documents = $fuzzy
-            ? $this->getAllDocumentsForFuzzyKeyword($word, $noLimit)
-            : $this->getAllDocumentsForStrictKeyword($word, $noLimit);
+        $limit     = $noLimit ? PHP_INT_MAX : $this->maxDocs;
+        $documents = $this->fetchDocsByTermIds($word, $limit, $fuzzy);
 
         $numDocs = ($fuzzy || count($word) > 1)
             ? (int) array_sum(array_column($word, 'num_docs'))
@@ -667,47 +656,28 @@ class SqliteEngine
     {
         // isLastWord=true so that $asYouType prefix expansion applies, matching the behaviour
         // of positive keyword lookups in scorePhrase().
-        $word = $this->getWordlistByKeyword($keyword, isLastWord: true);
+        $word  = $this->getWordlistByKeyword($keyword, isLastWord: true);
+        $limit = $noLimit ? PHP_INT_MAX : $this->maxDocs;
+
         if (!isset($word[0])) {
             // Term not indexed — all documents satisfy NOT, so return every doc_id.
-            $stmt = $this->stmt(
-                'allDocIds' . ($noLimit ? 'Unlimited' : 'Limited'),
-                'SELECT DISTINCT doc_id FROM doclist' . ($noLimit ? '' : ' LIMIT ?')
-            );
-            $stmt->execute($noLimit ? [] : [$this->maxDocs]);
-            /** @var list<array{doc_id: int}> $rows */
-            $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
-            return $rows;
+            $stmt = $this->stmt('allDocIds', 'SELECT DISTINCT doc_id FROM doclist LIMIT ?');
+            $stmt->execute([$limit]);
+            /** @var list<array{doc_id: int}> $all */
+            $all = $stmt->fetchAll(PDO::FETCH_ASSOC);
+            return $all;
         }
 
-        $ids = array_column($word, 'id');
-
-        if (count($ids) === 1) {
-            if ($noLimit) {
-                $stmt = $this->stmt(
-                    'keywordNotUnlimited',
-                    'SELECT DISTINCT doc_id FROM doclist'
-                    . ' WHERE doc_id NOT IN (SELECT doc_id FROM doclist WHERE term_id = ?)'
-                );
-            } else {
-                $stmt = $this->stmt(
-                    'keywordNotLimited',
-                    'SELECT DISTINCT doc_id FROM doclist'
-                    . ' WHERE doc_id NOT IN (SELECT doc_id FROM doclist WHERE term_id = ?) LIMIT ?'
-                );
-            }
-            $stmt->execute($noLimit ? [$ids[0]] : [$ids[0], $this->maxDocs]);
-        } else {
-            $n            = count($ids);
-            $placeholders = implode(',', array_fill(0, $n, '?'));
-            $limit        = $noLimit ? 'Unlimited' : 'Limited';
-            $query        = 'SELECT DISTINCT doc_id FROM doclist'
-                . " WHERE doc_id NOT IN (SELECT doc_id FROM doclist WHERE term_id IN ($placeholders))"
-                . ($noLimit ? '' : ' LIMIT ?');
-            $stmt = $this->stmt("notDocsMulti{$limit}_{$n}", $query);
-            $stmt->execute($noLimit ? $ids : [...$ids, $this->maxDocs]);
-        }
-
+        $ids          = array_column($word, 'id');
+        $n            = count($ids);
+        $placeholders = implode(',', array_fill(0, $n, '?'));
+        $stmt = $this->stmt(
+            "keywordNot_{$n}",
+            "SELECT DISTINCT doc_id FROM doclist
+             WHERE doc_id NOT IN (SELECT doc_id FROM doclist WHERE term_id IN ($placeholders))
+             LIMIT ?"
+        );
+        $stmt->execute([...$ids, $limit]);
         /** @var list<array{doc_id: int}> $rows */
         $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
         return $rows;
@@ -799,87 +769,36 @@ class SqliteEngine
     }
 
     /**
-     * Fetch all doclist rows for one or more exact/prefix wordlist matches, ordered by hit count.
+     * Fetch doclist rows for a set of wordlist term IDs, ordered by hit count.
      *
-     * When $words contains a single entry, a named-parameter equality query is used.
-     * When $words contains multiple entries (e.g. as-you-type prefix expansion), an
-     * IN clause with positional parameters is used instead.
-     *
-     * @param  list<array{id: int, term: string, num_hits: int, num_docs: int}> $words
-     *         Wordlist rows from getWordlistByKeyword().
-     * @param  bool $noLimit When true, the $maxDocs cap is not applied.
-     * @return list<array{term_id: int, doc_id: int, hit_count: int, doc_length: int}>
-     */
-    private function getAllDocumentsForStrictKeyword(array $words, bool $noLimit): array
-    {
-        if (count($words) === 1) {
-            if ($noLimit) {
-                $stmt = $this->stmt(
-                    'strictDocsUnlimited',
-                    'SELECT d.term_id, d.doc_id, d.hit_count, dl.length AS doc_length
-                      FROM doclist d JOIN doc_lengths dl ON dl.doc_id = d.doc_id
-                      WHERE d.term_id = :id ORDER BY d.hit_count DESC'
-                );
-                $stmt->bindValue(':id', $words[0]['id']);
-            } else {
-                $stmt = $this->stmt(
-                    'strictDocsLimited',
-                    'SELECT d.term_id, d.doc_id, d.hit_count, dl.length AS doc_length
-                      FROM doclist d JOIN doc_lengths dl ON dl.doc_id = d.doc_id
-                      WHERE d.term_id = :id ORDER BY d.hit_count DESC LIMIT :maxDocs'
-                );
-                $stmt->bindValue(':id', $words[0]['id']);
-                $stmt->bindValue(':maxDocs', $this->maxDocs, PDO::PARAM_INT);
-            }
-            $stmt->execute();
-        } else {
-            $n            = count($words);
-            $placeholders = implode(',', array_fill(0, $n, '?'));
-            $limit        = $noLimit ? 'Unlimited' : 'Limited';
-            $query        = "SELECT d.term_id, d.doc_id, d.hit_count, dl.length AS doc_length
-                              FROM doclist d JOIN doc_lengths dl ON dl.doc_id = d.doc_id
-                              WHERE d.term_id IN ($placeholders) ORDER BY d.hit_count DESC"
-                          . ($noLimit ? '' : ' LIMIT ?');
-            $stmt  = $this->stmt("strictDocsMulti{$limit}_{$n}", $query);
-            $ids   = array_column($words, 'id');
-            $stmt->execute($noLimit ? $ids : [...$ids, $this->maxDocs]);
-        }
-
-        /** @var list<array{term_id: int, doc_id: int, hit_count: int, doc_length: int}> $rows */
-        $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
-        return $rows;
-    }
-
-    /**
-     * Fetch doclist rows for a set of fuzzy-matched wordlist entries.
-     *
-     * Results are ordered to match the relevance ranking of $words (closest
-     * Levenshtein match first) using a SQL CASE expression.
+     * When $fuzzy is true, results are re-sorted by the relevance rank of $words
+     * (closest Levenshtein match first) after the DB fetch.
      *
      * @param  list<array{id: int, term: string, num_hits: int, num_docs: int}> $words
-     *         Wordlist rows from fuzzySearch(), ordered by relevance.
-     * @param  bool $noLimit When true, the $maxDocs cap is not applied.
+     *         Wordlist rows from getWordlistByKeyword() or fuzzySearch().
+     * @param  int  $limit Maximum rows to return.
+     * @param  bool $fuzzy When true, re-sort by fuzzy relevance rank.
      * @return list<array{term_id: int, doc_id: int, hit_count: int, doc_length: int}>
      */
-    private function getAllDocumentsForFuzzyKeyword(array $words, bool $noLimit): array
+    private function fetchDocsByTermIds(array $words, int $limit, bool $fuzzy = false): array
     {
-        $n            = count($words);
+        $ids          = array_column($words, 'id');
+        $n            = count($ids);
         $placeholders = implode(',', array_fill(0, $n, '?'));
-        $limit        = $noLimit ? 'Unlimited' : 'Limited';
-        $query        = "SELECT d.term_id, d.doc_id, d.hit_count, dl.length AS doc_length
-                          FROM doclist d JOIN doc_lengths dl ON dl.doc_id = d.doc_id
-                          WHERE d.term_id IN ($placeholders)"
-                      . ($noLimit ? '' : ' LIMIT ?');
-
-        $ids  = array_column($words, 'id');
-        $stmt = $this->stmt("fuzzyDocs{$limit}_{$n}", $query);
-        $stmt->execute($noLimit ? $ids : [...$ids, $this->maxDocs]);
+        $stmt = $this->stmt(
+            "docsByTermIds_{$n}",
+            "SELECT d.term_id, d.doc_id, d.hit_count, dl.length AS doc_length
+              FROM doclist d JOIN doc_lengths dl ON dl.doc_id = d.doc_id
+              WHERE d.term_id IN ($placeholders) ORDER BY d.hit_count DESC LIMIT ?"
+        );
+        $stmt->execute([...$ids, $limit]);
         /** @var list<array{term_id: int, doc_id: int, hit_count: int, doc_length: int}> $rows */
         $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
-        // Sort by the relevance rank established by fuzzySearch() (closest match first).
-        $rank = array_flip($ids);
-        usort($rows, fn(array $a, array $b) => $rank[$a['term_id']] <=> $rank[$b['term_id']]);
+        if ($fuzzy) {
+            $rank = array_flip($ids);
+            usort($rows, fn(array $a, array $b) => $rank[$a['term_id']] <=> $rank[$b['term_id']]);
+        }
 
         return $rows;
     }
