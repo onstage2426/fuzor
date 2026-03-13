@@ -101,12 +101,13 @@ class SqliteEngine
         }
         $this->flushIndex($indexName);
 
-        $this->index = new PDO('sqlite:' . $this->storagePath . $indexName);
-        $this->index->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+        $pdo = new PDO('sqlite:' . $this->storagePath . $indexName);
+        $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+        $this->index    = $pdo;
         $this->stmtCache = [];
         $this->applyPragmas();
 
-        $this->index->exec(
+        $pdo->exec(
             "CREATE TABLE IF NOT EXISTS wordlist (
                 id       INTEGER PRIMARY KEY,
                 term     TEXT    NOT NULL UNIQUE,
@@ -116,7 +117,7 @@ class SqliteEngine
         );
         // WITHOUT ROWID clusters rows by (term_id, doc_id), eliminating the heap fetch
         // that a secondary index would require. doc_id_index covers DELETE-by-doc_id.
-        $this->index->exec(
+        $pdo->exec(
             "CREATE TABLE IF NOT EXISTS doclist (
                 term_id   INTEGER NOT NULL,
                 doc_id    INTEGER NOT NULL,
@@ -124,17 +125,17 @@ class SqliteEngine
                 PRIMARY KEY (term_id, doc_id)
             ) WITHOUT ROWID, STRICT"
         );
-        $this->index->exec("CREATE INDEX IF NOT EXISTS 'main'.'doc_id_index' ON doclist ('doc_id');");
+        $pdo->exec("CREATE INDEX IF NOT EXISTS 'main'.'doc_id_index' ON doclist ('doc_id');");
 
-        $this->index->exec(
+        $pdo->exec(
             "CREATE TABLE IF NOT EXISTS doc_lengths (
                 doc_id INTEGER PRIMARY KEY,
                 length INTEGER NOT NULL
             ) STRICT"
         );
 
-        $this->index->exec("CREATE TABLE IF NOT EXISTS info (key TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT");
-        $this->index->exec("INSERT INTO info (key, value) VALUES ('total_documents', 0), ('avg_doc_length', 0)");
+        $pdo->exec("CREATE TABLE IF NOT EXISTS info (key TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT");
+        $pdo->exec("INSERT INTO info (key, value) VALUES ('total_documents', 0), ('avg_doc_length', 0)");
 
         return $this;
     }
@@ -185,6 +186,7 @@ class SqliteEngine
      */
     private function applyPragmas(): void
     {
+        assert($this->index !== null);
         $this->index->exec('
             PRAGMA journal_mode = WAL;
             PRAGMA synchronous  = NORMAL;
@@ -224,7 +226,7 @@ class SqliteEngine
         }
 
         $this->wrapInTransaction(function () use ($document): void {
-            $id    = (int) $document['id'];
+            $id    = intval($document['id']); // @phpstan-ignore argument.type
             $check = $this->stmt('docExistsCheck', 'SELECT 1 FROM doc_lengths WHERE doc_id = :id LIMIT 1');
             $check->execute([':id' => $id]);
             if ($check->fetchColumn() !== false) {
@@ -260,7 +262,7 @@ class SqliteEngine
             if (!array_key_exists('id', $document)) {
                 throw new \InvalidArgumentException("Document at index {$i} must contain an 'id' key.");
             }
-            $id = (int) $document['id'];
+            $id = intval($document['id']); // @phpstan-ignore argument.type
             if (isset($ids[$id])) {
                 throw new \InvalidArgumentException("Duplicate id {$id} at index {$i}.");
             }
@@ -309,7 +311,7 @@ class SqliteEngine
             throw new \InvalidArgumentException("Document must contain an 'id' key.");
         }
         $this->wrapInTransaction(function () use ($document): void {
-            $oldLength = $this->removeDocumentData((int) $document['id']);
+            $oldLength = $this->removeDocumentData(intval($document['id'])); // @phpstan-ignore argument.type
             $newLength = $this->processDocument($document);
 
             if ($oldLength === false) {
@@ -403,12 +405,12 @@ class SqliteEngine
      */
     private function processDocument(array $row): int
     {
-        $documentId = (int) $row['id'];
+        $documentId = intval($row['id']); // @phpstan-ignore argument.type
 
         $fieldTokens  = [];
         $length = 0;
         foreach (array_diff_key($row, ['id' => null]) as $col) {
-            $text = trim((string) $col);
+            $text = trim(strval($col)); // @phpstan-ignore argument.type
             if ($text !== '') {
                 $tokens  = $this->stopwords !== null
                     ? $this->stopwords->filter(Tokenizer::tokenize($text))
@@ -475,8 +477,12 @@ class SqliteEngine
                  RETURNING id, term'
             );
             $stmt->execute($params);
-            foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
-                $terms[$row['term']]['id'] = (int) $row['id'];
+            /** @var list<array{id: int, term: string}> $upserted */
+            $upserted = $stmt->fetchAll(PDO::FETCH_ASSOC);
+            foreach ($upserted as $row) {
+                if (array_key_exists($row['term'], $terms)) {
+                    $terms[$row['term']] = ['hits' => $terms[$row['term']]['hits'], 'id' => $row['id']];
+                }
             }
         }
 
@@ -621,7 +627,7 @@ class SqliteEngine
      * @param  bool   $noLimit       When true, the $maxDocs cap is not applied.
      * @param  bool   $isLastKeyword Whether this is the final token in the query.
      * @param  bool   $fuzzy         When true, Levenshtein fuzzy matching is used.
-     * @return array{documents: list<array<string, mixed>>, numDocs: int}
+     * @return array{documents: list<array{term_id: int, doc_id: int, hit_count: int, doc_length: int}>, numDocs: int}
      */
     public function getDocumentsAndCount(
         string $keyword,
@@ -639,8 +645,8 @@ class SqliteEngine
             : $this->getAllDocumentsForStrictKeyword($word, $noLimit);
 
         $numDocs = ($fuzzy || count($word) > 1)
-            ? array_sum(array_column($word, 'num_docs'))
-            : (int) $word[0]['num_docs'];
+            ? (int) array_sum(array_column($word, 'num_docs'))
+            : $word[0]['num_docs'];
 
         return ['documents' => $documents, 'numDocs' => $numDocs];
     }
@@ -655,7 +661,7 @@ class SqliteEngine
      *
      * @param  string                    $keyword Term to exclude.
      * @param  bool                      $noLimit When true, the $maxDocs cap is not applied.
-     * @return list<array<string, mixed>>         Doclist rows for non-matching documents.
+     * @return list<array{doc_id: int}>           Doc-id rows for non-matching documents.
      */
     public function getAllDocumentsForWhereKeywordNot(string $keyword, bool $noLimit = false): array
     {
@@ -669,7 +675,9 @@ class SqliteEngine
                 'SELECT DISTINCT doc_id FROM doclist' . ($noLimit ? '' : ' LIMIT ?')
             );
             $stmt->execute($noLimit ? [] : [$this->maxDocs]);
-            return $stmt->fetchAll(PDO::FETCH_ASSOC);
+            /** @var list<array{doc_id: int}> $rows */
+            $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+            return $rows;
         }
 
         $ids = array_column($word, 'id');
@@ -700,7 +708,9 @@ class SqliteEngine
             $stmt->execute($noLimit ? $ids : [...$ids, $this->maxDocs]);
         }
 
-        return $stmt->fetchAll(PDO::FETCH_ASSOC);
+        /** @var list<array{doc_id: int}> $rows */
+        $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+        return $rows;
     }
 
     /**
@@ -731,7 +741,9 @@ class SqliteEngine
         $placeholders = implode(',', array_fill(0, count($keys), '?'));
         $stmt = $this->stmt('info_' . implode(',', $keys), "SELECT key, value FROM info WHERE key IN ($placeholders)");
         $stmt->execute($keys);
-        return array_column($stmt->fetchAll(PDO::FETCH_ASSOC), 'value', 'key');
+        /** @var array<string, string> $result */
+        $result = array_column($stmt->fetchAll(PDO::FETCH_ASSOC), 'value', 'key');
+        return $result;
     }
 
     // --- Private read helpers -----------------------------------------------
@@ -748,7 +760,7 @@ class SqliteEngine
      * @param  bool                      $isLastWord Whether this is the final token in the query.
      * @param  bool                      $noLimit    When true, the $maxDocs cap is not applied to document fetches.
      * @param  bool                      $fuzzy      When true, fall through to Levenshtein fuzzy search on no match.
-     * @return list<array<string, mixed>>            Matching wordlist rows.
+     * @return list<array{id: int, term: string, num_hits: int, num_docs: int}>
      */
     private function getWordlistByKeyword(
         string $keyword,
@@ -776,7 +788,7 @@ class SqliteEngine
 
         $stmt->execute();
 
-        /** @var list<array<string, mixed>> $wordlistRows */
+        /** @var list<array{id: int, term: string, num_hits: int, num_docs: int}> $wordlistRows */
         $wordlistRows = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
         if ($fuzzy && !isset($wordlistRows[0])) {
@@ -793,9 +805,10 @@ class SqliteEngine
      * When $words contains multiple entries (e.g. as-you-type prefix expansion), an
      * IN clause with positional parameters is used instead.
      *
-     * @param  list<array<string, mixed>> $words   Wordlist rows from getWordlistByKeyword().
-     * @param  bool                       $noLimit When true, the $maxDocs cap is not applied.
-     * @return list<array<string, mixed>>          Doclist rows with term_id, doc_id, hit_count, doc_length.
+     * @param  list<array{id: int, term: string, num_hits: int, num_docs: int}> $words
+     *         Wordlist rows from getWordlistByKeyword().
+     * @param  bool $noLimit When true, the $maxDocs cap is not applied.
+     * @return list<array{term_id: int, doc_id: int, hit_count: int, doc_length: int}>
      */
     private function getAllDocumentsForStrictKeyword(array $words, bool $noLimit): array
     {
@@ -832,7 +845,9 @@ class SqliteEngine
             $stmt->execute($noLimit ? $ids : [...$ids, $this->maxDocs]);
         }
 
-        return $stmt->fetchAll(PDO::FETCH_ASSOC);
+        /** @var list<array{term_id: int, doc_id: int, hit_count: int, doc_length: int}> $rows */
+        $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+        return $rows;
     }
 
     /**
@@ -841,9 +856,10 @@ class SqliteEngine
      * Results are ordered to match the relevance ranking of $words (closest
      * Levenshtein match first) using a SQL CASE expression.
      *
-     * @param  list<array<string, mixed>> $words   Wordlist rows from fuzzySearch(), ordered by relevance.
-     * @param  bool                       $noLimit When true, the $maxDocs cap is not applied.
-     * @return list<array<string, mixed>>          Doclist rows in fuzzy-match order.
+     * @param  list<array{id: int, term: string, num_hits: int, num_docs: int}> $words
+     *         Wordlist rows from fuzzySearch(), ordered by relevance.
+     * @param  bool $noLimit When true, the $maxDocs cap is not applied.
+     * @return list<array{term_id: int, doc_id: int, hit_count: int, doc_length: int}>
      */
     private function getAllDocumentsForFuzzyKeyword(array $words, bool $noLimit): array
     {
@@ -858,11 +874,12 @@ class SqliteEngine
         $ids  = array_column($words, 'id');
         $stmt = $this->stmt("fuzzyDocs{$limit}_{$n}", $query);
         $stmt->execute($noLimit ? $ids : [...$ids, $this->maxDocs]);
+        /** @var list<array{term_id: int, doc_id: int, hit_count: int, doc_length: int}> $rows */
         $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
         // Sort by the relevance rank established by fuzzySearch() (closest match first).
         $rank = array_flip($ids);
-        usort($rows, fn($a, $b) => $rank[$a['term_id']] <=> $rank[$b['term_id']]);
+        usort($rows, fn(array $a, array $b) => $rank[$a['term_id']] <=> $rank[$b['term_id']]);
 
         return $rows;
     }
@@ -875,11 +892,11 @@ class SqliteEngine
      * by edit distance ascending, then num_hits descending.
      *
      * @param  string                    $keyword Search term to find fuzzy matches for (must already be lowercased).
-     * @return list<array<string, mixed>>         Matching wordlist rows with an added 'distance' key.
+     * @return list<array{id: int, term: string, num_hits: int, num_docs: int, distance: int}>
      */
     private function fuzzySearch(string $keyword): array
     {
-        $keywordLength = mb_strlen($keyword);
+        $keywordLength = (int) mb_strlen($keyword);
 
         $stmt = $this->stmt(
             'fuzzyWordlistLookup',
@@ -895,9 +912,11 @@ class SqliteEngine
         $stmt->bindValue(':maxExpansions', $this->fuzzyMaxExpansions, PDO::PARAM_INT);
         $stmt->execute();
 
-        /** @var list<array<string, mixed>> $resultSet */
+        /** @var list<array{id: int, term: string, num_hits: int, num_docs: int, distance: int}> $resultSet */
         $resultSet = [];
-        foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $match) {
+        /** @var list<array{id: int, term: string, num_hits: int, num_docs: int}> $candidates */
+        $candidates = $stmt->fetchAll(PDO::FETCH_ASSOC);
+        foreach ($candidates as $match) {
             $distance = Levenshtein::distance($match['term'], $keyword);
             if ($distance <= $this->fuzzyDistance) {
                 $resultSet[] = [...$match, 'distance' => $distance];
@@ -922,7 +941,9 @@ class SqliteEngine
      */
     private function stmt(string $key, string $sql): \PDOStatement
     {
-        return $this->stmtCache[$key] ??= $this->index->prepare($sql);
+        $index = $this->index;
+        assert($index !== null);
+        return $this->stmtCache[$key] ??= $index->prepare($sql);
     }
 
     /**
@@ -935,16 +956,18 @@ class SqliteEngine
      */
     private function wrapInTransaction(callable $fn): void
     {
-        if ($this->index->inTransaction()) {
+        $index = $this->index;
+        assert($index !== null);
+        if ($index->inTransaction()) {
             $fn();
             return;
         }
-        $this->index->beginTransaction();
+        $index->beginTransaction();
         try {
             $fn();
-            $this->index->commit();
+            $index->commit();
         } catch (\Throwable $e) {
-            $this->index->rollBack();
+            $index->rollBack();
             throw $e;
         }
     }

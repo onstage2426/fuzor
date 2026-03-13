@@ -21,7 +21,6 @@ use Fuzor\Tokenizer;
 class Index
 {
     private SqliteEngine $engine;
-    private string $resolvedPath;
 
     // --- Engine configuration (proxied via property hooks) ----------
 
@@ -79,14 +78,9 @@ class Index
 
     // ------------------------------------------------------------------------
 
-    /**
-     * @param SqliteEngine $engine       Configured engine bound to the index file.
-     * @param string       $resolvedPath Canonical absolute path to the index file.
-     */
-    private function __construct(SqliteEngine $engine, string $resolvedPath)
+    private function __construct(SqliteEngine $engine)
     {
-        $this->engine       = $engine;
-        $this->resolvedPath = $resolvedPath;
+        $this->engine = $engine;
     }
 
     /**
@@ -113,12 +107,12 @@ class Index
      * @param  string $path Absolute or relative path to the SQLite index file.
      * @throws \RuntimeException If the index file does not exist.
      */
-    public static function open(string $path): static
+    public static function open(string $path): self
     {
         $resolved = self::resolvePath($path);
         $engine = new SqliteEngine(dirname($resolved));
         $engine->selectIndex(basename($resolved));
-        return new static($engine, $resolved);
+        return new self($engine);
     }
 
     /**
@@ -128,12 +122,12 @@ class Index
      * @param  bool   $force When true, any existing file at that path is overwritten.
      * @throws \RuntimeException If a file already exists at $path and $force is false.
      */
-    public static function create(string $path, bool $force = false): static
+    public static function create(string $path, bool $force = false): self
     {
         $resolved = self::resolvePath($path);
         $engine = new SqliteEngine(dirname($resolved));
         $engine->createIndex(basename($resolved), $force);
-        return new static($engine, $resolved);
+        return new self($engine);
     }
 
     // --- Document operations ------------------------------------------------
@@ -261,6 +255,10 @@ class Index
         }
 
         // Resolve a stack operand to a doc-id list, caching DB lookups by term.
+        /**
+         * @param string|list<int>|null $operand
+         * @return list<int>
+         */
         $resolve = function (string|array|null $operand) use (&$cache, $lastTerm): array {
             if ($operand === null) {
                 return [];
@@ -276,17 +274,22 @@ class Index
 
         foreach ($postfix as $token) {
             if ($token === '&') {
+                /** @var list<int> $left */
                 $left    = $resolve(array_pop($stack));
+                /** @var list<int> $right */
                 $right   = $resolve(array_pop($stack));
                 $stack[] = array_values(array_intersect($left, $right));
             } elseif ($token === '|') {
+                /** @var list<int> $left */
                 $left    = $resolve(array_pop($stack));
+                /** @var list<int> $right */
                 $right   = $resolve(array_pop($stack));
                 // array_flip + '+' achieves union in one O(n+m) pass without array_merge + array_unique
                 $stack[] = array_keys(array_flip($left) + array_flip($right));
             } elseif ($token === '~') {
                 // ~ is always preceded by a string operand; the lexer places a term token before every ~
-                $term    = (string) array_pop($stack);
+                /** @var string $term */
+                $term    = array_pop($stack);
                 $stack[] = $cache["~{$term}"] ??= array_column(
                     $this->engine->getAllDocumentsForWhereKeywordNot($term, true),
                     'doc_id'
@@ -343,7 +346,7 @@ class Index
                 $documentId = $document['doc_id'];
                 $tf    = $document['hit_count'];
                 $dl    = $document['doc_length'];
-                $docScores[$documentId] = ($docScores[$documentId] ?? 0)
+                $docScores[$documentId] = ($docScores[$documentId] ?? 0.0)
                     + $idf * (($k1 + 1) * $tf) / ($k1 * (1 - $b + $b * $dl / $avgdl) + $tf);
             }
         }
@@ -432,6 +435,6 @@ class Index
             |> (fn(string $s): string => mb_strtolower($s, 'UTF-8'))
             |> (fn(string $s): string => str_replace([' or ', ' -', ' '], ['|', '&~', '&'], $s));
 
-        return preg_split('/([|~&()])/', $expression, -1, PREG_SPLIT_DELIM_CAPTURE | PREG_SPLIT_NO_EMPTY);
+        return preg_split('/([|~&()])/', $expression, -1, PREG_SPLIT_DELIM_CAPTURE | PREG_SPLIT_NO_EMPTY) ?: [];
     }
 }

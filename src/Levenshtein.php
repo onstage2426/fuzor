@@ -47,7 +47,7 @@ final class Levenshtein
         $count = count($map);
         foreach ($matches[0] as $mbc) {
             if (!isset($map[$mbc])) {
-                $map[$mbc] = chr(128 + $count++);
+                $map[$mbc] = chr(128 + $count++); // @phpstan-ignore argument.type
             }
         }
         $str = strtr($str, $map);
