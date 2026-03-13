@@ -245,8 +245,23 @@ class Index
         /** @var array<string, list<int>> $cache */
         $cache = [];
 
+        // Prepend "|" so the Shunting-Yard algorithm always has a left-hand operand
+        // on the stack. OR with an empty set is the identity, so it does not affect the result.
+        /** @var string[] $postfix */
+        $postfix = $this->toPostfix("|" . $phrase);
+
+        // Find the last term token in postfix (preserves left-to-right input order) so that
+        // asYouType prefix expansion applies to it, matching the behaviour of scorePhrase().
+        $lastTerm = null;
+        for ($i = count($postfix) - 1; $i >= 0; $i--) {
+            if (!in_array($postfix[$i], ['|', '&', '~'], true)) {
+                $lastTerm = $postfix[$i];
+                break;
+            }
+        }
+
         // Resolve a stack operand to a doc-id list, caching DB lookups by term.
-        $resolve = function (string|array|null $operand) use (&$cache): array {
+        $resolve = function (string|array|null $operand) use (&$cache, $lastTerm): array {
             if ($operand === null) {
                 return [];
             }
@@ -254,15 +269,10 @@ class Index
                 return $operand;
             }
             return $cache[$operand] ??= array_column(
-                $this->engine->getDocumentsAndCount($operand, true)['documents'],
+                $this->engine->getDocumentsAndCount($operand, true, $operand === $lastTerm)['documents'],
                 'doc_id'
             );
         };
-
-        // Prepend "|" so the Shunting-Yard algorithm always has a left-hand operand
-        // on the stack. OR with an empty set is the identity, so it does not affect the result.
-        /** @var string[] $postfix */
-        $postfix = $this->toPostfix("|" . $phrase);
 
         foreach ($postfix as $token) {
             if ($token === '&') {

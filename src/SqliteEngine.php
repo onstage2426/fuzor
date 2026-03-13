@@ -547,7 +547,7 @@ class SqliteEngine
              END
              WHERE key IN ('total_documents', 'avg_doc_length')"
         );
-        $stmt->bindValue(':delta',    $docDelta,    PDO::PARAM_INT);
+        $stmt->bindValue(':delta', $docDelta, PDO::PARAM_INT);
         $stmt->bindValue(':totalLen', $totalLength, PDO::PARAM_INT);
         $stmt->execute();
     }

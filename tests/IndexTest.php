@@ -377,6 +377,70 @@ class IndexTest extends TestCase
         $this->assertArrayHasKey('hits', $result);
     }
 
+    public function testSearchBooleanAndLastTermPrefixMatches(): void
+    {
+        $index = Index::create($this->dbPath);
+        $index->insertMany([
+            ['id' => 1, 'title' => 'bmw sedan', 'body' => ''],
+            ['id' => 2, 'title' => 'bmw coupe', 'body' => ''],
+            ['id' => 3, 'title' => 'audi sedan', 'body' => ''],
+        ]);
+
+        // 'sed' is a prefix of 'sedan' — asYouType should expand the last AND term.
+        $index->asYouType = true;
+        $result = $index->searchBoolean('bmw sed');
+        $this->assertContains(1, $result['ids']);
+        $this->assertNotContains(2, $result['ids']);
+        $this->assertNotContains(3, $result['ids']);
+    }
+
+    public function testSearchBooleanOrLastTermPrefixMatches(): void
+    {
+        $index = Index::create($this->dbPath);
+        $index->insertMany([
+            ['id' => 1, 'title' => 'bmw coupe', 'body' => ''],
+            ['id' => 2, 'title' => 'audi sedan', 'body' => ''],
+            ['id' => 3, 'title' => 'tesla electric', 'body' => ''],
+        ]);
+
+        // 'sed' is a prefix of 'sedan' — asYouType should expand the last OR term.
+        $index->asYouType = true;
+        $result = $index->searchBoolean('bmw or sed');
+        $this->assertContains(1, $result['ids']);
+        $this->assertContains(2, $result['ids']);
+        $this->assertNotContains(3, $result['ids']);
+    }
+
+    public function testSearchBooleanAsYouTypeDisabledNoPartialMatch(): void
+    {
+        $index = Index::create($this->dbPath);
+        $index->insertMany([
+            ['id' => 1, 'title' => 'bmw sedan', 'body' => ''],
+            ['id' => 2, 'title' => 'audi coupe', 'body' => ''],
+        ]);
+
+        // With asYouType off, 'sed' must not expand to 'sedan'.
+        $index->asYouType = false;
+        $result = $index->searchBoolean('bmw sed');
+        $this->assertEmpty($result['ids']);
+    }
+
+    public function testSearchBooleanOnlyLastTermIsPrefixExpanded(): void
+    {
+        $index = Index::create($this->dbPath);
+        $index->insertMany([
+            ['id' => 1, 'title' => 'sedan coupe', 'body' => ''],
+            ['id' => 2, 'title' => 'sedan hatchback', 'body' => ''],
+        ]);
+
+        // 'sed' should NOT expand 'sedan' for the first AND term;
+        // 'cou' should expand 'coupe' only for the last term.
+        $index->asYouType = true;
+        $result = $index->searchBoolean('sed cou');
+        // 'sed' is not the last term so it must match exactly — no doc has 'sed' literally.
+        $this->assertEmpty($result['ids']);
+    }
+
     // --- as-you-type prefix ---
 
     public function testAsYouTypePrefixMatchesPartialWord(): void
