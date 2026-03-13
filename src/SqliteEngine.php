@@ -513,8 +513,8 @@ class SqliteEngine
     /**
      * Persist a document's total token count for BM25 length normalisation.
      *
-     * @param int $documentId  Document ID.
-     * @param int $length Total number of tokens across all indexed fields.
+     * @param int $documentId Document ID.
+     * @param int $length     Total number of tokens across all indexed fields.
      */
     private function saveDocLength(int $documentId, int $length): void
     {
@@ -625,7 +625,7 @@ class SqliteEngine
         bool $isLastKeyword = false,
         bool $fuzzy = false
     ): array {
-        $word = $this->getWordlistByKeyword($keyword, $isLastKeyword, $noLimit, $fuzzy);
+        $word = $this->getWordlistByKeyword($keyword, $isLastKeyword, $fuzzy);
         if (!isset($word[0])) {
             return ['documents' => [], 'numDocs' => 0];
         }
@@ -687,8 +687,8 @@ class SqliteEngine
      * Filter stopwords from query tokens, falling back to the original list when
      * all tokens would be removed (so an all-stopword query still returns results).
      *
-     * @param  string[] $tokens Tokenised query terms.
-     * @return string[]         Filtered tokens, or the original list if filtering empties it.
+     * @param  list<string> $tokens Tokenised query terms.
+     * @return list<string>         Filtered tokens, or the original list if filtering empties it.
      */
     public function filterQueryTokens(array $tokens): array
     {
@@ -728,14 +728,12 @@ class SqliteEngine
      *
      * @param  string                    $keyword    Term to look up.
      * @param  bool                      $isLastWord Whether this is the final token in the query.
-     * @param  bool                      $noLimit    When true, the $maxDocs cap is not applied to document fetches.
      * @param  bool                      $fuzzy      When true, fall through to Levenshtein fuzzy search on no match.
      * @return list<array{id: int, term: string, num_hits: int, num_docs: int}>
      */
     private function getWordlistByKeyword(
         string $keyword,
         bool $isLastWord = false,
-        bool $noLimit = false,
         bool $fuzzy = false
     ): array {
         $keyword = mb_strtolower($keyword);
@@ -774,8 +772,8 @@ class SqliteEngine
      * When $fuzzy is true, results are re-sorted by the relevance rank of $words
      * (closest Levenshtein match first) after the DB fetch.
      *
-     * @param  list<array{id: int, term: string, num_hits: int, num_docs: int}> $words
-     *         Wordlist rows from getWordlistByKeyword() or fuzzySearch().
+     * @param  list<array{id: int, term: string, num_hits: int, num_docs: int, ...}> $words
+     *         Wordlist rows from getWordlistByKeyword() or fuzzySearch() (fuzzy rows also carry distance: int).
      * @param  int  $limit Maximum rows to return.
      * @param  bool $fuzzy When true, re-sort by fuzzy relevance rank.
      * @return list<array{term_id: int, doc_id: int, hit_count: int, doc_length: int}>

@@ -30,8 +30,8 @@ final class Stopwords
     /**
      * Remove stopwords from a token list.
      *
-     * @param  string[] $tokens Lowercased tokens from the tokeniser.
-     * @return string[]         Tokens with stopwords removed, re-indexed.
+     * @param  list<string> $tokens Lowercased tokens from the tokeniser.
+     * @return list<string>         Tokens with stopwords removed, re-indexed.
      */
     public function filter(array $tokens): array
     {

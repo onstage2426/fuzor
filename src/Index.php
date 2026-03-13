@@ -241,7 +241,7 @@ class Index
 
         // Prepend "|" so the Shunting-Yard algorithm always has a left-hand operand
         // on the stack. OR with an empty set is the identity, so it does not affect the result.
-        /** @var string[] $postfix */
+        /** @var list<string> $postfix */
         $postfix = $this->toPostfix("|" . $phrase);
 
         // Find the last term token in postfix (preserves left-to-right input order) so that
@@ -322,7 +322,7 @@ class Index
      */
     private function scorePhrase(string $phrase, int $numOfResults, bool $fuzzy): array
     {
-        /** @var string[] $keywords */
+        /** @var list<string> $keywords */
         $keywords = $this->engine->filterQueryTokens(Tokenizer::tokenize($phrase));
 
         /** @var array<int, float> $docScores */
@@ -365,15 +365,15 @@ class Index
      *
      * Uses the Shunting-Yard algorithm. Operator precedence: ~ (3) > & (2) > | (1).
      *
-     * @param  string   $expression Infix expression containing operators |, &, ~, (, ).
-     * @return string[]      Tokens in postfix order.
+     * @param  string      $expression Infix expression containing operators |, &, ~, (, ).
+     * @return list<string>            Tokens in postfix order.
      */
     private function toPostfix(string $expression): array
     {
-        /** @var string[] $postfix */
+        /** @var list<string> $postfix */
         $postfix = [];
 
-        /** @var string[] $stack */
+        /** @var list<string> $stack */
         $stack = [];
 
         foreach ($this->lexExpression($expression) as $token) {
@@ -408,7 +408,7 @@ class Index
      * Parentheses are handled structurally in toPostfix() and are not assigned a precedence.
      *
      * @param  string $operator Operator token.
-     * @return int          Precedence level; 0 for non-operator tokens.
+     * @return int             Precedence level; 0 for unknown tokens.
      */
     private function expressionPriority(string $operator): int
     {
@@ -426,8 +426,8 @@ class Index
      * Normalises natural-language syntax before splitting:
      *   " or " → |,   " -" → &~,   " " → &
      *
-     * @param  string   $expression Raw query string.
-     * @return string[]         Alternating word tokens and operator characters.
+     * @param  string      $expression Raw query string.
+     * @return list<string>            Alternating word tokens and operator characters.
      */
     private function lexExpression(string $expression): array
     {

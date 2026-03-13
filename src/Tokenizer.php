@@ -10,8 +10,8 @@ final class Tokenizer
      * mb_strtolower, both of which carry significant overhead.
      * Falls back to a full Unicode-aware scan for non-ASCII text.
      *
-     * @param  string   $text Raw input text.
-     * @return string[]       Lowercase token list.
+     * @param  string      $text Raw input text.
+     * @return list<string>        Lowercase token list.
      */
     public static function tokenize(string $text): array
     {

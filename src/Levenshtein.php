@@ -17,9 +17,9 @@ final class Levenshtein
      * Supports up to 128 distinct non-ASCII code points per string pair, which
      * is more than sufficient for short search terms.
      *
-     * @param string $a First string (already lowercased).
-     * @param string $b Second string (already lowercased).
-     * @return int Edit distance in Unicode characters.
+     * @param  string $a First string (already lowercased).
+     * @param  string $b Second string (already lowercased).
+     * @return int       Edit distance in Unicode characters.
      */
     public static function distance(string $a, string $b): int
     {
