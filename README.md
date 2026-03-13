@@ -5,7 +5,7 @@ Lightweight full-text search for PHP. Tokenises documents, stores an inverted in
 ## Requirements
 
 - PHP 8.5+
-- SQLite 3.35.0+
+- SQLite 3.37.0+
 
 ## Installation
 

@@ -17,7 +17,7 @@ use PDO;
  * selectIndex() to point the instance at a file before performing any reads
  * or writes.
  *
- * Requires SQLite 3.35.0+ (for RETURNING and CTEs in DML statements).
+ * Requires SQLite 3.37.0+ (for STRICT tables, RETURNING, and CTEs in DML statements).
  */
 class SqliteEngine
 {
@@ -82,8 +82,9 @@ class SqliteEngine
     /**
      * Create a new SQLite index file and initialise the schema.
      *
-     * Performance pragmas are applied via applyPragmas(), and indexes are created
-     * on both wordlist(term) and doclist(term_id, doc_id).
+     * Performance pragmas are applied via applyPragmas(). All tables are STRICT for
+     * type safety. doclist is WITHOUT ROWID (clustered on term_id, doc_id), replacing
+     * the old term_id secondary index with a zero-heap-fetch primary scan.
      *
      * @param  string $indexName Filename for the SQLite database (e.g. 'articles.db').
      * @param  bool   $force     When true, any existing file is deleted before creation.
@@ -107,29 +108,32 @@ class SqliteEngine
 
         $this->index->exec(
             "CREATE TABLE IF NOT EXISTS wordlist (
-                id INTEGER PRIMARY KEY,
-                term TEXT UNIQUE,
-                num_hits INTEGER,
-                num_docs INTEGER)"
+                id       INTEGER PRIMARY KEY,
+                term     TEXT    NOT NULL UNIQUE,
+                num_hits INTEGER NOT NULL,
+                num_docs INTEGER NOT NULL
+            ) STRICT"
         );
+        // WITHOUT ROWID clusters rows by (term_id, doc_id), eliminating the heap fetch
+        // that a secondary index would require. doc_id_index covers DELETE-by-doc_id.
         $this->index->exec(
             "CREATE TABLE IF NOT EXISTS doclist (
-                term_id INTEGER,
-                doc_id INTEGER,
-                hit_count INTEGER)"
-        );
-        $this->index->exec(
-            "CREATE INDEX IF NOT EXISTS 'main'.'term_id_hit_count_index' ON doclist ('term_id', 'hit_count' DESC);"
+                term_id   INTEGER NOT NULL,
+                doc_id    INTEGER NOT NULL,
+                hit_count INTEGER NOT NULL,
+                PRIMARY KEY (term_id, doc_id)
+            ) WITHOUT ROWID, STRICT"
         );
         $this->index->exec("CREATE INDEX IF NOT EXISTS 'main'.'doc_id_index' ON doclist ('doc_id');");
 
         $this->index->exec(
             "CREATE TABLE IF NOT EXISTS doc_lengths (
                 doc_id INTEGER PRIMARY KEY,
-                length INTEGER)"
+                length INTEGER NOT NULL
+            ) STRICT"
         );
 
-        $this->index->exec("CREATE TABLE IF NOT EXISTS info (key TEXT PRIMARY KEY, value TEXT)");
+        $this->index->exec("CREATE TABLE IF NOT EXISTS info (key TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT");
         $this->index->exec("INSERT INTO info (key, value) VALUES ('total_documents', 0), ('avg_doc_length', 0)");
 
         return $this;
@@ -352,6 +356,7 @@ class SqliteEngine
     private function removeDocumentData(int $documentId): int|false
     {
         // 1. Decrement wordlist stats for every term this document contributed.
+        // UPDATE … FROM (SQLite 3.33+) joins once rather than running a correlated subquery per row.
         $this->stmt(
             'wordlistDecrementByDoc',
             'WITH doc_terms AS (
@@ -359,8 +364,9 @@ class SqliteEngine
              )
              UPDATE wordlist SET
                  num_docs = num_docs - 1,
-                 num_hits = num_hits - (SELECT hit_count FROM doc_terms WHERE term_id = wordlist.id)
-             WHERE id IN (SELECT term_id FROM doc_terms)'
+                 num_hits = num_hits - doc_terms.hit_count
+             FROM doc_terms
+             WHERE wordlist.id = doc_terms.term_id'
         )->execute([':documentId' => $documentId]);
 
         // 2. Remove any term whose hit count reached zero (doclist rows still present for the lookup).
@@ -684,12 +690,13 @@ class SqliteEngine
             }
             $stmt->execute($noLimit ? [$ids[0]] : [$ids[0], $this->maxDocs]);
         } else {
-            // Dynamic IN clause for prefix-expanded matches — variable length prevents caching.
-            $placeholders = implode(',', array_fill(0, count($ids), '?'));
-            $query = 'SELECT DISTINCT doc_id FROM doclist'
+            $n            = count($ids);
+            $placeholders = implode(',', array_fill(0, $n, '?'));
+            $limit        = $noLimit ? 'Unlimited' : 'Limited';
+            $query        = 'SELECT DISTINCT doc_id FROM doclist'
                 . " WHERE doc_id NOT IN (SELECT doc_id FROM doclist WHERE term_id IN ($placeholders))"
                 . ($noLimit ? '' : ' LIMIT ?');
-            $stmt = $this->index->prepare($query);
+            $stmt = $this->stmt("notDocsMulti{$limit}_{$n}", $query);
             $stmt->execute($noLimit ? $ids : [...$ids, $this->maxDocs]);
         }
 
