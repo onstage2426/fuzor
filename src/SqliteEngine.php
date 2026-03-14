@@ -608,7 +608,7 @@ class SqliteEngine
 
         if (!isset($word[0])) {
             // Term not indexed — all documents satisfy NOT, so return every doc_id.
-            $stmt = $this->stmt('allDocIds', 'SELECT DISTINCT doc_id FROM doclist LIMIT ?');
+            $stmt = $this->stmt('allDocIds', 'SELECT doc_id FROM doc_lengths LIMIT ?');
             $stmt->execute([$limit]);
             /** @var list<array{doc_id: int}> $all */
             $all = $stmt->fetchAll(PDO::FETCH_ASSOC);
@@ -619,8 +619,8 @@ class SqliteEngine
         $n            = count($ids);
         $placeholders = implode(',', array_fill(0, $n, '?'));
         $stmt = $this->prepare(
-            "SELECT DISTINCT doc_id FROM doclist
-             WHERE doc_id NOT IN (SELECT doc_id FROM doclist WHERE term_id IN ($placeholders))
+            "SELECT dl.doc_id FROM doc_lengths dl
+             WHERE NOT EXISTS (SELECT 1 FROM doclist d WHERE d.doc_id = dl.doc_id AND d.term_id IN ($placeholders))
              LIMIT ?"
         );
         $stmt->execute([...$ids, $limit]);
