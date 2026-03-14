@@ -645,7 +645,7 @@ class SqliteEngine
      */
     public function filterQueryTokens(array $tokens): array
     {
-        if ($this->stopwords === null) {
+        if ($this->stopwords === null || count($tokens) <= 1) {
             return $tokens;
         }
         $filtered = $this->stopwords->filter($tokens);
