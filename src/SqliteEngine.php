@@ -682,7 +682,7 @@ class SqliteEngine
         bool $isLastWord = false,
         bool $fuzzy = false
     ): array {
-        $keyword = mb_strtolower($keyword);
+        $keyword = mb_strtolower($keyword, 'UTF-8');
 
         if ($this->asYouType && $isLastWord) {
             $stmt = $this->stmt(
