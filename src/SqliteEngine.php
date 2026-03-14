@@ -269,10 +269,7 @@ class SqliteEngine
         $this->wrapInTransaction(function () use ($documents, $ids): void {
             $n            = count($ids);
             $placeholders = implode(',', array_fill(0, $n, '?'));
-            $stmt         = $this->stmt(
-                "insertManyExistsCheck_{$n}",
-                "SELECT doc_id FROM doc_lengths WHERE doc_id IN ({$placeholders})"
-            );
+            $stmt         = $this->prepare("SELECT doc_id FROM doc_lengths WHERE doc_id IN ({$placeholders})");
             $stmt->execute(array_keys($ids));
 
             $existing = $stmt->fetchAll(PDO::FETCH_COLUMN);
@@ -455,8 +452,7 @@ class SqliteEngine
                 $params[]       = $term;
                 $params[]       = $hits;
             }
-            $stmt = $this->stmt(
-                "upsertWordlist_{$n}",
+            $stmt = $this->prepare(
                 'INSERT INTO wordlist (term, num_hits, num_docs) VALUES ' . implode(',', $placeholders) . '
                  ON CONFLICT(term) DO UPDATE SET
                      num_hits = num_hits + excluded.num_hits,
@@ -498,10 +494,8 @@ class SqliteEngine
                 $params[] = $documentId;
                 $params[] = $hits;
             }
-            $this->stmt(
-                "saveDoclist_{$n}",
-                "INSERT INTO doclist (term_id, doc_id, hit_count) VALUES {$placeholders}"
-            )->execute($params);
+            $this->prepare("INSERT INTO doclist (term_id, doc_id, hit_count) VALUES {$placeholders}")
+                ->execute($params);
         }
     }
 
@@ -624,8 +618,7 @@ class SqliteEngine
         $ids          = array_column($word, 'id');
         $n            = count($ids);
         $placeholders = implode(',', array_fill(0, $n, '?'));
-        $stmt = $this->stmt(
-            "keywordNot_{$n}",
+        $stmt = $this->prepare(
             "SELECT DISTINCT doc_id FROM doclist
              WHERE doc_id NOT IN (SELECT doc_id FROM doclist WHERE term_id IN ($placeholders))
              LIMIT ?"
@@ -736,8 +729,7 @@ class SqliteEngine
         $ids          = array_column($words, 'id');
         $n            = count($ids);
         $placeholders = implode(',', array_fill(0, $n, '?'));
-        $stmt = $this->stmt(
-            "docsByTermIds_{$n}",
+        $stmt = $this->prepare(
             "SELECT d.term_id, d.doc_id, d.hit_count, dl.length AS doc_length
               FROM doclist d JOIN doc_lengths dl ON dl.doc_id = d.doc_id
               WHERE d.term_id IN ($placeholders) ORDER BY d.hit_count DESC LIMIT ?"
@@ -814,6 +806,14 @@ class SqliteEngine
         $index = $this->index;
         assert($index !== null);
         return $this->stmtCache[$key] ??= $index->prepare($sql);
+    }
+
+    /** Prepare without caching; for variable-shape SQL where the cache hit rate would be near zero. */
+    private function prepare(string $sql): \PDOStatement
+    {
+        $index = $this->index;
+        assert($index !== null);
+        return $index->prepare($sql);
     }
 
     /**
