@@ -232,7 +232,7 @@ class SqliteEngine
             $check->closeCursor();
 
             $length = $this->processDocument($document);
-            $this->adjustStatsInsert(1, $length);
+            $this->adjustStats(1, $length);
         });
     }
 
@@ -287,7 +287,7 @@ class SqliteEngine
                 $totalLength += $this->processDocument($document);
             }
 
-            $this->adjustStatsInsert(count($documents), $totalLength);
+            $this->adjustStats(count($documents), $totalLength);
         });
     }
 
@@ -313,10 +313,10 @@ class SqliteEngine
 
             if ($oldLength === false) {
                 // Document did not exist — treat as insert: increment total_documents.
-                $this->adjustStatsInsert(1, $newLength);
+                $this->adjustStats(1, $newLength);
             } else {
                 // Replace: total_documents unchanged; adjust avg for the length delta.
-                $this->adjustStatsReplace((int) $oldLength, $newLength);
+                $this->adjustStats(0, $newLength - (int) $oldLength);
             }
         });
     }
@@ -337,7 +337,7 @@ class SqliteEngine
             $length = $this->removeDocumentData($documentId);
 
             if ($length !== false) {
-                $this->adjustStatsDelete((int) $length);
+                $this->adjustStats(-1, -(int) $length);
             }
         });
     }
@@ -523,82 +523,40 @@ class SqliteEngine
     }
 
     /**
-     * Update total_documents and avg_doc_length after inserting one or more documents.
+     * Update total_documents and avg_doc_length after any document mutation.
      *
-     * A single CTE-based UPDATE reads and writes both info rows in one round-trip,
-     * replacing the former three-query sequence (SELECT avg, UPDATE total, UPDATE avg).
+     * All three operations reduce to the same formula:
+     *   avg' = (avg * n + lengthDelta) / (n + docDelta)
      *
-     * @param int $docDelta    Number of documents added (≥ 1).
-     * @param int $totalLength Sum of token counts for all added documents.
+     * Callers pass signed deltas:
+     *   insert:  adjustStats(+count, +totalLength)
+     *   delete:  adjustStats(-1,     -tokenCount)
+     *   replace: adjustStats(0,      newLength - oldLength)
+     *
+     * @param int $docDelta    Signed change in document count.
+     * @param int $lengthDelta Signed change in total token count.
      */
-    private function adjustStatsInsert(int $docDelta, int $totalLength): void
+    private function adjustStats(int $docDelta, int $lengthDelta): void
     {
         $stmt = $this->stmt(
-            'statsInsert',
+            'statsAdjust',
             "WITH c AS (
                  SELECT CAST(MAX(CASE WHEN key = 'total_documents' THEN value END) AS INTEGER) AS n,
                         CAST(MAX(CASE WHEN key = 'avg_doc_length'  THEN value END) AS REAL)    AS avg
                  FROM info WHERE key IN ('total_documents', 'avg_doc_length')
              )
              UPDATE info SET value = CASE key
-                 WHEN 'total_documents' THEN CAST((SELECT n + :delta FROM c) AS TEXT)
-                 WHEN 'avg_doc_length'  THEN CAST((SELECT (avg * n + :totalLen) / (n + :delta) FROM c) AS TEXT)
-             END
-             WHERE key IN ('total_documents', 'avg_doc_length')"
-        );
-        $stmt->bindValue(':delta', $docDelta, PDO::PARAM_INT);
-        $stmt->bindValue(':totalLen', $totalLength, PDO::PARAM_INT);
-        $stmt->execute();
-    }
-
-    /**
-     * Update total_documents and avg_doc_length after deleting a document.
-     *
-     * @param int $length Token count of the removed document.
-     */
-    private function adjustStatsDelete(int $length): void
-    {
-        $stmt = $this->stmt(
-            'statsDelete',
-            "WITH c AS (
-                 SELECT CAST(MAX(CASE WHEN key = 'total_documents' THEN value END) AS INTEGER) AS n,
-                        CAST(MAX(CASE WHEN key = 'avg_doc_length'  THEN value END) AS REAL)    AS avg
-                 FROM info WHERE key IN ('total_documents', 'avg_doc_length')
-             )
-             UPDATE info SET value = CASE key
-                 WHEN 'total_documents' THEN CAST((SELECT n - 1 FROM c) AS TEXT)
+                 WHEN 'total_documents' THEN CAST((SELECT n + :docDelta FROM c) AS TEXT)
                  WHEN 'avg_doc_length'  THEN CAST(
-                     (SELECT CASE WHEN n > 1 THEN (avg * n - :length) / (n - 1) ELSE 0 END FROM c)
-                 AS TEXT)
+                     (SELECT CASE WHEN n + :docDelta > 0
+                         THEN (avg * n + :lengthDelta) / (n + :docDelta)
+                         ELSE 0
+                     END FROM c) AS TEXT)
              END
              WHERE key IN ('total_documents', 'avg_doc_length')"
         );
-        $stmt->bindValue(':length', $length, PDO::PARAM_INT);
-        $stmt->execute();
-    }
-
-    /**
-     * Update avg_doc_length after replacing a document (total_documents is unchanged).
-     *
-     * @param int $oldLength Token count of the document before replacement.
-     * @param int $newLength Token count of the document after replacement.
-     */
-    private function adjustStatsReplace(int $oldLength, int $newLength): void
-    {
-        $stmt = $this->stmt(
-            'statsReplace',
-            "WITH c AS (
-                 SELECT CAST(MAX(CASE WHEN key = 'total_documents' THEN value END) AS INTEGER) AS n,
-                        CAST(MAX(CASE WHEN key = 'avg_doc_length'  THEN value END) AS REAL)    AS avg
-                 FROM info WHERE key IN ('total_documents', 'avg_doc_length')
-             )
-             UPDATE info SET value = CAST(
-                 (SELECT CASE WHEN n > 0 THEN (avg * n - :oldLen + :newLen) / n ELSE 0 END FROM c)
-             AS TEXT)
-             WHERE key = 'avg_doc_length'"
-        );
-        $stmt->bindValue(':oldLen', $oldLength, PDO::PARAM_INT);
-        $stmt->bindValue(':newLen', $newLength, PDO::PARAM_INT);
+        $stmt->bindValue(':docDelta', $docDelta, PDO::PARAM_INT);
+        $stmt->bindValue(':lengthDelta', $lengthDelta, PDO::PARAM_INT);
         $stmt->execute();
     }
 
