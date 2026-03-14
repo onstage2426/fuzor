@@ -35,9 +35,11 @@ final class Stopwords
      */
     public function filter(array $tokens): array
     {
-        /** @var array<string, true> $loaded */
-        $loaded = require __DIR__ . '/../resources/stopwords/' . $this->lang . '.php';
-        $this->words ??= $loaded;
+        if ($this->words === null) {
+            /** @var array<string, true> $words */
+            $words = require __DIR__ . '/../resources/stopwords/' . $this->lang . '.php';
+            $this->words = $words;
+        }
         return array_values(array_filter($tokens, fn(string $t) => !isset($this->words[$t])));
     }
 }
