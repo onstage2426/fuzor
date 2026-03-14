@@ -581,7 +581,7 @@ class SqliteEngine
         $documents = $this->fetchDocsByTermIds($word, $limit, $fuzzy);
 
         $numDocs = ($fuzzy || count($word) > 1)
-            ? (int) array_sum(array_column($word, 'num_docs'))
+            ? count(array_unique(array_column($documents, 'doc_id')))
             : $word[0]['num_docs'];
 
         return ['documents' => $documents, 'numDocs' => $numDocs];
