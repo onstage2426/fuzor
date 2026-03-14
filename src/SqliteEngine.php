@@ -59,15 +59,12 @@ class SqliteEngine
      * Set to enable stopword removal; null (default) disables it entirely.
      * Throws \InvalidArgumentException if no stopword list exists for the given language.
      */
-    public ?string $language {
-        get => $this->lang;
+    public ?string $language = null {
         set {
             $this->stopwords = $value !== null ? new Stopwords($value) : null;
-            $this->lang      = $value;
+            $this->language  = $value;
         }
     }
-
-    private ?string $lang = null;
 
     // --- Connection management ----------------------------------------------
 
