@@ -450,12 +450,10 @@ class SqliteEngine
             $n            = count($chunk);
             $placeholders = [];
             $params       = [];
-            $i            = 0;
             foreach ($chunk as $term => $hits) {
-                $placeholders[] = "(:k{$i}, :h{$i}, 1)";
-                $params[":k{$i}"] = $term;
-                $params[":h{$i}"] = $hits;
-                $i++;
+                $placeholders[] = '(?, ?, 1)';
+                $params[]       = $term;
+                $params[]       = $hits;
             }
             $stmt = $this->stmt(
                 "upsertWordlist_{$n}",
