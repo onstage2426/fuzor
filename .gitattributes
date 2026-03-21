@@ -9,3 +9,4 @@ tests/             export-ignore
 # Benchmarks and data
 benchmarks/        export-ignore
 resources/datasets/ export-ignore
+phpbench.json      export-ignore

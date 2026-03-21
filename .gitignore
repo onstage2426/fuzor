@@ -1,5 +1,3 @@
 vendor/
 .phpunit.result.cache
 .phpactor.json
-resources/datasets/wiki*/
-benchmarks/*.db
