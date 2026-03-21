@@ -1,0 +1,46 @@
+============================================================
+ Fuzor — Movies Benchmark
+ Date    : 2026-03-21 13:14:26
+ Dataset : movies.json (4803 docs)
+============================================================
+
+----------------------- Index build ------------------------
+  Create index (schema init)                 11.2 ms
+  insertMany (4803 docs)                    689.5 ms
+  insert() (4803 docs, one by one)         2757.5 ms
+
+----------------- search() — exact BM25 ------------------
+  "space"                                     0.1 ms   57 hits
+  "love"                                      0.3 ms   414 hits
+  "war"                                       0.2 ms   264 hits
+  "dragon"                                    0.0 ms   31 hits
+  "secret agent"                              0.2 ms   315 hits
+
+-------------- search() — asYouType prefix ---------------
+  "sci" (prefix)                              0.2 ms   92 hits
+  "dra" (prefix)                              0.6 ms   241 hits
+  "adv" (prefix)                              0.5 ms   230 hits
+
+-------------- searchFuzzy() — Levenshtein ---------------
+  "spase" (fuzzy)                             0.3 ms   87 hits
+  "draggon" (fuzzy)                           0.1 ms   38 hits
+  "lovve" (fuzzy)                             0.5 ms   486 hits
+  "warroir" (fuzzy)                           0.2 ms   38 hits
+
+--------------------- searchBoolean() ----------------------
+  "space or war"                              0.2 ms   319 hits
+  "love -romance"                             0.2 ms   390 hits
+  "hero and villain"                          0.3 ms   2 hits
+  "action or adventure or thriller"           0.2 ms   211 hits
+
+------------------------ Throughput ------------------------
+  search() mix (500 queries)                     6363 qps
+  searchBoolean() mix (200 queries)              4706 qps
+
+-------------------------- Memory --------------------------
+  Peak PHP memory                               131.1 MB
+  Current PHP memory                            131.1 MB
+  Index file size                                 0.0 MB
+
+------------------------------------------------------------
+Done.

@@ -1,0 +1,2 @@
+<?php
+return ['futhi'=>true,'kahle'=>true,'kakhulu'=>true,'kanye'=>true,'khona'=>true,'kodwa'=>true,'kungani'=>true,'kusho'=>true,'la'=>true,'lakhe'=>true,'lapho'=>true,'mina'=>true,'ngesikhathi'=>true,'nje'=>true,'phansi'=>true,'phezulu'=>true,'u'=>true,'ukuba'=>true,'ukuthi'=>true,'ukuze'=>true,'uma'=>true,'wahamba'=>true,'wakhe'=>true,'wami'=>true,'wase'=>true,'wathi'=>true,'yakhe'=>true,'zakhe'=>true,'zonke'=>true];

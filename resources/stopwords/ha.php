@@ -1,0 +1,2 @@
+<?php
+return ['a'=>true,'amma'=>true,'ba'=>true,'ban'=>true,'ce'=>true,'cikin'=>true,'da'=>true,'don'=>true,'ga'=>true,'in'=>true,'ina'=>true,'ita'=>true,'ji'=>true,'ka'=>true,'ko'=>true,'kuma'=>true,'lokacin'=>true,'ma'=>true,'mai'=>true,'na'=>true,'ne'=>true,'ni'=>true,'sai'=>true,'shi'=>true,'su'=>true,'suka'=>true,'sun'=>true,'ta'=>true,'tafi'=>true,'take'=>true,'tana'=>true,'wani'=>true,'wannan'=>true,'wata'=>true,'ya'=>true,'yake'=>true,'yana'=>true,'yi'=>true,'za'=>true];

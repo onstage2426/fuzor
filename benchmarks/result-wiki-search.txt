@@ -1,0 +1,49 @@
+============================================================
+ Fuzor — Wikipedia Search Benchmark
+ Date  : 2026-03-21 13:14:40
+ Size  : 2568.3 MB
+============================================================
+
+----------------- search() — exact BM25 ------------------
+  "anarchism"                                 1.2 ms   500 hits
+  "photosynthesis"                            0.2 ms   50 hits
+  "quantum mechanics"                         2.1 ms   944 hits
+  "world war"                                 2.0 ms   1000 hits
+  "artificial intelligence"                   1.8 ms   947 hits
+  "evolution darwin"                          1.8 ms   997 hits
+  "shakespeare"                               1.0 ms   500 hits
+  "climate change"                            1.7 ms   927 hits
+
+-------------- search() — asYouType prefix ---------------
+  "anarch" (prefix)                           2.6 ms   499 hits
+  "photo" (prefix)                            3.0 ms   500 hits
+  "quant" (prefix)                            2.5 ms   500 hits
+  "evolu" (prefix)                            1.9 ms   500 hits
+  "climat" (prefix)                           2.3 ms   500 hits
+
+-------------- searchFuzzy() — Levenshtein ---------------
+  "anarchizm" (fuzzy)                         6.1 ms   500 hits
+  "photosinthesis" (fuzzy)                    0.1 ms   1 hits
+  "quatum" (fuzzy)                            4.0 ms   500 hits
+  "evolusion" (fuzzy)                         2.1 ms   500 hits
+  "shakespear" (fuzzy)                        0.3 ms   51 hits
+
+--------------------- searchBoolean() ----------------------
+  "science or history"                       65.9 ms   83686 hits
+  "war -peace"                               33.9 ms   38680 hits
+  "democracy and freedom"                    24.3 ms   103 hits
+  "physics or chemistry or biology"           3.1 ms   8004 hits
+  "europe and medieval"                      14.0 ms   5 hits
+  "language -english or french"              19.5 ms   61891 hits
+
+------------------------ Throughput ------------------------
+  search() mix (100 queries)                     1826 qps
+  searchBoolean() mix (12 queries)                 63 qps
+
+-------------------------- Memory --------------------------
+  Peak PHP memory                                 4.0 MB
+  Current PHP memory                              4.0 MB
+  Index file size                              2568.3 MB
+
+------------------------------------------------------------
+Done.

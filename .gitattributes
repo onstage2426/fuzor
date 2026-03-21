@@ -1,0 +1,11 @@
+# CI / dev tooling
+.github/           export-ignore
+phpstan.neon       export-ignore
+phpunit.xml.dist   export-ignore
+
+# Test suite
+tests/             export-ignore
+
+# Benchmarks and data
+benchmarks/        export-ignore
+resources/datasets/ export-ignore

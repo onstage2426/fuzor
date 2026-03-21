@@ -1,0 +1,36 @@
+<?xml version="1.0"?>
+<ruleset name="Fuzor">
+    <description>PSR-12 with 120-char line limit for the Fuzor library.</description>
+
+    <file>src</file>
+    <file>tests</file>
+    <exclude-pattern>vendor/*</exclude-pattern>
+
+    <arg name="basepath" value="."/>
+    <arg name="colors"/>
+    <arg value="sp"/>
+
+    <!-- PHP 8.5 minimum -->
+    <config name="php_version" value="80500"/>
+
+    <!-- PSR-12 base -->
+    <rule ref="PSR12"/>
+
+    <!-- Raise line length limit to 120 (soft); no hard limit enforced -->
+    <rule ref="Generic.Files.LineLength">
+        <properties>
+            <property name="lineLimit" value="120"/>
+            <property name="absoluteLineLimit" value="0"/>
+        </properties>
+    </rule>
+
+    <!--
+        PHP 8.5 property hooks (get/set blocks) are not yet understood by
+        PHPCS sniffs and trigger false positives in Index.php. Suppress
+        PropertyDeclaration sniffs for that file until PHPCS adds support.
+    -->
+    <rule ref="PSR2.Classes.PropertyDeclaration">
+        <exclude-pattern>src/Index\.php</exclude-pattern>
+        <exclude-pattern>src/SqliteEngine\.php</exclude-pattern>
+    </rule>
+</ruleset>
