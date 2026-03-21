@@ -1,0 +1,13 @@
+{
+    "source": {
+        "directories": ["src"]
+    },
+    "testFramework": "phpunit",
+"logs": {
+        "text": "infection.log",
+        "summary": "infection-summary.log"
+    },
+    "mutators": {
+        "@default": true
+    }
+}

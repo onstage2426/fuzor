@@ -578,4 +578,164 @@ class IndexTest extends TestCase
         $result = $index->search('merc');
         $this->assertNotContains(1, $result['ids']);
     }
+
+    // --- search() is exact, not fuzzy ---
+
+    public function testSearchIsExactNotFuzzy(): void
+    {
+        $index = Index::create($this->dbPath);
+        $index->insert(['id' => 1, 'title' => 'hello']);
+
+        // 'helo' is 1 edit away from 'hello'; exact search must not find it.
+        $index->asYouType = false;
+        $this->assertEmpty($index->search('helo')['ids']);
+
+        // searchFuzzy() with the same typo must find it, confirming the term is indexed.
+        $this->assertContains(1, $index->searchFuzzy('helo')['ids']);
+    }
+
+    // --- heap top-k ordering ---
+
+    public function testSearchTopKFromHeapIsOrdered(): void
+    {
+        $index = Index::create($this->dbPath);
+        // Five docs; TF increases with ID so BM25 score increases monotonically with ID.
+        $index->insertMany([
+            ['id' => 1, 'title' => 'sedan'],
+            ['id' => 2, 'title' => 'sedan sedan'],
+            ['id' => 3, 'title' => 'sedan sedan sedan'],
+            ['id' => 4, 'title' => 'sedan sedan sedan sedan'],
+            ['id' => 5, 'title' => 'sedan sedan sedan sedan sedan'],
+        ]);
+
+        // Request only 3 results (total=5 > 3 triggers the heap path).
+        $result = $index->search('sedan', 3);
+
+        $this->assertCount(3, $result['ids']);
+        // Doc 5 has the highest TF so it must be ranked first.
+        $this->assertSame(5, $result['ids'][0]);
+        // Results must be in descending score order.
+        for ($i = 1; $i < count($result['ids']); $i++) {
+            $prev = $result['ids'][$i - 1];
+            $curr = $result['ids'][$i];
+            $this->assertGreaterThanOrEqual(
+                $result['docScores'][$curr],
+                $result['docScores'][$prev],
+            );
+        }
+    }
+
+    // --- boolean operator precedence ---
+
+    public function testBooleanAndBindsTighterThanOr(): void
+    {
+        $index = Index::create($this->dbPath);
+        $index->insertMany([
+            ['id' => 1, 'title' => 'sedan'],          // only sedan
+            ['id' => 2, 'title' => 'coupe truck'],     // coupe AND truck
+            ['id' => 3, 'title' => 'coupe'],           // only coupe
+        ]);
+
+        // "sedan or coupe truck" must parse as sedan OR (coupe AND truck).
+        // Correct: matches 1 and 2; not 3 (coupe without truck).
+        // With reversed precedence it would parse as (sedan OR coupe) AND truck — matching 2 only.
+        $index->asYouType = false;
+        $result = $index->searchBoolean('sedan or coupe truck');
+        $this->assertContains(1, $result['ids']);
+        $this->assertContains(2, $result['ids']);
+        $this->assertNotContains(3, $result['ids']);
+    }
+
+    // --- single-term boolean as-you-type (lastTerm at postfix index 0) ---
+
+    public function testSearchBooleanSingleTermAsYouTypePrefix(): void
+    {
+        $index = Index::create($this->dbPath);
+        $index->insertMany([
+            ['id' => 1, 'title' => 'sedan'],
+            ['id' => 2, 'title' => 'coupe'],
+        ]);
+
+        // A single-term boolean query: the term is at postfix index 0.
+        // The loop that finds lastTerm must reach index 0 or prefix expansion breaks.
+        $index->asYouType = true;
+        $result = $index->searchBoolean('sed');
+        $this->assertContains(1, $result['ids']);
+        $this->assertNotContains(2, $result['ids']);
+    }
+
+    // --- fuzzy ordering by Levenshtein distance ---
+
+    public function testFuzzySearchCloserMatchRanksFirst(): void
+    {
+        $index = Index::create($this->dbPath);
+        // Query 'drago' (not indexed) is distance=1 from 'dragon' and distance=2 from 'draagon'.
+        $index->insertMany([
+            ['id' => 1, 'title' => 'dragon'],   // distance=1 from query
+            ['id' => 2, 'title' => 'draagon'],  // distance=2 from query
+        ]);
+
+        $index->fuzzyDistance = 2;
+        $index->asYouType     = false;
+        $result = $index->searchFuzzy('drago');
+
+        $this->assertContains(1, $result['ids']);
+        $this->assertContains(2, $result['ids']);
+        // The closer match (distance=1) must rank before the farther one (distance=2).
+        $pos = array_flip($result['ids']);
+        $this->assertLessThan($pos[2], $pos[1]);
+    }
+
+    // --- numOfResults=0 still counts total hits (mutant 45: || → &&) ---
+
+    public function testSearchReturnsEmptyIdsWhenNumOfResultsIsZero(): void
+    {
+        $index = Index::create($this->dbPath);
+        $index->insert(['id' => 1, 'title' => 'sedan']);
+        $result = $index->search('sedan', 0);
+        $this->assertSame([], $result['ids']);
+        $this->assertSame(1, $result['hits']);
+    }
+
+    // --- BM25 score order differs from DB fetch order (mutant 48: arsort removed) ---
+
+    public function testSearchResultsOrderedByBm25NotFetchOrder(): void
+    {
+        $index = Index::create($this->dbPath);
+        // Doc 1: tf=1, dl=1 — very short, high BM25 score per term.
+        // Doc 2: tf=3, dl=100 — long doc; DB fetches it first (higher hit_count), but BM25 penalises length.
+        $index->insertMany([
+            ['id' => 1, 'title' => 'sedan'],
+            ['id' => 2, 'title' => 'sedan sedan sedan ' . str_repeat('filler ', 97)],
+        ]);
+        $result = $index->search('sedan');
+        // Short doc must rank first; without arsort the raw DB order (doc 2) would win.
+        $this->assertSame(1, $result['ids'][0]);
+    }
+
+    // --- multi-keyword score accumulation (mutant 38: 0.0 ?? score resets accumulator) ---
+
+    public function testMultiKeywordSearchAccumulatesScoresAcrossTerms(): void
+    {
+        $index = Index::create($this->dbPath);
+        $index->insertMany([
+            ['id' => 1, 'title' => 'car sedan'],           // both terms, dl=2
+            ['id' => 2, 'title' => str_repeat('sedan ', 10)],  // sedan only, tf=10, dl=10
+        ]);
+        $index->asYouType = false;
+        // Doc 1 earns score for both 'car' (rare term, high IDF) and 'sedan'.
+        // Doc 2 earns only a sedan score (high TF but heavily length-penalised).
+        // Without accumulation the coalesce bug resets doc1 to sedan-only, so doc2 wins.
+        $result = $index->search('car sedan');
+        $this->assertSame(1, $result['ids'][0]);
+    }
+
+    // --- error message contains the directory that was rejected ---
+
+    public function testCreateErrorMessageContainsDirectory(): void
+    {
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessageMatches('#/nonexistent/dir#');
+        Index::create('/nonexistent/dir/index.db');
+    }
 }

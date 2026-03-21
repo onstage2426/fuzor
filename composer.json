@@ -11,7 +11,8 @@
         "phpunit/phpunit": "^11",
         "squizlabs/php_codesniffer": "^4.0",
         "phpstan/phpstan": "^2.1",
-        "phpbench/phpbench": "^1.5"
+        "phpbench/phpbench": "^1.5",
+        "infection/infection": "^0.32.6"
     },
     "autoload": {
         "psr-4": {
@@ -30,6 +31,12 @@
         "cs-fix": "./vendor/bin/phpcbf",
         "stan":   "./vendor/bin/phpstan analyse --memory-limit=512M",
         "bench":  "./vendor/bin/phpbench run benchmarks/FuzorBench.php --report=default",
+        "infect":  "./vendor/bin/infection",
         "check":  ["@cs", "@stan", "@test"]
+    },
+    "config": {
+        "allow-plugins": {
+            "infection/extension-installer": true
+        }
     }
 }

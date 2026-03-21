@@ -330,9 +330,11 @@ class Index
                     $stack[]  = ['__sql__' => $wrap($leftSql) . ' INTERSECT ' . $wrap($rightSql)];
                 }
             } elseif ($token === '|') {
-                // Build left before right to keep param order consistent.
-                $leftSql  = $opSql(array_pop($stack));
+                // The older entry (second pop) goes LEFT so its params — already at earlier
+                // positions in the $params array — align with the first '?' in the SQL string.
+                // The newer entry (first pop) goes RIGHT; params added here are appended after.
                 $rightSql = $opSql(array_pop($stack));
+                $leftSql  = $opSql(array_pop($stack));
                 $stack[]  = ['__sql__' => $wrap($leftSql) . ' UNION ' . $wrap($rightSql)];
             } elseif ($token === '~') {
                 // Lazy NOT marker: resolved to EXCEPT in AND context, or complement in OR context.
