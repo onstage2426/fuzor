@@ -21,6 +21,15 @@ use PDO;
  */
 class SqliteEngine
 {
+    /** Max rows per chunk when each row uses 1 bind variable (SQLite 32 766-variable ceiling). */
+    private const CHUNK_1P = 32_766;
+
+    /** Max rows per chunk when each row uses 2 bind variables. */
+    private const CHUNK_2P = 16_383;
+
+    /** Max rows per chunk when each row uses 3 bind variables. */
+    private const CHUNK_3P = 10_922;
+
     /** Absolute path to the storage directory (guaranteed trailing slash). */
     private string $storagePath;
 
@@ -362,7 +371,7 @@ class SqliteEngine
             $this->wrapInTransaction(function () use ($documents, $ids, $indexIsEmpty): void {
                 // Skip the duplicate-ID check on a known-empty table: nothing can already exist.
                 if (!$indexIsEmpty) {
-                    foreach (array_chunk(array_keys($ids), 32766) as $chunk) {
+                    foreach (array_chunk(array_keys($ids), self::CHUNK_1P) as $chunk) {
                         $placeholders = implode(',', array_fill(0, count($chunk), '?'));
                         $stmt = $this->prepare(
                             "SELECT doc_id FROM doc_lengths WHERE doc_id IN ({$placeholders})"
@@ -506,9 +515,44 @@ class SqliteEngine
 
         // Orphan terms may have been pruned from wordlist; stale cache entries would
         // corrupt the doclist on re-insertion of those terms in a future insertMany call.
-        $this->termIdCache = [];
+        $this->invalidateWriteCaches();
 
         return $length === false ? false : (int) $length;
+    }
+
+    /**
+     * Tokenise all non-id fields of a document and accumulate per-term counts.
+     *
+     * Shared by processDocument() and buildBatchBuffer().
+     * array_count_values is C-implemented: counts all tokens in one native pass,
+     * leaving only unique-term iteration to PHP.
+     *
+     * @param  array<string, mixed> $fields Document fields; 'id' is skipped.
+     * @return array{termCounts: array<string, int>, length: int}
+     */
+    private function tokenizeDocumentFields(array $fields): array
+    {
+        /** @var array<string, int> $termCounts */
+        $termCounts = [];
+        $length     = 0;
+        foreach ($fields as $key => $col) {
+            if ($key === 'id') {
+                continue;
+            }
+            $text = trim(strval($col)); // @phpstan-ignore argument.type
+            if ($text !== '') {
+                $tokens = $this->stopwords !== null
+                    ? $this->stopwords->filter(Tokenizer::tokenize($text))
+                    : Tokenizer::tokenize($text);
+                $length += count($tokens);
+                foreach (array_count_values($tokens) as $token => $count) {
+                    isset($termCounts[$token])
+                        ? $termCounts[$token] += $count
+                        : $termCounts[$token]  = $count;
+                }
+            }
+        }
+        return ['termCounts' => $termCounts, 'length' => $length];
     }
 
     /**
@@ -524,28 +568,7 @@ class SqliteEngine
     {
         $documentId = intval($row['id']); // @phpstan-ignore argument.type
 
-        /** @var array<string, int> $termCounts */
-        $termCounts = [];
-        $length = 0;
-        foreach ($row as $key => $col) {
-            if ($key === 'id') {
-                continue;
-            }
-            $text = trim(strval($col)); // @phpstan-ignore argument.type
-            if ($text !== '') {
-                $tokens = $this->stopwords !== null
-                    ? $this->stopwords->filter(Tokenizer::tokenize($text))
-                    : Tokenizer::tokenize($text);
-                $length += count($tokens);
-                // array_count_values is C-implemented: counts all tokens in one native pass,
-                // leaving only unique-term iteration to PHP.
-                foreach (array_count_values($tokens) as $token => $count) {
-                    isset($termCounts[$token])
-                        ? $termCounts[$token] += $count
-                        : $termCounts[$token]  = $count;
-                }
-            }
-        }
+        ['termCounts' => $termCounts, 'length' => $length] = $this->tokenizeDocumentFields($row);
 
         $termIds = $this->upsertWordlist($termCounts);
         $this->saveDoclist($documentId, $termIds);
@@ -642,26 +665,7 @@ class SqliteEngine
         foreach ($documents as $document) {
             $documentId = intval($document['id']); // @phpstan-ignore argument.type
 
-            /** @var array<string, int> $termCounts */
-            $termCounts = [];
-            $length     = 0;
-            foreach ($document as $key => $col) {
-                if ($key === 'id') {
-                    continue;
-                }
-                $text = trim(strval($col)); // @phpstan-ignore argument.type
-                if ($text !== '') {
-                    $tokens = $this->stopwords !== null
-                        ? $this->stopwords->filter(Tokenizer::tokenize($text))
-                        : Tokenizer::tokenize($text);
-                    $length += count($tokens);
-                    foreach (array_count_values($tokens) as $token => $count) {
-                        isset($termCounts[$token])
-                            ? $termCounts[$token] += $count
-                            : $termCounts[$token]  = $count;
-                    }
-                }
-            }
+            ['termCounts' => $termCounts, 'length' => $length] = $this->tokenizeDocumentFields($document);
 
             $docTermBuffer[$documentId]  = $termCounts;
             $docLengthBuffer[$documentId] = $length;
@@ -719,10 +723,10 @@ class SqliteEngine
                 $params[] = $termId;
                 $params[] = $docId;
                 $params[] = $hits;
-                if (++$rowCount === 10922) {
-                    ($this->bulkStmtCache['doclistChunk:10922'] ??= $index->prepare(
+                if (++$rowCount === self::CHUNK_3P) {
+                    ($this->bulkStmtCache['doclistChunk:' . self::CHUNK_3P] ??= $index->prepare(
                         'INSERT INTO doclist (term_id, doc_id, hit_count) VALUES '
-                            . implode(',', array_fill(0, 10922, '(?,?,?)'))
+                            . implode(',', array_fill(0, self::CHUNK_3P, '(?,?,?)'))
                     ))->execute($params);
                     $params   = [];
                     $rowCount = 0;
@@ -738,7 +742,7 @@ class SqliteEngine
 
         // Step 3: bulk-insert all doc_lengths rows.
         // No ON CONFLICT needed: insertMany already verified these doc_ids do not exist.
-        foreach (array_chunk($docLengthBuffer, 16383, true) as $chunk) {
+        foreach (array_chunk($docLengthBuffer, self::CHUNK_2P, true) as $chunk) {
             $n      = count($chunk);
             $params = [];
             foreach ($chunk as $docId => $length) {
@@ -791,7 +795,7 @@ class SqliteEngine
 
         // Path A: known terms — UPDATE by INTEGER PRIMARY KEY via CTE-VALUES; no RETURNING needed.
         // 3 params/row (id, hits, docs) → 10 922 rows/chunk.
-        foreach (array_chunk($knownTerms, 10922, true) as $chunk) {
+        foreach (array_chunk($knownTerms, self::CHUNK_3P, true) as $chunk) {
             $n      = count($chunk);
             $params = [];
             foreach ($chunk as $term => ['totalHits' => $hits, 'numDocs' => $numDocs]) {
@@ -814,7 +818,7 @@ class SqliteEngine
 
         // Path B: new terms — UPSERT via text UNIQUE index + RETURNING; IDs added to cache.
         // 3 params/term → 10 922 terms/chunk.
-        foreach (array_chunk($newTerms, 10922, true) as $chunk) {
+        foreach (array_chunk($newTerms, self::CHUNK_3P, true) as $chunk) {
             $n      = count($chunk);
             $params = [];
             foreach ($chunk as $term => ['totalHits' => $hits, 'numDocs' => $numDocs]) {
@@ -887,6 +891,20 @@ class SqliteEngine
     }
 
     /**
+     * Clear all write-sensitive caches after any index mutation.
+     *
+     * termIdCache: may contain IDs for terms that were just pruned from the wordlist
+     *              (removeDocumentData), so a subsequent insertMany would resolve stale IDs.
+     * wordlistCache: num_hits / num_docs on wordlist rows have changed, so cached
+     *                search results would return stale scoring data.
+     */
+    private function invalidateWriteCaches(): void
+    {
+        $this->termIdCache   = [];
+        $this->wordlistCache = [];
+    }
+
+    /**
      * Update total_documents and avg_doc_length after any document mutation.
      *
      * All three operations reduce to the same formula:
@@ -919,11 +937,11 @@ class SqliteEngine
 
         // Keep infoCache coherent so the next getInfoValues() call needs no DB read.
         // Invalidate wordlistCache: num_hits / num_docs on wordlist rows have changed.
-        $this->infoCache     = [
+        $this->infoCache = [
             'total_documents' => (string) $newN,
             'avg_doc_length'  => (string) $newAvg,
         ];
-        $this->wordlistCache = [];
+        $this->invalidateWriteCaches();
     }
 
     // --- Public read operations ---------------------------------------------
@@ -974,6 +992,45 @@ class SqliteEngine
     public function resolveWordlistIds(string $keyword, bool $isLastKeyword): array
     {
         return array_column($this->getWordlistByKeyword($keyword, $isLastKeyword), 'id');
+    }
+
+    /**
+     * Fetch a capped list of doc IDs matching any of the given term IDs.
+     *
+     * Used by the boolean PHP-side evaluator; does not fetch BM25 fields.
+     * Single-term path uses a cached statement. Multi-term path uses IN() —
+     * boolean set operations in PHP don't require hit_count ordering.
+     *
+     * @param  list<int> $termIds
+     * @return list<int>
+     */
+    public function fetchBooleanDocIds(array $termIds, int $limit): array
+    {
+        if ($termIds === []) {
+            return [];
+        }
+
+        $n = count($termIds);
+
+        if ($n === 1) {
+            $stmt = $this->stmt(
+                'boolDocIds1',
+                'SELECT doc_id FROM doclist WHERE term_id = ? ORDER BY hit_count DESC LIMIT ?'
+            );
+            $stmt->execute([$termIds[0], $limit]);
+            /** @var list<int> $rows */
+            $rows = $stmt->fetchAll(PDO::FETCH_COLUMN);
+            return $rows;
+        }
+
+        $placeholders = implode(',', array_fill(0, $n, '?'));
+        $stmt         = $this->prepare(
+            "SELECT doc_id FROM doclist WHERE term_id IN ({$placeholders}) ORDER BY hit_count DESC LIMIT ?"
+        );
+        $stmt->execute([...$termIds, $limit]);
+        /** @var list<int> $rows */
+        $rows = $stmt->fetchAll(PDO::FETCH_COLUMN);
+        return $rows;
     }
 
     /**

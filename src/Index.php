@@ -20,9 +20,6 @@ use Fuzor\Tokenizer;
  */
 class Index
 {
-    /** SQL fragment that returns zero rows; used as the identity operand for UNION. */
-    private const EMPTY_RESULT_SQL = 'SELECT NULL AS doc_id WHERE 0';
-
     private SqliteEngine $engine;
 
     // --- Engine configuration (proxied via property hooks) ----------
@@ -250,111 +247,81 @@ class Index
             }
         }
 
-        // Build a compound SQL query instead of materialising PHP arrays.
-        // Set operations (UNION / INTERSECT / EXCEPT) are pushed into SQLite, eliminating
-        // the large intermediate PHP arrays that were the main boolean performance bottleneck.
-        // SqliteEngine::wordlistCache handles deduplication of wordlist lookups across calls.
+        // PHP-side set evaluation: fetch per-term doc IDs (capped at maxDocs) from SQLite,
+        // then apply set operations in PHP via C-native array_intersect / array_diff /
+        // array_unique. This avoids SQLite compound-query materialisation (UNION/INTERSECT/
+        // EXCEPT over unbounded doclists) which was the main boolean performance bottleneck.
+        // Each term lookup is a single indexed SELECT with LIMIT; the wordlistCache ensures
+        // repeated keyword lookups within one query incur no extra DB round-trips.
 
-        /** @var list<int> $params Positional PDO parameters in SQL-appearance order. */
-        $params = [];
+        $limit = $this->engine->maxDocs;
 
-        /** Append IDs to $params and return a matching IN-clause placeholder string. */
-        /** @param list<int> $ids */
-        $addIds = function (array $ids) use (&$params): string {
-            array_push($params, ...$ids);
-            return implode(',', array_fill(0, count($ids), '?'));
-        };
-
-        /** SQL subquery returning doc_id rows for a positive keyword. */
-        $termSql = function (string $keyword, bool $isLast) use ($addIds): string {
-            $ids = $this->engine->resolveWordlistIds($keyword, $isLast);
-            if ($ids === []) {
-                return self::EMPTY_RESULT_SQL;
-            }
-            return 'SELECT doc_id FROM doclist WHERE term_id IN (' . $addIds($ids) . ')';
-        };
-
-        /** SQL subquery returning all doc_ids NOT containing a keyword (used for OR-NOT / standalone NOT). */
-        $notComplementSql = function (string $keyword) use ($addIds): string {
-            $ids = $this->engine->resolveWordlistIds($keyword, isLastKeyword: true);
-            if ($ids === []) {
-                return 'SELECT doc_id FROM doc_lengths';
-            }
-            return 'SELECT doc_id FROM doc_lengths WHERE doc_id NOT IN '
-                . '(SELECT doc_id FROM doclist WHERE term_id IN (' . $addIds($ids) . '))';
-        };
-
-        /** Wrap a SQL fragment in a subquery so it is safe as a compound SELECT operand. */
-        $wrap = fn(string $sql): string => "SELECT doc_id FROM ({$sql}) AS _s";
+        /** Fetch capped doc IDs for one keyword (resolves prefix expansion / caching). */
+        $fetchIds = fn(string $kw, bool $isLast): array =>
+            $this->engine->fetchBooleanDocIds(
+                $this->engine->resolveWordlistIds($kw, $isLast),
+                $limit
+            );
 
         /**
-         * Resolve a stack entry to a SQL fragment, appending params as a side effect.
-         * Params for $op are always appended when this function is called, so callers must
-         * invoke left-to-right to keep param order consistent with SQL placeholder order.
+         * Materialise a stack entry into a flat list of doc IDs.
+         * Strings are lazily fetched; lists are passed through; null maps to [].
          *
-         * @param  string|array{__not__: string}|array{__sql__: string}|null $op
+         * @param  string|list<int>|null $entry
+         * @return list<int>
          */
-        $opSql = function (string|array|null $op) use ($termSql, $notComplementSql, $lastTerm): string {
-            if ($op === null) {
-                return self::EMPTY_RESULT_SQL; // identity for UNION
+        $ids = function (string|array|null $entry) use ($fetchIds, $lastTerm): array {
+            if ($entry === null) {
+                return [];
             }
-            if (is_array($op)) {
-                /** @var array{__sql__: string}|array{__not__: string} $op */
-                return isset($op['__sql__']) ? $op['__sql__'] : $notComplementSql($op['__not__']);
+            if (is_string($entry)) {
+                return $fetchIds($entry, $entry === $lastTerm);
             }
-            return $termSql($op, $op === $lastTerm);
+            /** @var list<int> $entry */
+            return $entry;
         };
 
-        /** @var list<string|array{__not__: string}|array{__sql__: string}> $stack */
+        /**
+         * Stack entries: lazy string term, materialised list<int>, NOT-marker array, or null.
+         * @var list<string|list<int>|array{__not__: list<int>}|null> $stack
+         */
         $stack = [];
 
         foreach ($postfix as $token) {
-            if ($token === '&') {
+            if ($token === '~') {
+                // Lazy NOT: fetch the excluded IDs now so AND can use array_diff directly.
+                $term    = array_pop($stack);
+                $termIds = is_string($term) ? $fetchIds($term, $term === $lastTerm) : $ids($term);
+                $stack[] = ['__not__' => $termIds];
+            } elseif ($token === '&') {
                 $right = array_pop($stack);
                 $left  = array_pop($stack);
-                $rightIsNot = is_array($right) && array_key_exists('__not__', $right);
-                $leftIsNot  = is_array($left) && array_key_exists('__not__', $left);
-
-                if ($rightIsNot || $leftIsNot) {
-                    // AND-NOT via EXCEPT: avoids materialising the full complement of the negated term.
-                    // Build the positive side's SQL first so its params precede the EXCEPT term's params.
-                    /** @var array{__not__: string} $notOp */
-                    [$notOp, $posOp] = $rightIsNot ? [$right, $left] : [$left, $right];
-                    $posSql  = $opSql($posOp);
-                    $excIds  = $this->engine->resolveWordlistIds($notOp['__not__'], true);
-                    $excSql  = 'SELECT doc_id FROM doclist WHERE term_id IN (' . $addIds($excIds) . ')';
-                    $stack[] = ['__sql__' => $wrap($posSql) . ' EXCEPT ' . $wrap($excSql)];
+                if (is_array($right) && isset($right['__not__'])) {
+                    // AND-NOT: subtract negated IDs from the positive side.
+                    /** @var array{__not__: list<int>} $right */
+                    $stack[] = array_values(array_diff($ids($left), $right['__not__']));
                 } else {
-                    $leftSql  = $opSql($left);
-                    $rightSql = $opSql($right);
-                    $stack[]  = ['__sql__' => $wrap($leftSql) . ' INTERSECT ' . $wrap($rightSql)];
+                    // AND: intersection of both sides (C-native, O(n log n)).
+                    $stack[] = array_values(array_intersect($ids($left), $ids($right)));
                 }
             } elseif ($token === '|') {
-                // The older entry (second pop) goes LEFT so its params — already at earlier
-                // positions in the $params array — align with the first '?' in the SQL string.
-                // The newer entry (first pop) goes RIGHT; params added here are appended after.
-                $rightSql = $opSql(array_pop($stack));
-                $leftSql  = $opSql(array_pop($stack));
-                $stack[]  = ['__sql__' => $wrap($leftSql) . ' UNION ' . $wrap($rightSql)];
-            } elseif ($token === '~') {
-                // Lazy NOT marker: resolved to EXCEPT in AND context, or complement in OR context.
-                /** @var string $term */
-                $term    = array_pop($stack);
-                $stack[] = ['__not__' => $term];
+                // OR: merge both sides and deduplicate (preserves first-seen / popularity order).
+                $right = array_pop($stack) ?? null;
+                $left  = array_pop($stack) ?? null;
+                $stack[] = array_values(array_unique(array_merge($ids($left), $ids($right))));
             } else {
-                $stack[] = $token;
+                $stack[] = $token; // lazy string operand
             }
         }
 
-        $finalSql = $opSql(array_pop($stack) ?? null);
-        /** @var list<int> $params */
-        [$docIds, $total] = $this->engine->executeBooleanQuery($finalSql, $params, $numOfResults);
+        /** @var list<int> $docIds */
+        $docIds = $ids(array_pop($stack) ?? null);
+        $total  = count($docIds);
+        if ($total > $numOfResults) {
+            $docIds = array_slice($docIds, 0, $numOfResults);
+        }
 
-        return [
-            'ids'       => $docIds,
-            'hits'      => $total,
-            'docScores' => null,
-        ];
+        return ['ids' => $docIds, 'hits' => $total, 'docScores' => null];
     }
 
     // --- Internal -----------------------------------------------------------
