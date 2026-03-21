@@ -124,6 +124,10 @@ class IndexTest extends TestCase
         $index->insert(['id' => 1, 'title' => 'sedan']);
 
         $this->expectException(\RuntimeException::class);
+        // Require the full structure: prefix, then the conflicting ID, then the suffix.
+        // This kills concat-order mutations (ID moved to front/end) and partial-removal
+        // mutations (missing ID or missing "Use update()" suffix).
+        $this->expectExceptionMessageMatches('#^Documents already exist with ids: 1\. Use update\(\)#');
         $index->insertMany([['id' => 1, 'title' => 'already exists']]);
     }
 
@@ -193,6 +197,25 @@ class IndexTest extends TestCase
         $result = $index->search('sedan', 2);
         $this->assertCount(2, $result['ids']);
         $this->assertSame(3, $result['hits']); // total untruncated
+    }
+
+    public function testSearchDefaultNumOfResultsIsOneHundred(): void
+    {
+        // Insert 101 docs so the parameterless call must cap at exactly 100 — not 99 or 101.
+        $index = Index::create($this->dbPath);
+        $index->insertMany(array_map(fn($i) => ['id' => $i, 'title' => 'sedan'], range(1, 101)));
+
+        $result = $index->search('sedan');
+        $this->assertCount(100, $result['ids']);
+        $this->assertSame(101, $result['hits']);
+
+        $resultFuzzy = $index->searchFuzzy('sedan');
+        $this->assertCount(100, $resultFuzzy['ids']);
+        $this->assertSame(101, $resultFuzzy['hits']);
+
+        $resultBool = $index->searchBoolean('sedan');
+        $this->assertCount(100, $resultBool['ids']);
+        $this->assertSame(101, $resultBool['hits']);
     }
 
     public function testSearchIsCaseInsensitive(): void
@@ -735,7 +758,78 @@ class IndexTest extends TestCase
     public function testCreateErrorMessageContainsDirectory(): void
     {
         $this->expectException(\RuntimeException::class);
-        $this->expectExceptionMessageMatches('#/nonexistent/dir#');
+        // Require BOTH the fixed prefix AND the path so that mutants which reverse the
+        // concatenation order (path . "Directory does not exist: ") or drop the prefix
+        // (leaving just the path) are caught.
+        $this->expectExceptionMessageMatches('#^Directory does not exist: .*?/nonexistent/dir#');
         Index::create('/nonexistent/dir/index.db');
+    }
+
+    // --- Unicode normalization in boolean search ---
+
+    public function testSearchBooleanNormalizesUnicodeUppercase(): void
+    {
+        $index = Index::create($this->dbPath);
+        $index->insert(['id' => 1, 'title' => 'café']);
+        $index->asYouType = false;
+        $result = $index->searchBoolean('CAFÉ');
+        $this->assertContains(1, $result['ids']);
+    }
+
+    // --- BM25 top-k selects by score not by hit count ---
+
+    public function testSearchTopKSelectsByBm25NotByHitCount(): void
+    {
+        $index = Index::create($this->dbPath);
+        // Docs 1 and 2: high term frequency, long documents → low BM25 (length penalty).
+        // DB returns these first (by doc_id). Docs 3 and 4: single occurrence, very
+        // short → higher BM25 despite lower hit_count.
+        $index->insertMany([
+            ['id' => 1, 'title' => str_repeat('sedan ', 5) . str_repeat('filler ', 195)],
+            ['id' => 2, 'title' => str_repeat('sedan ', 3) . str_repeat('filler ', 147)],
+            ['id' => 3, 'title' => 'sedan'],
+            ['id' => 4, 'title' => 'sedan'],
+        ]);
+        // Heap path fires because total (4) > numOfResults (2).
+        // Correct: short docs win on BM25 → ids [3, 4].
+        // Mutant 34 (> → <=): short docs are never swapped in → ids [1, 2] instead.
+        $result = $index->search('sedan', 2);
+        $this->assertContains(3, $result['ids']);
+        $this->assertContains(4, $result['ids']);
+        $this->assertNotContains(1, $result['ids']);
+        $this->assertNotContains(2, $result['ids']);
+    }
+
+    // --- prefix expansion returns all matching terms, not just the first ---
+
+    public function testPrefixSearchExpandsAllMatchingTerms(): void
+    {
+        $index = Index::create($this->dbPath);
+        $index->insertMany([
+            ['id' => 1, 'title' => 'sedan'],
+            ['id' => 2, 'title' => 'suv'],
+        ]);
+        // asYouType defaults to true; query 's' must expand to both 'sedan' and 'suv'.
+        // Mutant 190 returns only the first wordlist row, so one doc would be missing.
+        $result = $index->search('s');
+        $this->assertContains(1, $result['ids']);
+        $this->assertContains(2, $result['ids']);
+    }
+
+    // --- fuzzy secondary sort: same distance → more popular term first ---
+
+    public function testSearchFuzzySecondaryOrderByPopularity(): void
+    {
+        $index = Index::create($this->dbPath);
+        $index->insertMany([
+            ['id' => 1, 'title' => 'dragon dragon dragon dragon dragon'], // 5 hits — high num_hits
+            ['id' => 2, 'title' => 'drage'],                             // 1 hit — low num_hits
+        ]);
+        // 'drako' is NOT a prefix of 'dragon' or 'drage', so the prefix lookup finds nothing
+        // and the fuzzy Levenshtein path kicks in.  Both 'dragon' (d=2) and 'drage' (d=2)
+        // are at the same edit distance from 'drako', so the secondary sort by num_hits
+        // decides order: DESC → 'dragon' first (5 hits), ASC (mutant) → 'drage' first (1 hit).
+        $result = $index->searchFuzzy('drako');
+        $this->assertSame(1, $result['ids'][0]);
     }
 }
