@@ -88,17 +88,21 @@ class SqliteEngine
     /** BM25 document length normalisation weight. 0 = no normalisation, 1 = full normalisation. */
     public float $b = 0.75;
 
-    /** Stopword filter applied during document indexing; null means no filtering. */
+    /** Stopword filter applied during document indexing and querying; null means no filtering. */
     private ?Stopwords $stopwords = null;
 
+    /** Snowball stemmer applied after stopword filtering; null when no stemmer exists for the language. */
+    private ?Stemmer $stemmer = null;
+
     /**
-     * BCP 47 language tag for stopword filtering (e.g. 'en', 'fr').
-     * Set to enable stopword removal; null (default) disables it entirely.
+     * BCP 47 language tag for stopword filtering and stemming (e.g. 'en', 'fr').
+     * Set to enable stopword removal and (where available) Snowball stemming; null (default) disables both.
      * Throws \InvalidArgumentException if no stopword list exists for the given language.
      */
     public ?string $language = null {
         set {
             $this->stopwords = $value !== null ? new Stopwords($value) : null;
+            $this->stemmer   = $value !== null && Stemmer::supports($value) ? new Stemmer($value) : null;
             $this->language  = $value;
         }
     }
@@ -545,6 +549,9 @@ class SqliteEngine
                     ? $this->stopwords->filter(Tokenizer::tokenize($text))
                     : Tokenizer::tokenize($text);
                 $length += count($tokens);
+                if ($this->stemmer !== null) {
+                    $tokens = $this->stemmer->stemTokens($tokens);
+                }
                 foreach (array_count_values($tokens) as $token => $count) {
                     isset($termCounts[$token])
                         ? $termCounts[$token] += $count
@@ -991,6 +998,9 @@ class SqliteEngine
      */
     public function resolveWordlistIds(string $keyword, bool $isLastKeyword): array
     {
+        if ($this->stemmer !== null) {
+            $keyword = $this->stemmer->stemToken($keyword);
+        }
         return array_column($this->getWordlistByKeyword($keyword, $isLastKeyword), 'id');
     }
 
@@ -1084,11 +1094,14 @@ class SqliteEngine
      */
     public function filterQueryTokens(array $tokens): array
     {
-        if ($this->stopwords === null || count($tokens) <= 1) {
-            return $tokens;
+        if ($this->stopwords !== null && count($tokens) > 1) {
+            $filtered = $this->stopwords->filter($tokens);
+            $tokens   = $filtered !== [] ? $filtered : $tokens;
         }
-        $filtered = $this->stopwords->filter($tokens);
-        return $filtered !== [] ? $filtered : $tokens;
+        if ($this->stemmer !== null) {
+            $tokens = $this->stemmer->stemTokens($tokens);
+        }
+        return $tokens;
     }
 
     /**
