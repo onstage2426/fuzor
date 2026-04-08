@@ -3,6 +3,7 @@
 namespace Fuzor\Tests;
 
 use Fuzor\Index;
+use Fuzor\IndexHandle;
 use PHPUnit\Framework\TestCase;
 
 class IndexTest extends TestCase
@@ -28,7 +29,7 @@ class IndexTest extends TestCase
     public function testCreateReturnsIndexInstance(): void
     {
         $index = Index::create($this->dbPath);
-        $this->assertInstanceOf(Index::class, $index);
+        $this->assertInstanceOf(IndexHandle::class, $index);
     }
 
     public function testOpenReturnsIndexInstance(): void
@@ -36,7 +37,7 @@ class IndexTest extends TestCase
         Index::create($this->dbPath)->close();
 
         $index = Index::open($this->dbPath);
-        $this->assertInstanceOf(Index::class, $index);
+        $this->assertInstanceOf(IndexHandle::class, $index);
     }
 
     public function testCloseReleasesConnection(): void
