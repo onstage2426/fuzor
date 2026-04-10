@@ -8,7 +8,7 @@ use Fuzor\Stemmers\SnowballStemmer;
  * Snowball stemmer wrapper for a single language.
  *
  * Maps BCP 47 language tags to generated Snowball stemmer classes.
- * Instantiated by SqliteEngine when $language is set and a stemmer exists.
+ * Instantiated by IndexStorage when $language is set and a stemmer exists.
  */
 final class Stemmer
 {

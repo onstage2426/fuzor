@@ -2,7 +2,7 @@
 
 namespace Fuzor;
 
-use Fuzor\SqliteEngine;
+use Fuzor\IndexStorage;
 
 /**
  * Factory for opening and creating Fuzor index files.
@@ -14,7 +14,9 @@ use Fuzor\SqliteEngine;
  */
 class Index
 {
-    private function __construct() {}
+    private function __construct()
+    {
+    }
 
     /**
      * Resolve a path to a canonical string, even if the file does not yet exist.
@@ -43,7 +45,7 @@ class Index
     public static function open(string $path): IndexHandle
     {
         $resolved = self::resolvePath($path);
-        $engine   = new SqliteEngine(dirname($resolved));
+        $engine   = new IndexStorage(dirname($resolved));
         $engine->selectIndex(basename($resolved));
         return new IndexHandle($engine);
     }
@@ -58,7 +60,7 @@ class Index
     public static function create(string $path, bool $force = false): IndexHandle
     {
         $resolved = self::resolvePath($path);
-        $engine   = new SqliteEngine(dirname($resolved));
+        $engine   = new IndexStorage(dirname($resolved));
         $engine->createIndex(basename($resolved), $force);
         return new IndexHandle($engine);
     }

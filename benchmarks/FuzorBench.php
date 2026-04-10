@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Fuzor\Benchmarks;
 
 use Fuzor\Index;
+use Fuzor\IndexHandle;
 use PhpBench\Attributes\AfterMethods;
 use PhpBench\Attributes\BeforeMethods;
 use PhpBench\Attributes\Groups;
@@ -44,7 +45,7 @@ class FuzorBench
     /** @var list<array{id: int, text: string}> */
     private static array $docs = [];
 
-    private Index $index;
+    private IndexHandle $index;
 
     // -----------------------------------------------------------------------
     // Shared helpers

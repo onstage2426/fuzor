@@ -2,7 +2,7 @@
 
 namespace Fuzor;
 
-use Fuzor\SqliteEngine;
+use Fuzor\IndexStorage;
 use Fuzor\Tokenizer;
 
 /**
@@ -13,13 +13,12 @@ use Fuzor\Tokenizer;
  *   $index = Index::open('/path/to/articles.db');
  *   $index = Index::create('/path/to/articles.db');
  *
- * All database interaction is delegated to SqliteEngine, which is kept as a
- * private implementation detail. Configuration properties proxy directly to
- * the engine via property hooks.
+ * All database interaction is delegated to IndexStorage. Configuration
+ * properties proxy directly to it via property hooks.
  */
 class IndexHandle
 {
-    private SqliteEngine $engine;
+    private IndexStorage $engine;
 
     // --- Engine configuration (proxied via property hooks) ----------
 
@@ -77,7 +76,7 @@ class IndexHandle
 
     // ------------------------------------------------------------------------
 
-    public function __construct(SqliteEngine $engine)
+    public function __construct(IndexStorage $engine)
     {
         $this->engine = $engine;
     }

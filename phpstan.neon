@@ -4,3 +4,5 @@ parameters:
         - src
         - tests
         - benchmarks
+    excludePaths:
+        - src/Stemmers

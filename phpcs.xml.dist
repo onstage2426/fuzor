@@ -5,6 +5,7 @@
     <file>src</file>
     <file>tests</file>
     <exclude-pattern>vendor/*</exclude-pattern>
+    <exclude-pattern>src/Stemmers/*</exclude-pattern>
 
     <arg name="basepath" value="."/>
     <arg name="colors"/>
@@ -30,7 +31,7 @@
         PropertyDeclaration sniffs for that file until PHPCS adds support.
     -->
     <rule ref="PSR2.Classes.PropertyDeclaration">
-        <exclude-pattern>src/Index\.php</exclude-pattern>
-        <exclude-pattern>src/SqliteEngine\.php</exclude-pattern>
+        <exclude-pattern>src/IndexHandle\.php</exclude-pattern>
+        <exclude-pattern>src/IndexStorage\.php</exclude-pattern>
     </rule>
 </ruleset>

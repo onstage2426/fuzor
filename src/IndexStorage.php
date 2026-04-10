@@ -19,7 +19,7 @@ use PDO;
  *
  * Requires SQLite 3.37.0+ (for STRICT tables, RETURNING, and CTEs in DML statements).
  */
-class SqliteEngine
+class IndexStorage
 {
     /** Max rows per chunk when each row uses 1 bind variable (SQLite 32 766-variable ceiling). */
     private const CHUNK_1P = 32_766;
