@@ -77,35 +77,33 @@ class StopwordsTest extends TestCase
     public function testDefaultLanguageIsNull(): void
     {
         $index = Index::create($this->dbPath);
-        $this->assertNull($index->language);
+        $this->assertNull($index->info()['language']);
     }
 
-    public function testSetLanguageEnablesStopwords(): void
+    public function testLanguageAtCreationIsReadBack(): void
     {
-        $index           = Index::create($this->dbPath);
-        $index->language = 'en';
-        $this->assertSame('en', $index->language);
+        $index = Index::create($this->dbPath, language: 'en');
+        $this->assertSame('en', $index->info()['language']);
     }
 
-    public function testSetLanguageNullDisablesStopwords(): void
+    public function testLanguageIsRestoredOnOpen(): void
     {
-        $index           = Index::create($this->dbPath);
-        $index->language = 'en';
-        $index->language = null;
-        $this->assertNull($index->language);
+        $index = Index::create($this->dbPath, language: 'en');
+        $index->close();
+
+        $reopened = Index::open($this->dbPath);
+        $this->assertSame('en', $reopened->info()['language']);
     }
 
-    public function testSetUnknownLanguageThrows(): void
+    public function testUnknownLanguageAtCreationThrows(): void
     {
-        $index = Index::create($this->dbPath);
         $this->expectException(\InvalidArgumentException::class);
-        $index->language = 'xx';
+        Index::create($this->dbPath, language: 'xx');
     }
 
     public function testStopwordsExcludedFromIndex(): void
     {
-        $index           = Index::create($this->dbPath);
-        $index->language = 'en';
+        $index = Index::create($this->dbPath, language: 'en');
         $index->insert(['id' => 1, 'body' => 'the quick brown fox']);
 
         // 'the' is a stopword — searching for it should return no results
@@ -124,16 +122,16 @@ class StopwordsTest extends TestCase
         $this->assertContains(1, $index->search('the')['ids']);
     }
 
-    public function testAllStopwordQueryFallsBackToOriginal(): void
+    public function testAllStopwordQueryDoesNotCrash(): void
     {
-        $index           = Index::create($this->dbPath);
-        $index->language = 'en';
-        // index without stopword filtering to ensure 'the' is in the index
-        $index->language = null;
-        $index->insert(['id' => 1, 'body' => 'the']);
-        $index->language = 'en';
+        // With language='en', stopwords are filtered from both inserts and queries.
+        // A query made up entirely of stopwords must not crash or throw; the fallback
+        // in filterQueryTokens re-enables the original tokens when all are stripped.
+        $index = Index::create($this->dbPath, language: 'en');
+        $index->insert(['id' => 1, 'body' => 'quick brown fox']);
 
-        // 'the' is a stopword — but it's the only term, so the search falls back to it
-        $this->assertContains(1, $index->search('the')['ids']);
+        $result = $index->search('the and or');
+        // 'the', 'and', 'or' are stopwords and were never indexed — no matches expected
+        $this->assertSame([], $result['ids']);
     }
 }

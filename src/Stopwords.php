@@ -15,13 +15,19 @@ final class Stopwords
 
     private string $lang;
 
+    /** Whether a stopword list exists for the given BCP 47 language tag. */
+    public static function supports(string $lang): bool
+    {
+        return file_exists(__DIR__ . '/../resources/stopwords/' . $lang . '.php');
+    }
+
     /**
      * @param string $lang BCP 47 language tag (e.g. 'en', 'fr', 'de').
      * @throws \InvalidArgumentException If no stopword list exists for the given language.
      */
     public function __construct(string $lang = 'en')
     {
-        if (!file_exists(__DIR__ . '/../resources/stopwords/' . $lang . '.php')) {
+        if (!self::supports($lang)) {
             throw new \InvalidArgumentException("No stopword list for language: '{$lang}'");
         }
         $this->lang = $lang;

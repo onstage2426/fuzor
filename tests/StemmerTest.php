@@ -92,9 +92,8 @@ class StemmerTest extends TestCase
     public function testStemmedFormMatchesSurfaceFormAtQuery(): void
     {
         // Index "running"; search "run" (the stem) — with asYouType off so it's exact.
-        $index             = Index::create($this->dbPath);
-        $index->language   = 'en';
-        $index->asYouType  = false;
+        $index            = Index::create($this->dbPath, language: 'en');
+        $index->asYouType = false;
         $index->insert(['id' => 1, 'body' => 'running quickly']);
 
         $this->assertContains(1, $index->search('run')['ids']);
@@ -102,8 +101,7 @@ class StemmerTest extends TestCase
 
     public function testDifferentSurfaceFormsMatchSameStem(): void
     {
-        $index            = Index::create($this->dbPath);
-        $index->language  = 'en';
+        $index            = Index::create($this->dbPath, language: 'en');
         $index->asYouType = false;
         $index->insert(['id' => 1, 'body' => 'connection to the server']);
 
@@ -125,8 +123,7 @@ class StemmerTest extends TestCase
 
     public function testBooleanSearchAppliesStemming(): void
     {
-        $index           = Index::create($this->dbPath);
-        $index->language = 'en';
+        $index = Index::create($this->dbPath, language: 'en');
         $index->insert(['id' => 1, 'body' => 'connections to the network']);
         $index->insert(['id' => 2, 'body' => 'network errors only']);
 
@@ -138,13 +135,8 @@ class StemmerTest extends TestCase
 
     public function testLanguageWithNoStemmerIndexesExactTokens(): void
     {
-        // 'zh' has stopwords but no Snowball stemmer — tokens stored as-is
-        // Use a language that has stopwords but no stemmer; 'ar' has both,
-        // so pick a language with stopwords only. Check that supported() is false for it.
-        // We verify indirectly: setting language to null after 'en' disables stemming.
+        // Without a language set, tokens are stored as-is — "run" must not match "running".
         $index            = Index::create($this->dbPath);
-        $index->language  = 'en';
-        $index->language  = null;
         $index->asYouType = false;
         $index->insert(['id' => 1, 'body' => 'running quickly']);
 
@@ -154,8 +146,7 @@ class StemmerTest extends TestCase
 
     public function testInsertManyWithStemming(): void
     {
-        $index           = Index::create($this->dbPath);
-        $index->language = 'en';
+        $index            = Index::create($this->dbPath, language: 'en');
         $index->asYouType = false;
         $index->insertMany([
             ['id' => 1, 'body' => 'connections are important'],

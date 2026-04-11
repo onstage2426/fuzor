@@ -53,15 +53,18 @@ class Index
     /**
      * Create a new index file.
      *
-     * @param  string $path  Absolute or relative path for the new SQLite index file.
-     * @param  bool   $force When true, any existing file at that path is overwritten.
-     * @throws \RuntimeException If a file already exists at $path and $force is false.
+     * @param  string      $path     Absolute or relative path for the new SQLite index file.
+     * @param  bool        $force    When true, any existing file at that path is overwritten.
+     * @param  string|null $language BCP 47 language tag for stopword filtering and stemming (e.g. 'en');
+     *                               persisted in the index file.
+     * @throws \RuntimeException        If a file already exists at $path and $force is false.
+     * @throws \InvalidArgumentException If $language is set but has no stopword list or stemmer.
      */
-    public static function create(string $path, bool $force = false): IndexHandle
+    public static function create(string $path, bool $force = false, ?string $language = null): IndexHandle
     {
         $resolved = self::resolvePath($path);
         $engine   = new IndexStorage(dirname($resolved));
-        $engine->createIndex(basename($resolved), $force);
+        $engine->createIndex(basename($resolved), $force, $language);
         return new IndexHandle($engine);
     }
 }

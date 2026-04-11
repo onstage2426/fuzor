@@ -97,11 +97,14 @@ class IndexStorage
     /**
      * BCP 47 language tag for stopword filtering and stemming (e.g. 'en', 'fr').
      * Set to enable stopword removal and (where available) Snowball stemming; null (default) disables both.
-     * Throws \InvalidArgumentException if no stopword list exists for the given language.
+     * Throws \InvalidArgumentException if the language has neither a stopword list nor a stemmer.
      */
     public ?string $language = null {
         set {
-            $this->stopwords = $value !== null ? new Stopwords($value) : null;
+    if ($value !== null && !Stopwords::supports($value) && !Stemmer::supports($value)) {
+        throw new \InvalidArgumentException("No stopword list or stemmer for language: '{$value}'");
+    }
+            $this->stopwords = $value !== null && Stopwords::supports($value) ? new Stopwords($value) : null;
             $this->stemmer   = $value !== null && Stemmer::supports($value) ? new Stemmer($value) : null;
             $this->language  = $value;
         }
@@ -124,12 +127,15 @@ class IndexStorage
      * type safety. doclist is WITHOUT ROWID (clustered on term_id, doc_id), replacing
      * the old term_id secondary index with a zero-heap-fetch primary scan.
      *
-     * @param  string $indexName Filename for the SQLite database (e.g. 'articles.db').
-     * @param  bool   $force     When true, any existing file is deleted before creation.
+     * @param  string      $indexName Filename for the SQLite database (e.g. 'articles.db').
+     * @param  bool        $force     When true, any existing file is deleted before creation.
+     * @param  string|null $language  BCP 47 language tag persisted in the index (e.g. 'en');
+     *                                null disables stopword filtering and stemming.
      * @return static
-     * @throws \RuntimeException If the index file already exists and $force is false.
+     * @throws \RuntimeException        If the index file already exists and $force is false.
+     * @throws \InvalidArgumentException If $language is set but has no stopword list or stemmer.
      */
-    public function createIndex(string $indexName, bool $force = false): static
+    public function createIndex(string $indexName, bool $force = false, ?string $language = null): static
     {
         $path = $this->storagePath . $indexName;
         if (!$force && file_exists($path)) {
@@ -185,6 +191,13 @@ class IndexStorage
         $pdo->exec("CREATE TABLE IF NOT EXISTS info (key TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT");
         $pdo->exec("INSERT INTO info (key, value) VALUES ('total_documents', 0), ('avg_doc_length', 0)");
 
+        $stmt = $pdo->prepare("INSERT INTO info (key, value) VALUES ('language', ?)");
+        $stmt->execute([$language ?? '']);
+
+        if ($language !== null) {
+            $this->language = $language;
+        }
+
         return $this;
     }
 
@@ -208,6 +221,13 @@ class IndexStorage
         $this->termIdCache   = [];
         $this->wordlistCache = [];
         $this->applyPragmas();
+
+        assert($this->index !== null);
+        $stmt  = $this->index->query("SELECT value FROM info WHERE key = 'language' LIMIT 1");
+        $row   = $stmt ? $stmt->fetch(PDO::FETCH_NUM) : false;
+        /** @var array<int, string>|false $row */
+        $lang  = (is_array($row) && $row[0] !== '') ? $row[0] : null;
+        $this->language = $lang;
     }
 
     /**
@@ -1102,6 +1122,21 @@ class IndexStorage
             $tokens = $this->stemmer->stemTokens($tokens);
         }
         return $tokens;
+    }
+
+    /**
+     * Return all index metadata as a typed map.
+     *
+     * @return array{total_documents: int, avg_doc_length: float, language: string|null}
+     */
+    public function info(): array
+    {
+        $raw = $this->getInfoValues(['total_documents', 'avg_doc_length', 'language']);
+        return [
+            'total_documents' => (int)   ($raw['total_documents'] ?? 0),
+            'avg_doc_length'  => (float) ($raw['avg_doc_length']  ?? 0.0),
+            'language'        => (isset($raw['language']) && $raw['language'] !== '') ? $raw['language'] : null,
+        ];
     }
 
     /**

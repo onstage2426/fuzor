@@ -64,16 +64,6 @@ class IndexHandle
         set { $this->engine->b = $value; }
     }
 
-    /**
-     * BCP 47 language tag for stopword filtering (e.g. 'en', 'fr', 'de').
-     * Null (default) disables stopword removal entirely.
-     * Throws \InvalidArgumentException if no stopword list exists for the given language.
-     */
-    public ?string $language {
-        get => $this->engine->language;
-        set { $this->engine->language = $value; }
-    }
-
     // ------------------------------------------------------------------------
 
     public function __construct(IndexStorage $engine)
@@ -126,6 +116,16 @@ class IndexHandle
     public function delete(int $id): void
     {
         $this->engine->delete($id);
+    }
+
+    /**
+     * Return index metadata: document count, average document length, and configured language.
+     *
+     * @return array{total_documents: int, avg_doc_length: float, language: string|null}
+     */
+    public function info(): array
+    {
+        return $this->engine->info();
     }
 
     /**
