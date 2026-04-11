@@ -18,57 +18,57 @@ use Fuzor\Tokenizer;
  */
 class IndexHandle
 {
-    private IndexStorage $engine;
+    private IndexStorage $index;
 
     // --- Engine configuration (proxied via property hooks) ----------
 
     /** When true, the last search keyword is matched as a prefix (as-you-type behaviour). */
     public bool $asYouType {
-        get => $this->engine->asYouType;
-        set { $this->engine->asYouType = $value; }
+        get => $this->index->asYouType;
+        set { $this->index->asYouType = $value; }
     }
 
     /** Number of leading characters that must match exactly before fuzzy edit distance kicks in. */
     public int $fuzzyPrefixLength {
-        get => $this->engine->fuzzyPrefixLength;
-        set { $this->engine->fuzzyPrefixLength = $value; }
+        get => $this->index->fuzzyPrefixLength;
+        set { $this->index->fuzzyPrefixLength = $value; }
     }
 
     /** Maximum number of wordlist candidates evaluated during a fuzzy search. */
     public int $fuzzyMaxExpansions {
-        get => $this->engine->fuzzyMaxExpansions;
-        set { $this->engine->fuzzyMaxExpansions = $value; }
+        get => $this->index->fuzzyMaxExpansions;
+        set { $this->index->fuzzyMaxExpansions = $value; }
     }
 
     /** Maximum Levenshtein edit distance accepted as a fuzzy match. */
     public int $fuzzyDistance {
-        get => $this->engine->fuzzyDistance;
-        set { $this->engine->fuzzyDistance = $value; }
+        get => $this->index->fuzzyDistance;
+        set { $this->index->fuzzyDistance = $value; }
     }
 
     /** Maximum number of documents returned per keyword in non-fuzzy queries. */
     public int $maxDocs {
-        get => $this->engine->maxDocs;
-        set { $this->engine->maxDocs = $value; }
+        get => $this->index->maxDocs;
+        set { $this->index->maxDocs = $value; }
     }
 
     /** BM25 term frequency saturation parameter. Higher values give more weight to repeated terms. */
     public float $k1 {
-        get => $this->engine->k1;
-        set { $this->engine->k1 = $value; }
+        get => $this->index->k1;
+        set { $this->index->k1 = $value; }
     }
 
     /** BM25 document length normalisation weight. 0 = no normalisation, 1 = full normalisation. */
     public float $b {
-        get => $this->engine->b;
-        set { $this->engine->b = $value; }
+        get => $this->index->b;
+        set { $this->index->b = $value; }
     }
 
     // ------------------------------------------------------------------------
 
     public function __construct(IndexStorage $engine)
     {
-        $this->engine = $engine;
+        $this->index = $engine;
     }
 
     // --- Document operations ------------------------------------------------
@@ -80,7 +80,7 @@ class IndexHandle
      */
     public function insert(array $document): void
     {
-        $this->engine->insert($document);
+        $this->index->insert($document);
     }
 
     /**
@@ -92,7 +92,7 @@ class IndexHandle
      */
     public function insertMany(array $documents): void
     {
-        $this->engine->insertMany($documents);
+        $this->index->insertMany($documents);
     }
 
     /**
@@ -105,7 +105,7 @@ class IndexHandle
      */
     public function update(array $document): void
     {
-        $this->engine->update($document);
+        $this->index->update($document);
     }
 
     /**
@@ -115,7 +115,7 @@ class IndexHandle
      */
     public function delete(int $id): void
     {
-        $this->engine->delete($id);
+        $this->index->delete($id);
     }
 
     /**
@@ -125,7 +125,7 @@ class IndexHandle
      */
     public function info(): array
     {
-        return $this->engine->info();
+        return $this->index->info();
     }
 
     /**
@@ -137,7 +137,7 @@ class IndexHandle
      */
     public function close(): void
     {
-        $this->engine->close();
+        $this->index->close();
     }
 
     // --- Search operations --------------------------------------------------
@@ -205,12 +205,12 @@ class IndexHandle
         // Each term lookup is a single indexed SELECT with LIMIT; the wordlistCache ensures
         // repeated keyword lookups within one query incur no extra DB round-trips.
 
-        $limit = $this->engine->maxDocs;
+        $limit = $this->index->maxDocs;
 
         /** Fetch capped doc IDs for one keyword (resolves prefix expansion / caching). */
         $fetchIds = fn(string $kw, bool $isLast): array =>
-            $this->engine->fetchBooleanDocIds(
-                $this->engine->resolveWordlistIds($kw, $isLast),
+            $this->index->fetchBooleanDocIds(
+                $this->index->resolveWordlistIds($kw, $isLast),
                 $limit
             );
 
@@ -288,12 +288,12 @@ class IndexHandle
     private function scorePhrase(string $phrase, int $numOfResults, bool $fuzzy): array
     {
         /** @var list<string> $keywords */
-        $keywords = $this->engine->filterQueryTokens(Tokenizer::tokenize($phrase));
+        $keywords = $this->index->filterQueryTokens(Tokenizer::tokenize($phrase));
 
         /** @var array<int, float> $docScores */
         $docScores = [];
 
-        $info      = $this->engine->getInfoValues(['total_documents', 'avg_doc_length']);
+        $info      = $this->index->getInfoValues(['total_documents', 'avg_doc_length']);
         $totalDocuments = (int) ($info['total_documents'] ?? 0);
         $avgdl     = max(1.0, (float) ($info['avg_doc_length'] ?? 0));
         $k1        = $this->k1;
@@ -302,7 +302,7 @@ class IndexHandle
 
         foreach ($keywords as $index => $term) {
             $isLastKeyword = $lastIndex === $index;
-            $result = $this->engine->getDocumentsAndCount($term, false, $isLastKeyword, $fuzzy);
+            $result = $this->index->getDocumentsAndCount($term, false, $isLastKeyword, $fuzzy);
             $df     = $result['numDocs'];
             // Smoothed BM25 IDF: always ≥ 0, avoids negative weights for common terms.
             $idf    = log(1 + ($totalDocuments - $df + 0.5) / ($df + 0.5));
