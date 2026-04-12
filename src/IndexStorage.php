@@ -94,21 +94,8 @@ class IndexStorage
     /** Snowball stemmer applied after stopword filtering; null when no stemmer exists for the language. */
     private ?Stemmer $stemmer = null;
 
-    /**
-     * BCP 47 language tag for stopword filtering and stemming (e.g. 'en', 'fr').
-     * Set to enable stopword removal and (where available) Snowball stemming; null (default) disables both.
-     * Throws \InvalidArgumentException if the language has neither a stopword list nor a stemmer.
-     */
-    public ?string $language = null {
-        set {
-    if ($value !== null && !Stopwords::supports($value) && !Stemmer::supports($value)) {
-        throw new \InvalidArgumentException("No stopword list or stemmer for language: '{$value}'");
-    }
-            $this->stopwords = $value !== null && Stopwords::supports($value) ? new Stopwords($value) : null;
-            $this->stemmer   = $value !== null && Stemmer::supports($value) ? new Stemmer($value) : null;
-            $this->language  = $value;
-        }
-    }
+    /** BCP 47 language tag currently active on this connection; null means no filtering. */
+    private ?string $language = null;
 
     // --- Connection management ----------------------------------------------
 
@@ -195,7 +182,7 @@ class IndexStorage
         $stmt->execute([$language ?? '']);
 
         if ($language !== null) {
-            $this->language = $language;
+            $this->applyLanguage($language);
         }
 
         return $this;
@@ -227,7 +214,24 @@ class IndexStorage
         $row   = $stmt ? $stmt->fetch(PDO::FETCH_NUM) : false;
         /** @var array<int, string>|false $row */
         $lang  = (is_array($row) && $row[0] !== '') ? $row[0] : null;
-        $this->language = $lang;
+        $this->applyLanguage($lang);
+    }
+
+    /**
+     * Instantiate Stopwords and Stemmer for the given BCP 47 tag on this connection.
+     *
+     * Called internally by createIndex() and selectIndex(). Passing null clears both.
+     *
+     * @throws \InvalidArgumentException If $language is set but has no stopword list or stemmer.
+     */
+    private function applyLanguage(?string $language): void
+    {
+        if ($language !== null && !Stopwords::supports($language) && !Stemmer::supports($language)) {
+            throw new \InvalidArgumentException("No stopword list or stemmer for language: '{$language}'");
+        }
+        $this->stopwords = $language !== null && Stopwords::supports($language) ? new Stopwords($language) : null;
+        $this->stemmer   = $language !== null && Stemmer::supports($language) ? new Stemmer($language) : null;
+        $this->language  = $language;
     }
 
     /**
@@ -1131,11 +1135,11 @@ class IndexStorage
      */
     public function info(): array
     {
-        $raw = $this->getInfoValues(['total_documents', 'avg_doc_length', 'language']);
+        $raw = $this->getInfoValues(['total_documents', 'avg_doc_length']);
         return [
             'total_documents' => (int)   ($raw['total_documents'] ?? 0),
             'avg_doc_length'  => (float) ($raw['avg_doc_length']  ?? 0.0),
-            'language'        => (isset($raw['language']) && $raw['language'] !== '') ? $raw['language'] : null,
+            'language'        => $this->language,
         ];
     }
 
