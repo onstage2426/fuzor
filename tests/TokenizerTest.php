@@ -82,4 +82,54 @@ class TokenizerTest extends TestCase
         $this->assertContains('bmw', $tokens);
         $this->assertContains('宝马', $tokens);
     }
+
+    // --- tokenizeWithOffsets ---
+
+    public function testTokenizeWithOffsetsAsciiReturnsCorrectOffsets(): void
+    {
+        $text   = 'Hello World';
+        $result = Tokenizer::tokenizeWithOffsets($text);
+        $this->assertCount(2, $result);
+        foreach ($result as [$token, $offset]) {
+            $this->assertSame($token, strtolower(substr($text, $offset, strlen($token))));
+        }
+    }
+
+    public function testTokenizeWithOffsetsTokensAreLowercased(): void
+    {
+        $result = Tokenizer::tokenizeWithOffsets('Hello World');
+        $this->assertSame('hello', $result[0][0]);
+        $this->assertSame('world', $result[1][0]);
+    }
+
+    public function testTokenizeWithOffsetsEmptyStringReturnsEmptyArray(): void
+    {
+        $this->assertSame([], Tokenizer::tokenizeWithOffsets(''));
+    }
+
+    public function testTokenizeWithOffsetsUnicodeReturnsCorrectByteOffsets(): void
+    {
+        // 'café' is 5 bytes (é is 2 bytes); 'résumé' follows after a space.
+        $text   = 'café résumé';
+        $result = Tokenizer::tokenizeWithOffsets($text);
+        $this->assertCount(2, $result);
+        foreach ($result as [$token, $offset]) {
+            // substr() uses bytes; mb_strtolower matches what tokenizeWithOffsets stores.
+            $this->assertSame($token, mb_strtolower(substr($text, $offset, strlen($token)), 'UTF-8'));
+        }
+    }
+
+    public function testTokenizeWithOffsetsFirstTokenOffsetIsZeroWhenNoLeadingDelimiter(): void
+    {
+        $result = Tokenizer::tokenizeWithOffsets('hello world');
+        $this->assertSame(0, $result[0][1]);
+    }
+
+    public function testTokenizeWithOffsetsSecondTokenOffsetIsCorrect(): void
+    {
+        $text   = 'foo bar';
+        $result = Tokenizer::tokenizeWithOffsets($text);
+        // 'bar' starts at byte 4.
+        $this->assertSame(4, $result[1][1]);
+    }
 }
