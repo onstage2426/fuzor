@@ -94,6 +94,16 @@ class IndexStorage
     /** Snowball stemmer applied after stopword filtering; null when no stemmer exists for the language. */
     private ?Stemmer $stemmer = null;
 
+    /** Whether a stopword filter is active on this connection. */
+    public bool $stopwordsActive {
+        get => $this->stopwords !== null;
+    }
+
+    /** Whether a Snowball stemmer is active on this connection. */
+    public bool $stemmerActive {
+        get => $this->stemmer !== null;
+    }
+
     /** BCP 47 language tag currently active on this connection; null means no filtering. */
     private ?string $language = null;
 
@@ -1129,6 +1139,34 @@ class IndexStorage
     }
 
     /**
+     * Like filterQueryTokens(), but also returns per-token filtering detail for inspectQuery().
+     *
+     * @param  list<string> $tokens Tokenised query terms.
+     * @return array{filtered: list<string>, all_stripped: bool, surviving_raw: list<string>}
+     */
+    public function filterQueryTokensVerbose(array $tokens): array
+    {
+        $survivingRaw = $tokens;
+        $allStripped  = false;
+
+        if ($this->stopwords !== null && count($tokens) > 1) {
+            $afterStop    = $this->stopwords->filter($tokens);
+            $allStripped  = $afterStop === [];
+            $survivingRaw = $allStripped ? $tokens : $afterStop;
+        }
+
+        $filtered = $this->stemmer !== null
+            ? $this->stemmer->stemTokens($survivingRaw)
+            : $survivingRaw;
+
+        return [
+            'filtered'      => $filtered,
+            'all_stripped'  => $allStripped,
+            'surviving_raw' => $survivingRaw,
+        ];
+    }
+
+    /**
      * Return all index metadata as a typed map.
      *
      * @return array{total_documents: int, avg_doc_length: float, language: string|null}
@@ -1174,9 +1212,11 @@ class IndexStorage
      * @param  string                    $keyword    Term to look up.
      * @param  bool                      $isLastWord Whether this is the final token in the query.
      * @param  bool                      $fuzzy      When true, fall through to Levenshtein fuzzy search on no match.
-     * @return list<array{id: int, term: string, num_hits: int, num_docs: int}>
+     * Fuzzy rows additionally carry a `distance` key (int) set by fuzzySearch().
+     *
+     * @return list<array{id: int, term: string, num_hits: int, num_docs: int, distance?: int}>
      */
-    private function getWordlistByKeyword(
+    public function getWordlistByKeyword(
         string $keyword,
         bool $isLastWord = false,
         bool $fuzzy = false

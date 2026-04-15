@@ -833,4 +833,220 @@ class IndexTest extends TestCase
         $result = $index->searchFuzzy('drako');
         $this->assertSame(1, $result['ids'][0]);
     }
+
+    // --- inspectQuery ---
+
+    public function testInspectQueryRawTokensMatchTokenizer(): void
+    {
+        $index = Index::create($this->dbPath);
+        $result = $index->inspectQuery('Hello World');
+        $this->assertSame(['hello', 'world'], $result['raw_tokens']);
+    }
+
+    public function testInspectQueryNoLanguageFilteredTokensEqualRaw(): void
+    {
+        $index = Index::create($this->dbPath);
+        $result = $index->inspectQuery('hello world');
+        $this->assertSame($result['raw_tokens'], $result['filtered_tokens']);
+        $this->assertFalse($result['stopwords_active']);
+        $this->assertFalse($result['stemmer_active']);
+    }
+
+    public function testInspectQueryStopwordsActiveWhenLanguageSet(): void
+    {
+        $index = Index::create($this->dbPath, language: 'en');
+        $result = $index->inspectQuery('hello world');
+        $this->assertTrue($result['stopwords_active']);
+    }
+
+    public function testInspectQueryStemmerActiveWhenLanguageSet(): void
+    {
+        $index = Index::create($this->dbPath, language: 'en');
+        $result = $index->inspectQuery('hello world');
+        $this->assertTrue($result['stemmer_active']);
+    }
+
+    public function testInspectQueryFilteredTokensDropsStopwords(): void
+    {
+        $index = Index::create($this->dbPath, language: 'en');
+        $result = $index->inspectQuery('the quick');
+        $this->assertNotContains('the', $result['filtered_tokens']);
+        $this->assertContains('the', $result['raw_tokens']);
+    }
+
+    public function testInspectQueryAllStrippedTrueWhenOnlyStopwords(): void
+    {
+        // Single-token all-stopword query: filterQueryTokens only strips when count > 1,
+        // so use two stopwords to trigger the all-stripped fallback.
+        $index = Index::create($this->dbPath, language: 'en');
+        $result = $index->inspectQuery('the and');
+        $this->assertTrue($result['all_stripped']);
+        // Fallback fires — filtered_tokens equals raw_tokens.
+        $this->assertSame($result['raw_tokens'], $result['filtered_tokens']);
+    }
+
+    public function testInspectQueryAllStrippedFalseWithNoLanguage(): void
+    {
+        $index = Index::create($this->dbPath);
+        $result = $index->inspectQuery('the and');
+        $this->assertFalse($result['all_stripped']);
+    }
+
+    public function testInspectQueryStemmerApplied(): void
+    {
+        $index = Index::create($this->dbPath, language: 'en');
+        $result = $index->inspectQuery('running');
+        // 'running' stems to 'run' in English Snowball
+        $this->assertSame('run', $result['filtered_tokens'][0]);
+    }
+
+    public function testInspectQueryRawToProcessedMapping(): void
+    {
+        $index = Index::create($this->dbPath, language: 'en');
+        $result = $index->inspectQuery('running');
+        $this->assertSame('running', $result['tokens'][0]['raw']);
+        $this->assertSame('run', $result['tokens'][0]['processed']);
+    }
+
+    public function testInspectQueryFoundTrueForIndexedTerm(): void
+    {
+        $index = Index::create($this->dbPath);
+        $index->insert(['id' => 1, 'body' => 'sedan']);
+        $index->asYouType = false;
+        $result = $index->inspectQuery('sedan');
+        $this->assertTrue($result['tokens'][0]['found']);
+        $this->assertGreaterThanOrEqual(1, $result['tokens'][0]['num_docs']);
+        $this->assertGreaterThanOrEqual(1, $result['tokens'][0]['num_hits']);
+    }
+
+    public function testInspectQueryFoundFalseForMissingTerm(): void
+    {
+        $index = Index::create($this->dbPath);
+        $index->asYouType = false;
+        $result = $index->inspectQuery('zzznomatch');
+        $this->assertFalse($result['tokens'][0]['found']);
+        $this->assertSame('none', $result['tokens'][0]['match_type']);
+        $this->assertSame(0, $result['tokens'][0]['num_docs']);
+        $this->assertSame(0, $result['tokens'][0]['num_hits']);
+    }
+
+    public function testInspectQueryMatchTypeExact(): void
+    {
+        $index = Index::create($this->dbPath);
+        $index->insert(['id' => 1, 'body' => 'sedan']);
+        $index->asYouType = false;
+        $result = $index->inspectQuery('sedan');
+        $this->assertSame('exact', $result['tokens'][0]['match_type']);
+    }
+
+    public function testInspectQueryMatchTypePrefix(): void
+    {
+        $index = Index::create($this->dbPath);
+        $index->insert(['id' => 1, 'body' => 'sedan']);
+        $index->asYouType = true;
+        // 'sed' is the last (only) token → prefix expansion fires
+        $result = $index->inspectQuery('sed');
+        $this->assertSame('prefix', $result['tokens'][0]['match_type']);
+        $terms = array_column($result['tokens'][0]['wordlist_rows'], 'term');
+        $this->assertContains('sedan', $terms);
+    }
+
+    public function testInspectQueryMatchTypeFuzzy(): void
+    {
+        $index = Index::create($this->dbPath);
+        $index->insert(['id' => 1, 'body' => 'sedan']);
+        $index->asYouType = false;
+        $result = $index->inspectQuery('sedaan', fuzzy: true);
+        $this->assertSame('fuzzy', $result['tokens'][0]['match_type']);
+        $this->assertNotNull($result['tokens'][0]['wordlist_rows'][0]['distance']);
+    }
+
+    public function testInspectQueryMatchTypeNoneWhenNoCandidate(): void
+    {
+        $index = Index::create($this->dbPath);
+        $index->insert(['id' => 1, 'body' => 'sedan']);
+        $index->asYouType = false;
+        $result = $index->inspectQuery('zzznomatch', fuzzy: true);
+        $this->assertSame('none', $result['tokens'][0]['match_type']);
+    }
+
+    public function testInspectQueryPrefixExpandsMultipleTerms(): void
+    {
+        $index = Index::create($this->dbPath);
+        $index->insertMany([
+            ['id' => 1, 'body' => 'sedan'],
+            ['id' => 2, 'body' => 'sediment'],
+        ]);
+        $index->asYouType = true;
+        $result = $index->inspectQuery('sed');
+        $terms = array_column($result['tokens'][0]['wordlist_rows'], 'term');
+        $this->assertContains('sedan', $terms);
+        $this->assertContains('sediment', $terms);
+    }
+
+    public function testInspectQueryIsLastOnlyTrueForFinalToken(): void
+    {
+        $index = Index::create($this->dbPath);
+        $result = $index->inspectQuery('fast sedan review');
+        $this->assertFalse($result['tokens'][0]['is_last']);
+        $this->assertFalse($result['tokens'][1]['is_last']);
+        $this->assertTrue($result['tokens'][2]['is_last']);
+    }
+
+    public function testInspectQueryIndexInfoMatchesInfoMethod(): void
+    {
+        $index = Index::create($this->dbPath);
+        $index->insert(['id' => 1, 'body' => 'sedan']);
+        $this->assertSame($index->info(), $index->inspectQuery('sedan')['index_info']);
+    }
+
+    public function testInspectQueryBooleanPostfixAndOperator(): void
+    {
+        $index = Index::create($this->dbPath);
+        $result = $index->inspectQuery('php laravel');
+        $this->assertContains('&', $result['boolean_postfix']);
+    }
+
+    public function testInspectQueryBooleanPostfixOrOperator(): void
+    {
+        $index = Index::create($this->dbPath);
+        $result = $index->inspectQuery('php or laravel');
+        $this->assertContains('|', $result['boolean_postfix']);
+    }
+
+    public function testInspectQueryBooleanPostfixNotOperator(): void
+    {
+        $index = Index::create($this->dbPath);
+        $result = $index->inspectQuery('php -wordpress');
+        $this->assertContains('~', $result['boolean_postfix']);
+    }
+
+    public function testInspectQueryEmptyPhraseReturnsEmptyLists(): void
+    {
+        $index = Index::create($this->dbPath);
+        $result = $index->inspectQuery('');
+        $this->assertSame([], $result['raw_tokens']);
+        $this->assertSame([], $result['filtered_tokens']);
+        $this->assertSame([], $result['tokens']);
+    }
+
+    public function testInspectQueryDoesNotChangeDocumentCount(): void
+    {
+        $index = Index::create($this->dbPath);
+        $index->insert(['id' => 1, 'body' => 'sedan']);
+        $before = $index->info()['total_documents'];
+        $index->inspectQuery('sedan');
+        $this->assertSame($before, $index->info()['total_documents']);
+    }
+
+    public function testInspectQueryWarmsWordlistCacheForSearch(): void
+    {
+        $index = Index::create($this->dbPath);
+        $index->insert(['id' => 1, 'body' => 'sedan']);
+        $index->asYouType = false;
+        $index->inspectQuery('sedan');
+        // If cache is warm, search returns the same result without extra DB reads.
+        $result = $index->search('sedan');
+        $this->assertContains(1, $result['ids']);
+    }
 }

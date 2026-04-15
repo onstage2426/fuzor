@@ -129,6 +129,98 @@ class IndexHandle
     }
 
     /**
+     * Explain what the engine does internally with a query string.
+     *
+     * Answers "why did my search return these results (or nothing)?" by walking the same
+     * tokenisation → stopword filtering → stemming → wordlist resolution pipeline that the
+     * real search methods use, and recording each step.
+     *
+     * Read-only: makes no writes and does not invalidate any cache. Wordlist lookups are
+     * written into the wordlist cache, so a subsequent search() call for the same phrase
+     * benefits from warm cache entries.
+     *
+     * @param  string $phrase Raw query string; processed identically to search().
+     * @param  bool   $fuzzy  When true, wordlist resolution uses Levenshtein matching
+     *                        (same as searchFuzzy()); when false, exact/prefix only.
+     * @return array{
+     *     raw_tokens:       list<string>,
+     *     filtered_tokens:  list<string>,
+     *     stopwords_active: bool,
+     *     stemmer_active:   bool,
+     *     all_stripped:     bool,
+     *     index_info:       array{total_documents: int, avg_doc_length: float, language: string|null},
+     *     tokens: list<array{
+     *         raw:           string,
+     *         processed:     string,
+     *         is_last:       bool,
+     *         found:         bool,
+     *         match_type:    string,
+     *         wordlist_rows: list<array{term: string, num_hits: int, num_docs: int, distance: int|null}>,
+     *         num_hits:      int,
+     *         num_docs:      int,
+     *     }>,
+     *     boolean_postfix: list<string>,
+     * }
+     */
+    public function inspectQuery(string $phrase, bool $fuzzy = false): array
+    {
+        $rawTokens = Tokenizer::tokenize($phrase);
+
+        $verbose = $this->index->filterQueryTokensVerbose($rawTokens);
+        /** @var list<string> $filteredTokens */
+        $filteredTokens = $verbose['filtered'];
+        /** @var list<string> $survivingRaw */
+        $survivingRaw = $verbose['surviving_raw'];
+
+        $lastIndex = count($filteredTokens) - 1;
+        $tokens    = [];
+
+        foreach ($filteredTokens as $i => $processed) {
+            $isLast       = $i === $lastIndex;
+            $rows         = $this->index->getWordlistByKeyword($processed, $isLast, $fuzzy);
+
+            $matchType = match (true) {
+                $rows === []                                                              => 'none',
+                $fuzzy && isset($rows[0]['distance'])                                    => 'fuzzy',
+                $this->asYouType && $isLast && $rows[0]['term'] !== $processed => 'prefix',
+                default                                                                  => 'exact',
+            };
+
+            $wordlistRows = array_map(
+                fn(array $r): array => [
+                    'term'     => $r['term'],
+                    'num_hits' => $r['num_hits'],
+                    'num_docs' => $r['num_docs'],
+                    'distance' => $r['distance'] ?? null,
+                ],
+                $rows
+            );
+
+            $tokens[] = [
+                'raw'          => $survivingRaw[$i] ?? $processed,
+                'processed'    => $processed,
+                'is_last'      => $isLast,
+                'found'        => $rows !== [],
+                'match_type'   => $matchType,
+                'wordlist_rows' => $wordlistRows,
+                'num_hits'     => (int) array_sum(array_column($rows, 'num_hits')),
+                'num_docs'     => (int) array_sum(array_column($rows, 'num_docs')),
+            ];
+        }
+
+        return [
+            'raw_tokens'       => $rawTokens,
+            'filtered_tokens'  => $filteredTokens,
+            'stopwords_active' => $this->index->stopwordsActive,
+            'stemmer_active'   => $this->index->stemmerActive,
+            'all_stripped'     => $verbose['all_stripped'],
+            'index_info'       => $this->index->info(),
+            'tokens'           => $tokens,
+            'boolean_postfix'  => $this->toPostfix('|' . $phrase),
+        ];
+    }
+
+    /**
      * Release the underlying database connection.
      *
      * Clears the prepared-statement cache and drops the PDO connection, allowing
