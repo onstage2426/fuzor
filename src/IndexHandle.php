@@ -64,6 +64,11 @@ class IndexHandle
         set { $this->index->b = $value; }
     }
 
+    /** BCP 47 language tag active on this index; null means no stopword filtering or stemming. */
+    public ?string $language {
+        get => $this->index->language;
+    }
+
     // ------------------------------------------------------------------------
 
     public function __construct(IndexStorage $engine)

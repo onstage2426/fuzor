@@ -6,8 +6,10 @@ namespace Fuzor;
  * Extracts the most relevant excerpt(s) from document text for a given search query.
  *
  * Finds the window of text where query terms are most densely clustered and returns
- * it as a short excerpt with ellipsis decoration. Optionally accepts a Stemmer so
- * that stemmed query terms match their surface forms in the text.
+ * it as a short excerpt with ellipsis decoration. Optionally accepts a BCP 47 language
+ * tag so that stemmed query terms match their surface forms in the text. Should match
+ * the language used at index creation time. Languages without a Snowball stemmer
+ * silently skip stemming.
  *
  * Stopword filtering is intentionally not applied to the query — stopwords score
  * zero and the fallback handles all-stopword queries gracefully. Pre-filter the
@@ -15,7 +17,7 @@ namespace Fuzor;
  *
  * Typical usage after a search:
  *
- *   $snip = new Snippeter(stemmer: new Stemmer('en'));
+ *   $snip = new Snippeter(language: 'en');
  *   echo $snip->snippet('fast connections', $doc['body']);
  *
  *   // Multiple fields at once:
@@ -26,12 +28,17 @@ namespace Fuzor;
  */
 final class Snippeter
 {
+    private readonly ?Stemmer $stemmer;
+
     public function __construct(
         private readonly int $windowSize = 200,
         private readonly int $maxSnippets = 1,
         private readonly string $ellipsis = '…',
-        private readonly ?Stemmer $stemmer = null,
+        ?string $language = null,
     ) {
+        $this->stemmer = ($language !== null && Stemmer::supports($language))
+            ? new Stemmer($language)
+            : null;
     }
 
     /**

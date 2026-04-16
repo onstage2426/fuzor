@@ -105,7 +105,7 @@ class IndexStorage
     }
 
     /** BCP 47 language tag currently active on this connection; null means no filtering. */
-    private ?string $language = null;
+    public private(set) ?string $language = null;
 
     // --- Connection management ----------------------------------------------
 
