@@ -56,19 +56,48 @@ final class Snippeter
      */
     public function snippet(string $query, string $text): string
     {
+        return $this->snippetOne($text, $this->buildQuerySet($query));
+    }
+
+    /**
+     * Snippet multiple fields at once, building the query token set once.
+     *
+     * @param string                $query  Raw search phrase.
+     * @param array<string, string> $fields Field name → text pairs.
+     * @return array<string, string>        Same keys, snippeted values.
+     */
+    public function snippetMany(string $query, array $fields): array
+    {
+        if ($fields === []) {
+            return [];
+        }
+
+        $querySet = $this->buildQuerySet($query);
+        $out      = [];
+
+        foreach ($fields as $key => $text) {
+            $out[$key] = $this->snippetOne($text, $querySet);
+        }
+
+        return $out;
+    }
+
+    // --- Internal -----------------------------------------------------------
+
+    /**
+     * Snippet a single text field against a pre-built query set.
+     *
+     * @param array<string, true> $querySet
+     */
+    private function snippetOne(string $text, array $querySet): string
+    {
         if ($text === '') {
             return '';
         }
 
         $bodyTokens = Tokenizer::tokenizeWithOffsets($text);
 
-        if ($bodyTokens === []) {
-            return $this->fallback($text);
-        }
-
-        $querySet = $this->buildQuerySet($query);
-
-        if ($querySet === []) {
+        if ($bodyTokens === [] || $querySet === []) {
             return $this->fallback($text);
         }
 
@@ -86,56 +115,6 @@ final class Snippeter
 
         return implode(' ' . $this->ellipsis . ' ', $slices);
     }
-
-    /**
-     * Snippet multiple fields at once, building the query token set once.
-     *
-     * @param string                $query  Raw search phrase.
-     * @param array<string, string> $fields Field name → text pairs.
-     * @return array<string, string>        Same keys, snippeted values.
-     */
-    public function snippetMany(string $query, array $fields): array
-    {
-        if ($fields === []) {
-            return [];
-        }
-
-        $querySet = $this->buildQuerySet($query);
-
-        $out = [];
-        foreach ($fields as $key => $text) {
-            if ($text === '') {
-                $out[$key] = '';
-                continue;
-            }
-
-            $bodyTokens = Tokenizer::tokenizeWithOffsets($text);
-
-            if ($bodyTokens === [] || $querySet === []) {
-                $out[$key] = $this->fallback($text);
-                continue;
-            }
-
-            $scores = $this->scoreTokens($bodyTokens, $querySet);
-            $wins   = $this->findWindows($scores, $bodyTokens);
-
-            if ($wins === []) {
-                $out[$key] = $this->fallback($text);
-                continue;
-            }
-
-            $slices = [];
-            foreach ($wins as [$startIdx, $endIdx]) {
-                $slices[] = $this->extractSlice($text, $bodyTokens, $startIdx, $endIdx);
-            }
-
-            $out[$key] = implode(' ' . $this->ellipsis . ' ', $slices);
-        }
-
-        return $out;
-    }
-
-    // --- Internal -----------------------------------------------------------
 
     /**
      * Return the first $windowSize characters of $text as a fallback excerpt.
