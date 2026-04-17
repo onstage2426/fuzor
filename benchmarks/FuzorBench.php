@@ -204,7 +204,7 @@ class FuzorBench
     #[ParamProviders('provideFuzzyQueries')]
     public function benchSearchFuzzy(array $params): void
     {
-        $this->index->searchFuzzy($params['query']);
+        $this->index->search($params['query'], fuzzy: true);
     }
 
     /** @return iterable<string, array{query: string}> */

@@ -195,7 +195,7 @@ class IndexTest extends TestCase
             ['id' => 3, 'title' => 'sedan'],
         ]);
 
-        $result = $index->search('sedan', 2);
+        $result = $index->search('sedan', numOfResults: 2);
         $this->assertCount(2, $result['ids']);
         $this->assertSame(3, $result['hits']); // total untruncated
     }
@@ -210,7 +210,7 @@ class IndexTest extends TestCase
         $this->assertCount(100, $result['ids']);
         $this->assertSame(101, $result['hits']);
 
-        $resultFuzzy = $index->searchFuzzy('sedan');
+        $resultFuzzy = $index->search('sedan', fuzzy: true);
         $this->assertCount(100, $resultFuzzy['ids']);
         $this->assertSame(101, $resultFuzzy['hits']);
 
@@ -307,14 +307,14 @@ class IndexTest extends TestCase
         $this->assertContains(1, $index->search('sedan')['ids']);
     }
 
-    // --- searchFuzzy ---
+    // --- search (fuzzy) ---
 
     public function testSearchFuzzyMatchesTypo(): void
     {
         $index = Index::create($this->dbPath);
         $index->insert(['id' => 1, 'title' => 'Mercedes Benz', 'body' => 'luxury car']);
 
-        $result = $index->searchFuzzy('mercdes');
+        $result = $index->search('mercdes', fuzzy: true);
         $this->assertContains(1, $result['ids']);
     }
 
@@ -323,7 +323,7 @@ class IndexTest extends TestCase
         $index = Index::create($this->dbPath);
         $index->insert(['id' => 1, 'title' => 'Volkswagen Golf']);
 
-        $result = $index->searchFuzzy('volksagen');
+        $result = $index->search('volksagen', fuzzy: true);
         $this->assertContains(1, $result['ids']);
         $this->assertArrayHasKey(1, $result['docScores']);
         $this->assertGreaterThan(0.0, $result['docScores'][1]);
@@ -507,7 +507,7 @@ class IndexTest extends TestCase
 
         $index->fuzzyDistance = 1;
         // 'sedaan' is one insertion away from 'sedan'.
-        $this->assertContains(1, $index->searchFuzzy('sedaan')['ids']);
+        $this->assertContains(1, $index->search('sedaan', fuzzy: true)['ids']);
     }
 
     public function testFuzzyDistanceOneRejectsDistanceTwoTypo(): void
@@ -517,7 +517,7 @@ class IndexTest extends TestCase
 
         $index->fuzzyDistance = 1;
         // 'seddaan' is two insertions away from 'sedan'.
-        $this->assertNotContains(1, $index->searchFuzzy('seddaan')['ids']);
+        $this->assertNotContains(1, $index->search('seddaan', fuzzy: true)['ids']);
     }
 
     public function testSearchFuzzyNoMatchReturnsEmpty(): void
@@ -525,7 +525,7 @@ class IndexTest extends TestCase
         $index = Index::create($this->dbPath);
         $index->insert(['id' => 1, 'title' => 'sedan']);
 
-        $result = $index->searchFuzzy('xqzpwk');
+        $result = $index->search('xqzpwk', fuzzy: true);
         $this->assertSame([], $result['ids']);
         $this->assertSame(0, $result['hits']);
     }
@@ -614,8 +614,8 @@ class IndexTest extends TestCase
         $index->asYouType = false;
         $this->assertEmpty($index->search('helo')['ids']);
 
-        // searchFuzzy() with the same typo must find it, confirming the term is indexed.
-        $this->assertContains(1, $index->searchFuzzy('helo')['ids']);
+        // fuzzy search with the same typo must find it, confirming the term is indexed.
+        $this->assertContains(1, $index->search('helo', fuzzy: true)['ids']);
     }
 
     // --- heap top-k ordering ---
@@ -633,7 +633,7 @@ class IndexTest extends TestCase
         ]);
 
         // Request only 3 results (total=5 > 3 triggers the heap path).
-        $result = $index->search('sedan', 3);
+        $result = $index->search('sedan', numOfResults: 3);
 
         $this->assertCount(3, $result['ids']);
         // Doc 5 has the highest TF so it must be ranked first.
@@ -701,7 +701,7 @@ class IndexTest extends TestCase
 
         $index->fuzzyDistance = 2;
         $index->asYouType     = false;
-        $result = $index->searchFuzzy('drago');
+        $result = $index->search('drago', fuzzy: true);
 
         $this->assertContains(1, $result['ids']);
         $this->assertContains(2, $result['ids']);
@@ -716,7 +716,7 @@ class IndexTest extends TestCase
     {
         $index = Index::create($this->dbPath);
         $index->insert(['id' => 1, 'title' => 'sedan']);
-        $result = $index->search('sedan', 0);
+        $result = $index->search('sedan', numOfResults: 0);
         $this->assertSame([], $result['ids']);
         $this->assertSame(1, $result['hits']);
     }
@@ -794,7 +794,7 @@ class IndexTest extends TestCase
         // Heap path fires because total (4) > numOfResults (2).
         // Correct: short docs win on BM25 → ids [3, 4].
         // Mutant 34 (> → <=): short docs are never swapped in → ids [1, 2] instead.
-        $result = $index->search('sedan', 2);
+        $result = $index->search('sedan', numOfResults: 2);
         $this->assertContains(3, $result['ids']);
         $this->assertContains(4, $result['ids']);
         $this->assertNotContains(1, $result['ids']);
@@ -830,7 +830,7 @@ class IndexTest extends TestCase
         // and the fuzzy Levenshtein path kicks in.  Both 'dragon' (d=2) and 'drage' (d=2)
         // are at the same edit distance from 'drako', so the secondary sort by num_hits
         // decides order: DESC → 'dragon' first (5 hits), ASC (mutant) → 'drage' first (1 hit).
-        $result = $index->searchFuzzy('drako');
+        $result = $index->search('drako', fuzzy: true);
         $this->assertSame(1, $result['ids'][0]);
     }
 

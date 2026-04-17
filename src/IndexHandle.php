@@ -146,7 +146,7 @@ class IndexHandle
      *
      * @param  string $phrase Raw query string; processed identically to search().
      * @param  bool   $fuzzy  When true, wordlist resolution uses Levenshtein matching
-     *                        (same as searchFuzzy()); when false, exact/prefix only.
+     *                        (same as search($phrase, fuzzy: true)); when false, exact/prefix only.
      * @return array{
      *     raw_tokens:       list<string>,
      *     filtered_tokens:  list<string>,
@@ -240,31 +240,89 @@ class IndexHandle
     // --- Search operations --------------------------------------------------
 
     /**
-     * Run a strict BM25 ranked full-text search (exact + optional as-you-type prefix).
+     * Run a BM25 ranked full-text search.
      *
-     * Fuzziness is explicitly disabled; use searchFuzzy() for Levenshtein matching.
+     * When $fuzzy is true, Levenshtein matching is used against the wordlist
+     * (respects $fuzzyDistance, $fuzzyPrefixLength, and $fuzzyMaxExpansions).
+     * When false, exact + optional as-you-type prefix matching is used.
      *
      * @param  string $phrase       Raw search phrase; will be tokenised.
+     * @param  bool   $fuzzy        When true, use Levenshtein matching.
      * @param  int    $numOfResults Maximum number of document IDs to return.
      * @return array{ids: list<int>, hits: int, docScores: array<int, float>}
      */
-    public function search(string $phrase, int $numOfResults = 100): array
+    public function search(string $phrase, bool $fuzzy = false, int $numOfResults = 100): array
     {
-        return $this->scorePhrase($phrase, $numOfResults, false);
-    }
+        /** @var list<string> $keywords */
+        $keywords = $this->index->filterQueryTokens(Tokenizer::tokenize($phrase));
 
-    /**
-     * Run a fuzzy BM25 ranked full-text search using Levenshtein matching.
-     *
-     * Respects $fuzzyDistance, $fuzzyPrefixLength, and $fuzzyMaxExpansions.
-     *
-     * @param  string $phrase       Raw search phrase; will be tokenised.
-     * @param  int    $numOfResults Maximum number of document IDs to return.
-     * @return array{ids: list<int>, hits: int, docScores: array<int, float>}
-     */
-    public function searchFuzzy(string $phrase, int $numOfResults = 100): array
-    {
-        return $this->scorePhrase($phrase, $numOfResults, true);
+        /** @var array<int, float> $docScores */
+        $docScores = [];
+
+        $info           = $this->index->getInfoValues(['total_documents', 'avg_doc_length']);
+        $totalDocuments = (int) ($info['total_documents'] ?? 0);
+        $avgdl          = max(1.0, (float) ($info['avg_doc_length'] ?? 0));
+        $k1             = $this->k1;
+        $b              = $this->b;
+        $lastIndex      = count($keywords) - 1;
+
+        foreach ($keywords as $index => $term) {
+            $isLastKeyword = $lastIndex === $index;
+            $result = $this->index->getDocumentsAndCount($term, false, $isLastKeyword, $fuzzy);
+            $df     = $result['numDocs'];
+            // Smoothed BM25 IDF: always ≥ 0, avoids negative weights for common terms.
+            $idf    = log(1 + ($totalDocuments - $df + 0.5) / ($df + 0.5));
+            // Precompute per-keyword BM25 invariants outside the per-document inner loop.
+            $idfK1p1   = $idf * ($k1 + 1);   // idf * (k1 + 1)  — numerator constant
+            $k1_1mb    = $k1 * (1.0 - $b);   // k1 * (1 - b)    — denominator constant
+            $k1b_avgdl = $k1 * $b / $avgdl;  // k1 * b / avgdl  — length-norm scale
+            // Column order from FETCH_NUM: 0=term_id, 1=doc_id, 2=hit_count, 3=doc_length
+            foreach ($result['documents'] as [, $docId, $tf, $dl]) {
+                $docScores[$docId] = ($docScores[$docId] ?? 0.0)
+                    + $idfK1p1 * $tf / ($k1_1mb + $k1b_avgdl * $dl + $tf);
+            }
+        }
+
+        $total = count($docScores);
+
+        if ($total === 0 || $numOfResults === 0) {
+            return ['ids' => [], 'hits' => $total, 'docScores' => $docScores];
+        }
+
+        if ($total <= $numOfResults) {
+            arsort($docScores);
+            return ['ids' => array_keys($docScores), 'hits' => $total, 'docScores' => $docScores];
+        }
+
+        // Partial sort: min-heap capped at $numOfResults keeps only the top-k scoring docs.
+        // SplMinHeap::top() is the weakest entry currently kept; anything that can't beat it
+        // is discarded, so the heap never grows beyond $numOfResults elements.
+        /** @var \SplMinHeap<array{float, int}> $heap */
+        $heap     = new \SplMinHeap();
+        $heapSize = 0;
+        $heapMin  = -INF;
+        foreach ($docScores as $docId => $score) {
+            if ($heapSize < $numOfResults) {
+                $heap->insert([$score, $docId]);
+                $heapSize++;
+                if ($heapSize === $numOfResults) {
+                    $heapMin = $heap->top()[0];
+                }
+            } elseif ($score > $heapMin) {
+                $heap->extract();
+                $heap->insert([$score, $docId]);
+                $heapMin = $heap->top()[0];
+            }
+        }
+
+        // extract() yields ascending order; reverse so ids are sorted by score descending.
+        /** @var list<int> $ids */
+        $ids = [];
+        while (!$heap->isEmpty()) {
+            $ids[] = $heap->extract()[1];
+        }
+
+        return ['ids' => array_reverse($ids), 'hits' => $total, 'docScores' => $docScores];
     }
 
     /**
@@ -370,90 +428,6 @@ class IndexHandle
         }
 
         return ['ids' => $docIds, 'hits' => $total, 'docScores' => null];
-    }
-
-    // --- Internal -----------------------------------------------------------
-
-    /**
-     * Core smoothed Okapi BM25 scoring loop shared by search() and searchFuzzy().
-     *
-     * @param  string $phrase       Raw search phrase; will be tokenised.
-     * @param  int    $numOfResults Maximum number of document IDs to return.
-     * @param  bool   $fuzzy        When true, Levenshtein fuzzy matching is used.
-     * @return array{ids: list<int>, hits: int, docScores: array<int, float>}
-     */
-    private function scorePhrase(string $phrase, int $numOfResults, bool $fuzzy): array
-    {
-        /** @var list<string> $keywords */
-        $keywords = $this->index->filterQueryTokens(Tokenizer::tokenize($phrase));
-
-        /** @var array<int, float> $docScores */
-        $docScores = [];
-
-        $info      = $this->index->getInfoValues(['total_documents', 'avg_doc_length']);
-        $totalDocuments = (int) ($info['total_documents'] ?? 0);
-        $avgdl     = max(1.0, (float) ($info['avg_doc_length'] ?? 0));
-        $k1        = $this->k1;
-        $b         = $this->b;
-        $lastIndex = count($keywords) - 1;
-
-        foreach ($keywords as $index => $term) {
-            $isLastKeyword = $lastIndex === $index;
-            $result = $this->index->getDocumentsAndCount($term, false, $isLastKeyword, $fuzzy);
-            $df     = $result['numDocs'];
-            // Smoothed BM25 IDF: always ≥ 0, avoids negative weights for common terms.
-            $idf    = log(1 + ($totalDocuments - $df + 0.5) / ($df + 0.5));
-            // Precompute per-keyword BM25 invariants outside the per-document inner loop.
-            $idfK1p1   = $idf * ($k1 + 1);   // idf * (k1 + 1)  — numerator constant
-            $k1_1mb    = $k1 * (1.0 - $b);   // k1 * (1 - b)    — denominator constant
-            $k1b_avgdl = $k1 * $b / $avgdl;  // k1 * b / avgdl  — length-norm scale
-            // Column order from FETCH_NUM: 0=term_id, 1=doc_id, 2=hit_count, 3=doc_length
-            foreach ($result['documents'] as [, $docId, $tf, $dl]) {
-                $docScores[$docId] = ($docScores[$docId] ?? 0.0)
-                    + $idfK1p1 * $tf / ($k1_1mb + $k1b_avgdl * $dl + $tf);
-            }
-        }
-
-        $total = count($docScores);
-
-        if ($total === 0 || $numOfResults === 0) {
-            return ['ids' => [], 'hits' => $total, 'docScores' => $docScores];
-        }
-
-        if ($total <= $numOfResults) {
-            arsort($docScores);
-            return ['ids' => array_keys($docScores), 'hits' => $total, 'docScores' => $docScores];
-        }
-
-        // Partial sort: min-heap capped at $numOfResults keeps only the top-k scoring docs.
-        // SplMinHeap::top() is the weakest entry currently kept; anything that can't beat it
-        // is discarded, so the heap never grows beyond $numOfResults elements.
-        /** @var \SplMinHeap<array{float, int}> $heap */
-        $heap     = new \SplMinHeap();
-        $heapSize = 0;
-        $heapMin  = -INF;
-        foreach ($docScores as $docId => $score) {
-            if ($heapSize < $numOfResults) {
-                $heap->insert([$score, $docId]);
-                $heapSize++;
-                if ($heapSize === $numOfResults) {
-                    $heapMin = $heap->top()[0];
-                }
-            } elseif ($score > $heapMin) {
-                $heap->extract();
-                $heap->insert([$score, $docId]);
-                $heapMin = $heap->top()[0];
-            }
-        }
-
-        // extract() yields ascending order; reverse so ids are sorted by score descending.
-        /** @var list<int> $ids */
-        $ids = [];
-        while (!$heap->isEmpty()) {
-            $ids[] = $heap->extract()[1];
-        }
-
-        return ['ids' => array_reverse($ids), 'hits' => $total, 'docScores' => $docScores];
     }
 
     /**
