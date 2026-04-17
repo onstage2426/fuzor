@@ -1295,7 +1295,7 @@ class IndexStorage
         // in the caller's BM25 scoring loop. Column order: 0=term_id, 1=doc_id,
         // 2=hit_count, 3=doc_length.
 
-        // Single-term non-fuzzy: SQL shape is fully stable — use the cached statement.
+        // Single-term non-fuzzy: simpler SQL (no UNION ALL needed) — cache by stable key.
         if ($n === 1 && !$fuzzy) {
             $stmt = $this->stmt(
                 'fetchOneTermDocs',
@@ -1310,53 +1310,16 @@ class IndexStorage
             return $rows;
         }
 
-        // Two/three-term non-fuzzy: UNION ALL — fixed arity, cacheable.
-        if ($n === 2 && !$fuzzy) {
-            $stmt = $this->stmt(
-                'fetchTwoTermDocs',
-                'SELECT sub.term_id, sub.doc_id, sub.hit_count, dl.length AS doc_length
-                  FROM (
-                    SELECT term_id, doc_id, hit_count FROM doclist WHERE term_id = ?
-                    UNION ALL
-                    SELECT term_id, doc_id, hit_count FROM doclist WHERE term_id = ?
-                    ORDER BY hit_count DESC LIMIT ?
-                  ) sub
-                  JOIN doc_lengths dl ON dl.doc_id = sub.doc_id'
-            );
-            $stmt->execute([$ids[0], $ids[1], $limit]);
-            /** @var list<array{0: int, 1: int, 2: int, 3: int}> $rows */
-            $rows = $stmt->fetchAll(PDO::FETCH_NUM);
-            return $rows;
-        }
-
-        if ($n === 3 && !$fuzzy) {
-            $stmt = $this->stmt(
-                'fetchThreeTermDocs',
-                'SELECT sub.term_id, sub.doc_id, sub.hit_count, dl.length AS doc_length
-                  FROM (
-                    SELECT term_id, doc_id, hit_count FROM doclist WHERE term_id = ?
-                    UNION ALL
-                    SELECT term_id, doc_id, hit_count FROM doclist WHERE term_id = ?
-                    UNION ALL
-                    SELECT term_id, doc_id, hit_count FROM doclist WHERE term_id = ?
-                    ORDER BY hit_count DESC LIMIT ?
-                  ) sub
-                  JOIN doc_lengths dl ON dl.doc_id = sub.doc_id'
-            );
-            $stmt->execute([$ids[0], $ids[1], $ids[2], $limit]);
-            /** @var list<array{0: int, 1: int, 2: int, 3: int}> $rows */
-            $rows = $stmt->fetchAll(PDO::FETCH_NUM);
-            return $rows;
-        }
-
-        // Multi-term non-fuzzy: UNION ALL of $n arms, shape varies — use prepare().
+        // Multi-term non-fuzzy: UNION ALL of $n arms. SQL is stable for a given $n,
+        // so cache by arity key rather than re-preparing on every call.
         if (!$fuzzy) {
             $arms = implode(' UNION ALL ', array_fill(
                 0,
                 $n,
                 'SELECT term_id, doc_id, hit_count FROM doclist WHERE term_id = ?'
             ));
-            $stmt = $this->prepare(
+            $stmt = $this->stmt(
+                "fetchNTermDocs:{$n}",
                 "SELECT sub.term_id, sub.doc_id, sub.hit_count, dl.length AS doc_length
                   FROM ({$arms} ORDER BY hit_count DESC LIMIT ?) sub
                   JOIN doc_lengths dl ON dl.doc_id = sub.doc_id"
