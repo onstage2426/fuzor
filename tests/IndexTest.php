@@ -993,11 +993,14 @@ class IndexTest extends TestCase
         $this->assertTrue($result['tokens'][2]['is_last']);
     }
 
-    public function testInspectQueryIndexInfoMatchesInfoMethod(): void
+    public function testInspectQueryIndexInfoContainsDocumentCount(): void
     {
         $index = Index::create($this->dbPath);
         $index->insert(['id' => 1, 'body' => 'sedan']);
-        $this->assertSame($index->info(), $index->inspectQuery('sedan')['index_info']);
+        $info = $index->inspectQuery('sedan')['index_info'];
+        $this->assertArrayHasKey('total_documents', $info);
+        $this->assertArrayHasKey('avg_doc_length', $info);
+        $this->assertSame('1', $info['total_documents']);
     }
 
     public function testInspectQueryBooleanPostfixAndOperator(): void
@@ -1034,9 +1037,9 @@ class IndexTest extends TestCase
     {
         $index = Index::create($this->dbPath);
         $index->insert(['id' => 1, 'body' => 'sedan']);
-        $before = $index->info()['total_documents'];
+        $before = $index->inspectQuery('sedan')['index_info']['total_documents'];
         $index->inspectQuery('sedan');
-        $this->assertSame($before, $index->info()['total_documents']);
+        $this->assertSame($before, $index->inspectQuery('sedan')['index_info']['total_documents']);
     }
 
     public function testInspectQueryWarmsWordlistCacheForSearch(): void

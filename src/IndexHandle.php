@@ -4,6 +4,8 @@ namespace Fuzor;
 
 use Fuzor\IndexStorage;
 use Fuzor\Tokenizer;
+use Fuzor\Snippeter;
+use Fuzor\Highlighter;
 
 /**
  * Represents a single open Fuzor index.
@@ -76,6 +78,11 @@ class IndexHandle
         $this->index = $engine;
     }
 
+    public function __destruct()
+    {
+        $this->index->close();
+    }
+
     // --- Document operations ------------------------------------------------
 
     /**
@@ -92,10 +99,11 @@ class IndexHandle
      * Index multiple documents in a single transaction with one stats update.
      *
      * Substantially faster than calling insert() in a loop for bulk loads.
+     * Accepts any iterable, including generators, for memory-efficient streaming.
      *
-     * @param array<array<string, mixed>> $documents Documents to index; each must contain an 'id' key.
+     * @param iterable<array<string, mixed>> $documents Documents to index; each must contain an 'id' key.
      */
-    public function insertMany(array $documents): void
+    public function insertMany(iterable $documents): void
     {
         $this->index->insertMany($documents);
     }
@@ -124,16 +132,6 @@ class IndexHandle
     }
 
     /**
-     * Return index metadata: document count, average document length, and configured language.
-     *
-     * @return array{total_documents: int, avg_doc_length: float, language: string|null}
-     */
-    public function info(): array
-    {
-        return $this->index->info();
-    }
-
-    /**
      * Explain what the engine does internally with a query string.
      *
      * Answers "why did my search return these results (or nothing)?" by walking the same
@@ -153,7 +151,7 @@ class IndexHandle
      *     stopwords_active: bool,
      *     stemmer_active:   bool,
      *     all_stripped:     bool,
-     *     index_info:       array{total_documents: int, avg_doc_length: float, language: string|null},
+     *     index_info:       array{total_documents: string, avg_doc_length: string},
      *     tokens: list<array{
      *         raw:           string,
      *         processed:     string,
@@ -213,16 +211,40 @@ class IndexHandle
             ];
         }
 
+        /** @var array{total_documents: string, avg_doc_length: string} $indexInfo */
+        $indexInfo = $this->index->getInfoValues(['total_documents', 'avg_doc_length']);
+
         return [
             'raw_tokens'       => $rawTokens,
             'filtered_tokens'  => $filteredTokens,
             'stopwords_active' => $this->index->stopwordsActive,
             'stemmer_active'   => $this->index->stemmerActive,
             'all_stripped'     => $verbose['all_stripped'],
-            'index_info'       => $this->index->info(),
+            'index_info'       => $indexInfo,
             'tokens'           => $tokens,
             'boolean_postfix'  => $this->toPostfix('|' . $phrase),
         ];
+    }
+
+    /**
+     * Return a Snippeter pre-configured with the index language.
+     */
+    public function snippeter(int $windowSize = 200, int $maxSnippets = 1, string $ellipsis = '…'): Snippeter
+    {
+        return new Snippeter(
+            windowSize: $windowSize,
+            maxSnippets: $maxSnippets,
+            ellipsis: $ellipsis,
+            language: $this->language,
+        );
+    }
+
+    /**
+     * Return a Highlighter pre-configured for use with this index.
+     */
+    public function highlighter(string $open = '<mark>', string $close = '</mark>', bool $asYouType = true): Highlighter
+    {
+        return new Highlighter(open: $open, close: $close, asYouType: $asYouType);
     }
 
     /**

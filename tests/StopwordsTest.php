@@ -77,13 +77,13 @@ class StopwordsTest extends TestCase
     public function testDefaultLanguageIsNull(): void
     {
         $index = Index::create($this->dbPath);
-        $this->assertNull($index->info()['language']);
+        $this->assertNull($index->language);
     }
 
     public function testLanguageAtCreationIsReadBack(): void
     {
         $index = Index::create($this->dbPath, language: 'en');
-        $this->assertSame('en', $index->info()['language']);
+        $this->assertSame('en', $index->language);
     }
 
     public function testLanguageIsRestoredOnOpen(): void
@@ -92,7 +92,7 @@ class StopwordsTest extends TestCase
         $index->close();
 
         $reopened = Index::open($this->dbPath);
-        $this->assertSame('en', $reopened->info()['language']);
+        $this->assertSame('en', $reopened->language);
     }
 
     public function testUnknownLanguageAtCreationThrows(): void

@@ -340,13 +340,17 @@ class IndexStorage
      * entire batch; Phase 2 upserts the wordlist once per unique term (not once
      * per document × term) and writes doclist and doc_lengths in bulk.
      *
-     * @param array<array<string, mixed>> $documents Documents to index; each must contain an 'id' key.
+     * @param iterable<array<string, mixed>> $documents Documents to index; each must contain an 'id' key.
      * @throws \InvalidArgumentException If any document is missing an 'id' key, or if the input
      *                                   contains duplicate IDs.
      * @throws \RuntimeException         If any document ID already exists in the index.
      */
-    public function insertMany(array $documents): void
+    public function insertMany(iterable $documents): void
     {
+        if (!is_array($documents)) {
+            $documents = iterator_to_array($documents, false);
+        }
+
         if (empty($documents)) {
             return;
         }
@@ -1163,21 +1167,6 @@ class IndexStorage
             'filtered'      => $filtered,
             'all_stripped'  => $allStripped,
             'surviving_raw' => $survivingRaw,
-        ];
-    }
-
-    /**
-     * Return all index metadata as a typed map.
-     *
-     * @return array{total_documents: int, avg_doc_length: float, language: string|null}
-     */
-    public function info(): array
-    {
-        $raw = $this->getInfoValues(['total_documents', 'avg_doc_length']);
-        return [
-            'total_documents' => (int)   ($raw['total_documents'] ?? 0),
-            'avg_doc_length'  => (float) ($raw['avg_doc_length']  ?? 0.0),
-            'language'        => $this->language,
         ];
     }
 
