@@ -509,6 +509,49 @@ class IndexStorage
         });
     }
 
+    /**
+     * Remove multiple documents in a single transaction with one stats update.
+     *
+     * @param list<int> $ids Document IDs to remove; non-existent IDs are silently skipped.
+     */
+    public function deleteMany(array $ids): void
+    {
+        if (empty($ids)) {
+            return;
+        }
+
+        $this->wrapInTransaction(function () use ($ids): void {
+            $docDelta    = 0;
+            $lengthDelta = 0;
+
+            foreach ($ids as $id) {
+                $length = $this->removeDocumentData((int) $id);
+                if ($length !== false) {
+                    $docDelta--;
+                    $lengthDelta -= $length;
+                }
+            }
+
+            if ($docDelta !== 0) {
+                $this->adjustStats($docDelta, $lengthDelta);
+            }
+        });
+    }
+
+    /**
+     * Return true if a document with the given ID exists in the index.
+     *
+     * @param int $id Document ID to check.
+     */
+    public function has(int $id): bool
+    {
+        $stmt = $this->stmt('docExistsCheck', 'SELECT 1 FROM doc_lengths WHERE doc_id = :id LIMIT 1');
+        $stmt->execute([':id' => $id]);
+        $result = $stmt->fetchColumn() !== false;
+        $stmt->closeCursor();
+        return $result;
+    }
+
     // --- Private write helpers ----------------------------------------------
 
     /**

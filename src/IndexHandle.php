@@ -132,6 +132,26 @@ class IndexHandle
     }
 
     /**
+     * Remove multiple documents in a single transaction with one stats update.
+     *
+     * @param list<int> $ids Document IDs to remove; non-existent IDs are silently skipped.
+     */
+    public function deleteMany(array $ids): void
+    {
+        $this->index->deleteMany($ids);
+    }
+
+    /**
+     * Return true if a document with the given ID exists in the index.
+     *
+     * @param int $id Document ID to check.
+     */
+    public function has(int $id): bool
+    {
+        return $this->index->has($id);
+    }
+
+    /**
      * Explain what the engine does internally with a query string.
      *
      * Answers "why did my search return these results (or nothing)?" by walking the same

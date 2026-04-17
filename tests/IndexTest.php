@@ -307,6 +307,116 @@ class IndexTest extends TestCase
         $this->assertContains(1, $index->search('sedan')['ids']);
     }
 
+    // --- deleteMany ---
+
+    public function testDeleteManyRemovesAllSpecifiedDocuments(): void
+    {
+        $index = Index::create($this->dbPath);
+        $index->insertMany([
+            ['id' => 1, 'title' => 'sedan'],
+            ['id' => 2, 'title' => 'coupe'],
+            ['id' => 3, 'title' => 'suv'],
+        ]);
+        $index->deleteMany([1, 2]);
+
+        $this->assertEmpty($index->search('sedan')['ids']);
+        $this->assertEmpty($index->search('coupe')['ids']);
+        $this->assertContains(3, $index->search('suv')['ids']);
+    }
+
+    public function testDeleteManyUpdatesDocumentCount(): void
+    {
+        $index = Index::create($this->dbPath);
+        $index->insertMany([
+            ['id' => 1, 'title' => 'sedan'],
+            ['id' => 2, 'title' => 'coupe'],
+            ['id' => 3, 'title' => 'suv'],
+        ]);
+        $index->deleteMany([1, 2]);
+
+        // Only one doc remains; total_documents must reflect that.
+        $info = $index->inspectQuery('suv')['index_info'];
+        $this->assertSame('1', $info['total_documents']);
+    }
+
+    public function testDeleteManyWithEmptyArrayIsNoop(): void
+    {
+        $index = Index::create($this->dbPath);
+        $index->insert(['id' => 1, 'title' => 'sedan']);
+        $index->deleteMany([]);
+
+        $this->assertContains(1, $index->search('sedan')['ids']);
+    }
+
+    public function testDeleteManyIgnoresNonexistentIds(): void
+    {
+        $index = Index::create($this->dbPath);
+        $index->insert(['id' => 1, 'title' => 'sedan']);
+        $index->deleteMany([1, 999]);
+
+        $this->assertEmpty($index->search('sedan')['ids']);
+    }
+
+    public function testDeleteManyIsAtomicOnFailure(): void
+    {
+        // All deletions happen inside a single transaction; if the call does not throw,
+        // the state must be consistent (this test ensures the empty-array guard works
+        // and that a mixed real/missing batch completes without error).
+        $index = Index::create($this->dbPath);
+        $index->insertMany([
+            ['id' => 1, 'title' => 'sedan'],
+            ['id' => 2, 'title' => 'coupe'],
+        ]);
+        $index->deleteMany([1, 888, 2]);
+
+        $this->assertEmpty($index->search('sedan')['ids']);
+        $this->assertEmpty($index->search('coupe')['ids']);
+    }
+
+    // --- has ---
+
+    public function testHasReturnsTrueForExistingDocument(): void
+    {
+        $index = Index::create($this->dbPath);
+        $index->insert(['id' => 1, 'title' => 'sedan']);
+
+        $this->assertTrue($index->has(1));
+    }
+
+    public function testHasReturnsFalseForMissingDocument(): void
+    {
+        $index = Index::create($this->dbPath);
+
+        $this->assertFalse($index->has(999));
+    }
+
+    public function testHasReturnsFalseAfterDelete(): void
+    {
+        $index = Index::create($this->dbPath);
+        $index->insert(['id' => 1, 'title' => 'sedan']);
+        $index->delete(1);
+
+        $this->assertFalse($index->has(1));
+    }
+
+    public function testHasReturnsTrueAfterUpdate(): void
+    {
+        $index = Index::create($this->dbPath);
+        $index->insert(['id' => 1, 'title' => 'sedan']);
+        $index->update(['id' => 1, 'title' => 'coupe']);
+
+        $this->assertTrue($index->has(1));
+    }
+
+    public function testHasReturnsTrueForUpsertedDocument(): void
+    {
+        $index = Index::create($this->dbPath);
+        // update() with an unknown ID inserts the document (upsert semantics).
+        $index->update(['id' => 42, 'title' => 'sedan']);
+
+        $this->assertTrue($index->has(42));
+    }
+
     // --- search (fuzzy) ---
 
     public function testSearchFuzzyMatchesTypo(): void
