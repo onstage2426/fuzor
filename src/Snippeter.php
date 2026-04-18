@@ -30,15 +30,16 @@ final class Snippeter
 {
     private readonly ?Stemmer $stemmer;
 
+    private readonly int $ngramSize;
+
     public function __construct(
         private readonly int $windowSize = 200,
         private readonly int $maxSnippets = 1,
         private readonly string $ellipsis = '…',
-        ?string $language = null,
+        private readonly ?string $language = null,
     ) {
-        $this->stemmer = ($language !== null && Stemmer::supports($language))
-            ? new Stemmer($language)
-            : null;
+        $this->stemmer   = $language !== null && Stemmer::supports($language) ? new Stemmer($language) : null;
+        $this->ngramSize = $language !== null ? Tokenizer::ngramSize($language) : 0;
     }
 
     /**
@@ -95,7 +96,7 @@ final class Snippeter
             return '';
         }
 
-        $bodyTokens = Tokenizer::tokenizeWithOffsets($text);
+        $bodyTokens = Tokenizer::tokenizeWithOffsets($text, $this->language);
 
         if ($bodyTokens === [] || $querySet === []) {
             return $this->fallback($text);
@@ -139,17 +140,16 @@ final class Snippeter
      */
     private function buildQuerySet(string $query): array
     {
-        $tokens = Tokenizer::tokenize($query);
+        $tokens = Tokenizer::tokenize($query, $this->language);
         if ($tokens === []) {
             return [];
         }
 
         $set = array_fill_keys($tokens, true);
 
-        if ($this->stemmer !== null) {
-            foreach ($this->stemmer->stemTokens($tokens) as $stem) {
-                $set[$stem] = true;
-            }
+        $stems = $this->stemmer !== null ? $this->stemmer->stemTokens($tokens) : $tokens;
+        foreach ($stems as $stem) {
+            $set[$stem] = true;
         }
 
         return $set;
@@ -252,7 +252,7 @@ final class Snippeter
         if ($count === 0) {
             return 10;
         }
-        $totalLen = array_sum(array_map(fn(array $t): int => strlen($t[0]), $bodyTokens));
+        $totalLen = array_sum(array_map(fn(array $t): int => mb_strlen($t[0], 'UTF-8'), $bodyTokens));
         $avgLen   = $totalLen / $count;
         // +1 accounts for average inter-token spacing.
         return max(3, (int) round($this->windowSize / ($avgLen + 1)));
@@ -271,14 +271,19 @@ final class Snippeter
         $startByte = $bodyTokens[$startIdx][1];
         $endByte   = $lastTok[1] + strlen($lastTok[0]);
 
-        // Snap left boundary backward to preceding whitespace.
-        while ($startByte > 0 && !$this->isWhitespace($text[$startByte - 1])) {
-            $startByte--;
-        }
+        // For ngram languages the text contains no spaces between characters, so whitespace
+        // snapping is skipped. The token byte offsets from ngramWithOffsets are already
+        // aligned to valid UTF-8 codepoint boundaries.
+        if ($this->ngramSize === 0) {
+            // Snap left boundary backward to preceding whitespace.
+            while ($startByte > 0 && !$this->isWhitespace($text[$startByte - 1])) {
+                $startByte--;
+            }
 
-        // Snap right boundary forward to following whitespace.
-        while ($endByte < $textLen && !$this->isWhitespace($text[$endByte])) {
-            $endByte++;
+            // Snap right boundary forward to following whitespace.
+            while ($endByte < $textLen && !$this->isWhitespace($text[$endByte])) {
+                $endByte++;
+            }
         }
 
         $slice     = substr($text, $startByte, $endByte - $startByte);

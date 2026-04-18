@@ -1162,4 +1162,99 @@ class IndexTest extends TestCase
         $result = $index->search('sedan');
         $this->assertContains(1, $result['ids']);
     }
+
+    // --- CJK / ngram languages ---
+
+    public function testZhInsertAndSearchBigram(): void
+    {
+        $index = Index::create($this->dbPath, language: 'zh');
+        $index->insert(['id' => 1, 'body' => '轿车测试']);
+
+        // '轿车' is a bigram within the indexed text
+        $this->assertContains(1, $index->search('轿车')['ids']);
+    }
+
+    public function testZhSingleCharSearch(): void
+    {
+        // Unigrams are emitted at index time for zh so single-character searches work.
+        $index = Index::create($this->dbPath, language: 'zh');
+        $index->insert(['id' => 1, 'body' => '轿车测试']);
+
+        $this->assertContains(1, $index->search('车')['ids']);
+    }
+
+    public function testZhDoesNotMatchUnrelatedDocument(): void
+    {
+        $index = Index::create($this->dbPath, language: 'zh');
+        $index->insertMany([
+            ['id' => 1, 'body' => '轿车测试'],
+            ['id' => 2, 'body' => '飞机起飞'],
+        ]);
+
+        $this->assertNotContains(2, $index->search('轿车')['ids']);
+    }
+
+    public function testJaInsertAndSearchBigram(): void
+    {
+        $index = Index::create($this->dbPath, language: 'ja');
+        $index->insert(['id' => 1, 'body' => '東京タワー']);
+
+        $this->assertContains(1, $index->search('東京')['ids']);
+    }
+
+    public function testKoInsertAndSearchBigram(): void
+    {
+        $index = Index::create($this->dbPath, language: 'ko');
+        $index->insert(['id' => 1, 'body' => '서울특별시']);
+
+        $this->assertContains(1, $index->search('서울')['ids']);
+    }
+
+    public function testThInsertAndSearchTrigram(): void
+    {
+        $index = Index::create($this->dbPath, language: 'th');
+        $index->insert(['id' => 1, 'body' => 'กรุงเทพมหานคร']);
+
+        // 'กรุงเท' is a trigram within the indexed text
+        $this->assertContains(1, $index->search('กรุงเท')['ids']);
+    }
+
+    public function testZhBooleanSearch(): void
+    {
+        $index = Index::create($this->dbPath, language: 'zh');
+        $index->insertMany([
+            ['id' => 1, 'body' => '轿车测试'],
+            ['id' => 2, 'body' => '飞机起飞'],
+        ]);
+
+        $result = $index->searchBoolean('轿车 -飞机');
+        $this->assertContains(1, $result['ids']);
+        $this->assertNotContains(2, $result['ids']);
+    }
+
+    public function testZhQueryTokensAreNgrammed(): void
+    {
+        // inspectQuery must show bigrams in filtered_tokens, not the raw full string.
+        $index  = Index::create($this->dbPath, language: 'zh');
+        $result = $index->inspectQuery('轿车');
+
+        $this->assertContains('轿车', $result['filtered_tokens']);
+        // Raw tokens show the output of the base tokenizer (whole string as one unit).
+        $this->assertSame(['轿车'], $result['raw_tokens']);
+    }
+
+    public function testZhMixedQueryAsciiTokenPassthrough(): void
+    {
+        // ASCII tokens in a mixed query must not be ngrammed.
+        $index = Index::create($this->dbPath, language: 'zh');
+        $index->insertMany([
+            ['id' => 1, 'body' => 'BMW 轿车'],
+            ['id' => 2, 'body' => '轿车'],
+        ]);
+
+        // Both docs contain '轿车'; only doc 1 also contains 'bmw'.
+        $result = $index->searchBoolean('bmw 轿车');
+        $this->assertContains(1, $result['ids']);
+        $this->assertNotContains(2, $result['ids']);
+    }
 }

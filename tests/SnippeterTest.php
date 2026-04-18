@@ -234,4 +234,34 @@ class SnippeterTest extends TestCase
         $result = $snip->snippet('цель', $text);
         $this->assertTrue(mb_check_encoding($result, 'UTF-8'));
     }
+
+    // --- CJK / ngram ---
+
+    public function testCjkSnippetFindsWindowAroundBigram(): void
+    {
+        $snip = new Snippeter(windowSize: 8, language: 'zh');
+        // '轿车' is a bigram; the window should contain it.
+        // windowSize=8 chars → ~2 bigrams; target is isolated so the window finds it.
+        $text   = '无关文字无关文字' . '轿车' . '无关文字无关文字';
+        $result = $snip->snippet('轿车', $text);
+        $this->assertStringContainsString('轿车', $result);
+    }
+
+    public function testCjkSnippetReturnsValidUtf8(): void
+    {
+        $snip   = new Snippeter(windowSize: 10, language: 'zh');
+        $text   = str_repeat('无关文字', 10) . '轿车测试';
+        $result = $snip->snippet('轿车', $text);
+        $this->assertTrue(mb_check_encoding($result, 'UTF-8'));
+    }
+
+    public function testThaiSnippetFindsTrigram(): void
+    {
+        $snip = new Snippeter(windowSize: 10, language: 'th');
+        // Use short padding so the window is large enough to reach the target.
+        $text   = 'คำอื่นคำ' . 'กรุงเทพ' . 'คำอื่นคำ';
+        $result = $snip->snippet('กรุงเท', $text);
+        // The window finds the densest cluster of matching trigrams inside 'กรุงเทพ'.
+        $this->assertStringContainsString('รุงเท', $result);
+    }
 }

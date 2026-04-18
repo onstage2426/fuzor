@@ -3,7 +3,6 @@
 namespace Fuzor;
 
 use Fuzor\IndexStorage;
-use Fuzor\Tokenizer;
 use Fuzor\Snippeter;
 use Fuzor\Highlighter;
 
@@ -187,9 +186,7 @@ class IndexHandle
      */
     public function inspectQuery(string $phrase, bool $fuzzy = false): array
     {
-        $rawTokens = Tokenizer::tokenize($phrase);
-
-        $verbose = $this->index->filterQueryTokensVerbose($rawTokens);
+        $verbose = $this->index->filterQueryTokensVerbose($phrase);
         /** @var list<string> $filteredTokens */
         $filteredTokens = $verbose['filtered'];
         /** @var list<string> $survivingRaw */
@@ -235,7 +232,7 @@ class IndexHandle
         $indexInfo = $this->index->getInfoValues(['total_documents', 'avg_doc_length']);
 
         return [
-            'raw_tokens'       => $rawTokens,
+            'raw_tokens'       => $verbose['raw_tokens'],
             'filtered_tokens'  => $filteredTokens,
             'stopwords_active' => $this->index->stopwordsActive,
             'stemmer_active'   => $this->index->stemmerActive,
@@ -255,7 +252,7 @@ class IndexHandle
             windowSize: $windowSize,
             maxSnippets: $maxSnippets,
             ellipsis: $ellipsis,
-            language: $this->language,
+            language: $this->index->language,
         );
     }
 
@@ -264,7 +261,12 @@ class IndexHandle
      */
     public function highlighter(string $open = '<mark>', string $close = '</mark>', bool $asYouType = true): Highlighter
     {
-        return new Highlighter(open: $open, close: $close, asYouType: $asYouType);
+        return new Highlighter(
+            open: $open,
+            close: $close,
+            asYouType: $asYouType,
+            language: $this->index->language,
+        );
     }
 
     /**
@@ -296,7 +298,7 @@ class IndexHandle
     public function search(string $phrase, bool $fuzzy = false, int $numOfResults = 100): array
     {
         /** @var list<string> $keywords */
-        $keywords = $this->index->filterQueryTokens(Tokenizer::tokenize($phrase));
+        $keywords = $this->index->filterQueryTokens($phrase);
 
         /** @var array<int, float> $docScores */
         $docScores = [];

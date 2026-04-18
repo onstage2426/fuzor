@@ -88,24 +88,22 @@ class IndexStorage
     /** BM25 document length normalisation weight. 0 = no normalisation, 1 = full normalisation. */
     public float $b = 0.75;
 
-    /** Stopword filter applied during document indexing and querying; null means no filtering. */
+    /** BCP 47 language tag active on this index; null means no stopword filtering or stemming. */
+    public private(set) ?string $language = null;
+
+    /** Active stopword filter; null when no language is set or language has no stopword list. */
     private ?Stopwords $stopwords = null;
 
-    /** Snowball stemmer applied after stopword filtering; null when no stemmer exists for the language. */
+    /** Active stemmer; null when no language is set or language has no stemmer. */
     private ?Stemmer $stemmer = null;
 
-    /** Whether a stopword filter is active on this connection. */
     public bool $stopwordsActive {
         get => $this->stopwords !== null;
     }
 
-    /** Whether a Snowball stemmer is active on this connection. */
     public bool $stemmerActive {
         get => $this->stemmer !== null;
     }
-
-    /** BCP 47 language tag currently active on this connection; null means no filtering. */
-    public private(set) ?string $language = null;
 
     // --- Connection management ----------------------------------------------
 
@@ -239,9 +237,9 @@ class IndexStorage
         if ($language !== null && !Stopwords::supports($language) && !Stemmer::supports($language)) {
             throw new \InvalidArgumentException("No stopword list or stemmer for language: '{$language}'");
         }
+        $this->language  = $language;
         $this->stopwords = $language !== null && Stopwords::supports($language) ? new Stopwords($language) : null;
         $this->stemmer   = $language !== null && Stemmer::supports($language) ? new Stemmer($language) : null;
-        $this->language  = $language;
     }
 
     /**
@@ -626,17 +624,16 @@ class IndexStorage
             }
             $text = trim(strval($col)); // @phpstan-ignore argument.type
             if ($text !== '') {
-                $tokens = $this->stopwords !== null
-                    ? $this->stopwords->filter(Tokenizer::tokenize($text))
-                    : Tokenizer::tokenize($text);
+                $tokens = Tokenizer::tokenize($text, $this->language);
+                if ($this->stopwords !== null) {
+                    $tokens = $this->stopwords->filter($tokens);
+                }
                 $length += count($tokens);
                 if ($this->stemmer !== null) {
                     $tokens = $this->stemmer->stemTokens($tokens);
                 }
                 foreach (array_count_values($tokens) as $token => $count) {
-                    isset($termCounts[$token])
-                        ? $termCounts[$token] += $count
-                        : $termCounts[$token]  = $count;
+                    $termCounts[$token] = ($termCounts[$token] ?? 0) + $count;
                 }
             }
         }
@@ -1079,9 +1076,18 @@ class IndexStorage
      */
     public function resolveWordlistIds(string $keyword, bool $isLastKeyword): array
     {
-        if ($this->stemmer !== null) {
-            $keyword = $this->stemmer->stemToken($keyword);
+        $ngramSize = Tokenizer::ngramSize($this->language ?? '');
+        if ($ngramSize > 0 && Tokenizer::isNgramToken($keyword)) {
+            $ngrams = Tokenizer::ngram($keyword, $ngramSize, includeUnigrams: $ngramSize === 2);
+            $ids    = [];
+            foreach ($ngrams as $ngram) {
+                foreach ($this->getWordlistByKeyword($ngram, false) as $row) {
+                    $ids[] = $row['id'];
+                }
+            }
+            return array_values(array_unique($ids));
         }
+        $keyword = $this->stemmer !== null ? $this->stemmer->stemToken($keyword) : $keyword;
         return array_column($this->getWordlistByKeyword($keyword, $isLastKeyword), 'id');
     }
 
@@ -1167,14 +1173,16 @@ class IndexStorage
     }
 
     /**
-     * Filter stopwords from query tokens, falling back to the original list when
-     * all tokens would be removed (so an all-stopword query still returns results).
+     * Tokenise and filter a raw query phrase.
      *
-     * @param  list<string> $tokens Tokenised query terms.
-     * @return list<string>         Filtered tokens, or the original list if filtering empties it.
+     * Splits, ngram-expands, stopword-filters, and stems in one call. Falls back to
+     * the unfiltered token list when all tokens would be removed by stopword filtering.
+     *
+     * @return list<string>
      */
-    public function filterQueryTokens(array $tokens): array
+    public function filterQueryTokens(string $phrase): array
     {
+        $tokens = Tokenizer::tokenize($phrase, $this->language);
         if ($this->stopwords !== null && count($tokens) > 1) {
             $filtered = $this->stopwords->filter($tokens);
             $tokens   = $filtered !== [] ? $filtered : $tokens;
@@ -1186,20 +1194,20 @@ class IndexStorage
     }
 
     /**
-     * Like filterQueryTokens(), but also returns per-token filtering detail for inspectQuery().
+     * Like filterQueryTokens(), but also returns per-token detail for inspectQuery().
      *
-     * @param  list<string> $tokens Tokenised query terms.
-     * @return array{filtered: list<string>, all_stripped: bool, surviving_raw: list<string>}
+     * @return array{raw_tokens: list<string>, filtered: list<string>, all_stripped: bool, surviving_raw: list<string>}
      */
-    public function filterQueryTokensVerbose(array $tokens): array
+    public function filterQueryTokensVerbose(string $phrase): array
     {
-        $survivingRaw = $tokens;
+        $rawTokens    = Tokenizer::split($phrase);
+        $survivingRaw = Tokenizer::tokenize($phrase, $this->language);
         $allStripped  = false;
 
-        if ($this->stopwords !== null && count($tokens) > 1) {
-            $afterStop    = $this->stopwords->filter($tokens);
+        if ($this->stopwords !== null && count($survivingRaw) > 1) {
+            $afterStop    = $this->stopwords->filter($survivingRaw);
             $allStripped  = $afterStop === [];
-            $survivingRaw = $allStripped ? $tokens : $afterStop;
+            $survivingRaw = $allStripped ? $survivingRaw : $afterStop;
         }
 
         $filtered = $this->stemmer !== null
@@ -1207,6 +1215,7 @@ class IndexStorage
             : $survivingRaw;
 
         return [
+            'raw_tokens'    => $rawTokens,
             'filtered'      => $filtered,
             'all_stripped'  => $allStripped,
             'surviving_raw' => $survivingRaw,
@@ -1265,7 +1274,7 @@ class IndexStorage
             }
         }
 
-        if ($this->asYouType && $isLastWord) {
+        if ($this->asYouType && $isLastWord && Tokenizer::ngramSize($this->language ?? '') === 0) {
             $stmt = $this->stmt(
                 'wordlistPrefix',
                 'SELECT id, term, num_hits, num_docs FROM wordlist'

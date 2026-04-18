@@ -140,4 +140,39 @@ class HighlighterTest extends TestCase
         $hl = new Highlighter('<mark>', '</mark>', false);
         $this->assertSame('<mark>CAFÉ</mark>', $hl->highlight('café', 'CAFÉ'));
     }
+
+    // --- CJK / ngram ---
+
+    public function testCjkHighlightsBigramInsideLongerText(): void
+    {
+        // Without language, word-boundary regex prevents matches inside continuous CJK text.
+        // With language: 'zh', the plain-substring regex must match '轿车' within the sentence.
+        $hl   = new Highlighter(language: 'zh');
+        $text = '这是一辆轿车测试';
+        $this->assertStringContainsString('<mark>轿车</mark>', $hl->highlight('轿车', $text));
+    }
+
+    public function testCjkHighlightWorksEvenWithoutLanguage(): void
+    {
+        // The highlighter classifies tokens via isNgramToken() regardless of language,
+        // so CJK substring matching works even without setting language: 'zh'.
+        $hl   = new Highlighter();
+        $text = '这是一辆轿车测试';
+        $this->assertStringContainsString('<mark>轿车</mark>', $hl->highlight('轿车', $text));
+    }
+
+    public function testCjkHighlightMixedQueryHighlightsBothScripts(): void
+    {
+        $hl   = new Highlighter(language: 'zh');
+        $text = 'BMW 轿车测试';
+        $out  = $hl->highlight('bmw 轿车', $text);
+        $this->assertStringContainsString('<mark>BMW</mark>', $out);
+        $this->assertStringContainsString('<mark>轿车</mark>', $out);
+    }
+
+    public function testCjkBigramQueryDoesNotHighlightIndividualChars(): void
+    {
+        $hl = new Highlighter(language: 'zh');
+        $this->assertSame('这是一辆<mark>轿车</mark>测试', $hl->highlight('轿车', '这是一辆轿车测试'));
+    }
 }

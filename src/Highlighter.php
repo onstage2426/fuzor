@@ -22,11 +22,15 @@ namespace Fuzor;
  */
 final class Highlighter
 {
+    private readonly int $ngramSize;
+
     public function __construct(
         private readonly string $open = '<mark>',
         private readonly string $close = '</mark>',
         private readonly bool $asYouType = true,
+        private readonly ?string $language = null,
     ) {
+        $this->ngramSize = $language !== null ? Tokenizer::ngramSize($language) : 0;
     }
 
     /**
@@ -38,7 +42,7 @@ final class Highlighter
      */
     public function highlight(string $phrase, string $text): string
     {
-        $pattern = $this->buildPattern(Tokenizer::tokenize($phrase));
+        $pattern = $this->buildPattern(Tokenizer::tokenize($phrase, $this->language, false));
         if ($pattern === null) {
             return $text;
         }
@@ -57,7 +61,7 @@ final class Highlighter
      */
     public function highlightMany(string $phrase, array $fields): array
     {
-        $pattern = $this->buildPattern(Tokenizer::tokenize($phrase));
+        $pattern = $this->buildPattern(Tokenizer::tokenize($phrase, $this->language, false));
         if ($pattern === null) {
             return $fields;
         }
@@ -81,22 +85,40 @@ final class Highlighter
             return null;
         }
 
-        $alts    = array_map(fn(string $t): string => preg_quote($t, '/'), $tokens);
-        $lastIdx = count($alts) - 1;
+        // Separate tokens by script type so each group gets the right boundary style.
+        $ngramAlts = [];
+        $asciiAlts = [];
 
-        if ($this->asYouType) {
-            // Extend the last token to match the rest of the word it prefixes.
-            $alts[$lastIdx] .= '[\p{L}\p{N}\p{Pc}]*';
-            // Move it to the front so it wins over shorter exact matches at the same position.
-            array_unshift($alts, array_splice($alts, $lastIdx, 1)[0]);
+        foreach ($tokens as $token) {
+            $quoted = preg_quote($token, '/');
+            if (Tokenizer::isNgramToken($token)) {
+                $ngramAlts[] = $quoted;
+            } else {
+                $asciiAlts[] = $quoted;
+            }
         }
 
-        $group = '(?:' . implode('|', $alts) . ')';
+        // For non-ngram queries, apply asYouType prefix extension to the last token.
+        if ($this->ngramSize === 0 && $this->asYouType && $asciiAlts !== []) {
+            $lastIdx = count($asciiAlts) - 1;
+            $asciiAlts[$lastIdx] .= '[\p{L}\p{N}\p{Pc}]*';
+            array_unshift($asciiAlts, array_splice($asciiAlts, $lastIdx, 1)[0]);
+        }
 
-        // Unicode-aware word boundaries: assert the match is not adjacent to another
-        // word character on either side. [\p{L}\p{N}\p{Pc}] is one character → fixed-
-        // length lookbehind/lookahead, compatible with PCRE.
-        return '/(?<![\p{L}\p{N}\p{Pc}])' . $group . '(?![\p{L}\p{N}\p{Pc}])/iu';
+        $parts = [];
+
+        // CJK/Thai tokens: plain substring match — word boundaries would block all matches
+        // because every character in these scripts is \p{L}.
+        if ($ngramAlts !== []) {
+            $parts[] = '(?:' . implode('|', $ngramAlts) . ')';
+        }
+
+        // ASCII/Latin tokens: Unicode-aware word boundaries prevent partial-word highlights.
+        if ($asciiAlts !== []) {
+            $parts[] = '(?<![\p{L}\p{N}\p{Pc}])(?:' . implode('|', $asciiAlts) . ')(?![\p{L}\p{N}\p{Pc}])';
+        }
+
+        return '/' . implode('|', $parts) . '/iu';
     }
 
     private function apply(string $pattern, string $text): string
