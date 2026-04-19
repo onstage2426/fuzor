@@ -6,6 +6,9 @@ phpunit.xml.dist   export-ignore
 # Test suite
 tests/             export-ignore
 
+# Documentation
+docs/              export-ignore
+
 # Benchmarks and data
 benchmarks/        export-ignore
 resources/datasets/ export-ignore

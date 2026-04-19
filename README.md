@@ -1,11 +1,16 @@
-# Fuzor
+# ⚡ Fuzor
 
-Lightweight full-text search for PHP. Tokenises documents, stores an inverted index in a SQLite file, and scores results with Okapi BM25. No external services required.
+![PHP 8.5+](https://img.shields.io/badge/PHP-8.5%2B-777BB4?logo=php&logoColor=white) ![License](https://img.shields.io/badge/license-MIT-green) ![Packagist Version](https://img.shields.io/packagist/v/onstage2426/fuzor)
 
-## Requirements
+Lightweight dependency-free full-text search for PHP. Tokenises documents, stores an inverted index in a SQLite file, and scores results with Okapi BM25.
 
-- PHP 8.5+
-- SQLite 3.37.0+
+- BM25 ranked full-text search with fuzzy and boolean modes
+- Search-as-you-type with built-in prefix matching
+- Stopword filtering and Snowball stemming for 60+ languages
+- Snippet extraction and result highlighting included
+- One SQLite file per index — zero infrastructure
+
+[Documentation](docs/) · [Benchmarks](benchmarks/results.txt)
 
 ## Installation
 
@@ -13,10 +18,14 @@ Lightweight full-text search for PHP. Tokenises documents, stores an inverted in
 composer require onstage2426/fuzor
 ```
 
-## Usage
+## Requirements
 
-<details>
-<summary><strong>Creating and opening an index</strong></summary>
+- PHP 8.5+
+- SQLite 3.37.0+
+
+## Quickstart
+
+### Creating and opening an index
 
 ```php
 use Fuzor\Index;
@@ -24,107 +33,56 @@ use Fuzor\Index;
 // Create a new index
 $index = Index::create('/path/to/articles.db');
 
-// Overwrite an existing index file
-$index = Index::create('/path/to/articles.db', force: true);
-
 // Open an existing index
 $index = Index::open('/path/to/articles.db');
-
-// Close the connection when done
-$index->close();
 ```
 
-</details>
+### Adding, updating, and removing items
 
-<details>
-<summary><strong>Inserting, updating, and deleting documents</strong></summary>
+Each document requires an `id`. All other fields are concatenated and indexed together.
 
 ```php
-// Insert a single document
+// Add one item
 $index->insert(['id' => 1, 'title' => 'Fast sedan', 'body' => 'Comfortable city car.']);
 
-// Bulk insert in a single transaction
+// Add many at once — faster than inserting one by one
 $index->insertMany([
     ['id' => 1, 'title' => 'Fast sedan',    'body' => 'Comfortable city car with great fuel economy.'],
     ['id' => 2, 'title' => 'Off-road SUV',  'body' => 'Built for adventure. Handles any terrain.'],
     ['id' => 3, 'title' => 'Electric coupe','body' => 'Zero emissions, instant torque, sporty design.'],
 ]);
 
-// Update a document (delete + re-index)
+// Replace an item
 $index->update(['id' => 1, 'title' => 'Updated sedan', 'body' => 'New content.']);
 
-// Delete a document by ID
+// Remove an item
 $index->delete(2);
 ```
 
-</details>
-
-<details>
-<summary><strong>Normal search</strong></summary>
+### Searching
 
 ```php
 $results = $index->search('city car');
+$results = $index->search('economi', fuzzy: true); // tolerates typos
+
+$results = $index->searchBoolean('sedan or coupe -electric');
 ```
 
-</details>
+### Stopword filtering and stemming
 
-<details>
-<summary><strong>Fuzzy search</strong></summary>
+Pass a BCP 47 language tag to enable stopword filtering and stemming:
 
 ```php
-$results = $index->searchFuzzy('economi'); // matches 'economy'
+$index = Index::create($path, language: 'en');
 ```
 
-</details>
-
-<details>
-<summary><strong>Boolean search</strong></summary>
+### Snippeting and highlighting
 
 ```php
-$results = $index->searchBoolean('sedan or coupe');
-$results = $index->searchBoolean('suv -electric');
-$results = $index->searchBoolean('fast & comfortable');
+$snip = $index->snippeter();
+echo $snip->snippet('fast connections', $doc['body']);
+// "… offers fast broadband connections for …"
+
+$hl = $index->highlighter();
+echo $hl->highlight('fast sedan', $doc['title']);
 ```
-
-| Syntax          | Operator | Effect                     |
-|-----------------|----------|----------------------------|
-| `term1 term2`   | AND      | Both terms must be present |
-| `term1 or term2`| OR       | Either term present        |
-| `-term`         | NOT      | Term must be absent        |
-
-Operators are evaluated via Shunting-Yard (postfix). Combine freely:
-
-```php
-$results = $index->searchBoolean('sedan or suv -electric');
-```
-
-</details>
-
-<details>
-<summary><strong>Stopword filtering</strong></summary>
-
-Stopword filtering removes common words (e.g. "the", "and") from both indexed documents and search queries, reducing index noise. It is opt-in. Should be set before indexing and/or searching.
-
-Supported languages: af, ar, bn, br, bg, ca, zh, hr, cs, da, nl, en, eo, et, eu, fa, fi, fr, ga, gl, de, el, gu, ha, he, hi, hu, hy, id, it, ja, ko, ku, la, lt, lv, mr, ms, no, pl, pt, ro, ru, sk, sl, so, es, st, sv, sw, th, tl, tr, uk, ur, vi, yo, zu
-
-```php
-// Disable (default)
-$index->language = null;
-
-// Enable
-$index->language = 'en';
-```
-</details>
-
-## Options reference
-
-| Property              | Default | Description                                     |
-|-----------------------|---------|-------------------------------------------------|
-| `asYouType`           | `true`  | Prefix-match the last keyword                   |
-| `fuzzyDistance`       | `2`     | Max edit distance for fuzzy search              |
-| `fuzzyPrefixLength`   | `2`     | Exact-match prefix length before fuzzy kicks in |
-| `fuzzyMaxExpansions`  | `50`    | Max candidate terms evaluated for fuzzy         |
-| `maxDocs`             | `500`   | Max documents returned per keyword              |
-| `k1`                  | `1.2`   | BM25 term frequency saturation                  |
-| `b`                   | `0.75`  | BM25 length normalisation weight (0–1)          |
-| `language`            | `null`  | BCP 47 language code for stopword filtering     |
