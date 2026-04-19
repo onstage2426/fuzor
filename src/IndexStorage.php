@@ -317,7 +317,7 @@ class IndexStorage
         }
 
         $this->wrapInTransaction(function () use ($document): void {
-            $id    = intval($document['id']); // @phpstan-ignore argument.type
+            $id    = self::extractId($document['id']);
             $check = $this->stmt('docExistsCheck', 'SELECT 1 FROM doc_lengths WHERE doc_id = :id LIMIT 1');
             $check->execute([':id' => $id]);
             if ($check->fetchColumn() !== false) {
@@ -358,7 +358,7 @@ class IndexStorage
             if (!array_key_exists('id', $document)) {
                 throw new \InvalidArgumentException("Document at index {$i} must contain an 'id' key.");
             }
-            $id = intval($document['id']); // @phpstan-ignore argument.type
+            $id = self::extractId($document['id']);
             if (isset($ids[$id])) {
                 throw new \InvalidArgumentException("Duplicate id {$id} at index {$i}.");
             }
@@ -366,7 +366,9 @@ class IndexStorage
         }
 
         $index = $this->index;
-        assert($index !== null);
+        if ($index === null) {
+            throw new \LogicException('Index connection is closed.');
+        }
 
         // Probe once to know whether the doclist is empty; used to skip the duplicate-ID check
         // (nothing can already exist in an empty table) and to gate index drop/rebuild.
@@ -473,7 +475,7 @@ class IndexStorage
             throw new \InvalidArgumentException("Document must contain an 'id' key.");
         }
         $this->wrapInTransaction(function () use ($document): void {
-            $oldLength = $this->removeDocumentData(intval($document['id'])); // @phpstan-ignore argument.type
+            $oldLength = $this->removeDocumentData(self::extractId($document['id']));
             $newLength = $this->processDocument($document);
 
             if ($oldLength === false) {
@@ -1446,7 +1448,9 @@ class IndexStorage
     private function stmt(string $key, string $sql): \PDOStatement
     {
         $index = $this->index;
-        assert($index !== null);
+        if ($index === null) {
+            throw new \LogicException('Index connection is closed.');
+        }
         return $this->stmtCache[$key] ??= $index->prepare($sql);
     }
 
@@ -1454,7 +1458,9 @@ class IndexStorage
     private function prepare(string $sql): \PDOStatement
     {
         $index = $this->index;
-        assert($index !== null);
+        if ($index === null) {
+            throw new \LogicException('Index connection is closed.');
+        }
         return $index->prepare($sql);
     }
 
@@ -1469,7 +1475,9 @@ class IndexStorage
     private function wrapInTransaction(callable $fn): void
     {
         $index = $this->index;
-        assert($index !== null);
+        if ($index === null) {
+            throw new \LogicException('Index connection is closed.');
+        }
         if ($index->inTransaction()) {
             $fn();
             return;
@@ -1482,5 +1490,23 @@ class IndexStorage
             $index->rollBack();
             throw $e;
         }
+    }
+
+    /**
+     * Validate and extract an integer document ID from a raw value.
+     *
+     * @throws \InvalidArgumentException If the value is not an integer or integer-like string.
+     */
+    private static function extractId(mixed $value): int
+    {
+        if (is_int($value)) {
+            return $value;
+        }
+        if (is_string($value) && preg_match('/^-?\d+$/', $value)) {
+            return (int) $value;
+        }
+        throw new \InvalidArgumentException(
+            "Document 'id' must be an integer, got " . get_debug_type($value) . '.'
+        );
     }
 }
