@@ -94,6 +94,17 @@ class IndexTest extends TestCase
         $this->assertSame([], $fresh->search('sedan')['ids']);
     }
 
+    public function testCreateWithForceRefusesToOverwriteNonSqliteFile(): void
+    {
+        file_put_contents($this->dbPath, 'this is not a sqlite file');
+
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessageMatches('/Refusing to overwrite non-Fuzor file/');
+        Index::create($this->dbPath, force: true);
+
+        $this->assertStringEqualsFile($this->dbPath, 'this is not a sqlite file');
+    }
+
     public function testCreateErrorMessageContainsDirectory(): void
     {
         $this->expectException(\RuntimeException::class);

@@ -264,11 +264,34 @@ class IndexStorage
     private function flushIndex(string $indexName): void
     {
         $path = $this->storagePath . $indexName;
-        /** @infection-ignore-all Concat,ConcatOperandRemoval: WAL/SHM suffixes are cleanup artefacts; omitting them only leaves journal files on disk */
-        foreach ([$path, $path . '-wal', $path . '-shm'] as $file) {
-            if (file_exists($file)) {
-                unlink($file);
+        if (file_exists($path)) {
+            if (!$this->isFuzorIndex($path)) {
+                throw new \RuntimeException("Refusing to overwrite non-Fuzor file: {$path}");
             }
+            unlink($path);
+            /** @infection-ignore-all Concat,ConcatOperandRemoval: WAL/SHM suffixes are cleanup artefacts; omitting them only leaves journal files on disk */
+            foreach ([$path . '-wal', $path . '-shm'] as $journal) {
+                if (file_exists($journal)) {
+                    unlink($journal);
+                }
+            }
+        }
+    }
+
+    /**
+     * Returns true if $path opens as SQLite and contains the Fuzor wordlist table.
+     *
+     * @param string $path Absolute path to the file to inspect.
+     */
+    private function isFuzorIndex(string $path): bool
+    {
+        try {
+            $pdo = new PDO('sqlite:' . $path);
+            $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+            $result = $pdo->query("SELECT 1 FROM wordlist LIMIT 1");
+            return $result !== false;
+        } catch (\Exception) {
+            return false;
         }
     }
 
