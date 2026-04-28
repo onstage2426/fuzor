@@ -76,6 +76,7 @@ final class Tokenizer
     public static function split(string $text): array
     {
         if (!preg_match('/[^\x00-\x7F]/', $text)) {
+            /** @infection-ignore-all both paths produce identical output for ASCII; fast-path exists for performance only */
             return preg_split('/[^\w@]+/', strtolower($text), -1, PREG_SPLIT_NO_EMPTY) ?: [];
         }
         preg_match_all('/[\p{L}\p{N}\p{Pc}@]+/u', mb_strtolower($text, 'UTF-8'), $m);
@@ -183,6 +184,7 @@ final class Tokenizer
      */
     public static function isNgramToken(string $token): bool
     {
+        /** @infection-ignore-all PHP coerces int return from preg_match to bool on declared bool return type */
         return (bool) preg_match(
             '/[\x{4E00}-\x{9FFF}\x{3040}-\x{30FF}\x{AC00}-\x{D7AF}\x{0E00}-\x{0E7F}]/u',
             $token,

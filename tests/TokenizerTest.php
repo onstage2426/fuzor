@@ -129,7 +129,6 @@ class TokenizerTest extends TestCase
     {
         $text   = 'foo bar';
         $result = Tokenizer::splitWithOffsets($text);
-        // 'bar' starts at byte 4.
         $this->assertSame(4, $result[1][1]);
     }
 
@@ -137,7 +136,6 @@ class TokenizerTest extends TestCase
 
     public function testNgramBigramProducesCorrectTokens(): void
     {
-        // 3 chars → 2 bigrams
         $this->assertSame(['轿车', '车测', '测试'], Tokenizer::ngram('轿车测试', 2));
     }
 
@@ -166,13 +164,11 @@ class TokenizerTest extends TestCase
 
     public function testNgramShorterThanWindowProducesNoGrams(): void
     {
-        // 1 char with n=2 → no complete bigram
         $this->assertSame([], Tokenizer::ngram('京', 2));
     }
 
     public function testNgramSingleUnigram(): void
     {
-        // 1 char with n=2 but includeUnigrams=true → only the unigram
         $result = Tokenizer::ngram('京', 2, includeUnigrams: true);
         $this->assertSame(['京'], $result);
     }
@@ -227,5 +223,53 @@ class TokenizerTest extends TestCase
     {
         $this->assertFalse(Tokenizer::isNgramToken('sedan'));
         $this->assertFalse(Tokenizer::isNgramToken('café'));
+    }
+
+    // --- tokenize ---
+
+    public function testTokenizeNonNgramLanguageReturnsSplitTokens(): void
+    {
+        // 'de' is not in NGRAM_SCRIPTS so ?? 0 kicks in; CJK text must be returned
+        // as a single split token, not broken into n-grams.
+        $this->assertSame(['轿车'], Tokenizer::tokenize('轿车', 'de'));
+    }
+
+    public function testTokenizeIncludeUnigramsFalseOmitsUnigrams(): void
+    {
+        // With includeUnigrams=false the condition is (false && n===2) = false.
+        // The || mutation turns this into (false || true) = true, adding unigrams.
+        $this->assertSame(['轿车', '车测', '测试'], Tokenizer::tokenize('轿车测试', 'zh', false));
+    }
+
+    // --- tokenizeWithOffsets ---
+
+    public function testTokenizeWithOffsetsNonNgramLanguageReturnsSplitOffsets(): void
+    {
+        // Non-ngram language must fall back to splitWithOffsets, not ngramWithOffsets.
+        $this->assertSame([['hello', 0], ['world', 6]], Tokenizer::tokenizeWithOffsets('hello world', 'de'));
+    }
+
+    // --- splitWithOffsets uppercase Unicode ---
+
+    public function testSplitWithOffsetsLowercasesUnicodeUppercase(): void
+    {
+        $result = Tokenizer::splitWithOffsets('CAFÉ');
+        $this->assertSame('café', $result[0][0]);
+    }
+
+    // --- ngram uppercase Unicode ---
+
+    public function testNgramLowercasesUnicodeUppercase(): void
+    {
+        $this->assertSame(['äö', 'öü'], Tokenizer::ngram('ÄÖÜ', 2));
+    }
+
+    // --- ngramWithOffsets uppercase Unicode ---
+
+    public function testNgramWithOffsetsLowercasesUnicodeUppercase(): void
+    {
+        $result = Tokenizer::ngramWithOffsets('ÄÖÜ', 2);
+        $this->assertSame('äö', $result[0][0]);
+        $this->assertSame('öü', $result[1][0]);
     }
 }

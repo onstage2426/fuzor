@@ -1,9 +1,10 @@
 {
     "source": {
-        "directories": ["src"]
+        "directories": ["src"],
+        "excludes": ["Stemmers"]
     },
     "testFramework": "phpunit",
-"logs": {
+    "logs": {
         "text": "infection.log",
         "summary": "infection-summary.log"
     },

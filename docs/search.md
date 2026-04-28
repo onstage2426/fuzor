@@ -55,14 +55,20 @@ Set-based: no BM25 scoring, `docScores` is always `null`. Useful for filtering r
 $results = $index->searchBoolean('sedan or coupe');
 $results = $index->searchBoolean('suv -electric');
 $results = $index->searchBoolean('fast & comfortable');
+$results = $index->searchBoolean('(sedan or coupe) -electric');
 ```
 
-| Syntax            | Operator | Effect                     |
-|-------------------|----------|----------------------------|
-| `term1 term2`     | AND      | Both terms must be present |
-| `term1 or term2`  | OR       | Either term present        |
-| `-term`           | NOT      | Term must be absent        |
-| `term1 & term2`   | AND      | Explicit AND               |
+| Syntax              | Operator | Effect                          |
+|---------------------|----------|---------------------------------|
+| `term1 term2`       | AND      | Both terms must be present      |
+| `term1 or term2`    | OR       | Either term present             |
+| `-term`             | NOT      | Term must be absent             |
+| `term1 & term2`     | AND      | Explicit AND                    |
+| `(term1 or term2)`  | grouping | Override default precedence     |
+
+Default precedence (tightest to loosest): NOT > AND > OR. Use parentheses when you need OR to bind tighter than an outer AND or NOT — for example `(sedan or coupe) -electric` excludes electric vehicles from a combined sedan/coupe set, whereas `sedan or coupe -electric` would be parsed as `sedan or (coupe and not electric)`.
+
+Spaces adjacent to parentheses are stripped before the AND-substitution step runs, so you must use an explicit `&` when a parenthesised group follows a term without a space: `suv&(sedan or coupe)`. With a space — `suv (sedan or coupe)` — the space is consumed by the paren-stripping step and no AND is inserted.
 
 ## As-you-type prefix
 

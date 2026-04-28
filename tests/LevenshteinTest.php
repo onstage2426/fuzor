@@ -61,7 +61,21 @@ class LevenshteinTest extends TestCase
 
     public function testUnicodeMultipleEdits(): void
     {
-        // "résumé" → "resume": substitute é→e twice = 2 edits
         $this->assertSame(2, Levenshtein::distance('résumé', 'resume'));
+    }
+
+    public function testUnicodeThreeDistinctCodepointsVsAscii(): void
+    {
+        $this->assertSame(3, Levenshtein::distance('éàè', '~'));
+    }
+
+    public function testUnicodeCodepointRemapDoesNotCollideWithDelByte(): void
+    {
+        $this->assertSame(1, Levenshtein::distance('ñello', chr(127) . 'ello'));
+    }
+
+    public function testUnicodeCodepointRemapDoesNotCollideWithChr129(): void
+    {
+        $this->assertSame(1, Levenshtein::distance('ñhello', chr(129) . 'hello'));
     }
 }

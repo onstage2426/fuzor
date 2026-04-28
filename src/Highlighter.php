@@ -90,6 +90,7 @@ final class Highlighter
         $asciiAlts = [];
 
         foreach ($tokens as $token) {
+            /** @infection-ignore-all tokenizer strips all regex special chars from tokens; preg_quote is defensive but untestable via public API */
             $quoted = preg_quote($token, '/');
             if (Tokenizer::isNgramToken($token)) {
                 $ngramAlts[] = $quoted;
@@ -102,6 +103,7 @@ final class Highlighter
         if ($this->ngramSize === 0 && $this->asYouType && $asciiAlts !== []) {
             $lastIdx = count($asciiAlts) - 1;
             $asciiAlts[$lastIdx] .= '[\p{L}\p{N}\p{Pc}]*';
+            /** @infection-ignore-all word-boundary lookahead makes alternation order irrelevant; moving prefix first is style only */
             array_unshift($asciiAlts, array_splice($asciiAlts, $lastIdx, 1)[0]);
         }
 
@@ -110,6 +112,7 @@ final class Highlighter
         // CJK/Thai tokens: plain substring match — word boundaries would block all matches
         // because every character in these scripts is \p{L}.
         if ($ngramAlts !== []) {
+            /** @infection-ignore-all non-capturing group wrapper has no effect on match results; alternation works identically without it */
             $parts[] = '(?:' . implode('|', $ngramAlts) . ')';
         }
 

@@ -46,9 +46,22 @@ class IndexTest extends TestCase
         $index->insert(['id' => 1, 'title' => 'sedan']);
         $index->close();
 
-        // Connection released — a second open on the same file must succeed.
         $reopened = Index::open($this->dbPath);
         $this->assertContains(1, $reopened->search('sedan')['ids']);
+    }
+
+    public function testStatsPersistAfterReopen(): void
+    {
+        $index = Index::create($this->dbPath);
+        $index->insertMany([
+            ['id' => 1, 'title' => 'sedan'],
+            ['id' => 2, 'title' => 'coupe'],
+        ]);
+        $index->delete(1);
+        $index->close();
+        $index = Index::open($this->dbPath);
+        $info = $index->inspectQuery('coupe')['index_info'];
+        $this->assertSame('1', $info['total_documents']);
     }
 
     public function testOpenNonexistentPathThrows(): void
@@ -79,6 +92,16 @@ class IndexTest extends TestCase
 
         $fresh = Index::create($this->dbPath, force: true);
         $this->assertSame([], $fresh->search('sedan')['ids']);
+    }
+
+    public function testCreateErrorMessageContainsDirectory(): void
+    {
+        $this->expectException(\RuntimeException::class);
+        // Require BOTH the fixed prefix AND the path so that mutants which reverse the
+        // concatenation order (path . "Directory does not exist: ") or drop the prefix
+        // (leaving just the path) are caught.
+        $this->expectExceptionMessageMatches('#^Directory does not exist: .*?/nonexistent/dir#');
+        Index::create('/nonexistent/dir/index.db');
     }
 
     // --- insert / search ---
@@ -228,6 +251,233 @@ class IndexTest extends TestCase
         $this->assertContains(1, $index->search('SEDAN')['ids']);
     }
 
+    public function testSearchLowercasesMultibyteQueryViaSearch(): void
+    {
+        $index = Index::create($this->dbPath);
+        $index->insert(['id' => 1, 'title' => 'über']);
+        $index->asYouType = false;
+
+        // MBString mutation in getWordlistByKeyword replaces mb_strtolower with strtolower.
+        // 'Ü' (U+00DC) is two UTF-8 bytes; strtolower leaves it unchanged, so 'ÜBER' stays
+        // uppercase and doesn't match the lowercase-stored term 'über'.
+        // searchBoolean already lowercases in lexExpression, so this test must use search().
+        $this->assertContains(1, $index->search('ÜBER')['ids']);
+    }
+
+    public function testSearchIsExactNotFuzzy(): void
+    {
+        $index = Index::create($this->dbPath);
+        $index->insert(['id' => 1, 'title' => 'hello']);
+
+        $index->asYouType = false;
+        $this->assertEmpty($index->search('helo')['ids']);
+
+        $this->assertContains(1, $index->search('helo', fuzzy: true)['ids']);
+    }
+
+    public function testSearchOrdersByRelevance(): void
+    {
+        $index = Index::create($this->dbPath);
+        $index->insertMany([
+            ['id' => 1, 'title' => 'sedan'],
+            ['id' => 2, 'title' => 'sedan sedan sedan'],
+        ]);
+
+        $result = $index->search('sedan');
+        $this->assertSame(2, $result['ids'][0]);
+    }
+
+    public function testSearchResultsOrderedByBm25NotFetchOrder(): void
+    {
+        $index = Index::create($this->dbPath);
+        // Doc 1: tf=1, dl=1 — very short, high BM25 score per term.
+        // Doc 2: tf=3, dl=100 — long doc; DB fetches it first (higher hit_count), but BM25 penalises length.
+        $index->insertMany([
+            ['id' => 1, 'title' => 'sedan'],
+            ['id' => 2, 'title' => 'sedan sedan sedan ' . str_repeat('filler ', 97)],
+        ]);
+        $result = $index->search('sedan');
+        // Short doc must rank first; without arsort the raw DB order (doc 2) would win.
+        $this->assertSame(1, $result['ids'][0]);
+    }
+
+    public function testMultiKeywordSearchAccumulatesScoresAcrossTerms(): void
+    {
+        $index = Index::create($this->dbPath);
+        $index->insertMany([
+            ['id' => 1, 'title' => 'car sedan'],           // both terms, dl=2
+            ['id' => 2, 'title' => str_repeat('sedan ', 10)],  // sedan only, tf=10, dl=10
+        ]);
+        $index->asYouType = false;
+        // Doc 1 earns score for both 'car' (rare term, high IDF) and 'sedan'.
+        // Doc 2 earns only a sedan score (high TF but heavily length-penalised).
+        // Without accumulation the coalesce bug resets doc1 to sedan-only, so doc2 wins.
+        $result = $index->search('car sedan');
+        $this->assertSame(1, $result['ids'][0]);
+    }
+
+    public function testSearchReturnsEmptyIdsWhenNumOfResultsIsZero(): void
+    {
+        $index = Index::create($this->dbPath);
+        $index->insert(['id' => 1, 'title' => 'sedan']);
+        $result = $index->search('sedan', numOfResults: 0);
+        $this->assertSame([], $result['ids']);
+        $this->assertSame(1, $result['hits']);
+    }
+
+    // --- as-you-type prefix ---
+
+    public function testAsYouTypePrefixMatchesPartialWord(): void
+    {
+        $index = Index::create($this->dbPath);
+        $index->insert(['id' => 1, 'title' => 'Mercedes Benz']);
+
+        $index->asYouType = true;
+        $result = $index->search('merc');
+        $this->assertContains(1, $result['ids']);
+    }
+
+    public function testAsYouTypeDisabledNoPartialMatch(): void
+    {
+        $index = Index::create($this->dbPath);
+        $index->insert(['id' => 1, 'title' => 'Mercedes Benz']);
+
+        $index->asYouType = false;
+        $result = $index->search('merc');
+        $this->assertNotContains(1, $result['ids']);
+    }
+
+    public function testPrefixSearchExpandsAllMatchingTerms(): void
+    {
+        $index = Index::create($this->dbPath);
+        $index->insertMany([
+            ['id' => 1, 'title' => 'sedan'],
+            ['id' => 2, 'title' => 'suv'],
+        ]);
+        // Mutant 190 returns only the first wordlist row, so one doc would be missing.
+        $result = $index->search('s');
+        $this->assertContains(1, $result['ids']);
+        $this->assertContains(2, $result['ids']);
+    }
+
+    // --- maxDocs ---
+
+    public function testMaxDocsLimitsResultsPerKeyword(): void
+    {
+        $index = Index::create($this->dbPath);
+        $index->insertMany([
+            ['id' => 1, 'title' => 'sedan'],
+            ['id' => 2, 'title' => 'sedan'],
+            ['id' => 3, 'title' => 'sedan'],
+            ['id' => 4, 'title' => 'sedan'],
+            ['id' => 5, 'title' => 'sedan'],
+        ]);
+
+        $index->maxDocs = 2;
+        $result = $index->search('sedan');
+        $this->assertCount(2, $result['ids']);
+    }
+
+    // --- top-k / heap ---
+
+    public function testSearchTopKFromHeapIsOrdered(): void
+    {
+        $index = Index::create($this->dbPath);
+        // Five docs; TF increases with ID so BM25 score increases monotonically with ID.
+        $index->insertMany([
+            ['id' => 1, 'title' => 'sedan'],
+            ['id' => 2, 'title' => 'sedan sedan'],
+            ['id' => 3, 'title' => 'sedan sedan sedan'],
+            ['id' => 4, 'title' => 'sedan sedan sedan sedan'],
+            ['id' => 5, 'title' => 'sedan sedan sedan sedan sedan'],
+        ]);
+
+        // Request only 3 results (total=5 > 3 triggers the heap path).
+        $result = $index->search('sedan', numOfResults: 3);
+
+        $this->assertCount(3, $result['ids']);
+        // Doc 5 has the highest TF so it must be ranked first.
+        $this->assertSame(5, $result['ids'][0]);
+        // Results must be in descending score order.
+        for ($i = 1; $i < count($result['ids']); $i++) {
+            $prev = $result['ids'][$i - 1];
+            $curr = $result['ids'][$i];
+            $this->assertGreaterThanOrEqual(
+                $result['docScores'][$curr],
+                $result['docScores'][$prev],
+            );
+        }
+    }
+
+    public function testSearchTopKSelectsByBm25NotByHitCount(): void
+    {
+        $index = Index::create($this->dbPath);
+        // Docs 1 and 2: high term frequency, long documents → low BM25 (length penalty).
+        // DB returns these first (by doc_id). Docs 3 and 4: single occurrence, very
+        // short → higher BM25 despite lower hit_count.
+        $index->insertMany([
+            ['id' => 1, 'title' => str_repeat('sedan ', 5) . str_repeat('filler ', 195)],
+            ['id' => 2, 'title' => str_repeat('sedan ', 3) . str_repeat('filler ', 147)],
+            ['id' => 3, 'title' => 'sedan'],
+            ['id' => 4, 'title' => 'sedan'],
+        ]);
+        // Heap path fires because total (4) > numOfResults (2).
+        // Correct: short docs win on BM25 → ids [3, 4].
+        // Mutant 34 (> → <=): short docs are never swapped in → ids [1, 2] instead.
+        $result = $index->search('sedan', numOfResults: 2);
+        $this->assertContains(3, $result['ids']);
+        $this->assertContains(4, $result['ids']);
+        $this->assertNotContains(1, $result['ids']);
+        $this->assertNotContains(2, $result['ids']);
+    }
+
+    public function testSearchHeapMinIsSetWhenHeapBecomesFull(): void
+    {
+        $index = Index::create($this->dbPath);
+        // avgdl = (3+1+2)/3 = 2, k1=1.2, b=0.75. BM25 scores ∝ tf/(1.3 + 0.9/avgdl*dl):
+        //   doc1 tf=3 dl=3: 3/2.65 ≈ 1.13 (highest); doc2 tf=1 dl=1: 1/1.75 ≈ 0.57 (lowest);
+        //   doc3 tf=2 dl=2: 2/2.2  ≈ 0.91 (middle).
+        // Fetch order by doc_id: doc1(high), doc2(low), doc3(mid).
+        // Fill heap (numOfResults=2): doc1→heapSize=1, doc2→heapSize=2=full.
+        // Original: heapMin = heap.top() = doc2's low score → doc3(mid) > low → replaces doc2.
+        // Mutation Identical (L352): heapMin set at heapSize≠2 (step 1, recording doc1's high
+        //   score) → doc3(mid) > high? No → doc3 not inserted → result = [doc1, doc2] (wrong).
+        $index->insertMany([
+            ['id' => 1, 'title' => 'sedan sedan sedan'],  // tf=3, highest BM25
+            ['id' => 2, 'title' => 'sedan'],              // tf=1, lowest BM25
+            ['id' => 3, 'title' => 'sedan sedan'],        // tf=2, middle BM25
+        ]);
+
+        $result = $index->search('sedan', numOfResults: 2);
+
+        $this->assertCount(2, $result['ids']);
+        $this->assertContains(1, $result['ids']);     // always in top-2
+        $this->assertContains(3, $result['ids']);     // middle replaces weakest (correct heapMin)
+        $this->assertNotContains(2, $result['ids']); // weakest is evicted
+    }
+
+    public function testSearchTopKWithNumOfResultsOneReturnsStrictlyBestDoc(): void
+    {
+        $index = Index::create($this->dbPath);
+        // Doc 1 has 3 hits (highest BM25), doc 2 has 1 hit (lowest), doc 3 has 2 hits (middle).
+        // Fetch order from doclist: doc_id ascending → 1, 2, 3.
+        // With numOfResults=1:
+        //   Normal: insert doc1, heapSize=1===1 → heapMin=score(doc1)≈high.
+        //     doc2: high > high? No. doc3: high > high? No. Result: [doc1]. ✓
+        //   Mutation (===→!==): insert doc1, heapSize=1!==1? false → heapMin stays -INF.
+        //     Else branch for doc2: score(doc2)>-INF? Yes → replace doc1 with doc2. heapMin=score(doc2).
+        //     doc3: score(doc3)>score(doc2)? Yes → replace. heapMin=score(doc3).
+        //     Result: [doc3], not [doc1]. ✗
+        $index->insertMany([
+            ['id' => 1, 'title' => 'sedan sedan sedan'],
+            ['id' => 2, 'title' => 'sedan'],
+            ['id' => 3, 'title' => 'sedan sedan'],
+        ]);
+        $result = $index->search('sedan', numOfResults: 1);
+        $this->assertCount(1, $result['ids']);
+        $this->assertSame(1, $result['ids'][0]); // doc1 has the highest BM25 score
+    }
+
     // --- insertMany ---
 
     public function testInsertManyIndexesAllDocuments(): void
@@ -271,8 +521,48 @@ class IndexTest extends TestCase
         ]);
         $index->update(['id' => 1, 'title' => 'suv']);
 
-        // total_documents must stay at 2, not grow to 3.
         $this->assertSame(2, $index->search('suv')['hits'] + $index->search('coupe')['hits']);
+    }
+
+    public function testUpdateExistingDocDoesNotIncrementTotalDocuments(): void
+    {
+        $index = Index::create($this->dbPath);
+        $index->insertMany([
+            ['id' => 1, 'title' => 'sedan'],
+            ['id' => 2, 'title' => 'coupe'],
+        ]);
+        $index->update(['id' => 1, 'title' => 'suv']);
+
+        // Identical mutation on update()'s '$oldLength === false' branch swaps the branches:
+        // updating an existing doc calls adjustStats(+1, newLength) instead of adjustStats(0, delta),
+        // growing total_documents from 2 to 3. inspectQuery exposes the raw DB value.
+        $info = $index->inspectQuery('suv')['index_info'];
+        $this->assertSame('2', $info['total_documents']);
+    }
+
+    public function testUpdateCreatesDocWhenIdNotFound(): void
+    {
+        $index = Index::create($this->dbPath);
+        $index->update(['id' => 999, 'title' => 'sedan']);
+
+        $this->assertContains(999, $index->search('sedan')['ids']);
+    }
+
+    public function testUpdateNonExistentDocIncrementsCount(): void
+    {
+        $index = Index::create($this->dbPath);
+        $index->update(['id' => 1, 'title' => 'sedan']);
+        $info = $index->inspectQuery('sedan')['index_info'];
+        $this->assertSame('1', $info['total_documents']);
+    }
+
+    public function testUpdateChangesAvgDocLength(): void
+    {
+        $index = Index::create($this->dbPath);
+        $index->insert(['id' => 1, 'title' => 'alpha beta gamma delta']);
+        $index->update(['id' => 1, 'title' => 'zeta']);
+        $info = $index->inspectQuery('zeta')['index_info'];
+        $this->assertEqualsWithDelta(1.0, (float) $info['avg_doc_length'], 0.01);
     }
 
     // --- delete ---
@@ -307,6 +597,19 @@ class IndexTest extends TestCase
         $this->assertContains(1, $index->search('sedan')['ids']);
     }
 
+    public function testDeleteDecrementsDocumentCount(): void
+    {
+        $index = Index::create($this->dbPath);
+        $index->insert(['id' => 1, 'title' => 'sedan']);
+        $index->delete(1);
+
+        // NotIdentical / MethodCallRemoval / IncrementInteger mutations on the adjustStats call
+        // inside delete() skip or corrupt the document-count decrement, leaving total_documents=1
+        // instead of 0 after the deletion.
+        $info = $index->inspectQuery('any')['index_info'];
+        $this->assertSame('0', $info['total_documents']);
+    }
+
     // --- deleteMany ---
 
     public function testDeleteManyRemovesAllSpecifiedDocuments(): void
@@ -334,9 +637,39 @@ class IndexTest extends TestCase
         ]);
         $index->deleteMany([1, 2]);
 
-        // Only one doc remains; total_documents must reflect that.
         $info = $index->inspectQuery('suv')['index_info'];
         $this->assertSame('1', $info['total_documents']);
+    }
+
+    public function testDeleteManyOfOnlyOneDocResetsCount(): void
+    {
+        $index = Index::create($this->dbPath);
+        $index->insert(['id' => 1, 'title' => 'sedan']);
+        $index->deleteMany([1]);
+
+        // DecrementInteger mutation on `if ($docDelta !== 0)` changes 0 to -1:
+        // the guard then reads `$docDelta !== -1`, which is false when exactly one doc
+        // is deleted ($docDelta=-1), so adjustStats is never called and total stays at 1.
+        $info = $index->inspectQuery('any')['index_info'];
+        $this->assertSame('0', $info['total_documents']);
+    }
+
+    public function testDeleteManyUpdatesAverageDocLength(): void
+    {
+        $index = Index::create($this->dbPath);
+        $index->insertMany([
+            ['id' => 1, 'title' => 'alpha beta gamma'],  // 3 tokens
+            ['id' => 2, 'title' => 'delta epsilon'],      // 2 tokens
+            ['id' => 3, 'title' => 'zeta'],               // 1 token
+        ]);
+        // avg after insert = (3+2+1)/3 = 2; delete docs 1+2, leaving only doc 3 (len=1)
+        $index->deleteMany([1, 2]);
+
+        // Assignment/MinusEqual mutations on `$lengthDelta -= $length` use direct assignment
+        // instead of accumulation, so the total removed length is wrong (last doc's length
+        // only instead of the sum), yielding avg_doc_length ≠ 1.
+        $info = $index->inspectQuery('zeta')['index_info'];
+        $this->assertEqualsWithDelta(1.0, (float) $info['avg_doc_length'], 0.01);
     }
 
     public function testDeleteManyWithEmptyArrayIsNoop(): void
@@ -439,6 +772,68 @@ class IndexTest extends TestCase
         $this->assertGreaterThan(0.0, $result['docScores'][1]);
     }
 
+    public function testSearchFuzzyNoMatchReturnsEmpty(): void
+    {
+        $index = Index::create($this->dbPath);
+        $index->insert(['id' => 1, 'title' => 'sedan']);
+
+        $result = $index->search('xqzpwk', fuzzy: true);
+        $this->assertSame([], $result['ids']);
+        $this->assertSame(0, $result['hits']);
+    }
+
+    public function testFuzzyDistanceOneAcceptsDistanceOneTypo(): void
+    {
+        $index = Index::create($this->dbPath);
+        $index->insert(['id' => 1, 'title' => 'sedan']);
+
+        $index->fuzzyDistance = 1;
+        $this->assertContains(1, $index->search('sedaan', fuzzy: true)['ids']);
+    }
+
+    public function testFuzzyDistanceOneRejectsDistanceTwoTypo(): void
+    {
+        $index = Index::create($this->dbPath);
+        $index->insert(['id' => 1, 'title' => 'sedan']);
+
+        $index->fuzzyDistance = 1;
+        $this->assertNotContains(1, $index->search('seddaan', fuzzy: true)['ids']);
+    }
+
+    public function testFuzzySearchCloserMatchRanksFirst(): void
+    {
+        $index = Index::create($this->dbPath);
+        // Query 'drago' (not indexed) is distance=1 from 'dragon' and distance=2 from 'draagon'.
+        $index->insertMany([
+            ['id' => 1, 'title' => 'dragon'],   // distance=1 from query
+            ['id' => 2, 'title' => 'draagon'],  // distance=2 from query
+        ]);
+
+        $index->fuzzyDistance = 2;
+        $index->asYouType     = false;
+        $result = $index->search('drago', fuzzy: true);
+
+        $this->assertContains(1, $result['ids']);
+        $this->assertContains(2, $result['ids']);
+        $pos = array_flip($result['ids']);
+        $this->assertLessThan($pos[2], $pos[1]);
+    }
+
+    public function testSearchFuzzySecondaryOrderByPopularity(): void
+    {
+        $index = Index::create($this->dbPath);
+        $index->insertMany([
+            ['id' => 1, 'title' => 'dragon dragon dragon dragon dragon'], // 5 hits — high num_hits
+            ['id' => 2, 'title' => 'drage'],                             // 1 hit — low num_hits
+        ]);
+        // 'drako' is NOT a prefix of 'dragon' or 'drage', so the prefix lookup finds nothing
+        // and the fuzzy Levenshtein path kicks in.  Both 'dragon' (d=2) and 'drage' (d=2)
+        // are at the same edit distance from 'drako', so the secondary sort by num_hits
+        // decides order: DESC → 'dragon' first (5 hits), ASC (mutant) → 'drage' first (1 hit).
+        $result = $index->search('drako', fuzzy: true);
+        $this->assertSame(1, $result['ids'][0]);
+    }
+
     // --- searchBoolean ---
 
     public function testSearchBooleanAnd(): void
@@ -520,7 +915,6 @@ class IndexTest extends TestCase
             ['id' => 3, 'title' => 'audi sedan'],
         ]);
 
-        // 'sed' is a prefix of 'sedan' — asYouType should expand the last AND term.
         $index->asYouType = true;
         $result = $index->searchBoolean('bmw sed');
         $this->assertContains(1, $result['ids']);
@@ -537,7 +931,6 @@ class IndexTest extends TestCase
             ['id' => 3, 'title' => 'tesla electric'],
         ]);
 
-        // 'sed' is a prefix of 'sedan' — asYouType should expand the last OR term.
         $index->asYouType = true;
         $result = $index->searchBoolean('bmw or sed');
         $this->assertContains(1, $result['ids']);
@@ -553,7 +946,6 @@ class IndexTest extends TestCase
             ['id' => 2, 'title' => 'audi coupe'],
         ]);
 
-        // With asYouType off, 'sed' must not expand to 'sedan'.
         $index->asYouType = false;
         $result = $index->searchBoolean('bmw sed');
         $this->assertEmpty($result['ids']);
@@ -575,89 +967,27 @@ class IndexTest extends TestCase
         $this->assertEmpty($result['ids']);
     }
 
-    // --- BM25 ordering ---
-
-    public function testSearchOrdersByRelevance(): void
+    public function testSearchBooleanSingleTermAsYouTypePrefix(): void
     {
         $index = Index::create($this->dbPath);
         $index->insertMany([
             ['id' => 1, 'title' => 'sedan'],
-            ['id' => 2, 'title' => 'sedan sedan sedan'],
+            ['id' => 2, 'title' => 'coupe'],
         ]);
 
-        $result = $index->search('sedan');
-        // Doc 2 has higher term frequency so BM25 should rank it first.
-        $this->assertSame(2, $result['ids'][0]);
+        // A single-term boolean query: the term is at postfix index 0.
+        // The loop that finds lastTerm must reach index 0 or prefix expansion breaks.
+        $index->asYouType = true;
+        $result = $index->searchBoolean('sed');
+        $this->assertContains(1, $result['ids']);
+        $this->assertNotContains(2, $result['ids']);
     }
-
-    // --- maxDocs ---
-
-    public function testMaxDocsLimitsResultsPerKeyword(): void
-    {
-        $index = Index::create($this->dbPath);
-        $index->insertMany([
-            ['id' => 1, 'title' => 'sedan'],
-            ['id' => 2, 'title' => 'sedan'],
-            ['id' => 3, 'title' => 'sedan'],
-            ['id' => 4, 'title' => 'sedan'],
-            ['id' => 5, 'title' => 'sedan'],
-        ]);
-
-        $index->maxDocs = 2;
-        $result = $index->search('sedan');
-        $this->assertCount(2, $result['ids']);
-    }
-
-    // --- fuzzy distance ---
-
-    public function testFuzzyDistanceOneAcceptsDistanceOneTypo(): void
-    {
-        $index = Index::create($this->dbPath);
-        $index->insert(['id' => 1, 'title' => 'sedan']);
-
-        $index->fuzzyDistance = 1;
-        // 'sedaan' is one insertion away from 'sedan'.
-        $this->assertContains(1, $index->search('sedaan', fuzzy: true)['ids']);
-    }
-
-    public function testFuzzyDistanceOneRejectsDistanceTwoTypo(): void
-    {
-        $index = Index::create($this->dbPath);
-        $index->insert(['id' => 1, 'title' => 'sedan']);
-
-        $index->fuzzyDistance = 1;
-        // 'seddaan' is two insertions away from 'sedan'.
-        $this->assertNotContains(1, $index->search('seddaan', fuzzy: true)['ids']);
-    }
-
-    public function testSearchFuzzyNoMatchReturnsEmpty(): void
-    {
-        $index = Index::create($this->dbPath);
-        $index->insert(['id' => 1, 'title' => 'sedan']);
-
-        $result = $index->search('xqzpwk', fuzzy: true);
-        $this->assertSame([], $result['ids']);
-        $this->assertSame(0, $result['hits']);
-    }
-
-    // --- update upsert ---
-
-    public function testUpdateCreatesDocWhenIdNotFound(): void
-    {
-        $index = Index::create($this->dbPath);
-        $index->update(['id' => 999, 'title' => 'sedan']);
-
-        $this->assertContains(999, $index->search('sedan')['ids']);
-    }
-
-    // --- searchBoolean extended ---
 
     public function testSearchBooleanAndMissingTermReturnsEmpty(): void
     {
         $index = Index::create($this->dbPath);
         $index->insert(['id' => 1, 'title' => 'sedan']);
 
-        // Space is the AND operator; 'helicopter' is not indexed, so the AND yields nothing.
         $result = $index->searchBoolean('sedan helicopter');
         $this->assertSame([], $result['ids']);
     }
@@ -691,75 +1021,14 @@ class IndexTest extends TestCase
         $this->assertNotContains(2, $result['ids']);
     }
 
-    // --- as-you-type prefix ---
-
-    public function testAsYouTypePrefixMatchesPartialWord(): void
+    public function testSearchBooleanNormalizesUnicodeUppercase(): void
     {
         $index = Index::create($this->dbPath);
-        $index->insert(['id' => 1, 'title' => 'Mercedes Benz']);
-
-        $index->asYouType = true;
-        $result = $index->search('merc');
+        $index->insert(['id' => 1, 'title' => 'café']);
+        $index->asYouType = false;
+        $result = $index->searchBoolean('CAFÉ');
         $this->assertContains(1, $result['ids']);
     }
-
-    public function testAsYouTypeDisabledNoPartialMatch(): void
-    {
-        $index = Index::create($this->dbPath);
-        $index->insert(['id' => 1, 'title' => 'Mercedes Benz']);
-
-        $index->asYouType = false;
-        $result = $index->search('merc');
-        $this->assertNotContains(1, $result['ids']);
-    }
-
-    // --- search() is exact, not fuzzy ---
-
-    public function testSearchIsExactNotFuzzy(): void
-    {
-        $index = Index::create($this->dbPath);
-        $index->insert(['id' => 1, 'title' => 'hello']);
-
-        // 'helo' is 1 edit away from 'hello'; exact search must not find it.
-        $index->asYouType = false;
-        $this->assertEmpty($index->search('helo')['ids']);
-
-        // fuzzy search with the same typo must find it, confirming the term is indexed.
-        $this->assertContains(1, $index->search('helo', fuzzy: true)['ids']);
-    }
-
-    // --- heap top-k ordering ---
-
-    public function testSearchTopKFromHeapIsOrdered(): void
-    {
-        $index = Index::create($this->dbPath);
-        // Five docs; TF increases with ID so BM25 score increases monotonically with ID.
-        $index->insertMany([
-            ['id' => 1, 'title' => 'sedan'],
-            ['id' => 2, 'title' => 'sedan sedan'],
-            ['id' => 3, 'title' => 'sedan sedan sedan'],
-            ['id' => 4, 'title' => 'sedan sedan sedan sedan'],
-            ['id' => 5, 'title' => 'sedan sedan sedan sedan sedan'],
-        ]);
-
-        // Request only 3 results (total=5 > 3 triggers the heap path).
-        $result = $index->search('sedan', numOfResults: 3);
-
-        $this->assertCount(3, $result['ids']);
-        // Doc 5 has the highest TF so it must be ranked first.
-        $this->assertSame(5, $result['ids'][0]);
-        // Results must be in descending score order.
-        for ($i = 1; $i < count($result['ids']); $i++) {
-            $prev = $result['ids'][$i - 1];
-            $curr = $result['ids'][$i];
-            $this->assertGreaterThanOrEqual(
-                $result['docScores'][$curr],
-                $result['docScores'][$prev],
-            );
-        }
-    }
-
-    // --- boolean operator precedence ---
 
     public function testBooleanAndBindsTighterThanOr(): void
     {
@@ -780,168 +1049,170 @@ class IndexTest extends TestCase
         $this->assertNotContains(3, $result['ids']);
     }
 
-    // --- single-term boolean as-you-type (lastTerm at postfix index 0) ---
-
-    public function testSearchBooleanSingleTermAsYouTypePrefix(): void
+    public function testBooleanNotBindsTighterThanAnd(): void
     {
         $index = Index::create($this->dbPath);
         $index->insertMany([
-            ['id' => 1, 'title' => 'sedan'],
-            ['id' => 2, 'title' => 'coupe'],
+            ['id' => 1, 'title' => 'php laravel'],
+            ['id' => 2, 'title' => 'php symfony'],
         ]);
+        $index->asYouType = false;
 
-        // A single-term boolean query: the term is at postfix index 0.
-        // The loop that finds lastTerm must reach index 0 or prefix expansion breaks.
-        $index->asYouType = true;
-        $result = $index->searchBoolean('sed');
-        $this->assertContains(1, $result['ids']);
-        $this->assertNotContains(2, $result['ids']);
+        // 'php -laravel' → after lex: '|php&~laravel'.
+        // Postfix (~ binds tighter than &): [php, laravel, ~, &, |].
+        // If '~' priority raised to 4 the output is the same (still highest).
+        // But '&' priority change OR default priority change could shift grouping.
+        // This exercises both '&'(2) and '~'(3) precedence in one query.
+        $result = $index->searchBoolean('php -laravel');
+        $this->assertContains(2, $result['ids']);    // php AND NOT laravel → doc2
+        $this->assertNotContains(1, $result['ids']); // doc1 has laravel → excluded
     }
 
-    // --- fuzzy ordering by Levenshtein distance ---
-
-    public function testFuzzySearchCloserMatchRanksFirst(): void
+    public function testBooleanExplicitAndWithParenthesisedOrOnRight(): void
     {
         $index = Index::create($this->dbPath);
-        // Query 'drago' (not indexed) is distance=1 from 'dragon' and distance=2 from 'draagon'.
         $index->insertMany([
-            ['id' => 1, 'title' => 'dragon'],   // distance=1 from query
-            ['id' => 2, 'title' => 'draagon'],  // distance=2 from query
+            ['id' => 1, 'title' => 'php laravel'],
+            ['id' => 2, 'title' => 'php nodejs'],
+            ['id' => 3, 'title' => 'golang'],
         ]);
+        $index->asYouType = false;
 
-        $index->fuzzyDistance = 2;
-        $index->asYouType     = false;
-        $result = $index->search('drago', fuzzy: true);
-
+        // 'php&(laravel or nodejs)' → postfix [php, laravel, nodejs, |, &, |].
+        // At '&': right = resolved [laravel∪nodejs] array, not a lazy string.
+        // Mutation L449: is_array(right) || isset(right['__not__']) → true → AND-NOT branch
+        //   → array_diff(ids('php'), right['__not__']) where right['__not__'] is undefined
+        //   → TypeError / wrong result.
+        $result = $index->searchBoolean('php&(laravel or nodejs)');
         $this->assertContains(1, $result['ids']);
         $this->assertContains(2, $result['ids']);
-        // The closer match (distance=1) must rank before the farther one (distance=2).
-        $pos = array_flip($result['ids']);
-        $this->assertLessThan($pos[2], $pos[1]);
+        $this->assertNotContains(3, $result['ids']);
     }
 
-    // --- numOfResults=0 still counts total hits (mutant 45: || → &&) ---
-
-    public function testSearchReturnsEmptyIdsWhenNumOfResultsIsZero(): void
+    public function testBooleanAndWithMaterializedOrResultIsIntersection(): void
     {
         $index = Index::create($this->dbPath);
-        $index->insert(['id' => 1, 'title' => 'sedan']);
-        $result = $index->search('sedan', numOfResults: 0);
-        $this->assertSame([], $result['ids']);
-        $this->assertSame(1, $result['hits']);
+        $index->insertMany([
+            ['id' => 1, 'title' => 'php laravel'],
+            ['id' => 2, 'title' => 'php nodejs'],
+            ['id' => 3, 'title' => 'laravel nodejs'],  // no php
+        ]);
+        $index->asYouType = false;
+
+        // Postfix for '|php&(laravel or nodejs)': [php, laravel, nodejs, |, &, |].
+        // At '&': right=[1,2,3] (laravel∪nodejs), left='php'.
+        // Normal (&&): right has no '__not__' → AND → intersect(ids(php)=[1,2], [1,2,3]) = [1,2].
+        // Mutation (||): is_array(right)=true → AND-NOT branch → array_diff(ids(php), right['__not__']).
+        //   right['__not__'] is undefined → null → TypeError (fatal — kills the mutant).
+        $result = $index->searchBoolean('php&(laravel or nodejs)');
+        $this->assertCount(2, $result['ids']);
+        $this->assertContains(1, $result['ids']);
+        $this->assertContains(2, $result['ids']);
+        $this->assertNotContains(3, $result['ids']);
     }
 
-    // --- BM25 score order differs from DB fetch order (mutant 48: arsort removed) ---
-
-    public function testSearchResultsOrderedByBm25NotFetchOrder(): void
+    public function testBooleanSliceStartsAtIndexZero(): void
     {
         $index = Index::create($this->dbPath);
-        // Doc 1: tf=1, dl=1 — very short, high BM25 score per term.
-        // Doc 2: tf=3, dl=100 — long doc; DB fetches it first (higher hit_count), but BM25 penalises length.
         $index->insertMany([
             ['id' => 1, 'title' => 'sedan'],
-            ['id' => 2, 'title' => 'sedan sedan sedan ' . str_repeat('filler ', 97)],
-        ]);
-        $result = $index->search('sedan');
-        // Short doc must rank first; without arsort the raw DB order (doc 2) would win.
-        $this->assertSame(1, $result['ids'][0]);
-    }
-
-    // --- multi-keyword score accumulation (mutant 38: 0.0 ?? score resets accumulator) ---
-
-    public function testMultiKeywordSearchAccumulatesScoresAcrossTerms(): void
-    {
-        $index = Index::create($this->dbPath);
-        $index->insertMany([
-            ['id' => 1, 'title' => 'car sedan'],           // both terms, dl=2
-            ['id' => 2, 'title' => str_repeat('sedan ', 10)],  // sedan only, tf=10, dl=10
-        ]);
-        $index->asYouType = false;
-        // Doc 1 earns score for both 'car' (rare term, high IDF) and 'sedan'.
-        // Doc 2 earns only a sedan score (high TF but heavily length-penalised).
-        // Without accumulation the coalesce bug resets doc1 to sedan-only, so doc2 wins.
-        $result = $index->search('car sedan');
-        $this->assertSame(1, $result['ids'][0]);
-    }
-
-    // --- error message contains the directory that was rejected ---
-
-    public function testCreateErrorMessageContainsDirectory(): void
-    {
-        $this->expectException(\RuntimeException::class);
-        // Require BOTH the fixed prefix AND the path so that mutants which reverse the
-        // concatenation order (path . "Directory does not exist: ") or drop the prefix
-        // (leaving just the path) are caught.
-        $this->expectExceptionMessageMatches('#^Directory does not exist: .*?/nonexistent/dir#');
-        Index::create('/nonexistent/dir/index.db');
-    }
-
-    // --- Unicode normalization in boolean search ---
-
-    public function testSearchBooleanNormalizesUnicodeUppercase(): void
-    {
-        $index = Index::create($this->dbPath);
-        $index->insert(['id' => 1, 'title' => 'café']);
-        $index->asYouType = false;
-        $result = $index->searchBoolean('CAFÉ');
-        $this->assertContains(1, $result['ids']);
-    }
-
-    // --- BM25 top-k selects by score not by hit count ---
-
-    public function testSearchTopKSelectsByBm25NotByHitCount(): void
-    {
-        $index = Index::create($this->dbPath);
-        // Docs 1 and 2: high term frequency, long documents → low BM25 (length penalty).
-        // DB returns these first (by doc_id). Docs 3 and 4: single occurrence, very
-        // short → higher BM25 despite lower hit_count.
-        $index->insertMany([
-            ['id' => 1, 'title' => str_repeat('sedan ', 5) . str_repeat('filler ', 195)],
-            ['id' => 2, 'title' => str_repeat('sedan ', 3) . str_repeat('filler ', 147)],
+            ['id' => 2, 'title' => 'sedan'],
             ['id' => 3, 'title' => 'sedan'],
-            ['id' => 4, 'title' => 'sedan'],
         ]);
-        // Heap path fires because total (4) > numOfResults (2).
-        // Correct: short docs win on BM25 → ids [3, 4].
-        // Mutant 34 (> → <=): short docs are never swapped in → ids [1, 2] instead.
-        $result = $index->search('sedan', numOfResults: 2);
-        $this->assertContains(3, $result['ids']);
-        $this->assertContains(4, $result['ids']);
-        $this->assertNotContains(1, $result['ids']);
-        $this->assertNotContains(2, $result['ids']);
+        $index->asYouType = false;
+
+        // total=3 > numOfResults=2 → slice path.
+        // Original: array_slice($docIds, 0, 2) → first two docs; doc 1 is included.
+        // Mutation IncrementInteger: array_slice($docIds, 1, 2) → skips doc 1.
+        $result = $index->searchBoolean('sedan', numOfResults: 2);
+        $this->assertCount(2, $result['ids']);
+        $this->assertSame(3, $result['hits']);
+        $this->assertContains(1, $result['ids']); // first doc must survive the slice
     }
 
-    // --- prefix expansion returns all matching terms, not just the first ---
+    public function testBooleanSearchLowercasesNonAsciiViaMultibyte(): void
+    {
+        $index = Index::create($this->dbPath);
+        $index->insert(['id' => 1, 'title' => 'naïve']);
+        $index->asYouType = false;
 
-    public function testPrefixSearchExpandsAllMatchingTerms(): void
+        // mb_strtolower('NAÏVE') → 'naïve'. strtolower('NAÏVE') → 'naÏve' (Ï stays uppercase).
+        // Without mb_, the mutated query 'naÏve' does not match 'naïve' in the wordlist.
+        $result = $index->searchBoolean('NAÏVE');
+        $this->assertContains(1, $result['ids']);
+    }
+
+    public function testBooleanSearchStripsSpacesAroundParentheses(): void
     {
         $index = Index::create($this->dbPath);
         $index->insertMany([
-            ['id' => 1, 'title' => 'sedan'],
-            ['id' => 2, 'title' => 'suv'],
+            ['id' => 1, 'title' => 'café'],
+            ['id' => 2, 'title' => 'latté'],
         ]);
-        // asYouType defaults to true; query 's' must expand to both 'sedan' and 'suv'.
-        // Mutant 190 returns only the first wordlist row, so one doc would be missing.
-        $result = $index->search('s');
+        $index->asYouType = false;
+
+        // Mutation Coalesce: '$s ?? preg_replace(...)' evaluates to $s (string is never null)
+        //   → preg_replace skipped → spaces around parens survive → str_replace converts them
+        //   to spurious '&' operators inside the group → malformed postfix → empty result.
+        $result = $index->searchBoolean('( café or latté )');
         $this->assertContains(1, $result['ids']);
         $this->assertContains(2, $result['ids']);
     }
 
-    // --- fuzzy secondary sort: same distance → more popular term first ---
+    public function testBooleanSearchFindsDocumentByUppercaseMultibyteQuery(): void
+    {
+        $index = Index::create($this->dbPath);
+        // Index the lowercase form; the query must be lowercased with mb_strtolower.
+        // 'Ü' (U+00DC) is two bytes in UTF-8; strtolower leaves it unchanged.
+        $index->insert(['id' => 1, 'title' => 'über']);
+        $index->asYouType = false;
+        $result = $index->searchBoolean('ÜBER');
+        $this->assertContains(1, $result['ids']);
+    }
 
-    public function testSearchFuzzySecondaryOrderByPopularity(): void
+    public function testBooleanGroupNotFollowedByNot(): void
     {
         $index = Index::create($this->dbPath);
         $index->insertMany([
-            ['id' => 1, 'title' => 'dragon dragon dragon dragon dragon'], // 5 hits — high num_hits
-            ['id' => 2, 'title' => 'drage'],                             // 1 hit — low num_hits
+            ['id' => 1, 'title' => 'sedan coupe'],
+            ['id' => 2, 'title' => 'sedan electric'],
+            ['id' => 3, 'title' => 'coupe electric'],
+            ['id' => 4, 'title' => 'suv'],
         ]);
-        // 'drako' is NOT a prefix of 'dragon' or 'drage', so the prefix lookup finds nothing
-        // and the fuzzy Levenshtein path kicks in.  Both 'dragon' (d=2) and 'drage' (d=2)
-        // are at the same edit distance from 'drako', so the secondary sort by num_hits
-        // decides order: DESC → 'dragon' first (5 hits), ASC (mutant) → 'drage' first (1 hit).
-        $result = $index->search('drako', fuzzy: true);
-        $this->assertSame(1, $result['ids'][0]);
+        $index->asYouType = false;
+
+        // '(sedan or coupe) -electric': the space between ')' and '-electric' must survive
+        // the paren-strip step so str_replace can convert ' -' to '&~'.
+        // Without the negative lookahead fix the space is consumed and '-electric' becomes
+        // a literal word token rather than a NOT operator, returning docs 1–3 instead of 1.
+        $result = $index->searchBoolean('(sedan or coupe) -electric');
+        $this->assertContains(1, $result['ids']);
+        $this->assertNotContains(2, $result['ids']);
+        $this->assertNotContains(3, $result['ids']);
+        $this->assertNotContains(4, $result['ids']);
+    }
+
+    public function testBooleanGroupingConstrainsChainedAnd(): void
+    {
+        $index = Index::create($this->dbPath);
+        $index->insertMany([
+            ['id' => 1, 'title' => 'alpha beta delta'],   // all three → should match
+            ['id' => 2, 'title' => 'alpha gamma delta'],  // all three → should match
+            ['id' => 3, 'title' => 'alpha beta'],          // missing delta → must be excluded
+            ['id' => 4, 'title' => 'gamma delta'],         // missing alpha → must be excluded
+        ]);
+        $index->asYouType = false;
+
+        // Query: alpha & (beta OR gamma) & delta
+        // While_ mutation (L525) replaces the ')' pop-loop with while(false), leaving the '|'
+        // operator inside the group on the stack. The resulting malformed postfix evaluates to
+        // alpha ∪ (gamma ∩ delta) instead of alpha ∩ (beta ∪ gamma) ∩ delta, including doc 3.
+        $result = $index->searchBoolean('alpha&(beta or gamma)&delta');
+        $this->assertCount(2, $result['ids']);
+        $this->assertContains(1, $result['ids']);
+        $this->assertContains(2, $result['ids']);
+        $this->assertNotContains(3, $result['ids']);
+        $this->assertNotContains(4, $result['ids']);
     }
 
     // --- inspectQuery ---
@@ -1054,7 +1325,6 @@ class IndexTest extends TestCase
         $index = Index::create($this->dbPath);
         $index->insert(['id' => 1, 'body' => 'sedan']);
         $index->asYouType = true;
-        // 'sed' is the last (only) token → prefix expansion fires
         $result = $index->inspectQuery('sed');
         $this->assertSame('prefix', $result['tokens'][0]['match_type']);
         $terms = array_column($result['tokens'][0]['wordlist_rows'], 'term');
@@ -1134,6 +1404,16 @@ class IndexTest extends TestCase
         $this->assertContains('~', $result['boolean_postfix']);
     }
 
+    public function testInspectQueryBooleanPostfixContainsOrForSingleTerm(): void
+    {
+        $index = Index::create($this->dbPath);
+
+        // Mutation ConcatOperandRemoval: toPostfix('php') → ['php'] — no '|'.
+        // Original: toPostfix('|php') → ['php', '|'].
+        $result = $index->inspectQuery('php');
+        $this->assertContains('|', $result['boolean_postfix']);
+    }
+
     public function testInspectQueryEmptyPhraseReturnsEmptyLists(): void
     {
         $index = Index::create($this->dbPath);
@@ -1163,6 +1443,55 @@ class IndexTest extends TestCase
         $this->assertContains(1, $result['ids']);
     }
 
+    public function testInspectQueryDefaultFuzzyParamIsFalse(): void
+    {
+        $index = Index::create($this->dbPath);
+        $index->insert(['id' => 1, 'title' => 'sedan']);
+        $index->asYouType = false;
+
+        // Mutation FalseValue: default changes to true → 'sedna' fuzzy-matches 'sedan' → 'fuzzy'.
+        // Original default false: no fuzzy → no match → 'none'.
+        $result = $index->inspectQuery('sedna');
+        $this->assertSame('none', $result['tokens'][0]['match_type']);
+    }
+
+    public function testInspectQueryExactMatchWithFuzzyTrueIsNotFuzzyType(): void
+    {
+        $index = Index::create($this->dbPath);
+        $index->insert(['id' => 1, 'title' => 'sedan']);
+        $index->asYouType = false;
+
+        // When fuzzy=true but an exact wordlist hit is found, rows[0] has no 'distance' key.
+        // Mutation L204: $fuzzy || isset($rows[0]['distance']) → true || false = true → 'fuzzy'.
+        // Original:      $fuzzy && isset($rows[0]['distance']) → true && false = false → 'exact'.
+        $result = $index->inspectQuery('sedan', fuzzy: true);
+        $this->assertSame('exact', $result['tokens'][0]['match_type']);
+    }
+
+    public function testInspectQueryWordlistRowsHaveExactKeys(): void
+    {
+        $index = Index::create($this->dbPath);
+        $index->insert(['id' => 1, 'title' => 'sedan']);
+        $index->asYouType = false;
+
+        $rows = $index->inspectQuery('sedan')['tokens'][0]['wordlist_rows'];
+        $this->assertNotEmpty($rows);
+        // Mutation UnwrapArrayMap: $wordlistRows = $rows (raw rows with extra internal fields).
+        // Correct: array_map remaps to exactly {term, num_hits, num_docs, distance}.
+        $this->assertSame(['term', 'num_hits', 'num_docs', 'distance'], array_keys($rows[0]));
+    }
+
+    public function testInspectQueryNumHitsAndNumDocsValues(): void
+    {
+        $index = Index::create($this->dbPath);
+        $index->insert(['id' => 1, 'title' => 'sedan sedan']);
+        $index->asYouType = false;
+
+        $token = $index->inspectQuery('sedan')['tokens'][0];
+        $this->assertSame(2, $token['num_hits']);
+        $this->assertSame(1, $token['num_docs']);
+    }
+
     // --- CJK / ngram languages ---
 
     public function testZhInsertAndSearchBigram(): void
@@ -1170,7 +1499,6 @@ class IndexTest extends TestCase
         $index = Index::create($this->dbPath, language: 'zh');
         $index->insert(['id' => 1, 'body' => '轿车测试']);
 
-        // '轿车' is a bigram within the indexed text
         $this->assertContains(1, $index->search('轿车')['ids']);
     }
 

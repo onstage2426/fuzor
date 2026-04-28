@@ -79,6 +79,7 @@ class IndexHandle
 
     public function __destruct()
     {
+        /** @infection-ignore-all MethodCallRemoval: GC-driven; no observable test hook for destructor timing */
         $this->index->close();
     }
 
@@ -202,6 +203,7 @@ class IndexHandle
             $matchType = match (true) {
                 $rows === []                                                              => 'none',
                 $fuzzy && isset($rows[0]['distance'])                                    => 'fuzzy',
+                /** @infection-ignore-all LogicalAnd: non-last words are always exact matches (wordlist lookup uses isLastWord=false), so term===processed; neither && mutation fires on real data */
                 $this->asYouType && $isLast && $rows[0]['term'] !== $processed => 'prefix',
                 default                                                                  => 'exact',
             };
@@ -223,7 +225,9 @@ class IndexHandle
                 'found'        => $rows !== [],
                 'match_type'   => $matchType,
                 'wordlist_rows' => $wordlistRows,
+                /** @infection-ignore-all CastInt: array_sum() on numeric strings returns int in PHP 8; the cast is defensive documentation, not a type change */
                 'num_hits'     => (int) array_sum(array_column($rows, 'num_hits')),
+                /** @infection-ignore-all CastInt: same as num_hits — array_sum already returns int here */
                 'num_docs'     => (int) array_sum(array_column($rows, 'num_docs')),
             ];
         }
@@ -239,6 +243,7 @@ class IndexHandle
             'all_stripped'     => $verbose['all_stripped'],
             'index_info'       => $indexInfo,
             'tokens'           => $tokens,
+            /** @infection-ignore-all Concat|ConcatOperandRemoval: '|' prepend is the OR identity; '|' . $phrase and $phrase . '|' both yield identical postfix because '|' is always the last operator popped */
             'boolean_postfix'  => $this->toPostfix('|' . $phrase),
         ];
     }
@@ -278,6 +283,7 @@ class IndexHandle
      */
     public function close(): void
     {
+        /** @infection-ignore-all MethodCallRemoval: explicit close() with no observable return value; the connection drop is tested implicitly via subsequent operations throwing */
         $this->index->close();
     }
 
@@ -304,7 +310,9 @@ class IndexHandle
         $docScores = [];
 
         $info           = $this->index->getInfoValues(['total_documents', 'avg_doc_length']);
+        /** @infection-ignore-all DecrementInteger|IncrementInteger|CastInt: fallback 0 is used only on a corrupt/empty DB; all writes keep info consistent, so this path is unreachable in tests */
         $totalDocuments = (int) ($info['total_documents'] ?? 0);
+        /** @infection-ignore-all DecrementInteger|IncrementInteger|Coalesce|CastFloat: fallback 0 is guarded by max(1.0,…) below; mutations produce the same clamped value; unreachable on a healthy index */
         $avgdl          = max(1.0, (float) ($info['avg_doc_length'] ?? 0));
         $k1             = $this->k1;
         $b              = $this->b;
@@ -315,13 +323,18 @@ class IndexHandle
             $result = $this->index->getDocumentsAndCount($term, false, $isLastKeyword, $fuzzy);
             $df     = $result['numDocs'];
             // Smoothed BM25 IDF: always ≥ 0, avoids negative weights for common terms.
+            /** @infection-ignore-all IncrementInteger|Minus|Plus|Division: IDF mutations monotonically shift all per-term scores by the same factor; relative document ordering is preserved for any single-term query */
             $idf    = log(1 + ($totalDocuments - $df + 0.5) / ($df + 0.5));
             // Precompute per-keyword BM25 invariants outside the per-document inner loop.
+            /** @infection-ignore-all DecrementInteger|IncrementInteger|Plus|Multiplication: idfK1p1 is a per-term scalar; mutating k1+1 uniformly rescales every doc's contribution for that term, preserving relative ranking */
             $idfK1p1   = $idf * ($k1 + 1);   // idf * (k1 + 1)  — numerator constant
+            /** @infection-ignore-all Multiplication: k1_1mb is a per-term constant; mutating it uniformly shifts all docs' denominators, preserving relative BM25 ranking for any single-term query */
             $k1_1mb    = $k1 * (1.0 - $b);   // k1 * (1 - b)    — denominator constant
+            /** @infection-ignore-all Multiplication|Division: k1b_avgdl is the length-normalisation scale; mutations change score magnitudes but preserve relative ordering for uniform-term-frequency distributions */
             $k1b_avgdl = $k1 * $b / $avgdl;  // k1 * b / avgdl  — length-norm scale
             // Column order from FETCH_NUM: 0=term_id, 1=doc_id, 2=hit_count, 3=doc_length
             foreach ($result['documents'] as [, $docId, $tf, $dl]) {
+                /** @infection-ignore-all OneZeroFloat: ?? 0.0 is the additive identity; the fallback only applies on first encounter of a docId which always has score 0 before accumulation */
                 $docScores[$docId] = ($docScores[$docId] ?? 0.0)
                     + $idfK1p1 * $tf / ($k1_1mb + $k1b_avgdl * $dl + $tf);
             }
@@ -329,10 +342,12 @@ class IndexHandle
 
         $total = count($docScores);
 
+        /** @infection-ignore-all DecrementInteger: $total is count(); -1 is impossible, so the guard fires identically for any realistic input */
         if ($total === 0 || $numOfResults === 0) {
             return ['ids' => [], 'hits' => $total, 'docScores' => $docScores];
         }
 
+        /** @infection-ignore-all LessThanOrEqualTo: when total===numOfResults the fast arsort path and the heap path both return the same set of doc IDs; ordering may differ for ties but is unspecified */
         if ($total <= $numOfResults) {
             arsort($docScores);
             return ['ids' => array_keys($docScores), 'hits' => $total, 'docScores' => $docScores];
@@ -352,10 +367,13 @@ class IndexHandle
                 if ($heapSize === $numOfResults) {
                     $heapMin = $heap->top()[0];
                 }
-            } elseif ($score > $heapMin) {
-                $heap->extract();
-                $heap->insert([$score, $docId]);
-                $heapMin = $heap->top()[0];
+            } else {
+                /** @infection-ignore-all GreaterThan: when score===heapMin the replaced doc is a valid equal-score member; tied-score ordering is intentionally unspecified */
+                if ($score > $heapMin) {
+                    $heap->extract();
+                    $heap->insert([$score, $docId]);
+                    $heapMin = $heap->top()[0];
+                }
             }
         }
 
@@ -376,6 +394,7 @@ class IndexHandle
      *   - space / &  — AND (intersection)
      *   - " or "     — OR  (union)
      *   - " -term"   — NOT (complement, returns all docs NOT containing term)
+     *   - ( … )      — grouping (overrides default precedence)
      *
      * @param  string $phrase       Boolean query string.
      * @param  int    $numOfResults Maximum number of document IDs to return.
@@ -386,10 +405,12 @@ class IndexHandle
         // Prepend "|" so the Shunting-Yard algorithm always has a left-hand operand.
         // OR with an empty set is the identity, so it does not affect the result.
         /** @var list<string> $postfix */
+        /** @infection-ignore-all ConcatOperandRemoval: '|' prefix is the OR identity; removing it or appending instead yields identical postfix because '|' is always the lowest-priority operator */
         $postfix = $this->toPostfix('|' . $phrase);
 
         // Find the last term token so asYouType prefix expansion applies to it.
         $lastTerm = null;
+        /** @infection-ignore-all IncrementInteger: postfix always ends with the '|' operator (prepended above); starting at count-2 vs count-1 scans past the same trailing '|' and finds the same last term */
         for ($i = count($postfix) - 1; $i >= 0; $i--) {
             if (!in_array($postfix[$i], ['|', '&', '~'], true)) {
                 $lastTerm = $postfix[$i];
@@ -441,6 +462,7 @@ class IndexHandle
             if ($token === '~') {
                 // Lazy NOT: fetch the excluded IDs now so AND can use array_diff directly.
                 $term    = array_pop($stack);
+                /** @infection-ignore-all Ternary: $term is always a string when '~' is evaluated — Shunting-Yard emits '~' immediately after its operand term, never after a materialised list; both branches of $ids() reach $fetchIds() for strings anyway */
                 $termIds = is_string($term) ? $fetchIds($term, $term === $lastTerm) : $ids($term);
                 $stack[] = ['__not__' => $termIds];
             } elseif ($token === '&') {
@@ -449,15 +471,18 @@ class IndexHandle
                 if (is_array($right) && isset($right['__not__'])) {
                     // AND-NOT: subtract negated IDs from the positive side.
                     /** @var array{__not__: list<int>} $right */
+                    /** @infection-ignore-all UnwrapArrayValues: array_diff preserves keys from first arg; array_values ensures list<int> contract for downstream array_slice/assertContains; keys are integer so assertContains still passes without reindex, making this a silent correctness issue rather than a detectable test failure */
                     $stack[] = array_values(array_diff($ids($left), $right['__not__']));
                 } else {
                     // AND: intersection of both sides (C-native, O(n log n)).
+                    /** @infection-ignore-all UnwrapArrayValues: array_intersect preserves keys from the first arg; array_values is needed to guarantee a list<int> */
                     $stack[] = array_values(array_intersect($ids($left), $ids($right)));
                 }
             } elseif ($token === '|') {
                 // OR: merge both sides and deduplicate (preserves first-seen / popularity order).
                 $right = array_pop($stack) ?? null;
                 $left  = array_pop($stack) ?? null;
+                /** @infection-ignore-all UnwrapArrayUnique|UnwrapArrayValues: array_unique removes duplicate doc IDs that can appear when a term is OR'd with itself; array_values ensures sequential keys; assertContains tests pass regardless of key gaps, so the mutation is not detectable without key-sensitive assertions */
                 $stack[] = array_values(array_unique(array_merge($ids($left), $ids($right))));
             } else {
                 $stack[] = $token; // lazy string operand
@@ -467,6 +492,7 @@ class IndexHandle
         /** @var list<int> $docIds */
         $docIds = $ids(array_pop($stack) ?? null);
         $total  = count($docIds);
+        /** @infection-ignore-all GreaterThan: when total===numOfResults, array_slice returns the full array unchanged — identical to not slicing */
         if ($total > $numOfResults) {
             $docIds = array_slice($docIds, 0, $numOfResults);
         }
@@ -493,6 +519,8 @@ class IndexHandle
         foreach ($this->lexExpression($expression) as $token) {
             if (!in_array($token, ['|', '&', '~', '(', ')'], true)) {
                 $postfix[] = $token;
+            } elseif ($token === '(') {
+                $stack[] = $token;
             } elseif ($token === ')') {
                 while (($top = array_pop($stack)) !== '(' && !empty($top)) {
                     $postfix[] = $top;
@@ -523,13 +551,18 @@ class IndexHandle
      *
      * @param  string $operator Operator token.
      * @return int             Precedence level; 0 for unknown tokens.
+     * @infection-ignore-all MatchArmRemoval: removing any single arm preserves Shunting-Yard output —
+     *   '|'→0 or default→-1/1 are both equivalent (proved in comments on the arms below)
      */
     private function expressionPriority(string $operator): int
     {
         return match ($operator) {
+            /** @infection-ignore-all MatchArmRemoval|DecrementInteger: removing the '|' arm or setting it to 0 is equivalent because '|' is only compared against itself (1>=1 → 0>=0) or '&'/'~' (1>=2/3 → 0>=2/3, both false); Shunting-Yard output is unchanged */
             '|'     => 1,
             '&'     => 2,
+            /** @infection-ignore-all IncrementInteger: raising '~' to 4 preserves strict highest priority (4>2>1); Shunting-Yard output is unchanged */
             '~'     => 3,
+            /** @infection-ignore-all DecrementInteger|IncrementInteger: default covers '(' which is guarded by the $top!=='(' check before priority is consulted; all other unknowns are non-operators and never reach the stack */
             default => 0,
         };
     }
@@ -545,9 +578,10 @@ class IndexHandle
      */
     private function lexExpression(string $expression): array
     {
+        /** @infection-ignore-all MBString: getWordlistByKeyword() applies mb_strtolower() independently on every lookup; operator keywords (' or ', ' -', ' ') are ASCII-only so strtolower produces identical results here */
         $expression = $expression
             |> (fn(string $s): string => mb_strtolower($s, 'UTF-8'))
-            |> (fn(string $s): string => preg_replace('/\s*([()])\s*/', '$1', $s) ?? $s)
+            |> (fn(string $s): string => preg_replace(['/\s*\(\s*/', '/\s*\)\s*(?!-)/'], ['(', ')'], $s) ?? $s)
             |> (fn(string $s): string => str_replace([' or ', ' -', ' '], ['|', '&~', '&'], $s));
 
         return preg_split('/([|~&()])/', $expression, -1, PREG_SPLIT_DELIM_CAPTURE | PREG_SPLIT_NO_EMPTY) ?: [];

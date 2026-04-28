@@ -46,7 +46,6 @@ class HighlighterTest extends TestCase
     public function testHighlightDoesNotMatchInsideWord(): void
     {
         $hl = new Highlighter('<mark>', '</mark>', false);
-        // 'car' must not match inside 'scarce'.
         $this->assertSame('scarce', $hl->highlight('car', 'scarce'));
     }
 
@@ -67,15 +66,12 @@ class HighlighterTest extends TestCase
     public function testAsYouTypePrefixHighlightsFullWord(): void
     {
         $hl = new Highlighter();
-        // 'merc' prefix should highlight the full word 'Mercedes'.
         $this->assertSame('<mark>Mercedes</mark> Benz', $hl->highlight('merc', 'Mercedes Benz'));
     }
 
     public function testAsYouTypeOnlyAppliesToLastToken(): void
     {
         $hl = new Highlighter();
-        // 'fast' is NOT the last token: must match exactly, not as a prefix.
-        // 'sed' IS the last token: must expand to 'sedan'.
         $result = $hl->highlight('fast sed', 'A fast sedan.');
         $this->assertSame('A <mark>fast</mark> <mark>sedan</mark>.', $result);
     }
@@ -83,14 +79,12 @@ class HighlighterTest extends TestCase
     public function testAsYouTypeDisabledMatchesExactOnly(): void
     {
         $hl = new Highlighter('<mark>', '</mark>', false);
-        // 'merc' must not expand to 'Mercedes' when asYouType is off.
         $this->assertSame('Mercedes Benz', $hl->highlight('merc', 'Mercedes Benz'));
     }
 
     public function testAsYouTypeExactTermStillMatchesFullWord(): void
     {
         $hl = new Highlighter();
-        // Even with asYouType, an exact last token must still match when the text matches exactly.
         $this->assertSame('<mark>sedan</mark>', $hl->highlight('sedan', 'sedan'));
     }
 
@@ -174,5 +168,21 @@ class HighlighterTest extends TestCase
     {
         $hl = new Highlighter(language: 'zh');
         $this->assertSame('这是一辆<mark>轿车</mark>测试', $hl->highlight('轿车', '这是一辆轿车测试'));
+    }
+
+    public function testCjkHighlightDoesNotMatchSeparatedChars(): void
+    {
+        // With includeUnigrams=true (mutation), '轿' and '车' would each match individually.
+        // With the correct false, only the bigram '轿车' is a pattern token, so separated
+        // characters produce no match.
+        $hl = new Highlighter(language: 'zh');
+        $this->assertSame('轿 车', $hl->highlight('轿车', '轿 车'));
+    }
+
+    public function testCjkHighlightManyDoesNotMatchSeparatedChars(): void
+    {
+        $hl     = new Highlighter(language: 'zh');
+        $result = $hl->highlightMany('轿车', ['body' => '轿 车']);
+        $this->assertSame('轿 车', $result['body']);
     }
 }

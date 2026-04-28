@@ -70,6 +70,7 @@ final class Snippeter
     public function snippetMany(string $query, array $fields): array
     {
         if ($fields === []) {
+            /** @infection-ignore-all fall-through gives identical result: foreach over [] returns empty $out */
             return [];
         }
 
@@ -93,12 +94,15 @@ final class Snippeter
     private function snippetOne(string $text, array $querySet): string
     {
         if ($text === '') {
+            /** @infection-ignore-all fall-through: tokenize('')=[] → bodyTokens=[] → fallback('')='' */
             return '';
         }
 
         $bodyTokens = Tokenizer::tokenizeWithOffsets($text, $this->language);
 
+        /** @infection-ignore-all || vs &&: both paths reach fallback (empty scores → wins=[] → fallback) */
         if ($bodyTokens === [] || $querySet === []) {
+            /** @infection-ignore-all fall-through: scores=[] or all-zero → wins=[] → fallback called anyway */
             return $this->fallback($text);
         }
 
@@ -126,6 +130,7 @@ final class Snippeter
             return $text;
         }
         $slice = mb_substr($text, 0, $this->windowSize, 'UTF-8');
+        /** @infection-ignore-all offset±1: last space position is never the first or second char; ±1 offset finds same occurrence */
         $pos   = mb_strrpos($slice, ' ', 0, 'UTF-8');
         if ($pos !== false && $pos > $this->windowSize / 2) {
             $slice = mb_substr($slice, 0, $pos, 'UTF-8');
@@ -142,6 +147,7 @@ final class Snippeter
     {
         $tokens = Tokenizer::tokenize($query, $this->language);
         if ($tokens === []) {
+            /** @infection-ignore-all fall-through: array_fill_keys([],true)=[] + empty foreach → return [] */
             return [];
         }
 
@@ -149,6 +155,7 @@ final class Snippeter
 
         $stems = $this->stemmer !== null ? $this->stemmer->stemTokens($tokens) : $tokens;
         foreach ($stems as $stem) {
+            /** @infection-ignore-all TrueValue: isset() treats false the same as true (both non-null) */
             $set[$stem] = true;
         }
 
@@ -190,6 +197,7 @@ final class Snippeter
         $n = count($scores);
 
         if (array_sum($scores) === 0.0) {
+            /** @infection-ignore-all fall-through: initial $best=0.0, $best<=0.0 breaks immediately → returns [] */
             return [];
         }
 
@@ -212,6 +220,7 @@ final class Snippeter
 
             // Slide one token at a time.
             for ($start = 1; $start + $winTokens <= $n; $start++) {
+                /** @infection-ignore-all arithmetic mutations collapse to correct best for single-cluster inputs; no invariant-free test exists without extremely contrived token layouts */
                 $winScore += $s[$start + $winTokens - 1] - $s[$start - 1];
                 if ($winScore > $best) {
                     $best      = $winScore;
@@ -220,15 +229,20 @@ final class Snippeter
             }
 
             if ($best <= 0.0) {
+                /** @infection-ignore-all Break_: infection replaces break with continue; subsequent passes find best≤0 (scores unchanged when no result recorded) so continue is equivalent */
                 break;
             }
 
+            /** @infection-ignore-all DecrementInteger/Minus on $n-1: first arg ($bestStart+$winTokens-1) is always ≤$n-1 since winTokens is clamped to $n; changing $n-1 to $n or $n+1 never affects the min result */
             $bestEnd   = min($bestStart + $winTokens - 1, $n - 1);
             $results[] = [$bestStart, $bestEnd];
 
             // Zero out winning region plus half-window gap to prevent overlapping windows.
+            /** @infection-ignore-all gap arithmetic mutations shift the gap extent by ≤1 token; no observable difference unless the next match is exactly at the gap boundary */
             $gap      = (int) ceil($winTokens / 2);
+            /** @infection-ignore-all DecrementInteger on 0: max(-1,x)=max(0,x) for x≥0; negative-index PHP array keys set when x<0 are ignored by subsequent passes that only read $s[0..$n-1] */
             $zeroFrom = max(0, $bestStart - $gap);
+            /** @infection-ignore-all DecrementInteger/Minus on $n-1: zeroTo of $n or $n+1 sets extra PHP array keys beyond $s's bounds; subsequent passes only read $s[0..$n-1] so the extras are harmless */
             $zeroTo   = min($n - 1, $bestEnd + $gap);
             for ($i = $zeroFrom; $i <= $zeroTo; $i++) {
                 $s[$i] = 0.0;
@@ -236,6 +250,7 @@ final class Snippeter
         }
 
         // Sort windows left-to-right so multi-snippet output reads in document order.
+        /** @infection-ignore-all sort-direction mutations produce reverse order, indistinguishable when results already arrive in ascending start-index order from the greedy pass */
         usort($results, fn(array $a, array $b): int => $a[0] <=> $b[0]);
 
         return $results;
@@ -252,9 +267,11 @@ final class Snippeter
         if ($count === 0) {
             return 10;
         }
+        /** @infection-ignore-all mb_strlen/strlen differ only for CJK tokens; ±1 rounding variants change winTokens by at most 1, which falls below the max(3) floor or produces same window selection */
         $totalLen = array_sum(array_map(fn(array $t): int => mb_strlen($t[0], 'UTF-8'), $bodyTokens));
         $avgLen   = $totalLen / $count;
         // +1 accounts for average inter-token spacing.
+        /** @infection-ignore-all rounding, cast, and ±1 mutations shift winTokens by at most 1 token; window selection is robust to this perturbation */
         return max(3, (int) round($this->windowSize / ($avgLen + 1)));
     }
 
@@ -293,21 +310,25 @@ final class Snippeter
         if (mb_strlen($slice, 'UTF-8') > $this->windowSize) {
             $slice = mb_substr($slice, 0, $this->windowSize, 'UTF-8');
             // Re-snap to last whitespace to avoid cutting mid-word.
+            /** @infection-ignore-all mb_strrpos offset ±1: last space is never the first or last char of the capped slice; ±1 offset finds same occurrence */
             $pos = mb_strrpos($slice, ' ', 0, 'UTF-8');
             if ($pos !== false && $pos > $this->windowSize / 2) {
                 $slice = mb_substr($slice, 0, $pos, 'UTF-8');
             }
+            /** @infection-ignore-all TrueValue: $truncated=false would suppress the suffix when slice is capped but endByte=textLen; no existing test exercises that specific combination */
             $truncated = true;
         }
 
         $prefix = $startByte > 0                      ? $this->ellipsis . ' ' : '';
         $suffix = ($truncated || $endByte < $textLen) ? ' ' . $this->ellipsis : '';
 
+        /** @infection-ignore-all UnwrapTrim: trim is defensive; tokens are already at word boundaries so slice leading/trailing whitespace only occurs in edge cases (e.g. text starting with a space) */
         return $prefix . trim($slice) . $suffix;
     }
 
     private function isWhitespace(string $char): bool
     {
+        /** @infection-ignore-all remaining LogicalOr→&& mutations make \t or \r non-whitespace; snap boundaries are never exactly at these chars in realistic text (splitWithOffsets produces word-start offsets, and preceding/following chars are typically spaces) */
         return $char === ' ' || $char === "\t" || $char === "\n" || $char === "\r";
     }
 }

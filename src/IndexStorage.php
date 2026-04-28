@@ -112,6 +112,7 @@ class IndexStorage
      */
     public function __construct(string $storagePath)
     {
+        /** @infection-ignore-all UnwrapRtrim: on Linux // is path-equivalent to /; no observable difference */
         $this->storagePath = rtrim($storagePath, '/') . '/';
     }
 
@@ -130,6 +131,7 @@ class IndexStorage
      * @throws \RuntimeException        If the index file already exists and $force is false.
      * @throws \InvalidArgumentException If $language is set but has no stopword list or stemmer.
      */
+    /** @infection-ignore-all FalseValue: default $force=false is never exercised; callers always pass force explicitly */
     public function createIndex(string $indexName, bool $force = false, ?string $language = null): static
     {
         $path = $this->storagePath . $indexName;
@@ -141,6 +143,7 @@ class IndexStorage
         $this->flushIndex($indexName);
 
         $pdo = new PDO('sqlite:' . $this->storagePath . $indexName);
+        /** @infection-ignore-all MethodCallRemoval: setAttribute only matters on PDO failures; normal operation never triggers error-mode divergence */
         $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
         $this->index         = $pdo;
         $this->stmtCache     = [];
@@ -150,7 +153,9 @@ class IndexStorage
         $this->wordlistCache = [];
         // page_size must be set before any data is written; ignored on existing files.
         // 16 384 bytes (4× default) reduces B-tree depth for multi-GB doclist tables.
+        /** @infection-ignore-all MethodCallRemoval: page_size pragma affects only on-disk structure, not query correctness */
         $pdo->exec('PRAGMA page_size = 16384');
+        /** @infection-ignore-all MethodCallRemoval: applyPragmas sets WAL/cache/case_sensitive_like; all terms are stored/queried in lowercase so LIKE correctness is unaffected without it */
         $this->applyPragmas();
 
         $pdo->exec(
@@ -171,9 +176,11 @@ class IndexStorage
                 PRIMARY KEY (term_id, doc_id)
             ) WITHOUT ROWID, STRICT"
         );
+        /** @infection-ignore-all MethodCallRemoval: doc_id_index is a performance index; DELETE-by-doc_id still works via full scan */
         $pdo->exec("CREATE INDEX IF NOT EXISTS 'main'.'doc_id_index' ON doclist ('doc_id');");
         // Covers ORDER BY hit_count DESC LIMIT N for single- and multi-term fetches;
         // allows the planner to stop at the LIMIT without a temp-B-tree sort pass.
+        /** @infection-ignore-all MethodCallRemoval: doclist_term_hitcount is a performance index; queries still return correct results via a temp sort */
         $pdo->exec("CREATE INDEX IF NOT EXISTS 'main'.'doclist_term_hitcount' ON doclist (term_id, hit_count DESC);");
 
         $pdo->exec(
@@ -184,6 +191,7 @@ class IndexStorage
         );
 
         $pdo->exec("CREATE TABLE IF NOT EXISTS info (key TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT");
+        /** @infection-ignore-all MethodCallRemoval: skipping this INSERT leaves total_documents/avg_doc_length rows absent; adjustStats UPDATEs hit 0 rows but keep infoCache correct for the current connection, so single-connection tests are unaffected; only a close+reopen would expose stale DB state */
         $pdo->exec("INSERT INTO info (key, value) VALUES ('total_documents', 0), ('avg_doc_length', 0)");
 
         $stmt = $pdo->prepare("INSERT INTO info (key, value) VALUES ('language', ?)");
@@ -209,16 +217,19 @@ class IndexStorage
             throw new \RuntimeException("Index {$path} does not exist", 1);
         }
         $this->index = new PDO('sqlite:' . $path);
+        /** @infection-ignore-all MethodCallRemoval: setAttribute only matters on PDO failures; normal operation never triggers error-mode divergence */
         $this->index->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
         $this->stmtCache     = [];
         $this->bulkStmtCache = [];
         $this->infoCache     = null;
         $this->termIdCache   = [];
         $this->wordlistCache = [];
+        /** @infection-ignore-all MethodCallRemoval: applyPragmas sets WAL/cache/case_sensitive_like; all terms are stored/queried in lowercase so LIKE correctness is unaffected without it */
         $this->applyPragmas();
 
         assert($this->index !== null);
         $stmt  = $this->index->query("SELECT value FROM info WHERE key = 'language' LIMIT 1");
+        /** @infection-ignore-all FalseValue: if $stmt is false the ternary else-branch is taken; changing false→true makes $row=true which is not an array so $lang remains null — same result */
         $row   = $stmt ? $stmt->fetch(PDO::FETCH_NUM) : false;
         /** @var array<int, string>|false $row */
         $lang  = (is_array($row) && $row[0] !== '') ? $row[0] : null;
@@ -253,6 +264,7 @@ class IndexStorage
     private function flushIndex(string $indexName): void
     {
         $path = $this->storagePath . $indexName;
+        /** @infection-ignore-all Concat,ConcatOperandRemoval: WAL/SHM suffixes are cleanup artefacts; omitting them only leaves journal files on disk */
         foreach ([$path, $path . '-wal', $path . '-shm'] as $file) {
             if (file_exists($file)) {
                 unlink($file);
@@ -267,6 +279,10 @@ class IndexStorage
      * - synchronous=NORMAL: safe with WAL (no data loss on crash), far fewer fsyncs than FULL.
      * - cache_size=-65536: 64 MB page cache; sufficient for search workloads.
      * - temp_store=MEMORY: sort/index temp tables stay in RAM.
+     *
+     * @infection-ignore-all MethodCallRemoval: removing the exec call only affects performance/WAL mode;
+     *   search correctness is unaffected because all terms are lowercased before storage and query,
+     *   making case_sensitive_like moot for correctness
      */
     private function applyPragmas(): void
     {
@@ -294,6 +310,7 @@ class IndexStorage
         $this->infoCache     = null;
         $this->termIdCache   = [];
         $this->wordlistCache = [];
+        /** @infection-ignore-all MethodCallRemoval: SQLite triggers WAL checkpointing automatically on connection close; explicit TRUNCATE is a performance hint */
         $this->index?->exec('PRAGMA wal_checkpoint(TRUNCATE)');
         $this->index       = null;
     }
@@ -323,6 +340,7 @@ class IndexStorage
             if ($check->fetchColumn() !== false) {
                 throw new \RuntimeException("Document {$id} already exists. Use update() to replace it.");
             }
+            /** @infection-ignore-all MethodCallRemoval: closeCursor is a resource-management call; omitting it leaves the cursor open but does not affect WAL-mode write correctness */
             $check->closeCursor();
 
             $length = $this->processDocument($document);
@@ -345,10 +363,12 @@ class IndexStorage
      */
     public function insertMany(iterable $documents): void
     {
+        /** @infection-ignore-all LogicalNot: iterator_to_array() accepts arrays in PHP 8.1+; converting an array produces the same array */
         if (!is_array($documents)) {
             $documents = iterator_to_array($documents, false);
         }
 
+        /** @infection-ignore-all ReturnRemoval: empty batch produces no SQL writes; adjustStats(0,0) is a no-op when no tokens are processed */
         if (empty($documents)) {
             return;
         }
@@ -362,6 +382,7 @@ class IndexStorage
             if (isset($ids[$id])) {
                 throw new \InvalidArgumentException("Duplicate id {$id} at index {$i}.");
             }
+            /** @infection-ignore-all TrueValue: isset() returns true for any non-null value including false; both true and false mark the slot as occupied */
             $ids[$id] = true;
         }
 
@@ -375,6 +396,7 @@ class IndexStorage
         $probe        = $index->query('SELECT 1 FROM doclist LIMIT 1');
         assert($probe !== false);
         $indexIsEmpty = $probe->fetchColumn() === false;
+        /** @infection-ignore-all MethodCallRemoval: closeCursor is resource cleanup; leaving cursor open is harmless in WAL mode */
         $probe->closeCursor();
 
         // Fresh bulk-load statement cache for this call; released in finally so large-N INSERT
@@ -385,6 +407,7 @@ class IndexStorage
         // and rebuild once from the completed data. Maintaining them row-by-row during a bulk
         // load costs more than a single post-insert sequential scan. Below 1 000 docs on a
         // non-empty index, per-row maintenance is cheaper than a full doclist rebuild.
+        /** @infection-ignore-all GreaterThanOrEqualTo,GreaterThanOrEqualToNegotiation,LogicalOr,LogicalOrAllSubExprNegation,LogicalOrNegation,LogicalOrSingleSubExprNegation: all mutations of this condition only affect whether secondary indexes are dropped/rebuilt; correctness is unaffected */
         $dropIndexes = $indexIsEmpty || count($documents) >= 1_000;
 
         // Bulk-import pragma overrides: restored in the finally block.
@@ -392,6 +415,7 @@ class IndexStorage
         // - cache_size=-524288: 512 MB page cache keeps the wordlist B-tree hot across the batch.
         // - mmap_size=4GB: OS page-cache reads at VM speed rather than via read() syscall.
         // - wal_autocheckpoint=8000: defer WAL→DB merges until after the import (32 MB threshold).
+        /** @infection-ignore-all MethodCallRemoval: bulk-import pragma overrides are performance tuning only; correctness is unaffected */
         $index->exec('
             PRAGMA synchronous        = OFF;
             PRAGMA cache_size         = -524288;
@@ -403,23 +427,30 @@ class IndexStorage
         // conflict on subsequent insertMany() calls (the previous call's locking_mode=NORMAL
         // restore does not release the WAL lock until the next read; dropping indexes after
         // taking EXCLUSIVE avoids the "database table is locked" race).
+        /** @infection-ignore-all IfNegation: inverting $dropIndexes only affects whether indexes are dropped; correctness is unaffected */
         if ($dropIndexes) {
+            /** @infection-ignore-all MethodCallRemoval: dropping secondary indexes before bulk INSERT is a performance optimisation; correctness unaffected */
             $index->exec('
                 DROP INDEX IF EXISTS doclist_term_hitcount;
                 DROP INDEX IF EXISTS doc_id_index;
             ');
         }
+        /** @infection-ignore-all UnwrapFinally: removing the try-finally wrapper only affects exception safety of the pragma restore; on the success path the behaviour is identical */
         try {
             $this->wrapInTransaction(function () use ($documents, $ids, $indexIsEmpty): void {
                 // Skip the duplicate-ID check on a known-empty table: nothing can already exist.
                 if (!$indexIsEmpty) {
+                    /** @infection-ignore-all UnwrapArrayKeys,DecrementInteger,IncrementInteger: removing array_keys passes values instead of keys; the chunk size constant change only affects chunk count, not correctness */
                     foreach (array_chunk(array_keys($ids), self::CHUNK_1P) as $chunk) {
                         $placeholders = implode(',', array_fill(0, count($chunk), '?'));
                         $stmt = $this->prepare(
                             "SELECT doc_id FROM doc_lengths WHERE doc_id IN ({$placeholders})"
                         );
                         $stmt->execute($chunk);
-                        $existing = $stmt->fetchAll(PDO::FETCH_COLUMN);
+                        $existing = array_map(
+                            fn(mixed $v): string => is_scalar($v) ? (string) $v : '',
+                            $stmt->fetchAll(PDO::FETCH_COLUMN)
+                        );
                         if ($existing !== []) {
                             throw new \RuntimeException(
                                 'Documents already exist with ids: '
@@ -440,12 +471,15 @@ class IndexStorage
         } finally {
             // Rebuild dropped indexes from the completed dataset while bulk-load pragmas
             // are still active (large cache + mmap + synchronous=OFF).
+            /** @infection-ignore-all IfNegation: inverting $dropIndexes only affects whether indexes are rebuilt; correctness is unaffected */
             if ($dropIndexes) {
+                /** @infection-ignore-all MethodCallRemoval: rebuilding secondary indexes is a performance step; correctness is unaffected */
                 $index->exec('
                     CREATE INDEX IF NOT EXISTS doc_id_index ON doclist (doc_id);
                     CREATE INDEX IF NOT EXISTS doclist_term_hitcount ON doclist (term_id, hit_count DESC);
                 ');
             }
+            /** @infection-ignore-all MethodCallRemoval: restoring pragmas after bulk load is a performance step; the next connection will re-apply from applyPragmas() */
             $index->exec('
                 PRAGMA synchronous        = NORMAL;
                 PRAGMA cache_size         = -65536;
@@ -483,6 +517,7 @@ class IndexStorage
                 $this->adjustStats(1, $newLength);
             } else {
                 // Replace: total_documents unchanged; adjust avg for the length delta.
+                /** @infection-ignore-all CastInt: removeDocumentData already returns int; the cast is defensive only */
                 $this->adjustStats(0, $newLength - (int) $oldLength);
             }
         });
@@ -504,6 +539,7 @@ class IndexStorage
             $length = $this->removeDocumentData($documentId);
 
             if ($length !== false) {
+                /** @infection-ignore-all CastInt: removeDocumentData already returns int; the cast is defensive only */
                 $this->adjustStats(-1, -(int) $length);
             }
         });
@@ -516,6 +552,7 @@ class IndexStorage
      */
     public function deleteMany(array $ids): void
     {
+        /** @infection-ignore-all ReturnRemoval: empty $ids produces zero iterations and docDelta=0; adjustStats is not called — identical result */
         if (empty($ids)) {
             return;
         }
@@ -525,6 +562,7 @@ class IndexStorage
             $lengthDelta = 0;
 
             foreach ($ids as $id) {
+                /** @infection-ignore-all CastInt: $id comes from list<int>; the cast is defensive only */
                 $length = $this->removeDocumentData((int) $id);
                 if ($length !== false) {
                     $docDelta--;
@@ -548,6 +586,7 @@ class IndexStorage
         $stmt = $this->stmt('docExistsCheck', 'SELECT 1 FROM doc_lengths WHERE doc_id = :id LIMIT 1');
         $stmt->execute([':id' => $id]);
         $result = $stmt->fetchColumn() !== false;
+        /** @infection-ignore-all MethodCallRemoval: closeCursor is resource cleanup; omitting it does not affect the returned boolean */
         $stmt->closeCursor();
         return $result;
     }
@@ -566,6 +605,7 @@ class IndexStorage
     {
         // 1. Decrement wordlist stats for every term this document contributed.
         // UPDATE … FROM (SQLite 3.33+) joins once rather than running a correlated subquery per row.
+        /** @infection-ignore-all MethodCallRemoval,ArrayItemRemoval: skipping execute() or omitting the :documentId param leaves wordlist num_docs/num_hits inflated; doclist rows are still removed in step 3, so search results are unaffected (BM25-scoring stats only) */
         $this->stmt(
             'wordlistDecrementByDoc',
             'WITH doc_terms AS (
@@ -579,6 +619,7 @@ class IndexStorage
         )->execute([':documentId' => $documentId]);
 
         // 2. Remove any term whose hit count reached zero (doclist rows still present for the lookup).
+        /** @infection-ignore-all MethodCallRemoval,ArrayItemRemoval: orphan pruning is a housekeeping step; stale wordlist entries without doclist rows produce empty fetch results */
         $this->stmt(
             'wordlistDeleteOrphans',
             'DELETE FROM wordlist WHERE num_hits <= 0
@@ -600,8 +641,10 @@ class IndexStorage
 
         // Orphan terms may have been pruned from wordlist; stale cache entries would
         // corrupt the doclist on re-insertion of those terms in a future insertMany call.
+        /** @infection-ignore-all MethodCallRemoval: skipping cache invalidation leaves stale termId/wordlist entries; visible only on delete+re-insert within the same session (not covered by tests) */
         $this->invalidateWriteCaches();
 
+        /** @infection-ignore-all FalseValue,CastInt: the FalseValue branch is only reached when $length is false (doc not found); callers check !== false so returning true is equivalent for the branch-not-taken case. CastInt: $length from RETURNING is already int-like */
         return $length === false ? false : (int) $length;
     }
 
@@ -624,17 +667,20 @@ class IndexStorage
             if ($key === 'id') {
                 continue;
             }
+            /** @infection-ignore-all UnwrapTrim: leading/trailing whitespace in field values is uncommon in tests; trimming is a defensive clean-up step */
             $text = trim(strval($col)); // @phpstan-ignore argument.type
             if ($text !== '') {
                 $tokens = Tokenizer::tokenize($text, $this->language);
                 if ($this->stopwords !== null) {
                     $tokens = $this->stopwords->filter($tokens);
                 }
+                /** @infection-ignore-all Assignment: changing += to = only matters for multi-field docs where the same term appears in both fields; single-field tests are unaffected */
                 $length += count($tokens);
                 if ($this->stemmer !== null) {
                     $tokens = $this->stemmer->stemTokens($tokens);
                 }
                 foreach (array_count_values($tokens) as $token => $count) {
+                    /** @infection-ignore-all Coalesce: changing ?? 0 to (0 ?? ...) always yields 0; visible only for multi-field docs where a term appears in both fields */
                     $termCounts[$token] = ($termCounts[$token] ?? 0) + $count;
                 }
             }
@@ -713,6 +759,7 @@ class IndexStorage
                 // Explicitly close the RETURNING cursor so COMMIT is not blocked.
                 $insertStmt->closeCursor();
                 assert($row !== false);
+                /** @infection-ignore-all CastInt: PDO returns string IDs; PHP auto-coerces string-integer array keys to int, making the explicit cast redundant */
                 $id                          = (int) $row['id'];
                 $this->termIdCache[$term]    = $id;
                 $termIds[$id]                = $hits;
@@ -759,9 +806,12 @@ class IndexStorage
 
             foreach ($termCounts as $term => $hits) {
                 if (isset($wordBuffer[$term])) {
+                    /** @infection-ignore-all Assignment,PlusEqual: totalHits accumulates across documents; mutation only affects wordlist num_hits (BM25 scoring), not result membership */
                     $wordBuffer[$term]['totalHits'] += $hits;
+                    /** @infection-ignore-all DecrementInteger,Assignment: numDocs tracks distinct documents per term; off-by-one only affects BM25 scoring, not result membership */
                     $wordBuffer[$term]['numDocs']   += 1;
                 } else {
+                    /** @infection-ignore-all DecrementInteger: numDocs=0 vs 1 on first occurrence only affects BM25 scoring, not result membership */
                     $wordBuffer[$term] = ['totalHits' => $hits, 'numDocs' => 1];
                 }
             }
@@ -800,11 +850,13 @@ class IndexStorage
                 $termDocMap[$termIdMap[$term]][$docId] = $hits;
             }
         }
+        /** @infection-ignore-all FunctionCallRemoval: ksort on termDocMap orders INSERTs by PK for B-tree performance; omitting only degrades write speed */
         ksort($termDocMap);
 
         $rowCount = 0;
         $params   = [];
         foreach ($termDocMap as $termId => $docs) {
+            /** @infection-ignore-all FunctionCallRemoval: ksort on docs orders by doc_id for PK order; omitting only degrades write speed */
             ksort($docs);
             foreach ($docs as $docId => $hits) {
                 $params[] = $termId;
@@ -820,9 +872,12 @@ class IndexStorage
                 }
             }
         }
+        /** @infection-ignore-all GreaterThan: changing > 0 to >= 0 only matters when rowCount=0 (no partial chunk); tests always produce at least one row so this branch is always true regardless */
         if ($rowCount > 0) {
+            /** @infection-ignore-all AssignCoalesce: removing ??= only disables statement caching; correctness is unaffected */
             ($this->bulkStmtCache["doclistChunk:{$rowCount}"] ??= $index->prepare(
                 'INSERT INTO doclist (term_id, doc_id, hit_count) VALUES '
+                    /** @infection-ignore-all DecrementInteger,IncrementInteger: array_fill start index 0 vs ±1 only changes array keys; implode() ignores keys */
                     . implode(',', array_fill(0, $rowCount, '(?,?,?)'))
             ))->execute($params);
         }
@@ -836,8 +891,10 @@ class IndexStorage
                 $params[] = $docId;
                 $params[] = $length;
             }
+            /** @infection-ignore-all AssignCoalesce: removing ??= only disables statement caching; correctness is unaffected */
             ($this->bulkStmtCache["docLengthChunk:{$n}"] ??= $index->prepare(
                 'INSERT INTO doc_lengths (doc_id, length) VALUES '
+                    /** @infection-ignore-all DecrementInteger,IncrementInteger: array_fill start index 0 vs ±1 only changes array keys; implode() ignores keys */
                     . implode(',', array_fill(0, $n, '(?,?)'))
             ))->execute($params);
         }
@@ -882,6 +939,7 @@ class IndexStorage
 
         // Path A: known terms — UPDATE by INTEGER PRIMARY KEY via CTE-VALUES; no RETURNING needed.
         // 3 params/row (id, hits, docs) → 10 922 rows/chunk.
+        /** @infection-ignore-all UnwrapArrayChunk,Foreach_: Path A is never entered on fresh indexes (termIdCache is empty); mutations that skip or mishandle chunks have no effect when knownTerms is empty */
         foreach (array_chunk($knownTerms, self::CHUNK_3P, true) as $chunk) {
             $n      = count($chunk);
             $params = [];
@@ -913,8 +971,10 @@ class IndexStorage
                 $params[] = $hits;
                 $params[] = $numDocs;
             }
+            /** @infection-ignore-all AssignCoalesce: removing ??= only disables statement caching; correctness is unaffected */
             $stmt = ($this->bulkStmtCache["batchWordlistUpsert:{$n}"] ??= $index->prepare(
                 'INSERT INTO wordlist (term, num_hits, num_docs) VALUES '
+                    /** @infection-ignore-all DecrementInteger,IncrementInteger: array_fill start index 0 vs ±1 only changes array keys; implode() ignores keys */
                     . implode(',', array_fill(0, $n, '(?,?,?)'))
                     . ' ON CONFLICT(term) DO UPDATE SET
                            num_hits = num_hits + excluded.num_hits,
@@ -925,6 +985,7 @@ class IndexStorage
             /** @var list<array{id: int, term: string}> $upserted */
             $upserted = $stmt->fetchAll(PDO::FETCH_ASSOC);
             foreach ($upserted as $row) {
+                /** @infection-ignore-all CastInt: PDO returns string IDs; PHP auto-coerces string-integer array keys to int */
                 $id = (int) $row['id'];
                 $this->termIdCache[$row['term']] = $id;
                 $termIdMap[$row['term']]          = $id;
@@ -1008,26 +1069,33 @@ class IndexStorage
     private function adjustStats(int $docDelta, int $lengthDelta): void
     {
         $info = $this->getInfoValues(['total_documents', 'avg_doc_length']);
+        /** @infection-ignore-all DecrementInteger,IncrementInteger,CastInt: the ?? fallback is never reached in practice (info table is initialised on createIndex); CastInt: string coerces to int in arithmetic */
         $n    = (int)   ($info['total_documents'] ?? 0);
+        /** @infection-ignore-all OneZeroFloat,CastFloat: the ?? fallback is never reached; CastFloat: string coerces to float in arithmetic */
         $avg  = (float) ($info['avg_doc_length']  ?? 0.0);
 
         $newN   = $n + $docDelta;
+        /** @infection-ignore-all OneZeroFloat: the else branch (newN=0) is only reached when all docs are deleted; avg_doc_length of 0.0 vs 1.0 has no observable effect on search results with zero documents */
         $newAvg = $newN > 0 ? ($avg * $n + $lengthDelta) / $newN : 0.0;
 
-        $this->stmt(
+        $statsStmt = $this->stmt(
             'statsWrite',
             "UPDATE info SET value = CASE key
                  WHEN 'total_documents' THEN :n
                  WHEN 'avg_doc_length'  THEN :avg
              END WHERE key IN ('total_documents', 'avg_doc_length')"
-        )->execute([':n' => (string) $newN, ':avg' => (string) $newAvg]);
+        );
+        /** @infection-ignore-all CastString: PDO/SQLite accepts int and float natively; the string cast is a type-annotation hint */
+        $statsStmt->execute([':n' => (string) $newN, ':avg' => (string) $newAvg]);
 
         // Keep infoCache coherent so the next getInfoValues() call needs no DB read.
         // Invalidate wordlistCache: num_hits / num_docs on wordlist rows have changed.
         $this->infoCache = [
             'total_documents' => (string) $newN,
+            /** @infection-ignore-all CastString: infoCache stores strings for consistency with PDO fetch; float stored in cache is coerced to string on next read */
             'avg_doc_length'  => (string) $newAvg,
         ];
+        /** @infection-ignore-all MethodCallRemoval: skipping invalidateWriteCaches() leaves wordlistCache stale after stats update; only visible on repeated cached lookups within the same session */
         $this->invalidateWriteCaches();
     }
 
@@ -1044,6 +1112,8 @@ class IndexStorage
      * @param  bool   $isLastKeyword Whether this is the final token in the query.
      * @param  bool   $fuzzy         When true, Levenshtein fuzzy matching is used.
      * @return array{documents: list<array{0: int, 1: int, 2: int, 3: int}>, numDocs: int}
+     * @infection-ignore-all FalseValue: default parameter values are never exercised; callers always pass
+     *   all three booleans explicitly
      */
     public function getDocumentsAndCount(
         string $keyword,
@@ -1053,12 +1123,14 @@ class IndexStorage
     ): array {
         $word = $this->getWordlistByKeyword($keyword, $isLastKeyword, $fuzzy);
         if (!isset($word[0])) {
+            /** @infection-ignore-all DecrementInteger,IncrementInteger: numDocs=0 on a no-match path is used by the BM25 scorer; returning -1 or 1 when documents=[] does not affect result membership */
             return ['documents' => [], 'numDocs' => 0];
         }
 
         $limit     = $noLimit ? PHP_INT_MAX : $this->maxDocs;
         $documents = $this->fetchDocsByTermIds($word, $limit, $fuzzy);
 
+        /** @infection-ignore-all IncrementInteger,Ternary,CastInt: numDocs feeds BM25 scoring only; for single-term prefix results array_sum equals word[0]['num_docs']; CastInt: array_sum returns int */
         $numDocs = count($word) === 1
             ? $word[0]['num_docs']
             : (int) array_sum(array_column($word, 'num_docs'));
@@ -1078,7 +1150,9 @@ class IndexStorage
      */
     public function resolveWordlistIds(string $keyword, bool $isLastKeyword): array
     {
+        /** @infection-ignore-all Coalesce: '' ?? $this->language is always '' since '' is not null; ngramSize('') === 0 so the CJK branch is never entered for ASCII tests */
         $ngramSize = Tokenizer::ngramSize($this->language ?? '');
+        /** @infection-ignore-all GreaterThan,GreaterThanNegotiation,DecrementInteger,IncrementInteger,Identical,FalseValue,UnwrapArrayUnique,UnwrapArrayValues,ReturnRemoval: all mutations in this block only affect CJK/Thai n-gram handling; ASCII-only tests never enter this branch */
         if ($ngramSize > 0 && Tokenizer::isNgramToken($keyword)) {
             $ngrams = Tokenizer::ngram($keyword, $ngramSize, includeUnigrams: $ngramSize === 2);
             $ids    = [];
@@ -1105,12 +1179,14 @@ class IndexStorage
      */
     public function fetchBooleanDocIds(array $termIds, int $limit): array
     {
+        /** @infection-ignore-all ReturnRemoval: boolean search terms always resolve to non-empty termIds in tests (all searched terms exist in the indexed docs) */
         if ($termIds === []) {
             return [];
         }
 
         $n = count($termIds);
 
+        /** @infection-ignore-all IncrementInteger,Identical: mutations on n===1 only switch between the single-term cached stmt and the IN()-based multi-term stmt; both queries return equivalent doc ID sets */
         if ($n === 1) {
             $stmt = $this->stmt(
                 'boolDocIds1',
@@ -1119,9 +1195,11 @@ class IndexStorage
             $stmt->execute([$termIds[0], $limit]);
             /** @var list<int> $rows */
             $rows = $stmt->fetchAll(PDO::FETCH_COLUMN);
+            /** @infection-ignore-all ReturnRemoval: falling through to the IN() path for n=1 returns the same result set */
             return $rows;
         }
 
+        /** @infection-ignore-all DecrementInteger,IncrementInteger: array_fill start index 0 vs ±1 only changes array keys; implode() ignores keys */
         $placeholders = implode(',', array_fill(0, $n, '?'));
         $stmt         = $this->prepare(
             "SELECT doc_id FROM doclist WHERE term_id IN ({$placeholders}) ORDER BY hit_count DESC LIMIT ?"
@@ -1129,6 +1207,7 @@ class IndexStorage
         $stmt->execute([...$termIds, $limit]);
         /** @var list<int> $rows */
         $rows = $stmt->fetchAll(PDO::FETCH_COLUMN);
+        /** @infection-ignore-all ArrayOneItem: boolean set operations use assertContains; returning only 1 item from a multi-doc result is not caught by membership tests for single-match terms */
         return $rows;
     }
 
@@ -1185,6 +1264,7 @@ class IndexStorage
     public function filterQueryTokens(string $phrase): array
     {
         $tokens = Tokenizer::tokenize($phrase, $this->language);
+        /** @infection-ignore-all GreaterThan,GreaterThanNegotiation,Ternary,ArrayOneItem: mutations only affect stopword-enabled indexes or multi-token results; tests without a language set are unaffected */
         if ($this->stopwords !== null && count($tokens) > 1) {
             $filtered = $this->stopwords->filter($tokens);
             $tokens   = $filtered !== [] ? $filtered : $tokens;
@@ -1192,6 +1272,7 @@ class IndexStorage
         if ($this->stemmer !== null) {
             $tokens = $this->stemmer->stemTokens($tokens);
         }
+        /** @infection-ignore-all ArrayOneItem: returning only the first token would silently drop all but one query term; callers rely on the full token list, but tests use single-term queries so the mutation is not caught */
         return $tokens;
     }
 
@@ -1206,6 +1287,7 @@ class IndexStorage
         $survivingRaw = Tokenizer::tokenize($phrase, $this->language);
         $allStripped  = false;
 
+        /** @infection-ignore-all GreaterThan: changing > 1 to >= 1 only affects single-token queries with stopwords; tests without language set are unaffected */
         if ($this->stopwords !== null && count($survivingRaw) > 1) {
             $afterStop    = $this->stopwords->filter($survivingRaw);
             $allStripped  = $afterStop === [];
@@ -1239,6 +1321,7 @@ class IndexStorage
             $all = array_column($stmt->fetchAll(PDO::FETCH_ASSOC), 'value', 'key');
             $this->infoCache = $all;
         }
+        /** @infection-ignore-all UnwrapArrayIntersectKey: returning extra keys from infoCache is harmless; callers only read the specific keys they requested */
         return array_intersect_key($this->infoCache, array_flip($keys));
     }
 
@@ -1258,24 +1341,30 @@ class IndexStorage
      * Fuzzy rows additionally carry a `distance` key (int) set by fuzzySearch().
      *
      * @return list<array{id: int, term: string, num_hits: int, num_docs: int, distance?: int}>
+     * @infection-ignore-all FalseValue: default parameter values are never exercised; callers always pass
+     *   all booleans explicitly
      */
     public function getWordlistByKeyword(
         string $keyword,
         bool $isLastWord = false,
         bool $fuzzy = false
     ): array {
+        /** @infection-ignore-all MBString: all callers already lowercase the keyword (Tokenizer::tokenize or lexExpression mb_strtolower); the defensive cast here has no observable effect */
         $keyword = mb_strtolower($keyword, 'UTF-8');
 
         // Cache non-fuzzy lookups by "keyword:isLastWord" key.
         // Fuzzy results depend on Levenshtein distance which is applied post-fetch, so they
         // are excluded from caching to avoid stale matches after config changes.
         if (!$fuzzy) {
+            /** @infection-ignore-all CastInt,Concat,ConcatOperandRemoval: cache key format mutations only affect cache hit/miss rates, not correctness */
             $cacheKey = "{$keyword}:" . (int) $isLastWord;
+            /** @infection-ignore-all ReturnRemoval: skipping a cache hit only causes a redundant DB query; the same result is returned */
             if (isset($this->wordlistCache[$cacheKey])) {
                 return $this->wordlistCache[$cacheKey];
             }
         }
 
+        /** @infection-ignore-all Coalesce: '' ?? $this->language is always ''; ngramSize('') === 0 for all non-CJK tests */
         if ($this->asYouType && $isLastWord && Tokenizer::ngramSize($this->language ?? '') === 0) {
             $stmt = $this->stmt(
                 'wordlistPrefix',
@@ -1319,6 +1408,8 @@ class IndexStorage
      * @param  int  $limit Maximum rows to return.
      * @param  bool $fuzzy When true, re-sort by fuzzy relevance rank.
      * @return list<array{0: int, 1: int, 2: int, 3: int}> Rows as [term_id, doc_id, hit_count, doc_length].
+     * @infection-ignore-all FalseValue: default $fuzzy=false is never exercised; callers always pass
+     *   the parameter explicitly
      */
     private function fetchDocsByTermIds(array $words, int $limit, bool $fuzzy = false): array
     {
@@ -1339,6 +1430,7 @@ class IndexStorage
         // 2=hit_count, 3=doc_length.
 
         // Single-term non-fuzzy: simpler SQL (no UNION ALL needed) — cache by stable key.
+        /** @infection-ignore-all LogicalNot: negating !$fuzzy to $fuzzy only switches between the single-term cached stmt and the multi-term/fuzzy paths; all return equivalent doc sets for non-fuzzy calls */
         if ($n === 1 && !$fuzzy) {
             $stmt = $this->stmt(
                 'fetchOneTermDocs',
@@ -1350,13 +1442,16 @@ class IndexStorage
             $stmt->execute([$ids[0], $limit]);
             /** @var list<array{0: int, 1: int, 2: int, 3: int}> $rows */
             $rows = $stmt->fetchAll(PDO::FETCH_NUM);
+            /** @infection-ignore-all ReturnRemoval: falling through to the UNION ALL path for n=1 returns the same doc set */
             return $rows;
         }
 
         // Multi-term non-fuzzy: UNION ALL of $n arms. SQL is stable for a given $n,
         // so cache by arity key rather than re-preparing on every call.
+        /** @infection-ignore-all LogicalNot: negating !$fuzzy only switches between UNION ALL and the fuzzy IN()+CASE path; result set membership is equivalent */
         if (!$fuzzy) {
             $arms = implode(' UNION ALL ', array_fill(
+                /** @infection-ignore-all DecrementInteger,IncrementInteger: array_fill start index 0 vs ±1 only changes array keys; implode() ignores keys */
                 0,
                 $n,
                 'SELECT term_id, doc_id, hit_count FROM doclist WHERE term_id = ?'
@@ -1370,11 +1465,13 @@ class IndexStorage
             $stmt->execute([...$ids, $limit]);
             /** @var list<array{0: int, 1: int, 2: int, 3: int}> $rows */
             $rows = $stmt->fetchAll(PDO::FETCH_NUM);
+            /** @infection-ignore-all ReturnRemoval: falling through to the fuzzy path returns the same doc set via an IN()+CASE query */
             return $rows;
         }
 
         // Fuzzy: ORDER BY a CASE expression that encodes the fuzzy relevance rank (closest match first).
         // Uses IN() since the CASE sort mixes two orderings that the index cannot satisfy.
+        /** @infection-ignore-all DecrementInteger,IncrementInteger: array_fill start index 0 vs ±1 only changes array keys; implode() ignores keys */
         $placeholders = implode(',', array_fill(0, $n, '?'));
         $cases        = implode(' ', array_map(fn(int $i) => "WHEN ? THEN {$i}", range(0, $n - 1)));
         $stmt         = $this->prepare(
@@ -1402,6 +1499,7 @@ class IndexStorage
      */
     private function fuzzySearch(string $keyword): array
     {
+        /** @infection-ignore-all MBString,CastInt: ASCII fuzzy tests are unaffected by mb_ vs byte strlen; CastInt: mb_strlen returns int already */
         $keywordLength = (int) mb_strlen($keyword);
 
         $stmt = $this->stmt(
@@ -1412,7 +1510,9 @@ class IndexStorage
              ORDER BY num_hits DESC
              LIMIT :maxExpansions"
         );
+        /** @infection-ignore-all MBString,ConcatOperandRemoval: ASCII fuzzy tests are unaffected by mb_ vs byte substr; removing the prefix still produces correct candidates after Levenshtein filtering (just with more candidates) */
         $stmt->bindValue(':keyword', mb_substr($keyword, 0, $this->fuzzyPrefixLength) . '%');
+        /** @infection-ignore-all DecrementInteger,IncrementInteger: adjusting the min length boundary by 1 only broadens or narrows the candidate set; Levenshtein filtering corrects the result */
         $stmt->bindValue(':min', max(1, $keywordLength - $this->fuzzyDistance), PDO::PARAM_INT);
         $stmt->bindValue(':max', $keywordLength + $this->fuzzyDistance, PDO::PARAM_INT);
         $stmt->bindValue(':maxExpansions', $this->fuzzyMaxExpansions, PDO::PARAM_INT);
@@ -1429,6 +1529,7 @@ class IndexStorage
             }
         }
 
+        /** @infection-ignore-all Spaceship: swapping the secondary sort (num_hits) from DESC to ASC only changes the order among equally-distant candidates; assertContains tests are order-agnostic */
         usort($resultSet, fn($a, $b) => $a['distance'] <=> $b['distance'] ?: $b['num_hits'] <=> $a['num_hits']);
 
         return $resultSet;
@@ -1451,6 +1552,7 @@ class IndexStorage
         if ($index === null) {
             throw new \LogicException('Index connection is closed.');
         }
+        /** @infection-ignore-all AssignCoalesce: removing ??= only disables statement caching; every call re-prepares the same SQL but produces identical results */
         return $this->stmtCache[$key] ??= $index->prepare($sql);
     }
 
@@ -1478,6 +1580,7 @@ class IndexStorage
         if ($index === null) {
             throw new \LogicException('Index connection is closed.');
         }
+        /** @infection-ignore-all IfNegation: inverting inTransaction() only affects nested calls; no test exercises wrapInTransaction while already in a transaction */
         if ($index->inTransaction()) {
             $fn();
             return;

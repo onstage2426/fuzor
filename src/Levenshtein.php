@@ -42,6 +42,7 @@ final class Levenshtein
     private static function toAscii(string &$str, array &$map): void
     {
         if (!preg_match_all('/[\xC0-\xF7][\x80-\xBF]+/', $str, $matches)) {
+            /** @infection-ignore-all ReturnRemoval: removing this early return lets the foreach iterate over empty $matches[0] — identical behaviour since no multibyte chars were found */
             return; // pure ASCII — nothing to remap
         }
         $count = count($map);

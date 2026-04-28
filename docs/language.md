@@ -32,7 +32,7 @@ When one of these languages is set, Fuzor splits each CJK/Thai token into overla
 - **False positives** — rare character combinations that span natural word boundaries may produce spurious matches. Precision is lower than a real segmenter.
 - **No stemming** — no Snowball stemmer exists for these languages; stopword filtering still applies.
 
-If you need higher precision for Chinese content at scale, you can pre-segment with a tool like [jieba](https://github.com/phpjieba/phpjieba) and index the space-separated output without setting a language.
+If you need higher precision for Chinese content at scale, you can pre-segment with a tool like jieba and index the space-separated output without setting a language.
 
 ## Changing language
 
