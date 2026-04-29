@@ -2,7 +2,13 @@
 
 namespace Fuzor;
 
-/** Unicode-aware Levenshtein edit distance. */
+/**
+ * Unicode-aware Levenshtein edit distance.
+ *
+ * PHP's built-in levenshtein() operates on bytes. This class remaps multi-byte
+ * UTF-8 code points to single bytes before delegating to the native C function,
+ * so the edit distance is counted in characters rather than bytes.
+ */
 final class Levenshtein
 {
     /**

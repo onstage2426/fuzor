@@ -97,10 +97,12 @@ class IndexStorage
     /** Active stemmer; null when no language is set or language has no stemmer. */
     private ?Stemmer $stemmer = null;
 
+    /** True when a stopword filter is active on this connection. */
     public bool $stopwordsActive {
         get => $this->stopwords !== null;
     }
 
+    /** True when a stemmer is active on this connection. */
     public bool $stemmerActive {
         get => $this->stemmer !== null;
     }
@@ -1235,17 +1237,16 @@ class IndexStorage
     }
 
     /**
-     * Execute a boolean compound SQL query and return paginated doc IDs + total count.
+     * Execute a compound SQL SELECT and return a paginated doc ID list plus total count.
      *
-     * The $sql parameter is a complete compound SELECT returning doc_id, built by
-     * Index::searchBoolean() from UNION / INTERSECT / EXCEPT sub-selects. Two queries
-     * are issued: a COUNT(*) for the total hit count, and a LIMIT-bounded SELECT for the
-     * result page. Both use the same positional $params array.
+     * $sql must be a compound SELECT returning a single `doc_id` column (e.g. UNION /
+     * INTERSECT / EXCEPT sub-selects). A COUNT(*) OVER () window function returns the
+     * true total in the same query execution, avoiding a second count query.
      *
-     * @param  string         $sql          Compound SELECT returning doc_id.
+     * @param  string           $sql          Compound SELECT returning doc_id.
      * @param  list<int|string> $params       Positional PDO parameter values bound in SQL order.
-     * @param  int            $numOfResults Maximum doc IDs to return.
-     * @return array{list<int>, int}   [docIds, totalCount]
+     * @param  int              $numOfResults Maximum doc IDs to return.
+     * @return array{list<int>, int}          [docIds, totalCount]
      */
     public function executeBooleanQuery(string $sql, array $params, int $numOfResults): array
     {

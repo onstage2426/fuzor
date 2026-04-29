@@ -7,10 +7,7 @@ use Fuzor\IndexStorage;
 /**
  * Factory for opening and creating Fuzor index files.
  *
- * All indexing and searching is performed on the returned IndexHandle.
- *
- *   $index = Index::open('/path/to/articles.db');
- *   $index = Index::create('/path/to/articles.db');
+ * Returns an IndexHandle on which all indexing and searching is performed.
  */
 class Index
 {

@@ -6,25 +6,9 @@ namespace Fuzor;
  * Extracts the most relevant excerpt(s) from document text for a given search query.
  *
  * Finds the window of text where query terms are most densely clustered and returns
- * it as a short excerpt with ellipsis decoration. Optionally accepts a BCP 47 language
- * tag so that stemmed query terms match their surface forms in the text. Should match
- * the language used at index creation time. Languages without a Snowball stemmer
- * silently skip stemming.
- *
- * Stopword filtering is intentionally not applied to the query — stopwords score
- * zero and the fallback handles all-stopword queries gracefully. Pre-filter the
- * query before passing it in if you need stopword-aware snippeting.
- *
- * Typical usage after a search:
- *
- *   $snip = new Snippeter(language: 'en');
- *   echo $snip->snippet('fast connections', $doc['body']);
- *
- *   // Multiple fields at once:
- *   ['title' => $t, 'body' => $b] = $snip->snippetMany('fast connections', [
- *       'title' => $doc['title'],
- *       'body'  => $doc['body'],
- *   ]);
+ * it as a short excerpt with ellipsis decoration. Stopword filtering is intentionally
+ * not applied to the query — stopwords score zero and the fallback handles all-stopword
+ * queries gracefully. Languages without a Snowball stemmer silently skip stemming.
  */
 final class Snippeter
 {

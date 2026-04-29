@@ -5,20 +5,10 @@ namespace Fuzor;
 /**
  * Highlights search terms inside document text.
  *
- * Typical usage after a search:
- *
- *   $hl = new Highlighter();
- *   echo $hl->highlight('fast sedan', $doc['title']);
- *
- *   // or multiple fields at once:
- *   [$title, $body] = array_values(
- *       $hl->highlightMany('fast sedan', ['title' => $doc['title'], 'body' => $doc['body']])
- *   );
- *
- * Matching follows the same tokenisation as the index. When $asYouType is true
- * (the default) the last token is matched as a word prefix — "merc" highlights
- * the full word "Mercedes". Matching is Unicode-aware and case-insensitive.
- * Stemming is intentionally not applied: the user's raw query terms are highlighted.
+ * Matching is Unicode-aware and case-insensitive, following the same tokenisation
+ * as the index. When $asYouType is true (the default) the last token is matched as
+ * a word prefix — "merc" highlights the full word "Mercedes". Stemming is
+ * intentionally not applied: raw query terms are highlighted, not their stems.
  */
 final class Highlighter
 {

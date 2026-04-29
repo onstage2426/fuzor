@@ -9,13 +9,9 @@ use Fuzor\Highlighter;
 /**
  * Represents a single open Fuzor index.
  *
- * Obtain an instance via the static factory on Index:
- *
- *   $index = Index::open('/path/to/articles.db');
- *   $index = Index::create('/path/to/articles.db');
- *
- * All database interaction is delegated to IndexStorage. Configuration
- * properties proxy directly to it via property hooks.
+ * Obtain an instance via Index::open() or Index::create(). All database interaction
+ * is delegated to IndexStorage; configuration properties proxy directly to it via
+ * property hooks.
  */
 class IndexHandle
 {
@@ -390,11 +386,8 @@ class IndexHandle
     /**
      * Run a boolean full-text search using Shunting-Yard postfix evaluation.
      *
-     * Supported operators (after lexExpression normalisation):
-     *   - space / &  — AND (intersection)
-     *   - " or "     — OR  (union)
-     *   - " -term"   — NOT (complement, returns all docs NOT containing term)
-     *   - ( … )      — grouping (overrides default precedence)
+     * Operator precedence (tightest to loosest): NOT (~) > AND (&, space) > OR ( or ).
+     * Parentheses override precedence. docScores is always null.
      *
      * @param  string $phrase       Boolean query string.
      * @param  int    $numOfResults Maximum number of document IDs to return.
