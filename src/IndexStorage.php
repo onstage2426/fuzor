@@ -145,8 +145,6 @@ class IndexStorage
         $this->flushIndex($indexName);
 
         $pdo = new PDO('sqlite:' . $this->storagePath . $indexName);
-        /** @infection-ignore-all MethodCallRemoval: setAttribute only matters on PDO failures; normal operation never triggers error-mode divergence */
-        $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
         $this->index         = $pdo;
         $this->stmtCache     = [];
         $this->bulkStmtCache = [];
@@ -219,8 +217,6 @@ class IndexStorage
             throw new \RuntimeException("Index {$path} does not exist", 1);
         }
         $this->index = new PDO('sqlite:' . $path);
-        /** @infection-ignore-all MethodCallRemoval: setAttribute only matters on PDO failures; normal operation never triggers error-mode divergence */
-        $this->index->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
         $this->stmtCache     = [];
         $this->bulkStmtCache = [];
         $this->infoCache     = null;
@@ -289,7 +285,6 @@ class IndexStorage
     {
         try {
             $pdo = new PDO('sqlite:' . $path);
-            $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
             $result = $pdo->query("SELECT 1 FROM wordlist LIMIT 1");
             return $result !== false;
         } catch (\Exception) {
