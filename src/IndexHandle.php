@@ -148,6 +148,14 @@ class IndexHandle
     }
 
     /**
+     * Return the total number of documents in the index.
+     */
+    public function count(): int
+    {
+        return (int) ($this->index->getInfoValues(['total_documents'])['total_documents'] ?? 0);
+    }
+
+    /**
      * Explain what the engine does internally with a query string.
      *
      * Answers "why did my search return these results (or nothing)?" by walking the same
