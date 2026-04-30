@@ -717,6 +717,55 @@ class IndexTest extends TestCase
         $this->assertEmpty($index->search('coupe')['ids']);
     }
 
+    // --- count ---
+
+    public function testCountReturnsZeroOnFreshIndex(): void
+    {
+        $index = Index::create($this->dbPath);
+        $this->assertSame(0, $index->count());
+    }
+
+    public function testCountReflectsInsertedDocuments(): void
+    {
+        $index = Index::create($this->dbPath);
+        $index->insertMany([
+            ['id' => 1, 'title' => 'sedan'],
+            ['id' => 2, 'title' => 'coupe'],
+        ]);
+        $this->assertSame(2, $index->count());
+    }
+
+    public function testCountDecrementsAfterDelete(): void
+    {
+        $index = Index::create($this->dbPath);
+        $index->insert(['id' => 1, 'title' => 'sedan']);
+        $index->delete(1);
+        $this->assertSame(0, $index->count());
+    }
+
+    public function testCountIsStableAfterUpdate(): void
+    {
+        $index = Index::create($this->dbPath);
+        $index->insertMany([
+            ['id' => 1, 'title' => 'sedan'],
+            ['id' => 2, 'title' => 'coupe'],
+        ]);
+        $index->update(['id' => 1, 'title' => 'suv']);
+        $this->assertSame(2, $index->count());
+    }
+
+    public function testCountPersistsAfterReopen(): void
+    {
+        $index = Index::create($this->dbPath);
+        $index->insertMany([
+            ['id' => 1, 'title' => 'sedan'],
+            ['id' => 2, 'title' => 'coupe'],
+        ]);
+        $index->close();
+
+        $this->assertSame(2, Index::open($this->dbPath)->count());
+    }
+
     // --- has ---
 
     public function testHasReturnsTrueForExistingDocument(): void
@@ -1501,6 +1550,127 @@ class IndexTest extends TestCase
         $token = $index->inspectQuery('sedan')['tokens'][0];
         $this->assertSame(2, $token['num_hits']);
         $this->assertSame(1, $token['num_docs']);
+    }
+
+    // --- rebuild ---
+
+    public function testRebuildReturnsIndexHandle(): void
+    {
+        $index = Index::create($this->dbPath);
+        $index->close();
+
+        $rebuilt = Index::rebuild($this->dbPath, function (IndexHandle $new): void {
+            $new->insert(['id' => 1, 'title' => 'sedan']);
+        });
+
+        $this->assertInstanceOf(IndexHandle::class, $rebuilt);
+    }
+
+    public function testRebuildNewContentIsSearchable(): void
+    {
+        $index = Index::create($this->dbPath);
+        $index->close();
+
+        $rebuilt = Index::rebuild($this->dbPath, function (IndexHandle $new): void {
+            $new->insert(['id' => 1, 'title' => 'sedan']);
+        });
+
+        $this->assertContains(1, $rebuilt->search('sedan')['ids']);
+    }
+
+    public function testRebuildRemovesOldContent(): void
+    {
+        $index = Index::create($this->dbPath);
+        $index->insert(['id' => 1, 'title' => 'old content']);
+        $index->close();
+
+        $rebuilt = Index::rebuild($this->dbPath, function (IndexHandle $new): void {
+            $new->insert(['id' => 2, 'title' => 'new content']);
+        });
+
+        $this->assertEmpty($rebuilt->search('old')['ids']);
+        $this->assertContains(2, $rebuilt->search('new')['ids']);
+    }
+
+    public function testRebuildLeavesOriginalIntactOnCallbackException(): void
+    {
+        $index = Index::create($this->dbPath);
+        $index->insert(['id' => 1, 'title' => 'original']);
+        $index->close();
+
+        try {
+            Index::rebuild($this->dbPath, function (IndexHandle $new): void {
+                $new->insert(['id' => 2, 'title' => 'partial']);
+                throw new \RuntimeException('simulated failure');
+            });
+        } catch (\RuntimeException) {
+        }
+
+        $surviving = Index::open($this->dbPath);
+        $this->assertContains(1, $surviving->search('original')['ids']);
+        $this->assertEmpty($surviving->search('partial')['ids']);
+    }
+
+    public function testRebuildPropagatesCallbackException(): void
+    {
+        Index::create($this->dbPath)->close();
+
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('simulated failure');
+
+        Index::rebuild($this->dbPath, function (): void {
+            throw new \RuntimeException('simulated failure');
+        });
+    }
+
+    public function testRebuildLeaksNoTempFileOnFailure(): void
+    {
+        Index::create($this->dbPath)->close();
+
+        try {
+            Index::rebuild($this->dbPath, function (): void {
+                throw new \RuntimeException('simulated failure');
+            });
+        } catch (\RuntimeException) {
+        }
+
+        $dir   = dirname($this->dbPath);
+        $base  = basename($this->dbPath);
+        $found = glob($dir . '/' . $base . '.tmp-*');
+        $this->assertSame([], $found);
+    }
+
+    public function testRebuildPreservesLanguageFromExistingIndex(): void
+    {
+        Index::create($this->dbPath, language: 'en')->close();
+
+        $rebuilt = Index::rebuild($this->dbPath, function (IndexHandle $new): void {
+            $new->insert(['id' => 1, 'title' => 'running']);
+        });
+
+        $this->assertSame('en', $rebuilt->language);
+    }
+
+    public function testRebuildWorksWhenFileDoesNotExistYet(): void
+    {
+        $rebuilt = Index::rebuild($this->dbPath, function (IndexHandle $new): void {
+            $new->insert(['id' => 1, 'title' => 'sedan']);
+        });
+
+        $this->assertContains(1, $rebuilt->search('sedan')['ids']);
+    }
+
+    public function testRebuildCountReflectsNewDocuments(): void
+    {
+        $index = Index::create($this->dbPath);
+        $index->insertMany([['id' => 1, 'title' => 'a'], ['id' => 2, 'title' => 'b']]);
+        $index->close();
+
+        $rebuilt = Index::rebuild($this->dbPath, function (IndexHandle $new): void {
+            $new->insert(['id' => 10, 'title' => 'only one']);
+        });
+
+        $this->assertSame(1, $rebuilt->count());
     }
 
     // --- CJK / ngram languages ---

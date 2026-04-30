@@ -77,6 +77,26 @@ $index->has(1); // true / false
 
 Returns `true` if the document is present in the index, `false` otherwise. Does not touch the wordlist or scores.
 
+## Document count
+
+```php
+$index->count(); // int
+```
+
+Returns the total number of indexed documents. Reads from the cached `info` table — no extra database round-trip if a search or write has already warmed the cache.
+
+## Atomic rebuild
+
+Replaces the entire contents of an index in one atomic operation. The callback receives a fresh, empty handle to populate; if it throws, the original file is left completely untouched.
+
+```php
+$index = Index::rebuild('/path/to/articles.db', function (IndexHandle $new) use ($docs) {
+    $new->insertMany($docs);
+});
+```
+
+Internally, `rebuild` writes to a temporary file alongside the target, then renames it over the original — a POSIX-atomic operation on the same filesystem. The language configured on the existing index is read first and applied to the new one automatically, so tokenisation and stemming remain consistent without any extra configuration.
+
 ## Multi-field documents
 
 All fields except `id` are concatenated and indexed together. There is no per-field weighting — the more a term appears across all fields, the higher it scores.

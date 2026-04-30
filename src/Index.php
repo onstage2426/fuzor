@@ -64,4 +64,46 @@ class Index
         $engine->createIndex(basename($resolved), $force, $language);
         return new IndexHandle($engine);
     }
+
+    /**
+     * Atomically rebuild an index by writing to a temporary file and renaming it over the target.
+     *
+     * The callback receives a fresh, empty IndexHandle to populate. If the callback throws,
+     * the temporary file is removed and the original index is left untouched. Language is
+     * preserved from the existing index when one already exists at $path.
+     *
+     * @param  string   $path     Absolute or relative path to the index file to rebuild.
+     * @param  callable $callback fn(IndexHandle $new): void — populate the new index here.
+     * @return IndexHandle        Open handle to the rebuilt index.
+     * @throws \RuntimeException  If the rename fails or the parent directory does not exist.
+     */
+    public static function rebuild(string $path, callable $callback): IndexHandle
+    {
+        $resolved = self::resolvePath($path);
+        $existing = file_exists($resolved) ? self::open($resolved) : null;
+        $language = $existing?->language;
+        /** @infection-ignore-all MethodCallRemoval: resource cleanup; GC closes the connection if skipped, no observable effect on the rebuild outcome */
+        $existing?->close();
+
+        /** @infection-ignore-all DecrementInteger|IncrementInteger|ConcatOperandRemoval|Concat: temp path construction details; any unique path in the same directory produces identical rename semantics */
+        $tmp = $resolved . '.tmp-' . bin2hex(random_bytes(4));
+
+        try {
+            $handle = self::create($tmp, language: $language);
+            $callback($handle);
+            $handle->close();
+
+            /** @infection-ignore-all Throw_: rename() returns false only on OS-level failure (cross-device, permissions); not reproducible in unit tests without filesystem mocking */
+            if (!rename($tmp, $resolved)) {
+                throw new \RuntimeException("Failed to atomically replace index at {$resolved}.");
+            }
+        } catch (\Throwable $e) {
+            @unlink($tmp);
+            @unlink($tmp . '-wal');
+            @unlink($tmp . '-shm');
+            throw $e;
+        }
+
+        return self::open($resolved);
+    }
 }

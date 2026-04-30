@@ -152,6 +152,7 @@ class IndexHandle
      */
     public function count(): int
     {
+        /** @infection-ignore-all DecrementInteger|IncrementInteger: ?? fallback is only reached on a corrupt/missing info table row; all writes keep total_documents consistent, so this path is unreachable in tests */
         return (int) ($this->index->getInfoValues(['total_documents'])['total_documents'] ?? 0);
     }
 
