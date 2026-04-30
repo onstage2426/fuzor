@@ -34,6 +34,34 @@ class Index
     }
 
     /**
+     * Return true if a valid Fuzor index exists at $path.
+     *
+     * Returns false for non-existent paths, non-SQLite files, and SQLite files
+     * that do not contain the Fuzor schema. Never throws.
+     *
+     * @param string $path Absolute or relative path to check.
+     */
+    public static function exists(string $path): bool
+    {
+        $dir = realpath(dirname($path));
+        /** @infection-ignore-all ReturnRemoval: without this return $dir is false; string concat yields '/<basename>' which file_exists() also returns false for, producing identical behaviour via the next guard */
+        if ($dir === false) {
+            return false;
+        }
+        $resolved = $dir . DIRECTORY_SEPARATOR . basename($path);
+        if (!file_exists($resolved)) {
+            return false;
+        }
+        try {
+            $pdo    = new \PDO('sqlite:' . $resolved);
+            $result = $pdo->query("SELECT 1 FROM wordlist LIMIT 1");
+            return $result !== false;
+        } catch (\Exception) {
+            return false;
+        }
+    }
+
+    /**
      * Open an existing index file.
      *
      * @param  string $path Absolute or relative path to the SQLite index file.

@@ -115,6 +115,46 @@ class IndexTest extends TestCase
         Index::create('/nonexistent/dir/index.db');
     }
 
+    // --- exists ---
+
+    public function testExistsTrueForValidIndex(): void
+    {
+        Index::create($this->dbPath)->close();
+        $this->assertTrue(Index::exists($this->dbPath));
+    }
+
+    public function testExistsFalseWhenFileAbsent(): void
+    {
+        $this->assertFalse(Index::exists($this->dbPath));
+    }
+
+    public function testExistsFalseForNonSqliteFile(): void
+    {
+        file_put_contents($this->dbPath, 'not a sqlite file');
+        $this->assertFalse(Index::exists($this->dbPath));
+    }
+
+    public function testExistsFalseForSqliteWithoutFuzorSchema(): void
+    {
+        $pdo = new \PDO('sqlite:' . $this->dbPath);
+        $pdo->exec('CREATE TABLE unrelated (id INTEGER PRIMARY KEY)');
+        unset($pdo);
+        $this->assertFalse(Index::exists($this->dbPath));
+    }
+
+    public function testExistsFalseForNonexistentDirectory(): void
+    {
+        $this->assertFalse(Index::exists('/nonexistent/dir/index.db'));
+    }
+
+    public function testExistsDoesNotCreateFileForMissingPath(): void
+    {
+        // Without the early return false on !file_exists(), PDO would create an empty SQLite
+        // file at the path. Assert no file is left behind as a side effect.
+        Index::exists($this->dbPath);
+        $this->assertFileDoesNotExist($this->dbPath);
+    }
+
     // --- insert / search ---
 
     public function testInsertWithoutIdThrows(): void
