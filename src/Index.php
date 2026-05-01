@@ -2,8 +2,6 @@
 
 namespace Fuzor;
 
-use Fuzor\IndexStorage;
-
 /**
  * Factory for opening and creating Fuzor index files.
  *
@@ -83,9 +81,9 @@ class Index
     public static function open(string $path): IndexHandle
     {
         $resolved = self::resolvePath($path);
-        $engine   = new IndexStorage(dirname($resolved));
-        $engine->selectIndex(basename($resolved));
-        return new IndexHandle($engine);
+        $handle   = new IndexHandle(dirname($resolved));
+        $handle->selectIndex(basename($resolved));
+        return $handle;
     }
 
     /**
@@ -104,9 +102,9 @@ class Index
             throw new \InvalidArgumentException("No stopword list or stemmer for language: '{$language}'");
         }
         $resolved = self::resolvePath($path);
-        $engine   = new IndexStorage(dirname($resolved));
-        $engine->createIndex(basename($resolved), $force, $language);
-        return new IndexHandle($engine);
+        $handle   = new IndexHandle(dirname($resolved));
+        $handle->createIndex(basename($resolved), $force, $language);
+        return $handle;
     }
 
     /**
