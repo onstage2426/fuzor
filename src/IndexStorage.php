@@ -34,7 +34,7 @@ class IndexStorage
     private string $storagePath;
 
     /** Active PDO connection to the open SQLite index file; null after close(). */
-    private ?PDO $index = null;
+    private ?PDO $pdo = null;
 
     /** @var array<string, \PDOStatement> Prepared statement cache; invalidated when the connection changes. */
     private array $stmtCache = [];
@@ -145,7 +145,7 @@ class IndexStorage
         $this->flushIndex($indexName);
 
         $pdo = new PDO('sqlite:' . $this->storagePath . $indexName);
-        $this->index         = $pdo;
+        $this->pdo         = $pdo;
         $this->stmtCache     = [];
         $this->bulkStmtCache = [];
         $this->infoCache     = null;
@@ -216,7 +216,7 @@ class IndexStorage
         if (!file_exists($path)) {
             throw new \RuntimeException("Index {$path} does not exist", 1);
         }
-        $this->index = new PDO('sqlite:' . $path);
+        $this->pdo = new PDO('sqlite:' . $path);
         $this->stmtCache     = [];
         $this->bulkStmtCache = [];
         $this->infoCache     = null;
@@ -225,8 +225,8 @@ class IndexStorage
         /** @infection-ignore-all MethodCallRemoval: applyPragmas sets WAL/cache/case_sensitive_like; all terms are stored/queried in lowercase so LIKE correctness is unaffected without it */
         $this->applyPragmas();
 
-        assert($this->index !== null);
-        $stmt  = $this->index->query("SELECT value FROM info WHERE key = 'language' LIMIT 1");
+        assert($this->pdo !== null);
+        $stmt  = $this->pdo->query("SELECT value FROM info WHERE key = 'language' LIMIT 1");
         /** @infection-ignore-all FalseValue: if $stmt is false the ternary else-branch is taken; changing false→true makes $row=true which is not an array so $lang remains null — same result */
         $row   = $stmt ? $stmt->fetch(PDO::FETCH_NUM) : false;
         /** @var array<int, string>|false $row */
@@ -306,8 +306,8 @@ class IndexStorage
      */
     private function applyPragmas(): void
     {
-        assert($this->index !== null);
-        $this->index->exec('
+        assert($this->pdo !== null);
+        $this->pdo->exec('
             PRAGMA journal_mode       = WAL;
             PRAGMA synchronous        = NORMAL;
             PRAGMA cache_size         = -65536;
@@ -331,8 +331,8 @@ class IndexStorage
         $this->termIdCache   = [];
         $this->wordlistCache = [];
         /** @infection-ignore-all MethodCallRemoval: SQLite triggers WAL checkpointing automatically on connection close; explicit TRUNCATE is a performance hint */
-        $this->index?->exec('PRAGMA wal_checkpoint(TRUNCATE)');
-        $this->index       = null;
+        $this->pdo?->exec('PRAGMA wal_checkpoint(TRUNCATE)');
+        $this->pdo       = null;
     }
 
     // --- Public write operations --------------------------------------------
@@ -406,14 +406,14 @@ class IndexStorage
             $ids[$id] = true;
         }
 
-        $index = $this->index;
-        if ($index === null) {
+        $pdo = $this->pdo;
+        if ($pdo === null) {
             throw new \LogicException('Index connection is closed.');
         }
 
         // Probe once to know whether the doclist is empty; used to skip the duplicate-ID check
         // (nothing can already exist in an empty table) and to gate index drop/rebuild.
-        $probe        = $index->query('SELECT 1 FROM doclist LIMIT 1');
+        $probe        = $pdo->query('SELECT 1 FROM doclist LIMIT 1');
         assert($probe !== false);
         $indexIsEmpty = $probe->fetchColumn() === false;
         /** @infection-ignore-all MethodCallRemoval: closeCursor is resource cleanup; leaving cursor open is harmless in WAL mode */
@@ -436,7 +436,7 @@ class IndexStorage
         // - mmap_size=4GB: OS page-cache reads at VM speed rather than via read() syscall.
         // - wal_autocheckpoint=8000: defer WAL→DB merges until after the import (32 MB threshold).
         /** @infection-ignore-all MethodCallRemoval: bulk-import pragma overrides are performance tuning only; correctness is unaffected */
-        $index->exec('
+        $pdo->exec('
             PRAGMA synchronous        = OFF;
             PRAGMA cache_size         = -524288;
             PRAGMA mmap_size          = 4294967296;
@@ -450,7 +450,7 @@ class IndexStorage
         /** @infection-ignore-all IfNegation: inverting $dropIndexes only affects whether indexes are dropped; correctness is unaffected */
         if ($dropIndexes) {
             /** @infection-ignore-all MethodCallRemoval: dropping secondary indexes before bulk INSERT is a performance optimisation; correctness unaffected */
-            $index->exec('
+            $pdo->exec('
                 DROP INDEX IF EXISTS doclist_term_hitcount;
                 DROP INDEX IF EXISTS doc_id_index;
             ');
@@ -494,13 +494,13 @@ class IndexStorage
             /** @infection-ignore-all IfNegation: inverting $dropIndexes only affects whether indexes are rebuilt; correctness is unaffected */
             if ($dropIndexes) {
                 /** @infection-ignore-all MethodCallRemoval: rebuilding secondary indexes is a performance step; correctness is unaffected */
-                $index->exec('
+                $pdo->exec('
                     CREATE INDEX IF NOT EXISTS doc_id_index ON doclist (doc_id);
                     CREATE INDEX IF NOT EXISTS doclist_term_hitcount ON doclist (term_id, hit_count DESC);
                 ');
             }
             /** @infection-ignore-all MethodCallRemoval: restoring pragmas after bulk load is a performance step; the next connection will re-apply from applyPragmas() */
-            $index->exec('
+            $pdo->exec('
                 PRAGMA synchronous        = NORMAL;
                 PRAGMA cache_size         = -65536;
                 PRAGMA mmap_size          = 2147483648;
@@ -921,8 +921,8 @@ class IndexStorage
      */
     private function flushBatch(array $wordBuffer, array $docTermBuffer, array $docLengthBuffer): int
     {
-        $index = $this->index;
-        assert($index !== null);
+        $pdo = $this->pdo;
+        assert($pdo !== null);
 
         // Step 1: upsert all unique terms; get back term text → wordlist ID mapping.
         $termIdMap = $this->batchUpsertWordlist($wordBuffer);
@@ -949,7 +949,7 @@ class IndexStorage
                 $params[] = $docId;
                 $params[] = $hits;
                 if (++$rowCount === self::CHUNK_3P) {
-                    ($this->bulkStmtCache['doclistChunk:' . self::CHUNK_3P] ??= $index->prepare(
+                    ($this->bulkStmtCache['doclistChunk:' . self::CHUNK_3P] ??= $pdo->prepare(
                         'INSERT INTO doclist (term_id, doc_id, hit_count) VALUES '
                             . implode(',', array_fill(0, self::CHUNK_3P, '(?,?,?)'))
                     ))->execute($params);
@@ -961,7 +961,7 @@ class IndexStorage
         /** @infection-ignore-all GreaterThan: changing > 0 to >= 0 only matters when rowCount=0 (no partial chunk); tests always produce at least one row so this branch is always true regardless */
         if ($rowCount > 0) {
             /** @infection-ignore-all AssignCoalesce: removing ??= only disables statement caching; correctness is unaffected */
-            ($this->bulkStmtCache["doclistChunk:{$rowCount}"] ??= $index->prepare(
+            ($this->bulkStmtCache["doclistChunk:{$rowCount}"] ??= $pdo->prepare(
                 'INSERT INTO doclist (term_id, doc_id, hit_count) VALUES '
                     /** @infection-ignore-all DecrementInteger,IncrementInteger: array_fill start index 0 vs ±1 only changes array keys; implode() ignores keys */
                     . implode(',', array_fill(0, $rowCount, '(?,?,?)'))
@@ -978,7 +978,7 @@ class IndexStorage
                 $params[] = $length;
             }
             /** @infection-ignore-all AssignCoalesce: removing ??= only disables statement caching; correctness is unaffected */
-            ($this->bulkStmtCache["docLengthChunk:{$n}"] ??= $index->prepare(
+            ($this->bulkStmtCache["docLengthChunk:{$n}"] ??= $pdo->prepare(
                 'INSERT INTO doc_lengths (doc_id, length) VALUES '
                     /** @infection-ignore-all DecrementInteger,IncrementInteger: array_fill start index 0 vs ±1 only changes array keys; implode() ignores keys */
                     . implode(',', array_fill(0, $n, '(?,?)'))
@@ -1007,8 +1007,8 @@ class IndexStorage
             return [];
         }
 
-        $index = $this->index;
-        assert($index !== null);
+        $pdo = $this->pdo;
+        assert($pdo !== null);
 
         /** @var array<string, int> $termIdMap */
         $termIdMap  = [];
@@ -1034,7 +1034,7 @@ class IndexStorage
                 $params[] = $hits;
                 $params[] = $numDocs;
             }
-            ($this->bulkStmtCache["batchWordlistUpdate:{$n}"] ??= $index->prepare(
+            ($this->bulkStmtCache["batchWordlistUpdate:{$n}"] ??= $pdo->prepare(
                 'WITH delta(id, hits, docs) AS (VALUES ' . implode(',', array_fill(0, $n, '(?,?,?)')) . ')
                  UPDATE wordlist SET
                      num_hits = num_hits + delta.hits,
@@ -1058,7 +1058,7 @@ class IndexStorage
                 $params[] = $numDocs;
             }
             /** @infection-ignore-all AssignCoalesce: removing ??= only disables statement caching; correctness is unaffected */
-            $stmt = ($this->bulkStmtCache["batchWordlistUpsert:{$n}"] ??= $index->prepare(
+            $stmt = ($this->bulkStmtCache["batchWordlistUpsert:{$n}"] ??= $pdo->prepare(
                 'INSERT INTO wordlist (term, num_hits, num_docs) VALUES '
                     /** @infection-ignore-all DecrementInteger,IncrementInteger: array_fill start index 0 vs ±1 only changes array keys; implode() ignores keys */
                     . implode(',', array_fill(0, $n, '(?,?,?)'))
@@ -1633,22 +1633,22 @@ class IndexStorage
      */
     private function stmt(string $key, string $sql): \PDOStatement
     {
-        $index = $this->index;
-        if ($index === null) {
+        $pdo = $this->pdo;
+        if ($pdo === null) {
             throw new \LogicException('Index connection is closed.');
         }
         /** @infection-ignore-all AssignCoalesce: removing ??= only disables statement caching; every call re-prepares the same SQL but produces identical results */
-        return $this->stmtCache[$key] ??= $index->prepare($sql);
+        return $this->stmtCache[$key] ??= $pdo->prepare($sql);
     }
 
     /** Prepare without caching; for variable-shape SQL where the cache hit rate would be near zero. */
     private function prepare(string $sql): \PDOStatement
     {
-        $index = $this->index;
-        if ($index === null) {
+        $pdo = $this->pdo;
+        if ($pdo === null) {
             throw new \LogicException('Index connection is closed.');
         }
-        return $index->prepare($sql);
+        return $pdo->prepare($sql);
     }
 
     /**
@@ -1661,21 +1661,21 @@ class IndexStorage
      */
     private function wrapInTransaction(callable $fn): void
     {
-        $index = $this->index;
-        if ($index === null) {
+        $pdo = $this->pdo;
+        if ($pdo === null) {
             throw new \LogicException('Index connection is closed.');
         }
         /** @infection-ignore-all IfNegation: inverting inTransaction() only affects nested calls; no test exercises wrapInTransaction while already in a transaction */
-        if ($index->inTransaction()) {
+        if ($pdo->inTransaction()) {
             $fn();
             return;
         }
-        $index->beginTransaction();
+        $pdo->beginTransaction();
         try {
             $fn();
-            $index->commit();
+            $pdo->commit();
         } catch (\Throwable $e) {
-            $index->rollBack();
+            $pdo->rollBack();
             throw $e;
         }
     }
