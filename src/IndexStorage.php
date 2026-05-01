@@ -649,6 +649,34 @@ class IndexStorage
         return $result;
     }
 
+    /**
+     * Return a map of id => bool for each requested ID.
+     *
+     * @param  list<int>       $ids Document IDs to check.
+     * @return array<int, bool>     Keys are the requested IDs; value is true if present, false if absent.
+     */
+    public function hasMany(array $ids): array
+    {
+        /** @infection-ignore-all ReturnRemoval: SQLite evaluates IN() as no-match and returns an empty result set; removing the early return produces the same [] */
+        if (empty($ids)) {
+            return [];
+        }
+
+        /** @infection-ignore-all DecrementInteger,IncrementInteger: array_fill start index 0 vs ±1 only changes array keys; implode() ignores keys */
+        $placeholders = implode(',', array_fill(0, count($ids), '?'));
+        $stmt = $this->prepare("SELECT doc_id FROM doc_lengths WHERE doc_id IN ($placeholders)");
+        $stmt->execute($ids);
+        /** @var list<int> $found */
+        $found    = $stmt->fetchAll(\PDO::FETCH_COLUMN);
+        $foundSet = array_flip($found);
+
+        $result = [];
+        foreach ($ids as $id) {
+            $result[$id] = isset($foundSet[$id]);
+        }
+        return $result;
+    }
+
     // --- Private write helpers ----------------------------------------------
 
     /**

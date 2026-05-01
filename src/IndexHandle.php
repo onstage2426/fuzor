@@ -161,6 +161,19 @@ class IndexHandle
     }
 
     /**
+     * Return a map of id => bool for each requested ID.
+     *
+     * More efficient than calling has() in a loop — resolves all IDs in a single query.
+     *
+     * @param  list<int>       $ids Document IDs to check.
+     * @return array<int, bool>     Keys are the requested IDs; value is true if present, false if absent.
+     */
+    public function hasMany(array $ids): array
+    {
+        return $this->index->hasMany($ids);
+    }
+
+    /**
      * Return the total number of documents in the index.
      */
     public function count(): int

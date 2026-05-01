@@ -88,6 +88,14 @@ $index->has(1); // true / false
 
 Returns `true` if the document is present in the index, `false` otherwise. Does not touch the wordlist or scores.
 
+## Check existence of many
+
+```php
+$index->hasMany([1, 2, 3]); // [1 => true, 2 => false, 3 => true]
+```
+
+Returns a map of `id => bool` for every requested ID. More efficient than calling `has()` in a loop — resolves all IDs in a single query. Keys follow the input order. Returns an empty array for empty input.
+
 ## Document count
 
 ```php

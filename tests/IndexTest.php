@@ -997,6 +997,73 @@ class IndexTest extends TestCase
         $this->assertTrue($index->has(42));
     }
 
+    // --- hasMany ---
+
+    public function testHasManyReturnsTrueForAllPresentIds(): void
+    {
+        $index = Index::create($this->dbPath);
+        $index->insertMany([
+            ['id' => 1, 'title' => 'sedan'],
+            ['id' => 2, 'title' => 'coupe'],
+            ['id' => 3, 'title' => 'suv'],
+        ]);
+
+        $this->assertSame([1 => true, 2 => true, 3 => true], $index->hasMany([1, 2, 3]));
+    }
+
+    public function testHasManyReturnsMixedBooleans(): void
+    {
+        $index = Index::create($this->dbPath);
+        $index->insertMany([
+            ['id' => 1, 'title' => 'sedan'],
+            ['id' => 3, 'title' => 'suv'],
+        ]);
+
+        // ID 2 was never inserted — its value must be false, not absent from the map.
+        $this->assertSame([1 => true, 2 => false, 3 => true], $index->hasMany([1, 2, 3]));
+    }
+
+    public function testHasManyReturnsFalseForAllAbsentIds(): void
+    {
+        $index = Index::create($this->dbPath);
+        $index->insert(['id' => 1, 'title' => 'sedan']);
+
+        $this->assertSame([99 => false, 100 => false], $index->hasMany([99, 100]));
+    }
+
+    public function testHasManyWithEmptyArrayReturnsEmpty(): void
+    {
+        $index = Index::create($this->dbPath);
+        $index->insert(['id' => 1, 'title' => 'sedan']);
+
+        $this->assertSame([], $index->hasMany([]));
+    }
+
+    public function testHasManyPreservesInputOrder(): void
+    {
+        $index = Index::create($this->dbPath);
+        $index->insertMany([
+            ['id' => 5, 'title' => 'sedan'],
+            ['id' => 1, 'title' => 'coupe'],
+            ['id' => 3, 'title' => 'suv'],
+        ]);
+
+        // Keys must follow the input order [5, 3, 1], not ascending DB order.
+        $this->assertSame([5 => true, 3 => true, 1 => true], $index->hasMany([5, 3, 1]));
+    }
+
+    public function testHasManyReturnsFalseForDeletedId(): void
+    {
+        $index = Index::create($this->dbPath);
+        $index->insertMany([
+            ['id' => 1, 'title' => 'sedan'],
+            ['id' => 2, 'title' => 'coupe'],
+        ]);
+        $index->delete(2);
+
+        $this->assertSame([1 => true, 2 => false], $index->hasMany([1, 2]));
+    }
+
     // --- search (fuzzy) ---
 
     public function testSearchFuzzyMatchesTypo(): void
