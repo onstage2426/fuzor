@@ -51,6 +51,15 @@ $index->language; // 'en', 'fr', null, …
 
 ## Supported languages
 
+To get the full list at runtime — useful for building a select list in a UI — call `Index::languages()`:
+
+```php
+$languages = Index::languages();
+// ['af' => 'Afrikaans', 'ar' => 'Arabic', 'en' => 'English', …]
+```
+
+Every tag returned is a valid `$language` argument for `Index::create()`.
+
 | Code | Language   | Stopwords | Stemmer |
 |------|------------|:---------:|:-------:|
 | `af` | Afrikaans  | ✓         |         |
