@@ -23,7 +23,7 @@ final class Snippeter
         private readonly ?string $language = null,
     ) {
         $this->stemmer   = $language !== null && Stemmer::supports($language) ? new Stemmer($language) : null;
-        $this->ngramSize = $language !== null ? Tokenizer::ngramSize($language) : 0;
+        $this->ngramSize = Tokenizer::ngramSize($language);
     }
 
     /**

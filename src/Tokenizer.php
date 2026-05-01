@@ -173,9 +173,9 @@ final class Tokenizer
      * Returns the n-gram window size for the given BCP 47 language tag,
      * or 0 if standard whitespace tokenisation should be used.
      */
-    public static function ngramSize(string $language): int
+    public static function ngramSize(?string $language): int
     {
-        return self::NGRAM_SCRIPTS[$language] ?? 0;
+        return $language !== null ? (self::NGRAM_SCRIPTS[$language] ?? 0) : 0;
     }
 
     /**

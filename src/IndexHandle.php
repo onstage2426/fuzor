@@ -1595,8 +1595,7 @@ class IndexHandle
      */
     private function resolveWordlistIds(string $keyword, bool $isLastKeyword): array
     {
-        /** @infection-ignore-all Coalesce: '' ?? $this->language is always '' since '' is not null; ngramSize('') === 0 so the CJK branch is never entered for ASCII tests */
-        $ngramSize = Tokenizer::ngramSize($this->language ?? '');
+        $ngramSize = Tokenizer::ngramSize($this->language);
         /** @infection-ignore-all GreaterThan,GreaterThanNegotiation,DecrementInteger,IncrementInteger,Identical,FalseValue,UnwrapArrayUnique,UnwrapArrayValues,ReturnRemoval: all mutations in this block only affect CJK/Thai n-gram handling; ASCII-only tests never enter this branch */
         if ($ngramSize > 0 && Tokenizer::isNgramToken($keyword)) {
             $ngrams = Tokenizer::ngram($keyword, $ngramSize, includeUnigrams: $ngramSize === 2);
@@ -1765,8 +1764,7 @@ class IndexHandle
             }
         }
 
-        /** @infection-ignore-all Coalesce: '' ?? $this->language is always ''; ngramSize('') === 0 for all non-CJK tests */
-        if ($this->asYouType && $isLastWord && Tokenizer::ngramSize($this->language ?? '') === 0) {
+        if ($this->asYouType && $isLastWord && Tokenizer::ngramSize($this->language) === 0) {
             $stmt = $this->stmt(
                 'wordlistPrefix',
                 'SELECT id, term, num_hits, num_docs FROM wordlist'

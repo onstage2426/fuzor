@@ -20,7 +20,7 @@ final class Highlighter
         private readonly bool $asYouType = true,
         private readonly ?string $language = null,
     ) {
-        $this->ngramSize = $language !== null ? Tokenizer::ngramSize($language) : 0;
+        $this->ngramSize = Tokenizer::ngramSize($language);
     }
 
     /**
