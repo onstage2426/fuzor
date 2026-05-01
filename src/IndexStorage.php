@@ -544,6 +544,44 @@ class IndexStorage
     }
 
     /**
+     * Replace multiple documents in a single transaction with one stats update.
+     *
+     * Non-existent IDs are inserted (upsert semantics). All documents are
+     * processed in one transaction; adjustStats is called once at the end.
+     *
+     * @param iterable<array<string, mixed>> $documents Documents to update; each must contain an 'id' key.
+     */
+    public function updateMany(iterable $documents): void
+    {
+        $this->wrapInTransaction(function () use ($documents): void {
+            $docDelta    = 0;
+            $lengthDelta = 0;
+
+            foreach ($documents as $document) {
+                if (!array_key_exists('id', $document)) {
+                    throw new \InvalidArgumentException("Document must contain an 'id' key.");
+                }
+
+                $oldLength = $this->removeDocumentData(self::extractId($document['id']));
+                $newLength = $this->processDocument($document);
+
+                if ($oldLength === false) {
+                    $docDelta++;
+                    $lengthDelta += $newLength;
+                } else {
+                    /** @infection-ignore-all CastInt: removeDocumentData already returns int; the cast is defensive only */
+                    $lengthDelta += $newLength - (int) $oldLength;
+                }
+            }
+
+            /** @infection-ignore-all NotIdentical: diverges only when docDelta≠0 and lengthDelta=0, which requires new docs with zero tokens — impossible in practice */
+            if ($docDelta !== 0 || $lengthDelta !== 0) {
+                $this->adjustStats($docDelta, $lengthDelta);
+            }
+        });
+    }
+
+    /**
      * Remove a document from the index.
      *
      * Decrements num_hits and num_docs on every wordlist term the document

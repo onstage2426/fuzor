@@ -118,6 +118,19 @@ class IndexHandle
     }
 
     /**
+     * Replace multiple documents in a single transaction with one stats update.
+     *
+     * Each document must contain an 'id' key. Non-existent IDs are inserted
+     * (upsert semantics), exactly like calling update() on each individually.
+     *
+     * @param iterable<array<string, mixed>> $documents Documents to update; each must contain an 'id' key.
+     */
+    public function updateMany(iterable $documents): void
+    {
+        $this->index->updateMany($documents);
+    }
+
+    /**
      * Remove a document from the index.
      *
      * @param int $id ID of the document to remove.

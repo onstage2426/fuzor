@@ -53,6 +53,17 @@ Replaces an existing document in the index. Old index data is removed and the do
 $index->update(['id' => 1, 'title' => 'Updated sedan', 'body' => 'New content.']);
 ```
 
+## Update many
+
+```php
+$index->updateMany([
+    ['id' => 1, 'title' => 'Updated sedan',   'body' => 'New content.'],
+    ['id' => 2, 'title' => 'Updated SUV',      'body' => 'More new content.'],
+]);
+```
+
+Replaces multiple documents in a single transaction with one stats update. More efficient than calling `update()` in a loop. Non-existent IDs are inserted (upsert semantics), exactly like `update()`.
+
 ## Delete
 
 ```php

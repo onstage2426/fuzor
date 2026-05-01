@@ -625,6 +625,144 @@ class IndexTest extends TestCase
         $this->assertEqualsWithDelta(1.0, (float) $info['avg_doc_length'], 0.01);
     }
 
+    // --- updateMany ---
+
+    public function testUpdateManyReplacesOldContent(): void
+    {
+        $index = Index::create($this->dbPath);
+        $index->insertMany([
+            ['id' => 1, 'title' => 'sedan car'],
+            ['id' => 2, 'title' => 'coupe sport'],
+        ]);
+        $index->updateMany([
+            ['id' => 1, 'title' => 'suv truck'],
+            ['id' => 2, 'title' => 'hatchback'],
+        ]);
+
+        $this->assertEmpty($index->search('sedan')['ids']);
+        $this->assertEmpty($index->search('coupe')['ids']);
+        $this->assertContains(1, $index->search('suv')['ids']);
+        $this->assertContains(2, $index->search('hatchback')['ids']);
+    }
+
+    public function testUpdateManyPreservesTotalDocumentCount(): void
+    {
+        $index = Index::create($this->dbPath);
+        $index->insertMany([
+            ['id' => 1, 'title' => 'sedan'],
+            ['id' => 2, 'title' => 'coupe'],
+            ['id' => 3, 'title' => 'suv'],
+        ]);
+        $index->updateMany([
+            ['id' => 1, 'title' => 'hatchback'],
+            ['id' => 2, 'title' => 'convertible'],
+        ]);
+
+        $info = $index->inspectQuery('suv')['index_info'];
+        $this->assertSame('3', $info['total_documents']);
+    }
+
+    public function testUpdateManyExistingDocsDoNotIncrementTotalDocuments(): void
+    {
+        $index = Index::create($this->dbPath);
+        $index->insertMany([
+            ['id' => 1, 'title' => 'sedan'],
+            ['id' => 2, 'title' => 'coupe'],
+        ]);
+        $index->updateMany([
+            ['id' => 1, 'title' => 'suv'],
+            ['id' => 2, 'title' => 'truck'],
+        ]);
+
+        // A mutation on the '$oldLength === false' branch that incorrectly increments
+        // docDelta for each existing doc would grow total_documents from 2 to 4.
+        $info = $index->inspectQuery('suv')['index_info'];
+        $this->assertSame('2', $info['total_documents']);
+    }
+
+    public function testUpdateManyCreatesDocWhenIdNotFound(): void
+    {
+        $index = Index::create($this->dbPath);
+        $index->updateMany([
+            ['id' => 1, 'title' => 'sedan'],
+            ['id' => 2, 'title' => 'coupe'],
+        ]);
+
+        $this->assertContains(1, $index->search('sedan')['ids']);
+        $this->assertContains(2, $index->search('coupe')['ids']);
+    }
+
+    public function testUpdateManyMixedExistingAndNewIdsUpdatesCount(): void
+    {
+        $index = Index::create($this->dbPath);
+        $index->insert(['id' => 1, 'title' => 'sedan']);
+        $index->updateMany([
+            ['id' => 1, 'title' => 'suv'],    // existing — no count change
+            ['id' => 2, 'title' => 'coupe'],   // new — count +1
+        ]);
+
+        // If docDelta accumulation is wrong (e.g., incremented for every doc instead of
+        // only new ones), total_documents would be 3 instead of 2.
+        $info = $index->inspectQuery('suv')['index_info'];
+        $this->assertSame('2', $info['total_documents']);
+    }
+
+    public function testUpdateManyUpdatesAvgDocLength(): void
+    {
+        $index = Index::create($this->dbPath);
+        $index->insertMany([
+            ['id' => 1, 'title' => 'alpha beta gamma delta'],  // 4 tokens
+            ['id' => 2, 'title' => 'epsilon zeta'],             // 2 tokens
+        ]);
+        // Replace both with 1-token docs; new avg = (1+1)/2 = 1.0
+        $index->updateMany([
+            ['id' => 1, 'title' => 'eta'],
+            ['id' => 2, 'title' => 'theta'],
+        ]);
+
+        // MinusEqual/PlusEqual mutations on `$lengthDelta += $newLength - (int) $oldLength`
+        // corrupt the accumulated delta, yielding an avg_doc_length other than 1.0.
+        $info = $index->inspectQuery('eta')['index_info'];
+        $this->assertEqualsWithDelta(1.0, (float) $info['avg_doc_length'], 0.01);
+    }
+
+    public function testUpdateManyAllNewDocsAccumulatesAvgDocLength(): void
+    {
+        $index = Index::create($this->dbPath);
+        // All three are upserts (no pre-existing docs).
+        $index->updateMany([
+            ['id' => 1, 'title' => 'alpha beta gamma'],  // 3 tokens
+            ['id' => 2, 'title' => 'delta epsilon'],       // 2 tokens
+            ['id' => 3, 'title' => 'zeta'],                // 1 token
+        ]);
+
+        // Assignment/MinusEqual mutations on `$lengthDelta += $newLength` (the all-new-docs
+        // branch) use direct assignment or subtraction instead of accumulation, so the last
+        // doc's length wins and avg_doc_length ends up as 1.0 instead of (3+2+1)/3 = 2.0.
+        $info = $index->inspectQuery('alpha')['index_info'];
+        $this->assertEqualsWithDelta(2.0, (float) $info['avg_doc_length'], 0.01);
+    }
+
+    public function testUpdateManyWithEmptyIterableIsNoop(): void
+    {
+        $index = Index::create($this->dbPath);
+        $index->insert(['id' => 1, 'title' => 'sedan']);
+        $index->updateMany([]);
+
+        $this->assertContains(1, $index->search('sedan')['ids']);
+        $info = $index->inspectQuery('sedan')['index_info'];
+        $this->assertSame('1', $info['total_documents']);
+    }
+
+    public function testUpdateManyThrowsOnMissingIdKey(): void
+    {
+        $index = Index::create($this->dbPath);
+
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage("Document must contain an 'id' key.");
+        $index->updateMany([['title' => 'sedan']]);
+    }
+
     // --- delete ---
 
     public function testDeleteRemovesDocumentFromResults(): void
