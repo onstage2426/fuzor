@@ -756,7 +756,7 @@ class IndexHandle
     public function search(string $phrase, bool $fuzzy = false, int $numOfResults = 100): array
     {
         /** @var list<string> $keywords */
-        $keywords = $this->filterQueryTokens($phrase);
+        $keywords = $this->filterQueryTokensVerbose($phrase)['filtered'];
 
         /** @var array<int, float> $docScores */
         $docScores = [];
@@ -1655,30 +1655,11 @@ class IndexHandle
     }
 
     /**
-     * Tokenise and filter a raw query phrase.
+     * Tokenise and filter a raw query phrase, returning per-step detail.
      *
-     * Splits, ngram-expands, stopword-filters, and stems in one call. Falls back to
-     * the unfiltered token list when all tokens would be removed by stopword filtering.
-     *
-     * @return list<string>
-     */
-    private function filterQueryTokens(string $phrase): array
-    {
-        $tokens = Tokenizer::tokenize($phrase, $this->language);
-        /** @infection-ignore-all GreaterThan,GreaterThanNegotiation,Ternary,ArrayOneItem: mutations only affect stopword-enabled indexes or multi-token results; tests without a language set are unaffected */
-        if ($this->stopwords !== null && count($tokens) > 1) {
-            $filtered = $this->stopwords->filter($tokens);
-            $tokens   = $filtered !== [] ? $filtered : $tokens;
-        }
-        if ($this->stemmer !== null) {
-            $tokens = $this->stemmer->stemTokens($tokens);
-        }
-        /** @infection-ignore-all ArrayOneItem: returning only the first token would silently drop all but one query term; callers rely on the full token list, but tests use single-term queries so the mutation is not caught */
-        return $tokens;
-    }
-
-    /**
-     * Like filterQueryTokens(), but also returns per-token detail for inspectQuery().
+     * Used directly by search() (via ['filtered']) and inspectQuery() (full result).
+     * Falls back to the unfiltered token list when all tokens would be removed by
+     * stopword filtering.
      *
      * @return array{raw_tokens: list<string>, filtered: list<string>, all_stripped: bool, surviving_raw: list<string>}
      */
@@ -1688,7 +1669,7 @@ class IndexHandle
         $survivingRaw = Tokenizer::tokenize($phrase, $this->language);
         $allStripped  = false;
 
-        /** @infection-ignore-all GreaterThan: changing > 1 to >= 1 only affects single-token queries with stopwords; tests without language set are unaffected */
+        /** @infection-ignore-all GreaterThan,GreaterThanNegotiation,Ternary: mutations only affect stopword-enabled indexes or multi-token results; tests without a language set are unaffected */
         if ($this->stopwords !== null && count($survivingRaw) > 1) {
             $afterStop    = $this->stopwords->filter($survivingRaw);
             $allStripped  = $afterStop === [];
