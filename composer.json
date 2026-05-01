@@ -31,7 +31,7 @@
         "cs-fix": "./vendor/bin/phpcbf",
         "stan":   "./vendor/bin/phpstan analyse --memory-limit=512M",
         "bench":  "./vendor/bin/phpbench run benchmarks/FuzorBench.php --report=default",
-        "infect":  "./vendor/bin/infection --threads=8",
+        "infect":  "./vendor/bin/infection --threads=16",
         "check":  ["@cs", "@stan", "@test", "@infect"]
     },
     "config": {

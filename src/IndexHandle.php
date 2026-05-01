@@ -1144,7 +1144,7 @@ class IndexHandle
      */
     private function processDocument(array $row): int
     {
-        $documentId = intval($row['id']); // @phpstan-ignore argument.type
+        $documentId = self::extractId($row['id']);
 
         ['termCounts' => $termCounts, 'length' => $length] = $this->tokenizeDocumentFields($row);
 
@@ -1242,7 +1242,7 @@ class IndexHandle
         $docLengthBuffer = [];
 
         foreach ($documents as $document) {
-            $documentId = intval($document['id']); // @phpstan-ignore argument.type
+            $documentId = self::extractId($document['id']);
 
             ['termCounts' => $termCounts, 'length' => $length] = $this->tokenizeDocumentFields($document);
 
