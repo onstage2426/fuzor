@@ -1,8 +1,8 @@
 {
     "name": "onstage2426/fuzor",
     "type": "library",
-    "description": "Lightweight full-text search for PHP — tokenises documents, stores an inverted index in SQLite, and ranks results with Okapi BM25. No external services required.",
-    "keywords": ["full-text-search", "sqlite", "bm25", "inverted-index", "search", "fuzzy-search"],
+    "description": "Dependency-free full-text search for PHP. BM25 ranking, fuzzy and boolean modes, search-as-you-type prefix matching, stopword filtering and Snowball stemming for 62 languages, snippet extraction and result highlighting — one SQLite file, zero infrastructure.",
+    "keywords": ["full-text-search", "search", "sqlite", "bm25", "inverted-index", "fuzzy-search", "boolean-search", "stemming", "stopwords", "snippet", "highlighting", "multilingual", "search-as-you-type", "tokenizer"],
     "license": "MIT",
     "require": {
         "php": ">=8.5"
@@ -31,8 +31,8 @@
         "cs-fix": "./vendor/bin/phpcbf",
         "stan":   "./vendor/bin/phpstan analyse --memory-limit=512M",
         "bench":  "./vendor/bin/phpbench run benchmarks/FuzorBench.php --report=default",
-        "infect":  "./vendor/bin/infection",
-        "check":  ["@cs", "@stan", "@test"]
+        "infect":  "./vendor/bin/infection --threads=8",
+        "check":  ["@cs", "@stan", "@test", "@infect"]
     },
     "config": {
         "allow-plugins": {
