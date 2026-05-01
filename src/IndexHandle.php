@@ -1585,8 +1585,9 @@ class IndexHandle
     /**
      * Resolve the wordlist IDs for a keyword, used by the boolean evaluator.
      *
-     * Thin wrapper over getWordlistByKeyword() that returns only term IDs, since the
-     * boolean path never needs num_hits / num_docs for BM25 scoring.
+     * Pipes the keyword through the same Tokenizer::tokenize → stem pipeline as the BM25
+     * path, so CJK n-gram expansion and stemming are handled identically in both modes.
+     * Each resulting token is looked up independently; duplicate IDs are collapsed.
      *
      * @param  string $keyword       Term to resolve.
      * @param  bool   $isLastKeyword Whether this is the final token (for asYouType prefix expansion).
@@ -1594,20 +1595,18 @@ class IndexHandle
      */
     private function resolveWordlistIds(string $keyword, bool $isLastKeyword): array
     {
-        $ngramSize = Tokenizer::ngramSize($this->language);
-        /** @infection-ignore-all GreaterThan,GreaterThanNegotiation,DecrementInteger,IncrementInteger,Identical,FalseValue,UnwrapArrayUnique,UnwrapArrayValues,ReturnRemoval: all mutations in this block only affect CJK/Thai n-gram handling; ASCII-only tests never enter this branch */
-        if ($ngramSize > 0 && Tokenizer::isNgramToken($keyword)) {
-            $ngrams = Tokenizer::ngram($keyword, $ngramSize, includeUnigrams: $ngramSize === 2);
-            $ids    = [];
-            foreach ($ngrams as $ngram) {
-                foreach ($this->getWordlistByKeyword($ngram, false) as $row) {
-                    $ids[] = $row['id'];
-                }
-            }
-            return array_values(array_unique($ids));
+        $tokens = Tokenizer::tokenize($keyword, $this->language);
+        if ($this->stemmer !== null) {
+            $tokens = $this->stemmer->stemTokens($tokens);
         }
-        $keyword = $this->stemmer !== null ? $this->stemmer->stemToken($keyword) : $keyword;
-        return array_column($this->getWordlistByKeyword($keyword, $isLastKeyword), 'id');
+        $ids  = [];
+        $last = count($tokens) - 1;
+        foreach ($tokens as $i => $token) {
+            foreach ($this->getWordlistByKeyword($token, $isLastKeyword && $i === $last) as $row) {
+                $ids[] = $row['id'];
+            }
+        }
+        return array_values(array_unique($ids));
     }
 
     /**
