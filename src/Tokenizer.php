@@ -212,6 +212,6 @@ final class Tokenizer
                 $expanded[] = $token;
             }
         }
-        return $expanded !== [] ? $expanded : $tokens;
+        return $expanded;
     }
 }
