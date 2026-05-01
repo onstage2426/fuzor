@@ -76,6 +76,15 @@ class IndexTest extends TestCase
         Index::create('/nonexistent/dir/index.db');
     }
 
+    public function testCreateWithUnsupportedLanguageThrowsBeforePathResolution(): void
+    {
+        // Language guard must fire before resolvePath(); using a non-existent directory
+        // proves it: without the early throw the code would reach resolvePath() and produce
+        // a RuntimeException instead of InvalidArgumentException.
+        $this->expectException(\InvalidArgumentException::class);
+        Index::create('/nonexistent/dir/index.db', language: 'xx');
+    }
+
     public function testCreateOnExistingFileThrows(): void
     {
         Index::create($this->dbPath);

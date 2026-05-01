@@ -24,6 +24,20 @@ class StopwordsTest extends TestCase
         }
     }
 
+    // --- Stopwords::supports ---
+
+    public function testSupportsReturnsTrueForKnownLanguage(): void
+    {
+        $this->assertTrue(Stopwords::supports('en'));
+        $this->assertTrue(Stopwords::supports('fr'));
+    }
+
+    public function testSupportsReturnsFalseForUnknownLanguage(): void
+    {
+        $this->assertFalse(Stopwords::supports('xx'));
+        $this->assertFalse(Stopwords::supports('ne')); // stemmer-only
+    }
+
     // --- Stopwords class ---
 
     public function testFilterRemovesEnglishStopwords(): void

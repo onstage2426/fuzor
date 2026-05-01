@@ -12,41 +12,6 @@ use Fuzor\Stemmers\SnowballStemmer;
  */
 final class Stemmer
 {
-    /** @var array<string, string> Maps BCP 47 tag to Snowball class suffix. */
-    private const array LANG_MAP = [
-        'ar' => 'Arabic',
-        'hy' => 'Armenian',
-        'eu' => 'Basque',
-        'ca' => 'Catalan',
-        'da' => 'Danish',
-        'nl' => 'Dutch',
-        'en' => 'English',
-        'eo' => 'Esperanto',
-        'et' => 'Estonian',
-        'fi' => 'Finnish',
-        'fr' => 'French',
-        'de' => 'German',
-        'el' => 'Greek',
-        'hi' => 'Hindi',
-        'hu' => 'Hungarian',
-        'id' => 'Indonesian',
-        'ga' => 'Irish',
-        'it' => 'Italian',
-        'lt' => 'Lithuanian',
-        'ne' => 'Nepali',
-        'no' => 'Norwegian',
-        'pl' => 'Polish',
-        'pt' => 'Portuguese',
-        'ro' => 'Romanian',
-        'ru' => 'Russian',
-        'sr' => 'Serbian',
-        'es' => 'Spanish',
-        'sv' => 'Swedish',
-        'ta' => 'Tamil',
-        'tr' => 'Turkish',
-        'yi' => 'Yiddish',
-    ];
-
     private SnowballStemmer $impl;
 
     /**
@@ -55,18 +20,17 @@ final class Stemmer
      */
     public function __construct(string $lang)
     {
-        $name = self::LANG_MAP[$lang] ?? null;
-        if ($name === null) {
+        $class = Language::stemmerClass($lang);
+        if ($class === null) {
             throw new \InvalidArgumentException("No stemmer for language: '{$lang}'");
         }
-        $class = 'Fuzor\\Stemmers\\Snowball' . $name;
         $this->impl = new $class();
     }
 
     /** Whether a stemmer is available for the given BCP 47 language tag. */
     public static function supports(string $lang): bool
     {
-        return isset(self::LANG_MAP[$lang]);
+        return Language::hasStemmer($lang);
     }
 
     /** Stem a single token. */

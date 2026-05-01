@@ -18,7 +18,7 @@ final class Stopwords
     /** Whether a stopword list exists for the given BCP 47 language tag. */
     public static function supports(string $lang): bool
     {
-        return file_exists(__DIR__ . '/../resources/stopwords/' . $lang . '.php');
+        return Language::hasStopwords($lang);
     }
 
     /**

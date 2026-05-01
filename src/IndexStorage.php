@@ -243,12 +243,12 @@ class IndexStorage
      */
     private function applyLanguage(?string $language): void
     {
-        if ($language !== null && !Stopwords::supports($language) && !Stemmer::supports($language)) {
+        if ($language !== null && !Language::supports($language)) {
             throw new \InvalidArgumentException("No stopword list or stemmer for language: '{$language}'");
         }
         $this->language  = $language;
-        $this->stopwords = $language !== null && Stopwords::supports($language) ? new Stopwords($language) : null;
-        $this->stemmer   = $language !== null && Stemmer::supports($language) ? new Stemmer($language) : null;
+        $this->stopwords = $language !== null && Language::hasStopwords($language) ? new Stopwords($language) : null;
+        $this->stemmer   = $language !== null && Language::hasStemmer($language) ? new Stemmer($language) : null;
     }
 
     /**

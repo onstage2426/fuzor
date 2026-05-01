@@ -34,6 +34,19 @@ class Index
     }
 
     /**
+     * Return all supported languages as a sorted BCP 47 tag => display name map.
+     *
+     * Suitable for populating a select list. Every tag in this map is a valid
+     * $language argument for Index::create().
+     *
+     * @return array<string, string>
+     */
+    public static function languages(): array
+    {
+        return Language::all();
+    }
+
+    /**
      * Return true if a valid Fuzor index exists at $path.
      *
      * Returns false for non-existent paths, non-SQLite files, and SQLite files
@@ -87,6 +100,9 @@ class Index
      */
     public static function create(string $path, bool $force = false, ?string $language = null): IndexHandle
     {
+        if ($language !== null && !Language::supports($language)) {
+            throw new \InvalidArgumentException("No stopword list or stemmer for language: '{$language}'");
+        }
         $resolved = self::resolvePath($path);
         $engine   = new IndexStorage(dirname($resolved));
         $engine->createIndex(basename($resolved), $force, $language);
