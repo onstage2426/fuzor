@@ -1027,7 +1027,7 @@ class IndexHandle
      */
     private function lexExpression(string $expression): array
     {
-        /** @infection-ignore-all MBString: getWordlistByKeyword() applies mb_strtolower() independently on every lookup; operator keywords (' or ', ' -', ' ') are ASCII-only so strtolower produces identical results here */
+        /** @infection-ignore-all MBString: operator keywords (' or ', ' -', ' ') are ASCII-only so strtolower produces identical results for the string-replace step; word tokens are lowercased here and flow through unchanged */
         $expression = $expression
             |> (fn(string $s): string => mb_strtolower($s, 'UTF-8'))
             |> (fn(string $s): string => preg_replace(['/\s*\(\s*/', '/\s*\)\s*(?!-)/'], ['(', ')'], $s) ?? $s)
@@ -1749,9 +1749,6 @@ class IndexHandle
         bool $isLastWord = false,
         bool $fuzzy = false
     ): array {
-        /** @infection-ignore-all MBString: all callers already lowercase the keyword (Tokenizer::tokenize or lexExpression mb_strtolower); the defensive cast here has no observable effect */
-        $keyword = mb_strtolower($keyword, 'UTF-8');
-
         // Cache non-fuzzy lookups by "keyword:isLastWord" key.
         // Fuzzy results depend on Levenshtein distance which is applied post-fetch, so they
         // are excluded from caching to avoid stale matches after config changes.
