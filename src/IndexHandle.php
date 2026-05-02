@@ -1526,14 +1526,17 @@ class IndexHandle
         $statsStmt->execute([':n' => (string) $newN, ':avg' => (string) $newAvg]);
 
         // Keep infoCache coherent so the next getInfoValues() call needs no DB read.
-        // Invalidate wordlistCache: num_hits / num_docs on wordlist rows have changed.
+        // wordlistCache: num_hits / num_docs on wordlist rows changed — must clear.
+        // termIdCache:   term→ID mappings are stable after a stats-only write; IDs only
+        //                become stale when terms are pruned, which removeDocumentData()
+        //                handles via its own invalidateWriteCaches() call.
         $this->infoCache = [
             'total_documents' => (string) $newN,
             /** @infection-ignore-all CastString: infoCache stores strings for consistency with PDO fetch; float stored in cache is coerced to string on next read */
             'avg_doc_length'  => (string) $newAvg,
         ];
-        /** @infection-ignore-all MethodCallRemoval: skipping invalidateWriteCaches() leaves wordlistCache stale after stats update; only visible on repeated cached lookups within the same session */
-        $this->invalidateWriteCaches();
+        /** @infection-ignore-all AssignmentRemoval: skipping this leaves wordlistCache stale after a stats update; stale entries return incorrect num_hits/num_docs in BM25 scoring */
+        $this->wordlistCache = [];
     }
 
     // --- Private read helpers -----------------------------------------------
