@@ -1057,11 +1057,16 @@ class IndexHandle
         )->execute([':documentId' => $documentId]);
 
         // 2. Prune any term whose hit count reached zero.
-        // After the decrement above, num_hits <= 0 can only be true for terms just decremented
-        // to zero — SQLite serialises writers so no concurrent operation can produce new orphans
-        // between steps 1 and 2. No doclist scan needed; the global filter is safe and exact.
-        /** @infection-ignore-all MethodCallRemoval: orphan pruning is a housekeeping step; stale wordlist entries without doclist rows produce empty fetch results */
-        $this->stmt('wordlistDeleteOrphans', 'DELETE FROM wordlist WHERE num_hits <= 0')->execute();
+        // Scoped to terms belonging to this document via doc_id_index. The doclist rows still
+        // exist at this point (step 3 removes them), so the subquery is valid. SQLite serialises
+        // writers, so no concurrent operation can produce new orphans for other terms between
+        // steps 1 and 2; limiting to this document's terms avoids a full wordlist table scan.
+        /** @infection-ignore-all MethodCallRemoval,ArrayItemRemoval: orphan pruning is a housekeeping step; stale wordlist entries without doclist rows produce empty fetch results */
+        $this->stmt(
+            'wordlistDeleteOrphans',
+            'DELETE FROM wordlist WHERE num_hits <= 0
+             AND id IN (SELECT term_id FROM doclist WHERE doc_id = :documentId)'
+        )->execute([':documentId' => $documentId]);
 
         // 2. Remove doclist rows for this document.
         $this->stmt('doclistDeleteByDoc', 'DELETE FROM doclist WHERE doc_id = :documentId')
