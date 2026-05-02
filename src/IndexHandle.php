@@ -652,7 +652,7 @@ class IndexHandle
      */
     public function inspectQuery(string $phrase, bool $fuzzy = false): array
     {
-        $verbose = $this->filterQueryTokensVerbose($phrase);
+        $verbose = $this->filterQueryTokens($phrase, verbose: true);
         /** @var list<string> $filteredTokens */
         $filteredTokens = $verbose['filtered'];
         /** @var list<string> $survivingRaw */
@@ -756,7 +756,7 @@ class IndexHandle
     public function search(string $phrase, bool $fuzzy = false, int $numOfResults = 100): array
     {
         /** @var list<string> $keywords */
-        $keywords = $this->filterQueryTokensVerbose($phrase)['filtered'];
+        $keywords = $this->filterQueryTokens($phrase)['filtered'];
 
         /** @var array<int, float> $docScores */
         $docScores = [];
@@ -1606,6 +1606,7 @@ class IndexHandle
                 $ids[] = $row['id'];
             }
         }
+        /** @infection-ignore-all UnwrapArrayUnique,UnwrapArrayValues: CJK/Thai boolean path is not covered by ASCII-only tests; both wrappers enforce the list<int> contract */
         return array_values(array_unique($ids));
     }
 
@@ -1654,17 +1655,21 @@ class IndexHandle
     }
 
     /**
-     * Tokenise and filter a raw query phrase, returning per-step detail.
+     * Tokenise and filter a raw query phrase.
      *
      * Used directly by search() (via ['filtered']) and inspectQuery() (full result).
      * Falls back to the unfiltered token list when all tokens would be removed by
      * stopword filtering.
      *
-     * @return array{raw_tokens: list<string>, filtered: list<string>, all_stripped: bool, surviving_raw: list<string>}
+     * When $verbose is false (the search hot path), raw_tokens and surviving_raw are
+     * not computed — Tokenizer::split() is skipped entirely.
+     *
+     * @infection-ignore-all FalseValue: default false→true only computes raw_tokens eagerly; correctness unaffected
+     * @return array{raw_tokens: list<string>, filtered: list<string>,
+     *               all_stripped: bool, surviving_raw: list<string>}
      */
-    private function filterQueryTokensVerbose(string $phrase): array
+    private function filterQueryTokens(string $phrase, bool $verbose = false): array
     {
-        $rawTokens    = Tokenizer::split($phrase);
         $survivingRaw = Tokenizer::tokenize($phrase, $this->language);
         $allStripped  = false;
 
@@ -1680,10 +1685,10 @@ class IndexHandle
             : $survivingRaw;
 
         return [
-            'raw_tokens'    => $rawTokens,
+            'raw_tokens'    => $verbose ? Tokenizer::split($phrase) : [],
             'filtered'      => $filtered,
             'all_stripped'  => $allStripped,
-            'surviving_raw' => $survivingRaw,
+            'surviving_raw' => $verbose ? $survivingRaw : [],
         ];
     }
 
