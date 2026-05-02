@@ -709,7 +709,7 @@ class IndexHandle
             'index_info'       => $indexInfo,
             'tokens'           => $tokens,
             /** @infection-ignore-all Concat|ConcatOperandRemoval: '|' prepend is the OR identity; '|' . $phrase and $phrase . '|' both yield identical postfix because '|' is always the last operator popped */
-            'boolean_postfix'  => $this->toPostfix('|' . $phrase),
+            'boolean_postfix'  => $this->toPostfix('|' . $phrase)[0],
         ];
     }
 
@@ -853,19 +853,8 @@ class IndexHandle
     {
         // Prepend "|" so the Shunting-Yard algorithm always has a left-hand operand.
         // OR with an empty set is the identity, so it does not affect the result.
-        /** @var list<string> $postfix */
         /** @infection-ignore-all ConcatOperandRemoval: '|' prefix is the OR identity; removing it or appending instead yields identical postfix because '|' is always the lowest-priority operator */
-        $postfix = $this->toPostfix('|' . $phrase);
-
-        // Find the last term token so asYouType prefix expansion applies to it.
-        $lastTerm = null;
-        /** @infection-ignore-all IncrementInteger: postfix always ends with the '|' operator (prepended above); starting at count-2 vs count-1 scans past the same trailing '|' and finds the same last term */
-        for ($i = count($postfix) - 1; $i >= 0; $i--) {
-            if (!in_array($postfix[$i], ['|', '&', '~'], true)) {
-                $lastTerm = $postfix[$i];
-                break;
-            }
-        }
+        [$postfix, $lastTerm] = $this->toPostfix('|' . $phrase);
 
         // PHP-side set evaluation: fetch per-term doc IDs (capped at maxDocs) from SQLite,
         // then apply set operations in PHP via C-native array_intersect / array_diff /
@@ -953,21 +942,25 @@ class IndexHandle
      * Convert an infix boolean expression to postfix (Reverse Polish) notation.
      *
      * Uses the Shunting-Yard algorithm. Operator precedence: ~ (3) > & (2) > | (1).
+     * Shunting-Yard preserves the relative order of operands, so the last word token
+     * appended to $postfix during the loop is always the last word in the original
+     * expression — returned as $lastTerm so callers need no backward scan.
      *
-     * @param  string      $expression Infix expression containing operators |, &, ~, (, ).
-     * @return list<string>            Tokens in postfix order.
+     * @param  string $expression Infix expression containing operators |, &, ~, (, ).
+     * @return array{list<string>, ?string} [postfix tokens, last word token or null]
      */
     private function toPostfix(string $expression): array
     {
         /** @var list<string> $postfix */
-        $postfix = [];
-
+        $postfix  = [];
         /** @var list<string> $stack */
-        $stack = [];
+        $stack    = [];
+        $lastTerm = null;
 
         foreach ($this->lexExpression($expression) as $token) {
             if (!in_array($token, ['|', '&', '~', '(', ')'], true)) {
                 $postfix[] = $token;
+                $lastTerm  = $token;
             } elseif ($token === '(') {
                 $stack[] = $token;
             } elseif ($token === ')') {
@@ -989,7 +982,7 @@ class IndexHandle
             $postfix[] = array_pop($stack);
         }
 
-        return $postfix;
+        return [$postfix, $lastTerm];
     }
 
     /**
