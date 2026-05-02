@@ -1645,7 +1645,8 @@ class IndexHandle
 
         /** @infection-ignore-all DecrementInteger,IncrementInteger: array_fill start index 0 vs ±1 only changes array keys; implode() ignores keys */
         $placeholders = implode(',', array_fill(0, $n, '?'));
-        $stmt         = $this->prepare(
+        $stmt         = $this->stmt(
+            "boolDocIds:{$n}",
             "SELECT doc_id FROM doclist WHERE term_id IN ({$placeholders}) ORDER BY hit_count DESC LIMIT ?"
         );
         $stmt->execute([...$termIds, $limit]);
