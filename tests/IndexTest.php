@@ -269,6 +269,18 @@ class IndexTest extends TestCase
         $this->assertSame(2, $result['hits']);
     }
 
+    public function testInsertSharedTermAcrossCallsPreservesTermAfterDelete(): void
+    {
+        $index = Index::create($this->dbPath);
+        $index->insert(['id' => 1, 'title' => 'sedan']); // cache miss: INSERT path, termIdCache seeded
+        $index->insert(['id' => 2, 'title' => 'sedan']); // cache hit: UPDATE path in upsertWordlist()
+        $index->delete(1);
+
+        // If the cache-hit UPDATE was a no-op, wordlist num_hits for 'sedan' would still be 1
+        // after the second insert. Deleting doc 1 (1 hit) would zero it and prune the term.
+        $this->assertContains(2, $index->search('sedan')['ids']);
+    }
+
     public function testSearchRespectsNumOfResults(): void
     {
         $index = Index::create($this->dbPath);
