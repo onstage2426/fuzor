@@ -27,78 +27,70 @@ class IndexTest extends TestCase
 
     public function testCreateReturnsIndexInstance(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $this->assertInstanceOf(Index::class, $index);
     }
 
     public function testOpenReturnsIndexInstance(): void
     {
-        Index::create($this->dbPath)->close();
+        new Index($this->dbPath)->close();
 
-        $index = Index::open($this->dbPath);
+        $index = new Index($this->dbPath);
         $this->assertInstanceOf(Index::class, $index);
     }
 
     public function testCloseReleasesConnection(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $index->insert(['id' => 1, 'title' => 'sedan']);
         $index->close();
 
-        $reopened = Index::open($this->dbPath);
+        $reopened = new Index($this->dbPath);
         $this->assertContains(1, $reopened->search('sedan')['ids']);
     }
 
     public function testStatsPersistAfterReopen(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $index->insertMany([
             ['id' => 1, 'title' => 'sedan'],
             ['id' => 2, 'title' => 'coupe'],
         ]);
         $index->delete(1);
         $index->close();
-        $index = Index::open($this->dbPath);
+        $index = new Index($this->dbPath);
         $info = $index->inspectQuery('coupe')['index_info'];
         $this->assertSame('1', $info['total_documents']);
     }
 
-    public function testOpenNonexistentPathThrows(): void
+    public function testConstructorThrowsIfDirectoryDoesNotExist(): void
     {
         $this->expectException(\RuntimeException::class);
-        Index::open('/nonexistent/fuzor_no_such.db');
+        new Index('/nonexistent/fuzor_no_such.db');
     }
 
-    public function testCreateInNonexistentDirectoryThrows(): void
+    public function testConstructorThrowsIfDirectoryDoesNotExistLong(): void
     {
         $this->expectException(\RuntimeException::class);
-        Index::create('/nonexistent/dir/index.db');
+        new Index('/nonexistent/dir/index.db');
     }
 
-    public function testCreateWithUnsupportedLanguageThrowsBeforePathResolution(): void
+    public function testConstructorWithUnsupportedLanguageThrowsBeforePathResolution(): void
     {
         // Language guard must fire before resolvePath(); using a non-existent directory
         // proves it: without the early throw the code would reach resolvePath() and produce
         // a RuntimeException instead of InvalidArgumentException.
         $this->expectException(\InvalidArgumentException::class);
-        Index::create('/nonexistent/dir/index.db', language: 'xx');
-    }
-
-    public function testCreateOnExistingFileThrows(): void
-    {
-        Index::create($this->dbPath);
-
-        $this->expectException(\RuntimeException::class);
-        Index::create($this->dbPath);
+        new Index('/nonexistent/dir/index.db', language: 'xx');
     }
 
     public function testCreateWithForceOverwritesExistingFile(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $index->insert(['id' => 1, 'title' => 'sedan']);
         $index->close();
 
-        $fresh = Index::create($this->dbPath, force: true);
+        $fresh = new Index($this->dbPath, force: true);
         $this->assertSame([], $fresh->search('sedan')['ids']);
     }
 
@@ -108,7 +100,7 @@ class IndexTest extends TestCase
 
         $this->expectException(\RuntimeException::class);
         $this->expectExceptionMessageMatches('/Refusing to overwrite non-Fuzor file/');
-        Index::create($this->dbPath, force: true);
+        new Index($this->dbPath, force: true);
 
         $this->assertStringEqualsFile($this->dbPath, 'this is not a sqlite file');
     }
@@ -120,14 +112,14 @@ class IndexTest extends TestCase
         // concatenation order (path . "Directory does not exist: ") or drop the prefix
         // (leaving just the path) are caught.
         $this->expectExceptionMessageMatches('#^Directory does not exist: .*?/nonexistent/dir#');
-        Index::create('/nonexistent/dir/index.db');
+        new Index('/nonexistent/dir/index.db');
     }
 
     // --- exists ---
 
     public function testExistsTrueForValidIndex(): void
     {
-        Index::create($this->dbPath)->close();
+        new Index($this->dbPath)->close();
         $this->assertTrue(Index::exists($this->dbPath));
     }
 
@@ -167,14 +159,14 @@ class IndexTest extends TestCase
 
     public function testInsertWithoutIdThrows(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $this->expectException(\InvalidArgumentException::class);
         $index->insert(['title' => 'no id here']);
     }
 
     public function testInsertDuplicateIdThrows(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $index->insert(['id' => 1, 'title' => 'sedan']);
 
         $this->expectException(\RuntimeException::class);
@@ -183,7 +175,7 @@ class IndexTest extends TestCase
 
     public function testInsertManyWithMissingIdThrows(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $this->expectException(\InvalidArgumentException::class);
         $index->insertMany([
             ['id' => 1, 'title' => 'sedan'],
@@ -193,7 +185,7 @@ class IndexTest extends TestCase
 
     public function testInsertManyWithDuplicateInputIdsThrows(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $this->expectException(\InvalidArgumentException::class);
         $index->insertMany([
             ['id' => 1, 'title' => 'sedan'],
@@ -203,7 +195,7 @@ class IndexTest extends TestCase
 
     public function testInsertManyWithExistingIdThrows(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $index->insert(['id' => 1, 'title' => 'sedan']);
 
         $this->expectException(\RuntimeException::class);
@@ -216,14 +208,14 @@ class IndexTest extends TestCase
 
     public function testUpdateWithoutIdThrows(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $this->expectException(\InvalidArgumentException::class);
         $index->update(['title' => 'no id here']);
     }
 
     public function testInsertAndSearchReturnsMatchingId(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $index->insert(['id' => 1, 'title' => 'fast sedan', 'body' => 'comfortable city car']);
 
         $result = $index->search('sedan');
@@ -232,7 +224,7 @@ class IndexTest extends TestCase
 
     public function testSearchReturnsEmptyForNoMatch(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $index->insert(['id' => 1, 'title' => 'sedan car']);
 
         $result = $index->search('helicopter');
@@ -242,7 +234,7 @@ class IndexTest extends TestCase
 
     public function testSearchReturnsBm25Scores(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         // Two docs so the term is not universal; smoothed IDF is always > 0 anyway.
         $index->insertMany([
             ['id' => 1, 'title' => 'sedan car'],
@@ -257,7 +249,7 @@ class IndexTest extends TestCase
 
     public function testSearchHitsCountsAllMatchingDocs(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $index->insertMany([
             ['id' => 1, 'title' => 'sedan'],
             ['id' => 2, 'title' => 'sedan'],
@@ -270,7 +262,7 @@ class IndexTest extends TestCase
 
     public function testInsertSharedTermAcrossCallsPreservesTermAfterDelete(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $index->insert(['id' => 1, 'title' => 'sedan']); // cache miss: INSERT path, termIdCache seeded
         $index->insert(['id' => 2, 'title' => 'sedan']); // cache hit: UPDATE path in upsertWordlist()
         $index->delete(1);
@@ -282,7 +274,7 @@ class IndexTest extends TestCase
 
     public function testSearchRespectsNumOfResults(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $index->insertMany([
             ['id' => 1, 'title' => 'sedan'],
             ['id' => 2, 'title' => 'sedan'],
@@ -297,7 +289,7 @@ class IndexTest extends TestCase
     public function testSearchDefaultNumOfResultsIsOneHundred(): void
     {
         // Insert 101 docs so the parameterless call must cap at exactly 100 — not 99 or 101.
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $index->insertMany(array_map(fn($i) => ['id' => $i, 'title' => 'sedan'], range(1, 101)));
 
         $result = $index->search('sedan');
@@ -315,7 +307,7 @@ class IndexTest extends TestCase
 
     public function testSearchIsCaseInsensitive(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $index->insert(['id' => 1, 'title' => 'SEDAN']);
 
         $this->assertContains(1, $index->search('sedan')['ids']);
@@ -324,7 +316,7 @@ class IndexTest extends TestCase
 
     public function testSearchLowercasesMultibyteQueryViaSearch(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $index->insert(['id' => 1, 'title' => 'über']);
         $index->asYouType = false;
 
@@ -337,7 +329,7 @@ class IndexTest extends TestCase
 
     public function testSearchIsExactNotFuzzy(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $index->insert(['id' => 1, 'title' => 'hello']);
 
         $index->asYouType = false;
@@ -348,7 +340,7 @@ class IndexTest extends TestCase
 
     public function testSearchOrdersByRelevance(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $index->insertMany([
             ['id' => 1, 'title' => 'sedan'],
             ['id' => 2, 'title' => 'sedan sedan sedan'],
@@ -360,7 +352,7 @@ class IndexTest extends TestCase
 
     public function testSearchResultsOrderedByBm25NotFetchOrder(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         // Doc 1: tf=1, dl=1 — very short, high BM25 score per term.
         // Doc 2: tf=3, dl=100 — long doc; DB fetches it first (higher hit_count), but BM25 penalises length.
         $index->insertMany([
@@ -374,7 +366,7 @@ class IndexTest extends TestCase
 
     public function testMultiKeywordSearchAccumulatesScoresAcrossTerms(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $index->insertMany([
             ['id' => 1, 'title' => 'car sedan'],           // both terms, dl=2
             ['id' => 2, 'title' => str_repeat('sedan ', 10)],  // sedan only, tf=10, dl=10
@@ -389,7 +381,7 @@ class IndexTest extends TestCase
 
     public function testSearchReturnsEmptyIdsWhenNumOfResultsIsZero(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $index->insert(['id' => 1, 'title' => 'sedan']);
         $result = $index->search('sedan', numOfResults: 0);
         $this->assertSame([], $result['ids']);
@@ -400,7 +392,7 @@ class IndexTest extends TestCase
 
     public function testAsYouTypePrefixMatchesPartialWord(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $index->insert(['id' => 1, 'title' => 'Mercedes Benz']);
 
         $index->asYouType = true;
@@ -410,7 +402,7 @@ class IndexTest extends TestCase
 
     public function testAsYouTypeDisabledNoPartialMatch(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $index->insert(['id' => 1, 'title' => 'Mercedes Benz']);
 
         $index->asYouType = false;
@@ -420,7 +412,7 @@ class IndexTest extends TestCase
 
     public function testPrefixSearchExpandsAllMatchingTerms(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $index->insertMany([
             ['id' => 1, 'title' => 'sedan'],
             ['id' => 2, 'title' => 'suv'],
@@ -435,7 +427,7 @@ class IndexTest extends TestCase
 
     public function testMaxDocsLimitsResultsPerKeyword(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $index->insertMany([
             ['id' => 1, 'title' => 'sedan'],
             ['id' => 2, 'title' => 'sedan'],
@@ -453,7 +445,7 @@ class IndexTest extends TestCase
 
     public function testSearchTopKFromHeapIsOrdered(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         // Five docs; TF increases with ID so BM25 score increases monotonically with ID.
         $index->insertMany([
             ['id' => 1, 'title' => 'sedan'],
@@ -482,7 +474,7 @@ class IndexTest extends TestCase
 
     public function testSearchTopKSelectsByBm25NotByHitCount(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         // Docs 1 and 2: high term frequency, long documents → low BM25 (length penalty).
         // DB returns these first (by doc_id). Docs 3 and 4: single occurrence, very
         // short → higher BM25 despite lower hit_count.
@@ -504,7 +496,7 @@ class IndexTest extends TestCase
 
     public function testSearchHeapMinIsSetWhenHeapBecomesFull(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         // avgdl = (3+1+2)/3 = 2, k1=1.2, b=0.75. BM25 scores ∝ tf/(1.3 + 0.9/avgdl*dl):
         //   doc1 tf=3 dl=3: 3/2.65 ≈ 1.13 (highest); doc2 tf=1 dl=1: 1/1.75 ≈ 0.57 (lowest);
         //   doc3 tf=2 dl=2: 2/2.2  ≈ 0.91 (middle).
@@ -529,7 +521,7 @@ class IndexTest extends TestCase
 
     public function testSearchTopKWithNumOfResultsOneReturnsStrictlyBestDoc(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         // Doc 1 has 3 hits (highest BM25), doc 2 has 1 hit (lowest), doc 3 has 2 hits (middle).
         // Fetch order from doclist: doc_id ascending → 1, 2, 3.
         // With numOfResults=1:
@@ -553,7 +545,7 @@ class IndexTest extends TestCase
 
     public function testInsertManyIndexesAllDocuments(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $index->insertMany([
             ['id' => 1, 'title' => 'sedan car'],
             ['id' => 2, 'title' => 'suv truck'],
@@ -565,7 +557,7 @@ class IndexTest extends TestCase
 
     public function testInsertManyWithEmptyArrayIsNoop(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $index->insertMany([]);
 
         $this->assertSame(0, $index->search('anything')['hits']);
@@ -575,7 +567,7 @@ class IndexTest extends TestCase
 
     public function testUpdateReplacesOldContent(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $index->insert(['id' => 1, 'title' => 'sedan car']);
         $index->update(['id' => 1, 'title' => 'suv truck']);
 
@@ -585,7 +577,7 @@ class IndexTest extends TestCase
 
     public function testUpdatePreservesTotalDocumentCount(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $index->insertMany([
             ['id' => 1, 'title' => 'sedan'],
             ['id' => 2, 'title' => 'coupe'],
@@ -597,7 +589,7 @@ class IndexTest extends TestCase
 
     public function testUpdateExistingDocDoesNotIncrementTotalDocuments(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $index->insertMany([
             ['id' => 1, 'title' => 'sedan'],
             ['id' => 2, 'title' => 'coupe'],
@@ -613,7 +605,7 @@ class IndexTest extends TestCase
 
     public function testUpdateCreatesDocWhenIdNotFound(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $index->update(['id' => 999, 'title' => 'sedan']);
 
         $this->assertContains(999, $index->search('sedan')['ids']);
@@ -621,7 +613,7 @@ class IndexTest extends TestCase
 
     public function testUpdateNonExistentDocIncrementsCount(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $index->update(['id' => 1, 'title' => 'sedan']);
         $info = $index->inspectQuery('sedan')['index_info'];
         $this->assertSame('1', $info['total_documents']);
@@ -629,7 +621,7 @@ class IndexTest extends TestCase
 
     public function testUpdateChangesAvgDocLength(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $index->insert(['id' => 1, 'title' => 'alpha beta gamma delta']);
         $index->update(['id' => 1, 'title' => 'zeta']);
         $info = $index->inspectQuery('zeta')['index_info'];
@@ -640,7 +632,7 @@ class IndexTest extends TestCase
 
     public function testUpdateManyReplacesOldContent(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $index->insertMany([
             ['id' => 1, 'title' => 'sedan car'],
             ['id' => 2, 'title' => 'coupe sport'],
@@ -658,7 +650,7 @@ class IndexTest extends TestCase
 
     public function testUpdateManyPreservesTotalDocumentCount(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $index->insertMany([
             ['id' => 1, 'title' => 'sedan'],
             ['id' => 2, 'title' => 'coupe'],
@@ -675,7 +667,7 @@ class IndexTest extends TestCase
 
     public function testUpdateManyExistingDocsDoNotIncrementTotalDocuments(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $index->insertMany([
             ['id' => 1, 'title' => 'sedan'],
             ['id' => 2, 'title' => 'coupe'],
@@ -693,7 +685,7 @@ class IndexTest extends TestCase
 
     public function testUpdateManyCreatesDocWhenIdNotFound(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $index->updateMany([
             ['id' => 1, 'title' => 'sedan'],
             ['id' => 2, 'title' => 'coupe'],
@@ -705,7 +697,7 @@ class IndexTest extends TestCase
 
     public function testUpdateManyMixedExistingAndNewIdsUpdatesCount(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $index->insert(['id' => 1, 'title' => 'sedan']);
         $index->updateMany([
             ['id' => 1, 'title' => 'suv'],    // existing — no count change
@@ -720,7 +712,7 @@ class IndexTest extends TestCase
 
     public function testUpdateManyUpdatesAvgDocLength(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $index->insertMany([
             ['id' => 1, 'title' => 'alpha beta gamma delta'],  // 4 tokens
             ['id' => 2, 'title' => 'epsilon zeta'],             // 2 tokens
@@ -739,7 +731,7 @@ class IndexTest extends TestCase
 
     public function testUpdateManyAllNewDocsAccumulatesAvgDocLength(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         // All three are upserts (no pre-existing docs).
         $index->updateMany([
             ['id' => 1, 'title' => 'alpha beta gamma'],  // 3 tokens
@@ -756,7 +748,7 @@ class IndexTest extends TestCase
 
     public function testUpdateManyWithEmptyIterableIsNoop(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $index->insert(['id' => 1, 'title' => 'sedan']);
         $index->updateMany([]);
 
@@ -767,7 +759,7 @@ class IndexTest extends TestCase
 
     public function testUpdateManyThrowsOnMissingIdKey(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
 
         $this->expectException(\InvalidArgumentException::class);
         $this->expectExceptionMessage("Document must contain an 'id' key.");
@@ -778,7 +770,7 @@ class IndexTest extends TestCase
 
     public function testDeleteRemovesDocumentFromResults(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $index->insert(['id' => 1, 'title' => 'sedan car']);
         $index->delete(1);
 
@@ -787,7 +779,7 @@ class IndexTest extends TestCase
 
     public function testDeleteDoesNotAffectOtherDocuments(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $index->insertMany([
             ['id' => 1, 'title' => 'sedan car'],
             ['id' => 2, 'title' => 'suv truck'],
@@ -799,7 +791,7 @@ class IndexTest extends TestCase
 
     public function testDeleteNonexistentDocumentIsNoop(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $index->insert(['id' => 1, 'title' => 'sedan']);
         $index->delete(999);
 
@@ -808,7 +800,7 @@ class IndexTest extends TestCase
 
     public function testDeleteDecrementsDocumentCount(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $index->insert(['id' => 1, 'title' => 'sedan']);
         $index->delete(1);
 
@@ -823,7 +815,7 @@ class IndexTest extends TestCase
 
     public function testDeleteManyRemovesAllSpecifiedDocuments(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $index->insertMany([
             ['id' => 1, 'title' => 'sedan'],
             ['id' => 2, 'title' => 'coupe'],
@@ -838,7 +830,7 @@ class IndexTest extends TestCase
 
     public function testDeleteManyUpdatesDocumentCount(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $index->insertMany([
             ['id' => 1, 'title' => 'sedan'],
             ['id' => 2, 'title' => 'coupe'],
@@ -852,7 +844,7 @@ class IndexTest extends TestCase
 
     public function testDeleteManyOfOnlyOneDocResetsCount(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $index->insert(['id' => 1, 'title' => 'sedan']);
         $index->deleteMany([1]);
 
@@ -865,7 +857,7 @@ class IndexTest extends TestCase
 
     public function testDeleteManyUpdatesAverageDocLength(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $index->insertMany([
             ['id' => 1, 'title' => 'alpha beta gamma'],  // 3 tokens
             ['id' => 2, 'title' => 'delta epsilon'],      // 2 tokens
@@ -883,7 +875,7 @@ class IndexTest extends TestCase
 
     public function testDeleteManyWithEmptyArrayIsNoop(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $index->insert(['id' => 1, 'title' => 'sedan']);
         $index->deleteMany([]);
 
@@ -892,7 +884,7 @@ class IndexTest extends TestCase
 
     public function testDeleteManyIgnoresNonexistentIds(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $index->insert(['id' => 1, 'title' => 'sedan']);
         $index->deleteMany([1, 999]);
 
@@ -904,7 +896,7 @@ class IndexTest extends TestCase
         // All deletions happen inside a single transaction; if the call does not throw,
         // the state must be consistent (this test ensures the empty-array guard works
         // and that a mixed real/missing batch completes without error).
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $index->insertMany([
             ['id' => 1, 'title' => 'sedan'],
             ['id' => 2, 'title' => 'coupe'],
@@ -919,13 +911,13 @@ class IndexTest extends TestCase
 
     public function testCountReturnsZeroOnFreshIndex(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $this->assertSame(0, $index->count());
     }
 
     public function testCountReflectsInsertedDocuments(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $index->insertMany([
             ['id' => 1, 'title' => 'sedan'],
             ['id' => 2, 'title' => 'coupe'],
@@ -935,7 +927,7 @@ class IndexTest extends TestCase
 
     public function testCountDecrementsAfterDelete(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $index->insert(['id' => 1, 'title' => 'sedan']);
         $index->delete(1);
         $this->assertSame(0, $index->count());
@@ -943,7 +935,7 @@ class IndexTest extends TestCase
 
     public function testCountIsStableAfterUpdate(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $index->insertMany([
             ['id' => 1, 'title' => 'sedan'],
             ['id' => 2, 'title' => 'coupe'],
@@ -954,21 +946,21 @@ class IndexTest extends TestCase
 
     public function testCountPersistsAfterReopen(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $index->insertMany([
             ['id' => 1, 'title' => 'sedan'],
             ['id' => 2, 'title' => 'coupe'],
         ]);
         $index->close();
 
-        $this->assertSame(2, Index::open($this->dbPath)->count());
+        $this->assertSame(2, new Index($this->dbPath)->count());
     }
 
     // --- has ---
 
     public function testHasReturnsTrueForExistingDocument(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $index->insert(['id' => 1, 'title' => 'sedan']);
 
         $this->assertTrue($index->has(1));
@@ -976,14 +968,14 @@ class IndexTest extends TestCase
 
     public function testHasReturnsFalseForMissingDocument(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
 
         $this->assertFalse($index->has(999));
     }
 
     public function testHasReturnsFalseAfterDelete(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $index->insert(['id' => 1, 'title' => 'sedan']);
         $index->delete(1);
 
@@ -992,7 +984,7 @@ class IndexTest extends TestCase
 
     public function testHasReturnsTrueAfterUpdate(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $index->insert(['id' => 1, 'title' => 'sedan']);
         $index->update(['id' => 1, 'title' => 'coupe']);
 
@@ -1001,7 +993,7 @@ class IndexTest extends TestCase
 
     public function testHasReturnsTrueForUpsertedDocument(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         // update() with an unknown ID inserts the document (upsert semantics).
         $index->update(['id' => 42, 'title' => 'sedan']);
 
@@ -1012,7 +1004,7 @@ class IndexTest extends TestCase
 
     public function testHasManyReturnsTrueForAllPresentIds(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $index->insertMany([
             ['id' => 1, 'title' => 'sedan'],
             ['id' => 2, 'title' => 'coupe'],
@@ -1024,7 +1016,7 @@ class IndexTest extends TestCase
 
     public function testHasManyReturnsMixedBooleans(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $index->insertMany([
             ['id' => 1, 'title' => 'sedan'],
             ['id' => 3, 'title' => 'suv'],
@@ -1036,7 +1028,7 @@ class IndexTest extends TestCase
 
     public function testHasManyReturnsFalseForAllAbsentIds(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $index->insert(['id' => 1, 'title' => 'sedan']);
 
         $this->assertSame([99 => false, 100 => false], $index->hasMany([99, 100]));
@@ -1044,7 +1036,7 @@ class IndexTest extends TestCase
 
     public function testHasManyWithEmptyArrayReturnsEmpty(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $index->insert(['id' => 1, 'title' => 'sedan']);
 
         $this->assertSame([], $index->hasMany([]));
@@ -1052,7 +1044,7 @@ class IndexTest extends TestCase
 
     public function testHasManyPreservesInputOrder(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $index->insertMany([
             ['id' => 5, 'title' => 'sedan'],
             ['id' => 1, 'title' => 'coupe'],
@@ -1065,7 +1057,7 @@ class IndexTest extends TestCase
 
     public function testHasManyReturnsFalseForDeletedId(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $index->insertMany([
             ['id' => 1, 'title' => 'sedan'],
             ['id' => 2, 'title' => 'coupe'],
@@ -1079,7 +1071,7 @@ class IndexTest extends TestCase
 
     public function testSearchFuzzyMatchesTypo(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $index->insert(['id' => 1, 'title' => 'Mercedes Benz', 'body' => 'luxury car']);
 
         $result = $index->search('mercdes', fuzzy: true);
@@ -1088,7 +1080,7 @@ class IndexTest extends TestCase
 
     public function testSearchFuzzyReturnsDocScores(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $index->insert(['id' => 1, 'title' => 'Volkswagen Golf']);
 
         $result = $index->search('volksagen', fuzzy: true);
@@ -1099,7 +1091,7 @@ class IndexTest extends TestCase
 
     public function testSearchFuzzyNoMatchReturnsEmpty(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $index->insert(['id' => 1, 'title' => 'sedan']);
 
         $result = $index->search('xqzpwk', fuzzy: true);
@@ -1109,7 +1101,7 @@ class IndexTest extends TestCase
 
     public function testFuzzyDistanceOneAcceptsDistanceOneTypo(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $index->insert(['id' => 1, 'title' => 'sedan']);
 
         $index->fuzzyDistance = 1;
@@ -1118,7 +1110,7 @@ class IndexTest extends TestCase
 
     public function testFuzzyDistanceOneRejectsDistanceTwoTypo(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $index->insert(['id' => 1, 'title' => 'sedan']);
 
         $index->fuzzyDistance = 1;
@@ -1127,7 +1119,7 @@ class IndexTest extends TestCase
 
     public function testFuzzySearchCloserMatchRanksFirst(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         // Query 'drago' (not indexed) is distance=1 from 'dragon' and distance=2 from 'draagon'.
         $index->insertMany([
             ['id' => 1, 'title' => 'dragon'],   // distance=1 from query
@@ -1146,7 +1138,7 @@ class IndexTest extends TestCase
 
     public function testSearchFuzzySecondaryOrderByPopularity(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $index->insertMany([
             ['id' => 1, 'title' => 'dragon dragon dragon dragon dragon'], // 5 hits — high num_hits
             ['id' => 2, 'title' => 'drage'],                             // 1 hit — low num_hits
@@ -1163,7 +1155,7 @@ class IndexTest extends TestCase
 
     public function testSearchBooleanAnd(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $index->insertMany([
             ['id' => 1, 'title' => 'sedan coupe'],
             ['id' => 2, 'title' => 'sedan only'],
@@ -1178,7 +1170,7 @@ class IndexTest extends TestCase
 
     public function testSearchBooleanOr(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $index->insertMany([
             ['id' => 1, 'title' => 'sedan car'],
             ['id' => 2, 'title' => 'suv truck'],
@@ -1193,7 +1185,7 @@ class IndexTest extends TestCase
 
     public function testSearchBooleanNot(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $index->insertMany([
             ['id' => 1, 'title' => 'bmw sedan'],
             ['id' => 2, 'title' => 'audi sedan'],
@@ -1206,7 +1198,7 @@ class IndexTest extends TestCase
 
     public function testSearchBooleanNotRespectsAsYouTypePrefix(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $index->insertMany([
             ['id' => 1, 'title' => 'mercedes sedan'],
             ['id' => 2, 'title' => 'audi sedan'],
@@ -1222,7 +1214,7 @@ class IndexTest extends TestCase
 
     public function testSearchBooleanDocScoresIsNull(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $index->insert(['id' => 1, 'title' => 'sedan']);
 
         $result = $index->searchBoolean('sedan');
@@ -1233,7 +1225,7 @@ class IndexTest extends TestCase
 
     public function testSearchBooleanAndLastTermPrefixMatches(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $index->insertMany([
             ['id' => 1, 'title' => 'bmw sedan'],
             ['id' => 2, 'title' => 'bmw coupe'],
@@ -1249,7 +1241,7 @@ class IndexTest extends TestCase
 
     public function testSearchBooleanOrLastTermPrefixMatches(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $index->insertMany([
             ['id' => 1, 'title' => 'bmw coupe'],
             ['id' => 2, 'title' => 'audi sedan'],
@@ -1265,7 +1257,7 @@ class IndexTest extends TestCase
 
     public function testSearchBooleanAsYouTypeDisabledNoPartialMatch(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $index->insertMany([
             ['id' => 1, 'title' => 'bmw sedan'],
             ['id' => 2, 'title' => 'audi coupe'],
@@ -1278,7 +1270,7 @@ class IndexTest extends TestCase
 
     public function testSearchBooleanOnlyLastTermIsPrefixExpanded(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $index->insertMany([
             ['id' => 1, 'title' => 'sedan coupe'],
             ['id' => 2, 'title' => 'sedan hatchback'],
@@ -1294,7 +1286,7 @@ class IndexTest extends TestCase
 
     public function testSearchBooleanSingleTermAsYouTypePrefix(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $index->insertMany([
             ['id' => 1, 'title' => 'sedan'],
             ['id' => 2, 'title' => 'coupe'],
@@ -1310,7 +1302,7 @@ class IndexTest extends TestCase
 
     public function testSearchBooleanAndMissingTermReturnsEmpty(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $index->insert(['id' => 1, 'title' => 'sedan']);
 
         $result = $index->searchBoolean('sedan helicopter');
@@ -1319,7 +1311,7 @@ class IndexTest extends TestCase
 
     public function testSearchBooleanHitsExceedsNumOfResults(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $index->insertMany([
             ['id' => 1, 'title' => 'sedan'],
             ['id' => 2, 'title' => 'sedan'],
@@ -1333,7 +1325,7 @@ class IndexTest extends TestCase
 
     public function testSearchBooleanMultipleNots(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $index->insertMany([
             ['id' => 1, 'title' => 'bmw sedan'],
             ['id' => 2, 'title' => 'audi sedan'],
@@ -1348,7 +1340,7 @@ class IndexTest extends TestCase
 
     public function testSearchBooleanNormalizesUnicodeUppercase(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $index->insert(['id' => 1, 'title' => 'café']);
         $index->asYouType = false;
         $result = $index->searchBoolean('CAFÉ');
@@ -1357,7 +1349,7 @@ class IndexTest extends TestCase
 
     public function testBooleanAndBindsTighterThanOr(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $index->insertMany([
             ['id' => 1, 'title' => 'sedan'],          // only sedan
             ['id' => 2, 'title' => 'coupe truck'],     // coupe AND truck
@@ -1376,7 +1368,7 @@ class IndexTest extends TestCase
 
     public function testBooleanNotBindsTighterThanAnd(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $index->insertMany([
             ['id' => 1, 'title' => 'php laravel'],
             ['id' => 2, 'title' => 'php symfony'],
@@ -1395,7 +1387,7 @@ class IndexTest extends TestCase
 
     public function testBooleanExplicitAndWithParenthesisedOrOnRight(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $index->insertMany([
             ['id' => 1, 'title' => 'php laravel'],
             ['id' => 2, 'title' => 'php nodejs'],
@@ -1416,7 +1408,7 @@ class IndexTest extends TestCase
 
     public function testBooleanAndWithMaterializedOrResultIsIntersection(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $index->insertMany([
             ['id' => 1, 'title' => 'php laravel'],
             ['id' => 2, 'title' => 'php nodejs'],
@@ -1438,7 +1430,7 @@ class IndexTest extends TestCase
 
     public function testBooleanSliceStartsAtIndexZero(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $index->insertMany([
             ['id' => 1, 'title' => 'sedan'],
             ['id' => 2, 'title' => 'sedan'],
@@ -1457,7 +1449,7 @@ class IndexTest extends TestCase
 
     public function testBooleanSearchLowercasesNonAsciiViaMultibyte(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $index->insert(['id' => 1, 'title' => 'naïve']);
         $index->asYouType = false;
 
@@ -1469,7 +1461,7 @@ class IndexTest extends TestCase
 
     public function testBooleanSearchStripsSpacesAroundParentheses(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $index->insertMany([
             ['id' => 1, 'title' => 'café'],
             ['id' => 2, 'title' => 'latté'],
@@ -1486,7 +1478,7 @@ class IndexTest extends TestCase
 
     public function testBooleanSearchFindsDocumentByUppercaseMultibyteQuery(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         // Index the lowercase form; the query must be lowercased with mb_strtolower.
         // 'Ü' (U+00DC) is two bytes in UTF-8; strtolower leaves it unchanged.
         $index->insert(['id' => 1, 'title' => 'über']);
@@ -1497,7 +1489,7 @@ class IndexTest extends TestCase
 
     public function testBooleanGroupNotFollowedByNot(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $index->insertMany([
             ['id' => 1, 'title' => 'sedan coupe'],
             ['id' => 2, 'title' => 'sedan electric'],
@@ -1519,7 +1511,7 @@ class IndexTest extends TestCase
 
     public function testBooleanGroupingConstrainsChainedAnd(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $index->insertMany([
             ['id' => 1, 'title' => 'alpha beta delta'],   // all three → should match
             ['id' => 2, 'title' => 'alpha gamma delta'],  // all three → should match
@@ -1544,14 +1536,14 @@ class IndexTest extends TestCase
 
     public function testInspectQueryRawTokensMatchTokenizer(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $result = $index->inspectQuery('Hello World');
         $this->assertSame(['hello', 'world'], $result['raw_tokens']);
     }
 
     public function testInspectQueryNoLanguageFilteredTokensEqualRaw(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $result = $index->inspectQuery('hello world');
         $this->assertSame($result['raw_tokens'], $result['filtered_tokens']);
         $this->assertFalse($result['stopwords_active']);
@@ -1560,21 +1552,21 @@ class IndexTest extends TestCase
 
     public function testInspectQueryStopwordsActiveWhenLanguageSet(): void
     {
-        $index = Index::create($this->dbPath, language: 'en');
+        $index = new Index($this->dbPath, language: 'en');
         $result = $index->inspectQuery('hello world');
         $this->assertTrue($result['stopwords_active']);
     }
 
     public function testInspectQueryStemmerActiveWhenLanguageSet(): void
     {
-        $index = Index::create($this->dbPath, language: 'en');
+        $index = new Index($this->dbPath, language: 'en');
         $result = $index->inspectQuery('hello world');
         $this->assertTrue($result['stemmer_active']);
     }
 
     public function testInspectQueryFilteredTokensDropsStopwords(): void
     {
-        $index = Index::create($this->dbPath, language: 'en');
+        $index = new Index($this->dbPath, language: 'en');
         $result = $index->inspectQuery('the quick');
         $this->assertNotContains('the', $result['filtered_tokens']);
         $this->assertContains('the', $result['raw_tokens']);
@@ -1584,7 +1576,7 @@ class IndexTest extends TestCase
     {
         // Single-token all-stopword query: filterQueryTokens only strips when count > 1,
         // so use two stopwords to trigger the all-stripped fallback.
-        $index = Index::create($this->dbPath, language: 'en');
+        $index = new Index($this->dbPath, language: 'en');
         $result = $index->inspectQuery('the and');
         $this->assertTrue($result['all_stripped']);
         // Fallback fires — filtered_tokens equals raw_tokens.
@@ -1593,14 +1585,14 @@ class IndexTest extends TestCase
 
     public function testInspectQueryAllStrippedFalseWithNoLanguage(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $result = $index->inspectQuery('the and');
         $this->assertFalse($result['all_stripped']);
     }
 
     public function testInspectQueryStemmerApplied(): void
     {
-        $index = Index::create($this->dbPath, language: 'en');
+        $index = new Index($this->dbPath, language: 'en');
         $result = $index->inspectQuery('running');
         // 'running' stems to 'run' in English Snowball
         $this->assertSame('run', $result['filtered_tokens'][0]);
@@ -1608,7 +1600,7 @@ class IndexTest extends TestCase
 
     public function testInspectQueryRawToProcessedMapping(): void
     {
-        $index = Index::create($this->dbPath, language: 'en');
+        $index = new Index($this->dbPath, language: 'en');
         $result = $index->inspectQuery('running');
         $this->assertSame('running', $result['tokens'][0]['raw']);
         $this->assertSame('run', $result['tokens'][0]['processed']);
@@ -1616,7 +1608,7 @@ class IndexTest extends TestCase
 
     public function testInspectQueryFoundTrueForIndexedTerm(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $index->insert(['id' => 1, 'body' => 'sedan']);
         $index->asYouType = false;
         $result = $index->inspectQuery('sedan');
@@ -1627,7 +1619,7 @@ class IndexTest extends TestCase
 
     public function testInspectQueryFoundFalseForMissingTerm(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $index->asYouType = false;
         $result = $index->inspectQuery('zzznomatch');
         $this->assertFalse($result['tokens'][0]['found']);
@@ -1638,7 +1630,7 @@ class IndexTest extends TestCase
 
     public function testInspectQueryMatchTypeExact(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $index->insert(['id' => 1, 'body' => 'sedan']);
         $index->asYouType = false;
         $result = $index->inspectQuery('sedan');
@@ -1647,7 +1639,7 @@ class IndexTest extends TestCase
 
     public function testInspectQueryMatchTypePrefix(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $index->insert(['id' => 1, 'body' => 'sedan']);
         $index->asYouType = true;
         $result = $index->inspectQuery('sed');
@@ -1658,7 +1650,7 @@ class IndexTest extends TestCase
 
     public function testInspectQueryMatchTypeFuzzy(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $index->insert(['id' => 1, 'body' => 'sedan']);
         $index->asYouType = false;
         $result = $index->inspectQuery('sedaan', fuzzy: true);
@@ -1668,7 +1660,7 @@ class IndexTest extends TestCase
 
     public function testInspectQueryMatchTypeNoneWhenNoCandidate(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $index->insert(['id' => 1, 'body' => 'sedan']);
         $index->asYouType = false;
         $result = $index->inspectQuery('zzznomatch', fuzzy: true);
@@ -1677,7 +1669,7 @@ class IndexTest extends TestCase
 
     public function testInspectQueryPrefixExpandsMultipleTerms(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $index->insertMany([
             ['id' => 1, 'body' => 'sedan'],
             ['id' => 2, 'body' => 'sediment'],
@@ -1691,7 +1683,7 @@ class IndexTest extends TestCase
 
     public function testInspectQueryIsLastOnlyTrueForFinalToken(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $result = $index->inspectQuery('fast sedan review');
         $this->assertFalse($result['tokens'][0]['is_last']);
         $this->assertFalse($result['tokens'][1]['is_last']);
@@ -1700,7 +1692,7 @@ class IndexTest extends TestCase
 
     public function testInspectQueryIndexInfoContainsDocumentCount(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $index->insert(['id' => 1, 'body' => 'sedan']);
         $info = $index->inspectQuery('sedan')['index_info'];
         $this->assertArrayHasKey('total_documents', $info);
@@ -1710,28 +1702,28 @@ class IndexTest extends TestCase
 
     public function testInspectQueryBooleanPostfixAndOperator(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $result = $index->inspectQuery('php laravel');
         $this->assertContains('&', $result['boolean_postfix']);
     }
 
     public function testInspectQueryBooleanPostfixOrOperator(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $result = $index->inspectQuery('php or laravel');
         $this->assertContains('|', $result['boolean_postfix']);
     }
 
     public function testInspectQueryBooleanPostfixNotOperator(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $result = $index->inspectQuery('php -wordpress');
         $this->assertContains('~', $result['boolean_postfix']);
     }
 
     public function testInspectQueryBooleanPostfixContainsOrForSingleTerm(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
 
         // Mutation ConcatOperandRemoval: toPostfix('php') → ['php'] — no '|'.
         // Original: toPostfix('|php') → ['php', '|'].
@@ -1741,7 +1733,7 @@ class IndexTest extends TestCase
 
     public function testInspectQueryEmptyPhraseReturnsEmptyLists(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $result = $index->inspectQuery('');
         $this->assertSame([], $result['raw_tokens']);
         $this->assertSame([], $result['filtered_tokens']);
@@ -1750,7 +1742,7 @@ class IndexTest extends TestCase
 
     public function testInspectQueryDoesNotChangeDocumentCount(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $index->insert(['id' => 1, 'body' => 'sedan']);
         $before = $index->inspectQuery('sedan')['index_info']['total_documents'];
         $index->inspectQuery('sedan');
@@ -1759,7 +1751,7 @@ class IndexTest extends TestCase
 
     public function testInspectQueryWarmsWordlistCacheForSearch(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $index->insert(['id' => 1, 'body' => 'sedan']);
         $index->asYouType = false;
         $index->inspectQuery('sedan');
@@ -1770,7 +1762,7 @@ class IndexTest extends TestCase
 
     public function testInspectQueryDefaultFuzzyParamIsFalse(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $index->insert(['id' => 1, 'title' => 'sedan']);
         $index->asYouType = false;
 
@@ -1782,7 +1774,7 @@ class IndexTest extends TestCase
 
     public function testInspectQueryExactMatchWithFuzzyTrueIsNotFuzzyType(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $index->insert(['id' => 1, 'title' => 'sedan']);
         $index->asYouType = false;
 
@@ -1795,7 +1787,7 @@ class IndexTest extends TestCase
 
     public function testInspectQueryWordlistRowsHaveExactKeys(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $index->insert(['id' => 1, 'title' => 'sedan']);
         $index->asYouType = false;
 
@@ -1808,7 +1800,7 @@ class IndexTest extends TestCase
 
     public function testInspectQueryNumHitsAndNumDocsValues(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $index->insert(['id' => 1, 'title' => 'sedan sedan']);
         $index->asYouType = false;
 
@@ -1821,7 +1813,7 @@ class IndexTest extends TestCase
 
     public function testRebuildReturnsIndex(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $index->close();
 
         $rebuilt = Index::rebuild($this->dbPath, function (Index $new): void {
@@ -1833,7 +1825,7 @@ class IndexTest extends TestCase
 
     public function testRebuildNewContentIsSearchable(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $index->close();
 
         $rebuilt = Index::rebuild($this->dbPath, function (Index $new): void {
@@ -1845,7 +1837,7 @@ class IndexTest extends TestCase
 
     public function testRebuildRemovesOldContent(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $index->insert(['id' => 1, 'title' => 'old content']);
         $index->close();
 
@@ -1859,7 +1851,7 @@ class IndexTest extends TestCase
 
     public function testRebuildLeavesOriginalIntactOnCallbackException(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $index->insert(['id' => 1, 'title' => 'original']);
         $index->close();
 
@@ -1871,14 +1863,14 @@ class IndexTest extends TestCase
         } catch (\RuntimeException) {
         }
 
-        $surviving = Index::open($this->dbPath);
+        $surviving = new Index($this->dbPath);
         $this->assertContains(1, $surviving->search('original')['ids']);
         $this->assertEmpty($surviving->search('partial')['ids']);
     }
 
     public function testRebuildPropagatesCallbackException(): void
     {
-        Index::create($this->dbPath)->close();
+        new Index($this->dbPath)->close();
 
         $this->expectException(\RuntimeException::class);
         $this->expectExceptionMessage('simulated failure');
@@ -1890,7 +1882,7 @@ class IndexTest extends TestCase
 
     public function testRebuildLeaksNoTempFileOnFailure(): void
     {
-        Index::create($this->dbPath)->close();
+        new Index($this->dbPath)->close();
 
         try {
             Index::rebuild($this->dbPath, function (): void {
@@ -1907,7 +1899,7 @@ class IndexTest extends TestCase
 
     public function testRebuildPreservesLanguageFromExistingIndex(): void
     {
-        Index::create($this->dbPath, language: 'en')->close();
+        new Index($this->dbPath, language: 'en')->close();
 
         $rebuilt = Index::rebuild($this->dbPath, function (Index $new): void {
             $new->insert(['id' => 1, 'title' => 'running']);
@@ -1927,7 +1919,7 @@ class IndexTest extends TestCase
 
     public function testRebuildCountReflectsNewDocuments(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $index->insertMany([['id' => 1, 'title' => 'a'], ['id' => 2, 'title' => 'b']]);
         $index->close();
 
@@ -1942,7 +1934,7 @@ class IndexTest extends TestCase
 
     public function testZhInsertAndSearchBigram(): void
     {
-        $index = Index::create($this->dbPath, language: 'zh');
+        $index = new Index($this->dbPath, language: 'zh');
         $index->insert(['id' => 1, 'body' => '轿车测试']);
 
         $this->assertContains(1, $index->search('轿车')['ids']);
@@ -1951,7 +1943,7 @@ class IndexTest extends TestCase
     public function testZhSingleCharSearch(): void
     {
         // Unigrams are emitted at index time for zh so single-character searches work.
-        $index = Index::create($this->dbPath, language: 'zh');
+        $index = new Index($this->dbPath, language: 'zh');
         $index->insert(['id' => 1, 'body' => '轿车测试']);
 
         $this->assertContains(1, $index->search('车')['ids']);
@@ -1959,7 +1951,7 @@ class IndexTest extends TestCase
 
     public function testZhDoesNotMatchUnrelatedDocument(): void
     {
-        $index = Index::create($this->dbPath, language: 'zh');
+        $index = new Index($this->dbPath, language: 'zh');
         $index->insertMany([
             ['id' => 1, 'body' => '轿车测试'],
             ['id' => 2, 'body' => '飞机起飞'],
@@ -1970,7 +1962,7 @@ class IndexTest extends TestCase
 
     public function testJaInsertAndSearchBigram(): void
     {
-        $index = Index::create($this->dbPath, language: 'ja');
+        $index = new Index($this->dbPath, language: 'ja');
         $index->insert(['id' => 1, 'body' => '東京タワー']);
 
         $this->assertContains(1, $index->search('東京')['ids']);
@@ -1978,7 +1970,7 @@ class IndexTest extends TestCase
 
     public function testKoInsertAndSearchBigram(): void
     {
-        $index = Index::create($this->dbPath, language: 'ko');
+        $index = new Index($this->dbPath, language: 'ko');
         $index->insert(['id' => 1, 'body' => '서울특별시']);
 
         $this->assertContains(1, $index->search('서울')['ids']);
@@ -1986,7 +1978,7 @@ class IndexTest extends TestCase
 
     public function testThInsertAndSearchTrigram(): void
     {
-        $index = Index::create($this->dbPath, language: 'th');
+        $index = new Index($this->dbPath, language: 'th');
         $index->insert(['id' => 1, 'body' => 'กรุงเทพมหานคร']);
 
         // 'กรุงเท' is a trigram within the indexed text
@@ -1995,7 +1987,7 @@ class IndexTest extends TestCase
 
     public function testZhBooleanSearch(): void
     {
-        $index = Index::create($this->dbPath, language: 'zh');
+        $index = new Index($this->dbPath, language: 'zh');
         $index->insertMany([
             ['id' => 1, 'body' => '轿车测试'],
             ['id' => 2, 'body' => '飞机起飞'],
@@ -2009,7 +2001,7 @@ class IndexTest extends TestCase
     public function testZhQueryTokensAreNgrammed(): void
     {
         // inspectQuery must show bigrams in filtered_tokens, not the raw full string.
-        $index  = Index::create($this->dbPath, language: 'zh');
+        $index  = new Index($this->dbPath, language: 'zh');
         $result = $index->inspectQuery('轿车');
 
         $this->assertContains('轿车', $result['filtered_tokens']);
@@ -2020,7 +2012,7 @@ class IndexTest extends TestCase
     public function testZhMixedQueryAsciiTokenPassthrough(): void
     {
         // ASCII tokens in a mixed query must not be ngrammed.
-        $index = Index::create($this->dbPath, language: 'zh');
+        $index = new Index($this->dbPath, language: 'zh');
         $index->insertMany([
             ['id' => 1, 'body' => 'BMW 轿车'],
             ['id' => 2, 'body' => '轿车'],

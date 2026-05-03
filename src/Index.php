@@ -9,9 +9,9 @@ use Fuzor\Tokenizer;
 use PDO;
 
 /**
- * Fuzor index — static factory and full implementation.
+ * Fuzor index.
  *
- * Use Index::open() or Index::create() to obtain an instance. Owns all database
+ * Instantiate directly to open or create an index file. Owns all database
  * interaction: schema creation, document indexing (tokenisation → wordlist upsert →
  * doclist insert), and every query mode (BM25 ranked, as-you-type prefix, Levenshtein
  * fuzzy, boolean). One instance maps to one open SQLite file at a time.
@@ -106,15 +106,34 @@ class Index
         get => $this->stemmer !== null;
     }
 
-    // --- Connection management ----------------------------------------------
+    // --- Constructor --------------------------------------------------------
 
     /**
-     * @param string $storagePath Writable directory where index files are stored.
+     * Open an existing index or create a new one.
+     *
+     * If the file at $path already exists and $force is false, the index is opened
+     * and the stored language is restored automatically — $language is ignored.
+     * If the file does not exist, or $force is true, a new index is created.
+     *
+     * @param  string      $path     Absolute or relative path to the SQLite index file.
+     * @param  string|null $language BCP 47 language tag persisted at creation time (e.g. 'en').
+     *                               Ignored when opening an existing index.
+     * @param  bool        $force    Overwrite any existing file at $path.
+     * @throws \RuntimeException        If the parent directory does not exist.
+     * @throws \InvalidArgumentException If $language is set but has no stopword list or stemmer.
      */
-    public function __construct(string $storagePath)
+    public function __construct(string $path, ?string $language = null, bool $force = false)
     {
-        /** @infection-ignore-all UnwrapRtrim: on Linux // is path-equivalent to /; no observable difference */
-        $this->storagePath = rtrim($storagePath, '/') . '/';
+        if ($language !== null && !Language::supports($language)) {
+            throw new \InvalidArgumentException("No stopword list or stemmer for language: '{$language}'");
+        }
+        $resolved          = self::resolvePath($path);
+        $this->storagePath = dirname($resolved) . DIRECTORY_SEPARATOR;
+        if (file_exists($resolved) && !$force) {
+            $this->selectIndex(basename($resolved));
+        } else {
+            $this->createIndex(basename($resolved), $force, $language);
+        }
     }
 
     public function __destruct()
@@ -185,41 +204,6 @@ class Index
     }
 
     /**
-     * Open an existing index file.
-     *
-     * @param  string $path Absolute or relative path to the SQLite index file.
-     * @throws \RuntimeException If the index file does not exist.
-     */
-    public static function open(string $path): self
-    {
-        $resolved = self::resolvePath($path);
-        $handle   = new self(dirname($resolved));
-        $handle->selectIndex(basename($resolved));
-        return $handle;
-    }
-
-    /**
-     * Create a new index file.
-     *
-     * @param  string      $path     Absolute or relative path for the new SQLite index file.
-     * @param  bool        $force    When true, any existing file at that path is overwritten.
-     * @param  string|null $language BCP 47 language tag for stopword filtering and stemming (e.g. 'en');
-     *                               persisted in the index file.
-     * @throws \RuntimeException        If a file already exists at $path and $force is false.
-     * @throws \InvalidArgumentException If $language is set but has no stopword list or stemmer.
-     */
-    public static function create(string $path, bool $force = false, ?string $language = null): self
-    {
-        if ($language !== null && !Language::supports($language)) {
-            throw new \InvalidArgumentException("No stopword list or stemmer for language: '{$language}'");
-        }
-        $resolved = self::resolvePath($path);
-        $handle   = new self(dirname($resolved));
-        $handle->createIndex(basename($resolved), $force, $language);
-        return $handle;
-    }
-
-    /**
      * Atomically rebuild an index by writing to a temporary file and renaming it over the target.
      *
      * The callback receives a fresh, empty Index to populate. If the callback throws,
@@ -228,13 +212,13 @@ class Index
      *
      * @param  string   $path     Absolute or relative path to the index file to rebuild.
      * @param  callable $callback fn(Index $new): void — populate the new index here.
-     * @return self               Open handle to the rebuilt index.
+     * @return self               Open index pointing at the rebuilt file.
      * @throws \RuntimeException  If the rename fails or the parent directory does not exist.
      */
     public static function rebuild(string $path, callable $callback): self
     {
         $resolved = self::resolvePath($path);
-        $existing = file_exists($resolved) ? self::open($resolved) : null;
+        $existing = file_exists($resolved) ? new self($resolved) : null;
         $language = $existing?->language;
         /** @infection-ignore-all MethodCallRemoval: resource cleanup; GC closes the connection if skipped, no observable effect on the rebuild outcome */
         $existing?->close();
@@ -243,7 +227,7 @@ class Index
         $tmp = $resolved . '.tmp-' . bin2hex(random_bytes(4));
 
         try {
-            $handle = self::create($tmp, language: $language);
+            $handle = new self($tmp, language: $language);
             $callback($handle);
             $handle->close();
 
@@ -258,7 +242,7 @@ class Index
             throw $e;
         }
 
-        return self::open($resolved);
+        return new self($resolved);
     }
 
     // --- Index lifecycle (private, called by static factories) --------------

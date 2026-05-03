@@ -71,7 +71,7 @@ class FuzorBench
             return;
         }
         self::loadDocs();
-        $idx = Index::create(self::SEARCH_DB, true);
+        $idx = new Index(self::SEARCH_DB, force: true);
         $idx->insertMany(self::$docs);
         $idx->close();
     }
@@ -84,14 +84,14 @@ class FuzorBench
     public function setUpSearch(): void
     {
         self::ensureSearchDb();
-        $this->index           = Index::open(self::SEARCH_DB);
+        $this->index           = new Index(self::SEARCH_DB);
         $this->index->asYouType = false;
     }
 
     public function setUpPrefix(): void
     {
         self::ensureSearchDb();
-        $this->index           = Index::open(self::SEARCH_DB);
+        $this->index           = new Index(self::SEARCH_DB);
         $this->index->asYouType = true;
     }
 
@@ -113,7 +113,7 @@ class FuzorBench
     {
         $path = sys_get_temp_dir() . '/fuzor_bench_im_' . getmypid() . '.db';
         @unlink($path);
-        $idx = Index::create($path, true);
+        $idx = new Index($path, force: true);
         $idx->insertMany(self::$docs);
         $idx->close();
         @unlink($path);
@@ -128,7 +128,7 @@ class FuzorBench
     {
         $path = sys_get_temp_dir() . '/fuzor_bench_is_' . getmypid() . '.db';
         @unlink($path);
-        $idx = Index::create($path, true);
+        $idx = new Index($path, force: true);
         foreach (self::$docs as $doc) {
             $idx->insert($doc);
         }

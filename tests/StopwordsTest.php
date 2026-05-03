@@ -90,34 +90,34 @@ class StopwordsTest extends TestCase
 
     public function testDefaultLanguageIsNull(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         $this->assertNull($index->language);
     }
 
     public function testLanguageAtCreationIsReadBack(): void
     {
-        $index = Index::create($this->dbPath, language: 'en');
+        $index = new Index($this->dbPath, language: 'en');
         $this->assertSame('en', $index->language);
     }
 
     public function testLanguageIsRestoredOnOpen(): void
     {
-        $index = Index::create($this->dbPath, language: 'en');
+        $index = new Index($this->dbPath, language: 'en');
         $index->close();
 
-        $reopened = Index::open($this->dbPath);
+        $reopened = new Index($this->dbPath);
         $this->assertSame('en', $reopened->language);
     }
 
     public function testUnknownLanguageAtCreationThrows(): void
     {
         $this->expectException(\InvalidArgumentException::class);
-        Index::create($this->dbPath, language: 'xx');
+        new Index($this->dbPath, language: 'xx');
     }
 
     public function testStopwordsExcludedFromIndex(): void
     {
-        $index = Index::create($this->dbPath, language: 'en');
+        $index = new Index($this->dbPath, language: 'en');
         $index->insert(['id' => 1, 'body' => 'the quick brown fox']);
 
         // 'the' is a stopword — searching for it should return no results
@@ -129,7 +129,7 @@ class StopwordsTest extends TestCase
 
     public function testWithoutLanguageStopwordsAreIndexed(): void
     {
-        $index = Index::create($this->dbPath);
+        $index = new Index($this->dbPath);
         // no language set — 'the' is indexed normally
         $index->insert(['id' => 1, 'body' => 'the quick brown fox']);
 
@@ -141,7 +141,7 @@ class StopwordsTest extends TestCase
         // With language='en', stopwords are filtered from both inserts and queries.
         // A query made up entirely of stopwords must not crash or throw; the fallback
         // in filterQueryTokens re-enables the original tokens when all are stripped.
-        $index = Index::create($this->dbPath, language: 'en');
+        $index = new Index($this->dbPath, language: 'en');
         $index->insert(['id' => 1, 'body' => 'quick brown fox']);
 
         $result = $index->search('the and or');
