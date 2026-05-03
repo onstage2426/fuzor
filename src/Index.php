@@ -931,9 +931,10 @@ class Index
      * @param  bool   $fuzzy      When true, use Levenshtein matching.
      * @param  bool   $asYouType  When true, the last keyword is matched as a prefix.
      * @param  int    $limit      Maximum number of document IDs to return.
+     * @param  int    $offset     Number of top-ranked results to skip (for pagination).
      * @return array{ids: list<int>, hits: int, docScores: array<int, float>}
      */
-    public function search(string $phrase, bool $fuzzy = false, bool $asYouType = true, int $limit = 100): array
+    public function search(string $phrase, bool $fuzzy = false, bool $asYouType = true, int $limit = 100, int $offset = 0): array
     {
         /** @var list<string> $keywords */
         $keywords = $this->filterQueryTokens($phrase)['filtered'];
@@ -980,23 +981,24 @@ class Index
         }
 
         /** @infection-ignore-all LessThanOrEqualTo: when total===numOfResults the fast arsort path and the heap path both return the same set of doc IDs; ordering may differ for ties but is unspecified */
-        if ($total <= $limit) {
+        if ($total <= $offset + $limit) {
             arsort($docScores);
-            return ['ids' => array_keys($docScores), 'hits' => $total, 'docScores' => $docScores];
+            return ['ids' => array_slice(array_keys($docScores), $offset, $limit), 'hits' => $total, 'docScores' => $docScores];
         }
 
-        // Partial sort: min-heap capped at $limit keeps only the top-k scoring docs.
+        // Partial sort: min-heap capped at $offset + $limit keeps the top window of scoring docs.
         // SplMinHeap::top() is the weakest entry currently kept; anything that can't beat it
-        // is discarded, so the heap never grows beyond $limit elements.
+        // is discarded, so the heap never grows beyond $offset + $limit elements.
+        $window   = $offset + $limit;
         /** @var \SplMinHeap<array{float, int}> $heap */
         $heap     = new \SplMinHeap();
         $heapSize = 0;
         $heapMin  = -INF;
         foreach ($docScores as $docId => $score) {
-            if ($heapSize < $limit) {
+            if ($heapSize < $window) {
                 $heap->insert([$score, $docId]);
                 $heapSize++;
-                if ($heapSize === $limit) {
+                if ($heapSize === $window) {
                     $heapMin = $heap->top()[0];
                 }
             } else {
@@ -1009,14 +1011,15 @@ class Index
             }
         }
 
-        // extract() yields ascending order; reverse so ids are sorted by score descending.
+        // extract() yields ascending order; reverse so ids are sorted by score descending,
+        // then slice to the requested page window.
         /** @var list<int> $ids */
         $ids = [];
         while (!$heap->isEmpty()) {
             $ids[] = $heap->extract()[1];
         }
 
-        return ['ids' => array_reverse($ids), 'hits' => $total, 'docScores' => $docScores];
+        return ['ids' => array_slice(array_reverse($ids), $offset, $limit), 'hits' => $total, 'docScores' => $docScores];
     }
 
     /**
@@ -1028,9 +1031,10 @@ class Index
      * @param  string $phrase     Boolean query string.
      * @param  bool   $asYouType  When true, the last keyword is matched as a prefix.
      * @param  int    $limit      Maximum number of document IDs to return.
+     * @param  int    $offset     Number of results to skip (for pagination).
      * @return array{ids: list<int>, hits: int, docScores: null}
      */
-    public function searchBoolean(string $phrase, bool $asYouType = true, int $limit = 100): array
+    public function searchBoolean(string $phrase, bool $asYouType = true, int $limit = 100, int $offset = 0): array
     {
         // Prepend "|" so the Shunting-Yard algorithm always has a left-hand operand.
         // OR with an empty set is the identity, so it does not affect the result.
@@ -1111,10 +1115,7 @@ class Index
         /** @var list<int> $docIds */
         $docIds = $ids(array_pop($stack) ?? null);
         $total  = count($docIds);
-        /** @infection-ignore-all GreaterThan: when total===numOfResults, array_slice returns the full array unchanged — identical to not slicing */
-        if ($total > $limit) {
-            $docIds = array_slice($docIds, 0, $limit);
-        }
+        $docIds = array_slice($docIds, $offset, $limit);
 
         return ['ids' => $docIds, 'hits' => $total, 'docScores' => null];
     }

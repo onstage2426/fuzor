@@ -537,6 +537,72 @@ class IndexTest extends TestCase
         $this->assertSame(1, $result['ids'][0]); // doc1 has the highest BM25 score
     }
 
+    public function testSearchOffsetSkipsTopResults(): void
+    {
+        $index = new Index($this->dbPath);
+        // tf proportional to id: doc5 scores highest, doc1 lowest.
+        $index->insertMany([
+            ['id' => 1, 'title' => 'sedan'],
+            ['id' => 2, 'title' => 'sedan sedan'],
+            ['id' => 3, 'title' => 'sedan sedan sedan'],
+            ['id' => 4, 'title' => 'sedan sedan sedan sedan'],
+            ['id' => 5, 'title' => 'sedan sedan sedan sedan sedan'],
+        ]);
+
+        $page1 = $index->search('sedan', limit: 2, offset: 0);
+        $page2 = $index->search('sedan', limit: 2, offset: 2);
+        $page3 = $index->search('sedan', limit: 2, offset: 4);
+
+        $this->assertCount(2, $page1['ids']);
+        $this->assertCount(2, $page2['ids']);
+        $this->assertCount(1, $page3['ids']);
+
+        // hits is always the full total regardless of offset.
+        $this->assertSame(5, $page1['hits']);
+        $this->assertSame(5, $page2['hits']);
+        $this->assertSame(5, $page3['hits']);
+
+        // Pages are non-overlapping and together cover all 5 docs.
+        $allIds = array_merge($page1['ids'], $page2['ids'], $page3['ids']);
+        $this->assertEqualsCanonicalizing([1, 2, 3, 4, 5], array_unique($allIds));
+
+        // Page 1 must start with the best-scoring doc.
+        $this->assertSame(5, $page1['ids'][0]);
+        // Pages must not overlap.
+        $this->assertEmpty(array_intersect($page1['ids'], $page2['ids']));
+        $this->assertEmpty(array_intersect($page2['ids'], $page3['ids']));
+    }
+
+    public function testSearchOffsetBeyondTotalReturnsEmptyIds(): void
+    {
+        $index = new Index($this->dbPath);
+        $index->insert(['id' => 1, 'title' => 'sedan']);
+
+        $result = $index->search('sedan', limit: 10, offset: 5);
+
+        $this->assertSame([], $result['ids']);
+        $this->assertSame(1, $result['hits']);
+    }
+
+    public function testSearchBooleanOffsetSkipsTopResults(): void
+    {
+        $index = new Index($this->dbPath);
+        $index->insertMany([
+            ['id' => 1, 'title' => 'sedan'],
+            ['id' => 2, 'title' => 'sedan'],
+            ['id' => 3, 'title' => 'sedan'],
+        ]);
+
+        $page1 = $index->searchBoolean('sedan', limit: 2, offset: 0);
+        $page2 = $index->searchBoolean('sedan', limit: 2, offset: 2);
+
+        $this->assertCount(2, $page1['ids']);
+        $this->assertCount(1, $page2['ids']);
+        $this->assertSame(3, $page1['hits']);
+        $this->assertSame(3, $page2['hits']);
+        $this->assertEmpty(array_intersect($page1['ids'], $page2['ids']));
+    }
+
     // --- insertMany ---
 
     public function testInsertManyIndexesAllDocuments(): void
