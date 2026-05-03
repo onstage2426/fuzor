@@ -68,26 +68,8 @@ class Index
      */
     private array $wordlistCache = [];
 
-    /** When true, the last search keyword is matched as a prefix (as-you-type behaviour). */
-    public bool $asYouType = true;
-
-    /** Number of leading characters that must match exactly before fuzzy edit distance kicks in. */
-    public int $fuzzyPrefixLength = 3;
-
-    /** Maximum number of wordlist candidates evaluated during a fuzzy search. */
-    public int $fuzzyMaxExpansions = 50;
-
-    /** Maximum Levenshtein edit distance accepted as a fuzzy match. */
-    public int $fuzzyDistance = 2;
-
-    /** Maximum number of documents returned per keyword in non-fuzzy queries. */
-    public int $maxDocs = 500;
-
-    /** BM25 term frequency saturation parameter. Higher values give more weight to repeated terms. */
-    public float $k1 = 1.2;
-
-    /** BM25 document length normalisation weight. 0 = no normalisation, 1 = full normalisation. */
-    public float $b = 0.75;
+    /** Search tuning; immutable after construction. */
+    private Config $config;
 
     /** BCP 47 language tag active on this index; null means no stopword filtering or stemming. */
     public private(set) ?string $language = null;
@@ -121,11 +103,13 @@ class Index
      * @param  string|null $language BCP 47 language tag persisted at creation time (e.g. 'en').
      *                               Ignored when opening an existing index.
      * @param  bool        $force    Overwrite any existing file at $path.
+     * @param  Config|null $config   Search tuning; null uses all defaults.
      * @throws IOException    If the parent directory does not exist.
      * @throws QueryException If $language is set but has no stopword list or stemmer.
      */
-    public function __construct(string $path, ?string $language = null, bool $force = false)
+    public function __construct(string $path, ?string $language = null, bool $force = false, ?Config $config = null)
     {
+        $this->config = $config ?? new Config();
         if ($language !== null && !Language::supports($language)) {
             throw new QueryException("No stopword list or stemmer for language: '{$language}'");
         }
@@ -845,7 +829,7 @@ class Index
      *     boolean_postfix: list<string>,
      * }
      */
-    public function inspectQuery(string $phrase, bool $fuzzy = false): array
+    public function inspectQuery(string $phrase, bool $fuzzy = false, bool $asYouType = true): array
     {
         $verbose = $this->filterQueryTokens($phrase, verbose: true);
         /** @var list<string> $filteredTokens */
@@ -857,15 +841,15 @@ class Index
         $tokens    = [];
 
         foreach ($filteredTokens as $i => $processed) {
-            $isLast = $i === $lastIndex;
+            $isLast = $asYouType && ($i === $lastIndex);
             $rows   = $this->getWordlistByKeyword($processed, $isLast, $fuzzy);
 
             $matchType = match (true) {
-                $rows === []                                                              => 'none',
-                $fuzzy && isset($rows[0]['distance'])                                    => 'fuzzy',
+                $rows === []                                                     => 'none',
+                $fuzzy && isset($rows[0]['distance'])                            => 'fuzzy',
                 /** @infection-ignore-all LogicalAnd: non-last words are always exact matches (wordlist lookup uses isLastWord=false), so term===processed; neither && mutation fires on real data */
-                $this->asYouType && $isLast && $rows[0]['term'] !== $processed => 'prefix',
-                default                                                                  => 'exact',
+                $isLast && $rows[0]['term'] !== $processed                       => 'prefix',
+                default                                                          => 'exact',
             };
 
             $wordlistRows = array_map(
@@ -940,15 +924,16 @@ class Index
      * Run a BM25 ranked full-text search.
      *
      * When $fuzzy is true, Levenshtein matching is used against the wordlist
-     * (respects $fuzzyDistance, $fuzzyPrefixLength, and $fuzzyMaxExpansions).
+     * (respects Config::$fuzzyDistance, $fuzzyPrefixLength, and $fuzzyMaxExpansions).
      * When false, exact + optional as-you-type prefix matching is used.
      *
-     * @param  string $phrase       Raw search phrase; will be tokenised.
-     * @param  bool   $fuzzy        When true, use Levenshtein matching.
-     * @param  int    $numOfResults Maximum number of document IDs to return.
+     * @param  string $phrase     Raw search phrase; will be tokenised.
+     * @param  bool   $fuzzy      When true, use Levenshtein matching.
+     * @param  bool   $asYouType  When true, the last keyword is matched as a prefix.
+     * @param  int    $limit      Maximum number of document IDs to return.
      * @return array{ids: list<int>, hits: int, docScores: array<int, float>}
      */
-    public function search(string $phrase, bool $fuzzy = false, int $numOfResults = 100): array
+    public function search(string $phrase, bool $fuzzy = false, bool $asYouType = true, int $limit = 100): array
     {
         /** @var list<string> $keywords */
         $keywords = $this->filterQueryTokens($phrase)['filtered'];
@@ -961,12 +946,12 @@ class Index
         $totalDocuments = (int) ($info['total_documents'] ?? 0);
         /** @infection-ignore-all DecrementInteger|IncrementInteger|Coalesce|CastFloat: fallback 0 is guarded by max(1.0,…) below; mutations produce the same clamped value; unreachable on a healthy index */
         $avgdl          = max(1.0, (float) ($info['avg_doc_length'] ?? 0));
-        $k1             = $this->k1;
-        $b              = $this->b;
+        $k1             = $this->config->k1;
+        $b              = $this->config->b;
         $lastIndex      = count($keywords) - 1;
 
         foreach ($keywords as $idx => $term) {
-            $isLastKeyword = $lastIndex === $idx;
+            $isLastKeyword = $asYouType && ($lastIndex === $idx);
             $result = $this->getDocumentsAndCount($term, false, $isLastKeyword, $fuzzy);
             $df     = $result['numDocs'];
             // Smoothed BM25 IDF: always ≥ 0, avoids negative weights for common terms.
@@ -990,28 +975,28 @@ class Index
         $total = count($docScores);
 
         /** @infection-ignore-all DecrementInteger: $total is count(); -1 is impossible, so the guard fires identically for any realistic input */
-        if ($total === 0 || $numOfResults === 0) {
+        if ($total === 0 || $limit === 0) {
             return ['ids' => [], 'hits' => $total, 'docScores' => $docScores];
         }
 
         /** @infection-ignore-all LessThanOrEqualTo: when total===numOfResults the fast arsort path and the heap path both return the same set of doc IDs; ordering may differ for ties but is unspecified */
-        if ($total <= $numOfResults) {
+        if ($total <= $limit) {
             arsort($docScores);
             return ['ids' => array_keys($docScores), 'hits' => $total, 'docScores' => $docScores];
         }
 
-        // Partial sort: min-heap capped at $numOfResults keeps only the top-k scoring docs.
+        // Partial sort: min-heap capped at $limit keeps only the top-k scoring docs.
         // SplMinHeap::top() is the weakest entry currently kept; anything that can't beat it
-        // is discarded, so the heap never grows beyond $numOfResults elements.
+        // is discarded, so the heap never grows beyond $limit elements.
         /** @var \SplMinHeap<array{float, int}> $heap */
         $heap     = new \SplMinHeap();
         $heapSize = 0;
         $heapMin  = -INF;
         foreach ($docScores as $docId => $score) {
-            if ($heapSize < $numOfResults) {
+            if ($heapSize < $limit) {
                 $heap->insert([$score, $docId]);
                 $heapSize++;
-                if ($heapSize === $numOfResults) {
+                if ($heapSize === $limit) {
                     $heapMin = $heap->top()[0];
                 }
             } else {
@@ -1040,11 +1025,12 @@ class Index
      * Operator precedence (tightest to loosest): NOT (~) > AND (&, space) > OR ( or ).
      * Parentheses override precedence. docScores is always null.
      *
-     * @param  string $phrase       Boolean query string.
-     * @param  int    $numOfResults Maximum number of document IDs to return.
+     * @param  string $phrase     Boolean query string.
+     * @param  bool   $asYouType  When true, the last keyword is matched as a prefix.
+     * @param  int    $limit      Maximum number of document IDs to return.
      * @return array{ids: list<int>, hits: int, docScores: null}
      */
-    public function searchBoolean(string $phrase, int $numOfResults = 100): array
+    public function searchBoolean(string $phrase, bool $asYouType = true, int $limit = 100): array
     {
         // Prepend "|" so the Shunting-Yard algorithm always has a left-hand operand.
         // OR with an empty set is the identity, so it does not affect the result.
@@ -1058,13 +1044,13 @@ class Index
         // Each term lookup is a single indexed SELECT with LIMIT; the wordlistCache ensures
         // repeated keyword lookups within one query incur no extra DB round-trips.
 
-        $limit = $this->maxDocs;
+        $maxDocs = $this->config->maxDocs;
 
         /** Fetch capped doc IDs for one keyword (resolves prefix expansion / caching). */
         $fetchIds = fn(string $kw, bool $isLast): array =>
             $this->fetchBooleanDocIds(
                 $this->resolveWordlistIds($kw, $isLast),
-                $limit
+                $maxDocs
             );
 
         /**
@@ -1074,12 +1060,12 @@ class Index
          * @param  string|list<int>|null $entry
          * @return list<int>
          */
-        $ids = function (string|array|null $entry) use ($fetchIds, $lastTerm): array {
+        $ids = function (string|array|null $entry) use ($fetchIds, $lastTerm, $asYouType): array {
             if ($entry === null) {
                 return [];
             }
             if (is_string($entry)) {
-                return $fetchIds($entry, $entry === $lastTerm);
+                return $fetchIds($entry, $asYouType && $entry === $lastTerm);
             }
             /** @var list<int> $entry */
             return $entry;
@@ -1126,8 +1112,8 @@ class Index
         $docIds = $ids(array_pop($stack) ?? null);
         $total  = count($docIds);
         /** @infection-ignore-all GreaterThan: when total===numOfResults, array_slice returns the full array unchanged — identical to not slicing */
-        if ($total > $numOfResults) {
-            $docIds = array_slice($docIds, 0, $numOfResults);
+        if ($total > $limit) {
+            $docIds = array_slice($docIds, 0, $limit);
         }
 
         return ['ids' => $docIds, 'hits' => $total, 'docScores' => null];
@@ -1767,7 +1753,7 @@ class Index
             return ['documents' => [], 'numDocs' => 0];
         }
 
-        $limit     = $noLimit ? PHP_INT_MAX : $this->maxDocs;
+        $limit     = $noLimit ? PHP_INT_MAX : $this->config->maxDocs;
         $documents = $this->fetchDocsByTermIds($word, $limit, $fuzzy);
 
         /** @infection-ignore-all IncrementInteger,Ternary,CastInt: numDocs feeds BM25 scoring only; for single-term prefix results array_sum equals word[0]['num_docs']; CastInt: array_sum returns int */
@@ -1942,14 +1928,14 @@ class Index
             }
         }
 
-        if ($this->asYouType && $isLastWord && Tokenizer::ngramSize($this->language) === 0) {
+        if ($isLastWord && Tokenizer::ngramSize($this->language) === 0) {
             $stmt = $this->stmt(
                 'wordlistPrefix',
                 'SELECT id, term, num_hits, num_docs FROM wordlist'
                 . ' WHERE term LIKE :keyword ORDER BY length(term) ASC, num_hits DESC LIMIT :maxExpansions;'
             );
             $stmt->bindValue(':keyword', $keyword . '%');
-            $stmt->bindValue(':maxExpansions', $this->fuzzyMaxExpansions, PDO::PARAM_INT);
+            $stmt->bindValue(':maxExpansions', $this->config->fuzzyMaxExpansions, PDO::PARAM_INT);
         } else {
             $stmt = $this->stmt(
                 'wordlistExact',
@@ -2088,11 +2074,11 @@ class Index
              LIMIT :maxExpansions"
         );
         /** @infection-ignore-all MBString,ConcatOperandRemoval: ASCII fuzzy tests are unaffected by mb_ vs byte substr; removing the prefix still produces correct candidates after Levenshtein filtering (just with more candidates) */
-        $stmt->bindValue(':keyword', mb_substr($keyword, 0, $this->fuzzyPrefixLength) . '%');
+        $stmt->bindValue(':keyword', mb_substr($keyword, 0, $this->config->fuzzyPrefixLength) . '%');
         /** @infection-ignore-all DecrementInteger,IncrementInteger: adjusting the min length boundary by 1 only broadens or narrows the candidate set; Levenshtein filtering corrects the result */
-        $stmt->bindValue(':min', max(1, $keywordLength - $this->fuzzyDistance), PDO::PARAM_INT);
-        $stmt->bindValue(':max', $keywordLength + $this->fuzzyDistance, PDO::PARAM_INT);
-        $stmt->bindValue(':maxExpansions', $this->fuzzyMaxExpansions, PDO::PARAM_INT);
+        $stmt->bindValue(':min', max(1, $keywordLength - $this->config->fuzzyDistance), PDO::PARAM_INT);
+        $stmt->bindValue(':max', $keywordLength + $this->config->fuzzyDistance, PDO::PARAM_INT);
+        $stmt->bindValue(':maxExpansions', $this->config->fuzzyMaxExpansions, PDO::PARAM_INT);
         $stmt->execute();
 
         /** @var list<array{id: int, term: string, num_hits: int, num_docs: int, distance: int}> $resultSet */
@@ -2101,7 +2087,7 @@ class Index
         $candidates = $stmt->fetchAll(PDO::FETCH_ASSOC);
         foreach ($candidates as $match) {
             $distance = Levenshtein::distance($match['term'], $keyword);
-            if ($distance <= $this->fuzzyDistance) {
+            if ($distance <= $this->config->fuzzyDistance) {
                 $resultSet[] = [...$match, 'distance' => $distance];
             }
         }

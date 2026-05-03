@@ -84,15 +84,13 @@ class FuzorBench
     public function setUpSearch(): void
     {
         self::ensureSearchDb();
-        $this->index           = new Index(self::SEARCH_DB);
-        $this->index->asYouType = false;
+        $this->index = new Index(self::SEARCH_DB);
     }
 
     public function setUpPrefix(): void
     {
         self::ensureSearchDb();
-        $this->index           = new Index(self::SEARCH_DB);
-        $this->index->asYouType = true;
+        $this->index = new Index(self::SEARCH_DB);
     }
 
     public function tearDownSearch(): void
@@ -150,7 +148,7 @@ class FuzorBench
     #[ParamProviders('provideSearchQueries')]
     public function benchSearch(array $params): void
     {
-        $this->index->search($params['query']);
+        $this->index->search($params['query'], asYouType: false);
     }
 
     /** @return iterable<string, array{query: string}> */
@@ -229,7 +227,7 @@ class FuzorBench
     #[ParamProviders('provideBooleanQueries')]
     public function benchSearchBoolean(array $params): void
     {
-        $this->index->searchBoolean($params['query']);
+        $this->index->searchBoolean($params['query'], asYouType: false);
     }
 
     /** @return iterable<string, array{query: string}> */

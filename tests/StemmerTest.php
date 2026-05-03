@@ -92,33 +92,30 @@ class StemmerTest extends TestCase
     public function testStemmedFormMatchesSurfaceFormAtQuery(): void
     {
         // Index "running"; search "run" (the stem) — with asYouType off so it's exact.
-        $index            = new Index($this->dbPath, language: 'en');
-        $index->asYouType = false;
+        $index = new Index($this->dbPath, language: 'en');
         $index->insert(['id' => 1, 'body' => 'running quickly']);
 
-        $this->assertContains(1, $index->search('run')['ids']);
+        $this->assertContains(1, $index->search('run', asYouType: false)['ids']);
     }
 
     public function testDifferentSurfaceFormsMatchSameStem(): void
     {
-        $index            = new Index($this->dbPath, language: 'en');
-        $index->asYouType = false;
+        $index = new Index($this->dbPath, language: 'en');
         $index->insert(['id' => 1, 'body' => 'connection to the server']);
 
         // Both "connect" and "connections" stem to "connect"
-        $this->assertContains(1, $index->search('connect')['ids']);
-        $this->assertContains(1, $index->search('connections')['ids']);
+        $this->assertContains(1, $index->search('connect', asYouType: false)['ids']);
+        $this->assertContains(1, $index->search('connections', asYouType: false)['ids']);
     }
 
     public function testWithoutLanguageNoStemming(): void
     {
         // Without a language set, exact tokens are stored — "run" must not match "running".
-        $index            = new Index($this->dbPath);
-        $index->asYouType = false;
+        $index = new Index($this->dbPath);
         $index->insert(['id' => 1, 'body' => 'running quickly']);
 
-        $this->assertSame([], $index->search('run')['ids']);
-        $this->assertContains(1, $index->search('running')['ids']);
+        $this->assertSame([], $index->search('run', asYouType: false)['ids']);
+        $this->assertContains(1, $index->search('running', asYouType: false)['ids']);
     }
 
     public function testBooleanSearchAppliesStemming(): void
@@ -136,24 +133,22 @@ class StemmerTest extends TestCase
     public function testLanguageWithNoStemmerIndexesExactTokens(): void
     {
         // Without a language set, tokens are stored as-is — "run" must not match "running".
-        $index            = new Index($this->dbPath);
-        $index->asYouType = false;
+        $index = new Index($this->dbPath);
         $index->insert(['id' => 1, 'body' => 'running quickly']);
 
         // stemming disabled — "run" should not match "running"
-        $this->assertSame([], $index->search('run')['ids']);
+        $this->assertSame([], $index->search('run', asYouType: false)['ids']);
     }
 
     public function testInsertManyWithStemming(): void
     {
-        $index            = new Index($this->dbPath, language: 'en');
-        $index->asYouType = false;
+        $index = new Index($this->dbPath, language: 'en');
         $index->insertMany([
             ['id' => 1, 'body' => 'connections are important'],
             ['id' => 2, 'body' => 'running fast'],
         ]);
 
-        $this->assertContains(1, $index->search('connect')['ids']);
-        $this->assertContains(2, $index->search('run')['ids']);
+        $this->assertContains(1, $index->search('connect', asYouType: false)['ids']);
+        $this->assertContains(2, $index->search('run', asYouType: false)['ids']);
     }
 }
