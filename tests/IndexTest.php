@@ -2,6 +2,7 @@
 
 namespace Fuzor\Tests;
 
+use Fuzor\Config;
 use Fuzor\Index;
 use Fuzor\Exceptions\IOException;
 use Fuzor\Exceptions\QueryException;
@@ -2242,5 +2243,78 @@ class IndexTest extends TestCase
         $this->assertNotFalse($stmt);
         $tables = $stmt->fetchAll(\PDO::FETCH_COLUMN);
         $this->assertNotContains('positions', $tables);
+    }
+
+    // --- Proximity ranking ---------------------------------------------------
+
+    public function testProximityBoostRanksCloserTermsHigher(): void
+    {
+        // doc 1: terms adjacent (minSpan = 1), doc 2: terms far apart (minSpan = 10)
+        $index = new Index($this->dbPath, storePositions: true);
+        $index->insertMany([
+            ['id' => 1, 'title' => 'fast car review review review review review review review review review'],
+            ['id' => 2, 'title' => 'fast review review review review review review review review review car'],
+        ]);
+
+        $results = $index->search('fast car');
+
+        // Both docs have the same terms; proximity should rank doc 1 higher (adjacent terms).
+        $this->assertSame([1, 2], $results->ids);
+    }
+
+    public function testProximityBoostDisabledWhenBoostIsZero(): void
+    {
+        $config = new Config(proximityBoost: 0.0);
+        $index  = new Index($this->dbPath, storePositions: true, config: $config);
+        $index->insertMany([
+            ['id' => 1, 'title' => 'fast car review review review review review review review review review'],
+            ['id' => 2, 'title' => 'fast review review review review review review review review review car'],
+        ]);
+
+        // With proximityBoost=0.0 the result order is pure BM25 (identical here → stable order).
+        $results = $index->search('fast car');
+        $this->assertCount(2, $results->ids);
+        $this->assertContains(1, $results->ids);
+        $this->assertContains(2, $results->ids);
+    }
+
+    public function testProximityBoostNoEffectWithoutPositions(): void
+    {
+        // Index without storePositions — proximity should silently do nothing.
+        $index = new Index($this->dbPath);
+        $index->insertMany([
+            ['id' => 1, 'title' => 'fast car review review review review review review review review review'],
+            ['id' => 2, 'title' => 'fast review review review review review review review review review car'],
+        ]);
+
+        $results = $index->search('fast car');
+        $this->assertCount(2, $results->ids);
+    }
+
+    public function testProximityBoostNoEffectOnSingleKeyword(): void
+    {
+        $index = new Index($this->dbPath, storePositions: true);
+        $index->insertMany([
+            ['id' => 1, 'title' => 'fast sedan'],
+            ['id' => 2, 'title' => 'fast coupe'],
+        ]);
+
+        // Single keyword: no proximity applied, just BM25.
+        $results = $index->search('fast');
+        $this->assertCount(2, $results->ids);
+    }
+
+    public function testProximityBoostPartialMatchDocNotBoosted(): void
+    {
+        // doc 1 has both terms, doc 2 has only "fast" — partial match should not get boosted.
+        $index = new Index($this->dbPath, storePositions: true);
+        $index->insertMany([
+            ['id' => 1, 'title' => 'fast car'],
+            ['id' => 2, 'title' => 'fast review'],
+        ]);
+
+        $results = $index->search('fast car');
+        // doc 1 should rank above doc 2 (has both terms; doc 2 misses "car").
+        $this->assertSame(1, $results->ids[0]);
     }
 }

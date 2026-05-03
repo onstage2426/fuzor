@@ -990,6 +990,9 @@ class Index
         $b              = $this->config->b;
         $lastIndex      = count($keywords) - 1;
 
+        /** @var list<list<int>> $termGroups  keyword_index → matched term IDs, for proximity ranking */
+        $termGroups = [];
+
         foreach ($keywords as $idx => $term) {
             $isLastKeyword = $asYouType && ($lastIndex === $idx);
             $result = $this->getDocumentsAndCount($term, false, $isLastKeyword, $fuzzy);
@@ -1005,11 +1008,21 @@ class Index
             /** @infection-ignore-all Multiplication|Division: k1b_avgdl is the length-normalisation scale; mutations change score magnitudes but preserve relative ordering for uniform-term-frequency distributions */
             $k1b_avgdl = $k1 * $b / $avgdl;  // k1 * b / avgdl  — length-norm scale
             // Column order from FETCH_NUM: 0=term_id, 1=doc_id, 2=hit_count, 3=doc_length
-            foreach ($result['documents'] as [, $docId, $tf, $dl]) {
+            /** @var array<int, true> $groupTermIds */
+            $groupTermIds = [];
+            foreach ($result['documents'] as [$termId, $docId, $tf, $dl]) {
                 /** @infection-ignore-all OneZeroFloat: ?? 0.0 is the additive identity; the fallback only applies on first encounter of a docId which always has score 0 before accumulation */
                 $docScores[$docId] = ($docScores[$docId] ?? 0.0)
                     + $idfK1p1 * $tf / ($k1_1mb + $k1b_avgdl * $dl + $tf);
+                $groupTermIds[$termId] = true;
             }
+            if ($groupTermIds !== []) {
+                $termGroups[] = array_keys($groupTermIds);
+            }
+        }
+
+        if ($this->storePositions && count($termGroups) >= 2 && $this->config->proximityBoost > 0.0) {
+            $this->applyProximityBoost($docScores, $termGroups);
         }
 
         $total = count($docScores);
@@ -1982,6 +1995,138 @@ class Index
         $rows = $stmt->fetchAll(PDO::FETCH_COLUMN);
         /** @infection-ignore-all ArrayOneItem: boolean set operations use assertContains; returning only 1 item from a multi-doc result is not caught by membership tests for single-match terms */
         return $rows;
+    }
+
+    /**
+     * Rerank BM25 scores in-place using a proximity factor: 1 / (1 + boost × minSpan).
+     *
+     * minSpan is the smallest token-position window (in indexed positions) that contains at
+     * least one occurrence of every query-keyword group. A "group" is the set of term IDs
+     * produced by one keyword — including prefix/fuzzy expansions — so "se" matching
+     * {sedan, seat} counts as a single group, not two independent constraints.
+     *
+     * Documents that do not have positions for every group (partial matches) are unchanged.
+     *
+     * @param array<int, float> $docScores  BM25 scores keyed by doc ID; modified in-place.
+     * @param list<list<int>>   $termGroups One element per keyword; each is a list of term IDs.
+     */
+    private function applyProximityBoost(array &$docScores, array $termGroups): void
+    {
+        /** @var list<int> $allTermIds */
+        $allTermIds = array_values(array_unique(array_merge(...$termGroups)));
+        $positions  = $this->fetchPositionsForDocs(array_keys($docScores), $allTermIds);
+        if ($positions === []) {
+            return;
+        }
+
+        // Invert: term_id → group index, for O(1) lookup in the per-doc loop.
+        /** @var array<int, int> $termToGroup */
+        $termToGroup = [];
+        foreach ($termGroups as $g => $termIds) {
+            foreach ($termIds as $termId) {
+                $termToGroup[$termId] = $g;
+            }
+        }
+
+        $numGroups = count($termGroups);
+        $boost     = $this->config->proximityBoost;
+
+        foreach ($positions as $docId => $termPositions) {
+            // Partition positions into per-keyword-group buckets.
+            /** @var array<int, list<int>> $groupPositions */
+            $groupPositions = array_fill(0, $numGroups, []);
+            foreach ($termPositions as $termId => $posList) {
+                $g = $termToGroup[$termId] ?? null;
+                if ($g !== null) {
+                    foreach ($posList as $pos) {
+                        $groupPositions[$g][] = $pos;
+                    }
+                }
+            }
+
+            // Skip docs missing positions for any group (partial BM25 matches).
+            foreach ($groupPositions as $gp) {
+                if ($gp === []) {
+                    continue 2;
+                }
+            }
+
+            // Build a merged list of (position, groupIndex) sorted by position.
+            /** @var list<array{0: int, 1: int}> $merged */
+            $merged = [];
+            foreach ($groupPositions as $g => $posList) {
+                sort($posList);
+                foreach ($posList as $pos) {
+                    $merged[] = [$pos, $g];
+                }
+            }
+            usort($merged, static fn(array $a, array $b): int => $a[0] <=> $b[0]);
+
+            // Sliding-window minimum-span: smallest window covering all groups.
+            $count   = array_fill(0, $numGroups, 0);
+            $have    = 0;
+            $left    = 0;
+            $minSpan = PHP_INT_MAX;
+
+            foreach ($merged as $rightIdx => [$rightPos, $rightG]) {
+                if ($count[$rightG] === 0) {
+                    $have++;
+                }
+                $count[$rightG]++;
+
+                while ($have === $numGroups) {
+                    $span = $rightPos - $merged[$left][0];
+                    if ($span < $minSpan) {
+                        $minSpan = $span;
+                    }
+                    /** @var array{0: int, 1: int} $leftEntry */
+                    $leftEntry = $merged[$left];
+                    $count[$leftEntry[1]]--;
+                    if ($count[$leftEntry[1]] === 0) {
+                        $have--;
+                    }
+                    $left++;
+                }
+            }
+
+            if ($minSpan < PHP_INT_MAX) {
+                $docScores[$docId] *= 1.0 / (1.0 + $boost * $minSpan);
+            }
+        }
+    }
+
+    /**
+     * Fetch term positions for a set of documents and term IDs from the positions table.
+     *
+     * @param  list<int> $docIds
+     * @param  list<int> $termIds
+     * @return array<int, array<int, list<int>>> doc_id → term_id → sorted position list
+     */
+    private function fetchPositionsForDocs(array $docIds, array $termIds): array
+    {
+        if ($docIds === [] || $termIds === []) {
+            return [];
+        }
+
+        $dPlaceholders = implode(',', array_fill(0, count($docIds), '?'));
+        $tPlaceholders = implode(',', array_fill(0, count($termIds), '?'));
+
+        $stmt = $this->prepare(
+            "SELECT doc_id, term_id, position
+             FROM positions
+             WHERE doc_id IN ({$dPlaceholders}) AND term_id IN ({$tPlaceholders})
+             ORDER BY doc_id, term_id, position"
+        );
+        $stmt->execute([...$docIds, ...$termIds]);
+
+        /** @var array<int, array<int, list<int>>> $result */
+        $result = [];
+        /** @var list<array{0: int, 1: int, 2: int}> $rows */
+        $rows = $stmt->fetchAll(PDO::FETCH_NUM);
+        foreach ($rows as [$docId, $termId, $position]) {
+            $result[$docId][$termId][] = $position;
+        }
+        return $result;
     }
 
     /**
