@@ -2122,4 +2122,125 @@ class IndexTest extends TestCase
         $this->assertContains(1, $result->ids);
         $this->assertNotContains(2, $result->ids);
     }
+
+    // --- storePositions ---
+
+    public function testStorePositionsFlagDefaultsFalse(): void
+    {
+        $index = new Index($this->dbPath);
+        $this->assertFalse($index->storePositions);
+    }
+
+    public function testStorePositionsFlagPersistedAndRestoredOnOpen(): void
+    {
+        $index = new Index($this->dbPath, storePositions: true);
+        $this->assertTrue($index->storePositions);
+        $index->close();
+
+        $reopened = new Index($this->dbPath);
+        $this->assertTrue($reopened->storePositions);
+    }
+
+    public function testStorePositionsWritesCorrectRowCount(): void
+    {
+        $index = new Index($this->dbPath, storePositions: true);
+        // "city car" → 2 tokens → 2 position rows
+        $index->insert(['id' => 1, 'title' => 'city car']);
+        $index->close();
+
+        $pdo  = new \PDO('sqlite:' . $this->dbPath);
+        $stmt = $pdo->query('SELECT COUNT(*) FROM positions WHERE doc_id = 1');
+        $this->assertNotFalse($stmt);
+        $count = (int) $stmt->fetchColumn();
+        $this->assertSame(2, $count);
+    }
+
+    public function testStorePositionsRecordsCorrectPositionValues(): void
+    {
+        $index = new Index($this->dbPath, storePositions: true);
+        $index->insert(['id' => 1, 'title' => 'city car review']);
+
+        $pdo  = new \PDO('sqlite:' . $this->dbPath);
+        $stmt = $pdo->query(
+            'SELECT w.term, p.position
+             FROM positions p
+             JOIN wordlist w ON w.id = p.term_id
+             WHERE p.doc_id = 1
+             ORDER BY p.position'
+        );
+        $this->assertNotFalse($stmt);
+        $rows = $stmt->fetchAll(\PDO::FETCH_KEY_PAIR);
+
+        // Positions are sequential: city=0, car=1, review=2
+        $this->assertSame(0, $rows['city']);
+        $this->assertSame(1, $rows['car']);
+        $this->assertSame(2, $rows['review']);
+    }
+
+    public function testStorePositionsGlobalCounterAcrossFields(): void
+    {
+        $index = new Index($this->dbPath, storePositions: true);
+        // title contributes tokens at 0, 1; body continues from 2, 3
+        $index->insert(['id' => 1, 'title' => 'city car', 'body' => 'fast sedan']);
+
+        $pdo  = new \PDO('sqlite:' . $this->dbPath);
+        $stmt = $pdo->query(
+            'SELECT w.term, p.position
+             FROM positions p
+             JOIN wordlist w ON w.id = p.term_id
+             WHERE p.doc_id = 1
+             ORDER BY p.position'
+        );
+        $this->assertNotFalse($stmt);
+        $rows = $stmt->fetchAll(\PDO::FETCH_KEY_PAIR);
+
+        $this->assertSame(0, $rows['city']);
+        $this->assertSame(1, $rows['car']);
+        $this->assertSame(2, $rows['fast']);
+        $this->assertSame(3, $rows['sedan']);
+    }
+
+    public function testStorePositionsDeletedOnDocumentRemoval(): void
+    {
+        $index = new Index($this->dbPath, storePositions: true);
+        $index->insert(['id' => 1, 'title' => 'city car']);
+        $index->delete(1);
+        $index->close();
+
+        $pdo  = new \PDO('sqlite:' . $this->dbPath);
+        $stmt = $pdo->query('SELECT COUNT(*) FROM positions WHERE doc_id = 1');
+        $this->assertNotFalse($stmt);
+        $count = (int) $stmt->fetchColumn();
+        $this->assertSame(0, $count);
+    }
+
+    public function testStorePositionsInsertManyWritesCorrectRows(): void
+    {
+        $index = new Index($this->dbPath, storePositions: true);
+        $index->insertMany([
+            ['id' => 1, 'title' => 'city car'],     // 2 tokens
+            ['id' => 2, 'title' => 'fast sedan review'], // 3 tokens
+        ]);
+        $index->close();
+
+        $pdo   = new \PDO('sqlite:' . $this->dbPath);
+        $stmt1 = $pdo->query('SELECT COUNT(*) FROM positions WHERE doc_id = 1');
+        $this->assertNotFalse($stmt1);
+        $c1    = (int) $stmt1->fetchColumn();
+        $stmt2 = $pdo->query('SELECT COUNT(*) FROM positions WHERE doc_id = 2');
+        $this->assertNotFalse($stmt2);
+        $c2    = (int) $stmt2->fetchColumn();
+        $this->assertSame(2, $c1);
+        $this->assertSame(3, $c2);
+    }
+
+    public function testNoPositionsTableWhenFlagFalse(): void
+    {
+        new Index($this->dbPath);
+        $pdo   = new \PDO('sqlite:' . $this->dbPath);
+        $stmt  = $pdo->query("SELECT name FROM sqlite_master WHERE type='table'");
+        $this->assertNotFalse($stmt);
+        $tables = $stmt->fetchAll(\PDO::FETCH_COLUMN);
+        $this->assertNotContains('positions', $tables);
+    }
 }

@@ -90,6 +90,9 @@ class Index
         get => $this->stemmer !== null;
     }
 
+    /** True when this index stores term positions (enables proximity ranking and phrase search). */
+    public private(set) bool $storePositions = false;
+
     // --- Constructor --------------------------------------------------------
 
     /**
@@ -99,16 +102,23 @@ class Index
      * and the stored language is restored automatically — $language is ignored.
      * If the file does not exist, or $force is true, a new index is created.
      *
-     * @param  string      $path     Absolute or relative path to the SQLite index file.
-     * @param  string|null $language BCP 47 language tag persisted at creation time (e.g. 'en').
-     *                               Ignored when opening an existing index.
-     * @param  bool        $force    Overwrite any existing file at $path.
-     * @param  Config|null $config   Search tuning; null uses all defaults.
+     * @param  string      $path           Absolute or relative path to the SQLite index file.
+     * @param  string|null $language       BCP 47 language tag persisted at creation time (e.g. 'en').
+     *                                     Ignored when opening an existing index.
+     * @param  bool        $force          Overwrite any existing file at $path.
+     * @param  Config|null $config         Search tuning; null uses all defaults.
+     * @param  bool        $storePositions Persist term positions for proximity ranking and phrase search.
+     *                                     Ignored when opening an existing index.
      * @throws IOException    If the parent directory does not exist.
      * @throws QueryException If $language is set but has no stopword list or stemmer.
      */
-    public function __construct(string $path, ?string $language = null, bool $force = false, ?Config $config = null)
-    {
+    public function __construct(
+        string $path,
+        ?string $language = null,
+        bool $force = false,
+        ?Config $config = null,
+        bool $storePositions = false,
+    ) {
         $this->config = $config ?? new Config();
         if ($language !== null && !Language::supports($language)) {
             throw new QueryException("No stopword list or stemmer for language: '{$language}'");
@@ -118,7 +128,7 @@ class Index
         if (file_exists($resolved) && !$force) {
             $this->selectIndex(basename($resolved));
         } else {
-            $this->createIndex(basename($resolved), $force, $language);
+            $this->createIndex(basename($resolved), $force, $language, $storePositions);
         }
     }
 
@@ -236,8 +246,12 @@ class Index
      * @throws QueryException If $language is set but has no stopword list or stemmer.
      */
     /** @infection-ignore-all FalseValue: default $force=false is never exercised; callers always pass force explicitly */
-    private function createIndex(string $indexName, bool $force = false, ?string $language = null): static
-    {
+    private function createIndex(
+        string $indexName,
+        bool $force = false,
+        ?string $language = null,
+        bool $storePositions = false,
+    ): static {
         $path = $this->storagePath . $indexName;
         if (!$force && file_exists($path)) {
             throw new IOException(
@@ -299,6 +313,21 @@ class Index
         $stmt = $pdo->prepare("INSERT INTO info (key, value) VALUES ('language', ?)");
         $stmt->execute([$language ?? '']);
 
+        $pdo->exec("INSERT INTO info (key, value) VALUES ('store_positions', '" . ($storePositions ? '1' : '0') . "')");
+
+        if ($storePositions) {
+            $pdo->exec(
+                "CREATE TABLE IF NOT EXISTS positions (
+                    term_id  INTEGER NOT NULL,
+                    doc_id   INTEGER NOT NULL,
+                    position INTEGER NOT NULL,
+                    PRIMARY KEY (term_id, doc_id, position)
+                ) WITHOUT ROWID, STRICT"
+            );
+            $pdo->exec("CREATE INDEX IF NOT EXISTS 'main'.'positions_doc_id' ON positions ('doc_id');");
+            $this->storePositions = true;
+        }
+
         if ($language !== null) {
             $this->applyLanguage($language);
         }
@@ -328,12 +357,17 @@ class Index
         $this->applyPragmas();
 
         assert($this->pdo !== null);
-        $stmt  = $this->pdo->query("SELECT value FROM info WHERE key = 'language' LIMIT 1");
+        $pdo   = $this->pdo;
+        $stmt  = $pdo->query("SELECT value FROM info WHERE key = 'language' LIMIT 1");
         /** @infection-ignore-all FalseValue: if $stmt is false the ternary else-branch is taken; changing false→true makes $row=true which is not an array so $lang remains null — same result */
         $row   = $stmt ? $stmt->fetch(PDO::FETCH_NUM) : false;
         /** @var array<int, string>|false $row */
         $lang  = (is_array($row) && $row[0] !== '') ? $row[0] : null;
         $this->applyLanguage($lang);
+
+        $stmtPos = $pdo->query("SELECT value FROM info WHERE key = 'store_positions' LIMIT 1");
+        $posRow  = $stmtPos ? $stmtPos->fetch(PDO::FETCH_NUM) : false;
+        $this->storePositions = is_array($posRow) && $posRow[0] === '1';
     }
 
     /**
@@ -501,11 +535,12 @@ class Index
                     }
                 }
 
-                ['wordBuffer'      => $wordBuffer,
-                 'docTermBuffer'   => $docTermBuffer,
-                 'docLengthBuffer' => $docLengthBuffer] = $this->buildBatchBuffer($documents);
+                ['wordBuffer'        => $wordBuffer,
+                 'docTermBuffer'     => $docTermBuffer,
+                 'docLengthBuffer'   => $docLengthBuffer,
+                 'docPositionBuffer' => $docPositionBuffer] = $this->buildBatchBuffer($documents);
 
-                $totalLength = $this->flushBatch($wordBuffer, $docTermBuffer, $docLengthBuffer);
+                $totalLength = $this->flushBatch($wordBuffer, $docTermBuffer, $docLengthBuffer, $docPositionBuffer);
 
                 $this->adjustStats(count($documents), $totalLength);
             });
@@ -1258,9 +1293,15 @@ class Index
              AND id IN (SELECT term_id FROM doclist WHERE doc_id = :documentId)'
         )->execute([':documentId' => $documentId]);
 
-        // 2. Remove doclist rows for this document.
+        // 3. Remove doclist rows for this document.
         $this->stmt('doclistDeleteByDoc', 'DELETE FROM doclist WHERE doc_id = :documentId')
             ->execute([':documentId' => $documentId]);
+
+        // Remove positions rows if this index stores them.
+        if ($this->storePositions) {
+            $this->stmt('positionsDeleteByDoc', 'DELETE FROM positions WHERE doc_id = :documentId')
+                ->execute([':documentId' => $documentId]);
+        }
 
         // 4. Remove doc_lengths and return the old token count (false if the document was not found).
         $delStmt = $this->stmt(
@@ -1288,13 +1329,16 @@ class Index
      * leaving only unique-term iteration to PHP.
      *
      * @param  array<string, mixed> $fields Document fields; 'id' is skipped.
-     * @return array{termCounts: array<string, int>, length: int}
+     * @return array{termCounts: array<string, int>, termPositions: array<string, list<int>>, length: int}
      */
     private function tokenizeDocumentFields(array $fields): array
     {
         /** @var array<string, int> $termCounts */
         $termCounts = [];
-        $length     = 0;
+        /** @var array<string, list<int>> $termPositions */
+        $termPositions = [];
+        $length        = 0;
+        $position      = 0;
         foreach ($fields as $key => $col) {
             if ($key === 'id') {
                 continue;
@@ -1311,13 +1355,20 @@ class Index
                 if ($this->stemmer !== null) {
                     $tokens = $this->stemmer->stemTokens($tokens);
                 }
-                foreach (array_count_values($tokens) as $token => $count) {
-                    /** @infection-ignore-all Coalesce: changing ?? 0 to (0 ?? ...) always yields 0; visible only for multi-field docs where a term appears in both fields */
-                    $termCounts[$token] = ($termCounts[$token] ?? 0) + $count;
+                if ($this->storePositions) {
+                    foreach ($tokens as $token) {
+                        $termCounts[$token]      = ($termCounts[$token] ?? 0) + 1;
+                        $termPositions[$token][] = $position++;
+                    }
+                } else {
+                    foreach (array_count_values($tokens) as $token => $count) {
+                        /** @infection-ignore-all Coalesce: changing ?? 0 to (0 ?? ...) always yields 0; visible only for multi-field docs where a term appears in both fields */
+                        $termCounts[$token] = ($termCounts[$token] ?? 0) + $count;
+                    }
                 }
             }
         }
-        return ['termCounts' => $termCounts, 'length' => $length];
+        return ['termCounts' => $termCounts, 'termPositions' => $termPositions, 'length' => $length];
     }
 
     /**
@@ -1333,10 +1384,21 @@ class Index
     {
         $documentId = self::extractId($row['id']);
 
-        ['termCounts' => $termCounts, 'length' => $length] = $this->tokenizeDocumentFields($row);
+        ['termCounts' => $termCounts, 'termPositions' => $termPositions, 'length' => $length]
+            = $this->tokenizeDocumentFields($row);
 
         $termIds = $this->upsertWordlist($termCounts);
         $this->saveDoclist($documentId, $termIds);
+        if ($this->storePositions && $termPositions !== []) {
+            $termIdPositions = [];
+            foreach ($termPositions as $term => $positions) {
+                $termId = $this->termIdCache[$term] ?? null;
+                if ($termId !== null) {
+                    $termIdPositions[$termId] = $positions;
+                }
+            }
+            $this->savePositions($documentId, $termIdPositions);
+        }
         $this->saveDocLength($documentId, $length);
 
         return $length;
@@ -1414,9 +1476,10 @@ class Index
      *
      * @param  array<array<string, mixed>> $documents
      * @return array{
-     *     wordBuffer:      array<string, array{totalHits: int, numDocs: int}>,
-     *     docTermBuffer:   array<int, array<string, int>>,
-     *     docLengthBuffer: array<int, int>
+     *     wordBuffer:        array<string, array{totalHits: int, numDocs: int}>,
+     *     docTermBuffer:     array<int, array<string, int>>,
+     *     docLengthBuffer:   array<int, int>,
+     *     docPositionBuffer: array<int, array<string, list<int>>>
      * }
      */
     private function buildBatchBuffer(array $documents): array
@@ -1427,14 +1490,20 @@ class Index
         $docTermBuffer  = [];
         /** @var array<int, int> $docLengthBuffer */
         $docLengthBuffer = [];
+        /** @var array<int, array<string, list<int>>> $docPositionBuffer */
+        $docPositionBuffer = [];
 
         foreach ($documents as $document) {
             $documentId = self::extractId($document['id']);
 
-            ['termCounts' => $termCounts, 'length' => $length] = $this->tokenizeDocumentFields($document);
+            ['termCounts' => $termCounts, 'termPositions' => $termPositions, 'length' => $length]
+                = $this->tokenizeDocumentFields($document);
 
             $docTermBuffer[$documentId]   = $termCounts;
             $docLengthBuffer[$documentId] = $length;
+            if ($this->storePositions) {
+                $docPositionBuffer[$documentId] = $termPositions;
+            }
 
             foreach ($termCounts as $term => $hits) {
                 if (isset($wordBuffer[$term])) {
@@ -1449,7 +1518,7 @@ class Index
             }
         }
 
-        return compact('wordBuffer', 'docTermBuffer', 'docLengthBuffer');
+        return compact('wordBuffer', 'docTermBuffer', 'docLengthBuffer', 'docPositionBuffer');
     }
 
     /**
@@ -1463,10 +1532,15 @@ class Index
      * @param  array<string, array{totalHits: int, numDocs: int}> $wordBuffer
      * @param  array<int, array<string, int>>                     $docTermBuffer
      * @param  array<int, int>                                    $docLengthBuffer
+     * @param  array<int, array<string, list<int>>>               $docPositionBuffer
      * @return int Total token count across all documents (for adjustStats).
      */
-    private function flushBatch(array $wordBuffer, array $docTermBuffer, array $docLengthBuffer): int
-    {
+    private function flushBatch(
+        array $wordBuffer,
+        array $docTermBuffer,
+        array $docLengthBuffer,
+        array $docPositionBuffer = [],
+    ): int {
         $pdo = $this->pdo;
         assert($pdo !== null);
 
@@ -1529,6 +1603,48 @@ class Index
                     /** @infection-ignore-all DecrementInteger,IncrementInteger: array_fill start index 0 vs ±1 only changes array keys; implode() ignores keys */
                     . implode(',', array_fill(0, $n, '(?,?)'))
             ))->execute($params);
+        }
+
+        // Step 4: bulk-insert positions in (term_id, doc_id, position) PK order.
+        // Mirrors the doclist sorted-insertion strategy: inserting in clustered PK order
+        // turns random leaf-page seeks into sequential B-tree appends.
+        if ($this->storePositions && $docPositionBuffer !== []) {
+            $termDocPosMap = [];
+            foreach ($docPositionBuffer as $docId => $termPositions) {
+                foreach ($termPositions as $term => $positions) {
+                    if (isset($termIdMap[$term])) {
+                        $termDocPosMap[$termIdMap[$term]][$docId] = $positions;
+                    }
+                }
+            }
+            ksort($termDocPosMap);
+
+            $rowCount = 0;
+            $params   = [];
+            foreach ($termDocPosMap as $termId => $docs) {
+                ksort($docs);
+                foreach ($docs as $docId => $positions) {
+                    foreach ($positions as $position) {
+                        $params[] = $termId;
+                        $params[] = $docId;
+                        $params[] = $position;
+                        if (++$rowCount === self::CHUNK_3P) {
+                            ($this->bulkStmtCache['positionsChunk:' . self::CHUNK_3P] ??= $pdo->prepare(
+                                'INSERT INTO positions (term_id, doc_id, position) VALUES '
+                                    . implode(',', array_fill(0, self::CHUNK_3P, '(?,?,?)'))
+                            ))->execute($params);
+                            $params   = [];
+                            $rowCount = 0;
+                        }
+                    }
+                }
+            }
+            if ($rowCount > 0) {
+                ($this->bulkStmtCache["positionsChunk:{$rowCount}"] ??= $pdo->prepare(
+                    'INSERT INTO positions (term_id, doc_id, position) VALUES '
+                        . implode(',', array_fill(0, $rowCount, '(?,?,?)'))
+                ))->execute($params);
+            }
         }
 
         return array_sum($docLengthBuffer);
@@ -1652,6 +1768,28 @@ class Index
         );
         foreach ($termIds as $termId => $hits) {
             $stmt->execute([$termId, $documentId, $hits]);
+        }
+    }
+
+    /**
+     * Persist term positions for a single document (single-insert path).
+     *
+     * @param int                       $documentId Document ID.
+     * @param array<int, list<int>>     $termIdPositions term_id → ordered position list.
+     */
+    private function savePositions(int $documentId, array $termIdPositions): void
+    {
+        if (empty($termIdPositions)) {
+            return;
+        }
+        $stmt = $this->stmt(
+            'savePositionRow',
+            'INSERT INTO positions (term_id, doc_id, position) VALUES (?,?,?)'
+        );
+        foreach ($termIdPositions as $termId => $positions) {
+            foreach ($positions as $position) {
+                $stmt->execute([$termId, $documentId, $position]);
+            }
         }
     }
 
