@@ -598,27 +598,18 @@ class IndexTest extends TestCase
         ]);
         $index->update(['id' => 1, 'title' => 'suv']);
 
-        // Identical mutation on update()'s '$oldLength === false' branch swaps the branches:
-        // updating an existing doc calls adjustStats(+1, newLength) instead of adjustStats(0, delta),
-        // growing total_documents from 2 to 3. inspectQuery exposes the raw DB value.
+        // A mutation that swaps the strict branch would call adjustStats(+1, newLength)
+        // instead of adjustStats(0, delta), growing total_documents from 2 to 3.
         $info = $index->inspectQuery('suv')['index_info'];
         $this->assertSame('2', $info['total_documents']);
     }
 
-    public function testUpdateCreatesDocWhenIdNotFound(): void
+    public function testUpdateThrowsIfDocumentDoesNotExist(): void
     {
         $index = new Index($this->dbPath);
+        $this->expectException(QueryException::class);
+        $this->expectExceptionMessageMatches('/does not exist/');
         $index->update(['id' => 999, 'title' => 'sedan']);
-
-        $this->assertContains(999, $index->search('sedan')['ids']);
-    }
-
-    public function testUpdateNonExistentDocIncrementsCount(): void
-    {
-        $index = new Index($this->dbPath);
-        $index->update(['id' => 1, 'title' => 'sedan']);
-        $info = $index->inspectQuery('sedan')['index_info'];
-        $this->assertSame('1', $info['total_documents']);
     }
 
     public function testUpdateChangesAvgDocLength(): void
@@ -628,6 +619,47 @@ class IndexTest extends TestCase
         $index->update(['id' => 1, 'title' => 'zeta']);
         $info = $index->inspectQuery('zeta')['index_info'];
         $this->assertEqualsWithDelta(1.0, (float) $info['avg_doc_length'], 0.01);
+    }
+
+    // --- upsert ---
+
+    public function testUpsertCreatesDocWhenIdNotFound(): void
+    {
+        $index = new Index($this->dbPath);
+        $index->upsert(['id' => 999, 'title' => 'sedan']);
+
+        $this->assertContains(999, $index->search('sedan')['ids']);
+    }
+
+    public function testUpsertNonExistentDocIncrementsCount(): void
+    {
+        $index = new Index($this->dbPath);
+        $index->upsert(['id' => 1, 'title' => 'sedan']);
+        $info = $index->inspectQuery('sedan')['index_info'];
+        $this->assertSame('1', $info['total_documents']);
+    }
+
+    public function testUpsertReplacesOldContent(): void
+    {
+        $index = new Index($this->dbPath);
+        $index->insert(['id' => 1, 'title' => 'sedan car']);
+        $index->upsert(['id' => 1, 'title' => 'suv truck']);
+
+        $this->assertEmpty($index->search('sedan')['ids']);
+        $this->assertContains(1, $index->search('suv')['ids']);
+    }
+
+    public function testUpsertExistingDocDoesNotIncrementTotalDocuments(): void
+    {
+        $index = new Index($this->dbPath);
+        $index->insertMany([
+            ['id' => 1, 'title' => 'sedan'],
+            ['id' => 2, 'title' => 'coupe'],
+        ]);
+        $index->upsert(['id' => 1, 'title' => 'suv']);
+
+        $info = $index->inspectQuery('suv')['index_info'];
+        $this->assertSame('2', $info['total_documents']);
     }
 
     // --- updateMany ---
@@ -679,37 +711,57 @@ class IndexTest extends TestCase
             ['id' => 2, 'title' => 'truck'],
         ]);
 
-        // A mutation on the '$oldLength === false' branch that incorrectly increments
-        // docDelta for each existing doc would grow total_documents from 2 to 4.
         $info = $index->inspectQuery('suv')['index_info'];
         $this->assertSame('2', $info['total_documents']);
     }
 
-    public function testUpdateManyCreatesDocWhenIdNotFound(): void
-    {
-        $index = new Index($this->dbPath);
-        $index->updateMany([
-            ['id' => 1, 'title' => 'sedan'],
-            ['id' => 2, 'title' => 'coupe'],
-        ]);
-
-        $this->assertContains(1, $index->search('sedan')['ids']);
-        $this->assertContains(2, $index->search('coupe')['ids']);
-    }
-
-    public function testUpdateManyMixedExistingAndNewIdsUpdatesCount(): void
+    public function testUpdateManyThrowsIfAnyIdMissing(): void
     {
         $index = new Index($this->dbPath);
         $index->insert(['id' => 1, 'title' => 'sedan']);
-        $index->updateMany([
-            ['id' => 1, 'title' => 'suv'],    // existing — no count change
-            ['id' => 2, 'title' => 'coupe'],   // new — count +1
-        ]);
 
-        // If docDelta accumulation is wrong (e.g., incremented for every doc instead of
-        // only new ones), total_documents would be 3 instead of 2.
-        $info = $index->inspectQuery('suv')['index_info'];
-        $this->assertSame('2', $info['total_documents']);
+        $this->expectException(QueryException::class);
+        $this->expectExceptionMessageMatches('/do not exist/');
+        // id 2 does not exist — must throw before any write
+        $index->updateMany([
+            ['id' => 1, 'title' => 'suv'],
+            ['id' => 2, 'title' => 'coupe'],
+        ]);
+    }
+
+    public function testUpdateManyThrowsListsMissingIds(): void
+    {
+        $index = new Index($this->dbPath);
+        $index->insert(['id' => 1, 'title' => 'sedan']);
+
+        $this->expectException(QueryException::class);
+        // Prefix must come first, then the missing IDs, then the suffix — kills concat-order mutations.
+        $this->expectExceptionMessageMatches(
+            '/^Documents do not exist with ids: .*\b2\b.*\. Use upsertMany\(\)/'
+        );
+        $index->updateMany([
+            ['id' => 1, 'title' => 'suv'],
+            ['id' => 2, 'title' => 'coupe'],
+            ['id' => 3, 'title' => 'truck'],
+        ]);
+    }
+
+    public function testUpdateManyIsAtomicOnMissingId(): void
+    {
+        $index = new Index($this->dbPath);
+        $index->insert(['id' => 1, 'title' => 'sedan']);
+
+        try {
+            $index->updateMany([
+                ['id' => 1, 'title' => 'suv'],
+                ['id' => 99, 'title' => 'ghost'],
+            ]);
+        } catch (QueryException) {
+        }
+
+        // id 1 must be unchanged — the upfront check prevented any write
+        $this->assertContains(1, $index->search('sedan')['ids']);
+        $this->assertEmpty($index->search('suv')['ids']);
     }
 
     public function testUpdateManyUpdatesAvgDocLength(): void
@@ -731,11 +783,48 @@ class IndexTest extends TestCase
         $this->assertEqualsWithDelta(1.0, (float) $info['avg_doc_length'], 0.01);
     }
 
-    public function testUpdateManyAllNewDocsAccumulatesAvgDocLength(): void
+    public function testUpdateManyThrowsOnMissingIdKey(): void
     {
         $index = new Index($this->dbPath);
-        // All three are upserts (no pre-existing docs).
-        $index->updateMany([
+
+        $this->expectException(QueryException::class);
+        $this->expectExceptionMessageMatches("/must contain an 'id' key/");
+        $index->updateMany([['title' => 'sedan']]);
+    }
+
+    // --- upsertMany ---
+
+    public function testUpsertManyCreatesDocWhenIdNotFound(): void
+    {
+        $index = new Index($this->dbPath);
+        $index->upsertMany([
+            ['id' => 1, 'title' => 'sedan'],
+            ['id' => 2, 'title' => 'coupe'],
+        ]);
+
+        $this->assertContains(1, $index->search('sedan')['ids']);
+        $this->assertContains(2, $index->search('coupe')['ids']);
+    }
+
+    public function testUpsertManyMixedExistingAndNewIdsUpdatesCount(): void
+    {
+        $index = new Index($this->dbPath);
+        $index->insert(['id' => 1, 'title' => 'sedan']);
+        $index->upsertMany([
+            ['id' => 1, 'title' => 'suv'],    // existing — no count change
+            ['id' => 2, 'title' => 'coupe'],   // new — count +1
+        ]);
+
+        // If docDelta accumulation is wrong (e.g., incremented for every doc instead of
+        // only new ones), total_documents would be 3 instead of 2.
+        $info = $index->inspectQuery('suv')['index_info'];
+        $this->assertSame('2', $info['total_documents']);
+    }
+
+    public function testUpsertManyAllNewDocsAccumulatesAvgDocLength(): void
+    {
+        $index = new Index($this->dbPath);
+        $index->upsertMany([
             ['id' => 1, 'title' => 'alpha beta gamma'],  // 3 tokens
             ['id' => 2, 'title' => 'delta epsilon'],       // 2 tokens
             ['id' => 3, 'title' => 'zeta'],                // 1 token
@@ -748,24 +837,15 @@ class IndexTest extends TestCase
         $this->assertEqualsWithDelta(2.0, (float) $info['avg_doc_length'], 0.01);
     }
 
-    public function testUpdateManyWithEmptyIterableIsNoop(): void
+    public function testUpsertManyWithEmptyIterableIsNoop(): void
     {
         $index = new Index($this->dbPath);
         $index->insert(['id' => 1, 'title' => 'sedan']);
-        $index->updateMany([]);
+        $index->upsertMany([]);
 
         $this->assertContains(1, $index->search('sedan')['ids']);
         $info = $index->inspectQuery('sedan')['index_info'];
         $this->assertSame('1', $info['total_documents']);
-    }
-
-    public function testUpdateManyThrowsOnMissingIdKey(): void
-    {
-        $index = new Index($this->dbPath);
-
-        $this->expectException(QueryException::class);
-        $this->expectExceptionMessage("Document must contain an 'id' key.");
-        $index->updateMany([['title' => 'sedan']]);
     }
 
     // --- delete ---
@@ -996,8 +1076,7 @@ class IndexTest extends TestCase
     public function testHasReturnsTrueForUpsertedDocument(): void
     {
         $index = new Index($this->dbPath);
-        // update() with an unknown ID inserts the document (upsert semantics).
-        $index->update(['id' => 42, 'title' => 'sedan']);
+        $index->upsert(['id' => 42, 'title' => 'sedan']);
 
         $this->assertTrue($index->has(42));
     }

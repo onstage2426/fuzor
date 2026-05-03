@@ -550,30 +550,79 @@ class Index
     }
 
     /**
-     * Replace a document in the index.
+     * Replace an existing document in the index.
      *
-     * Removes the old document's index data and re-indexes the new content in a
-     * single transaction with one avg_doc_length write. total_documents is
-     * unchanged when the document already existed; if the ID is new it is
-     * incremented (upsert semantics matching the previous delete+insert behaviour).
+     * @param array<string, mixed> $document New document data; must contain an 'id' key.
+     * @throws QueryException If the document has no 'id' key, or the ID does not exist.
+     */
+    public function update(array $document): void
+    {
+        $this->replaceOne($document, strict: true);
+    }
+
+    /**
+     * Create or replace a document in the index.
+     *
+     * If the ID already exists the document is replaced; if not, it is inserted.
      *
      * @param array<string, mixed> $document New document data; must contain an 'id' key.
      * @throws QueryException If the document has no 'id' key.
      */
-    public function update(array $document): void
+    public function upsert(array $document): void
+    {
+        $this->replaceOne($document, strict: false);
+    }
+
+    /**
+     * Replace multiple existing documents in a single transaction.
+     *
+     * All IDs are checked for existence before any writes. If any are missing the
+     * method throws without modifying the index.
+     *
+     * @param iterable<array<string, mixed>> $documents Documents to replace; each must contain an 'id' key.
+     * @throws QueryException If any document has no 'id' key, or any ID does not exist.
+     */
+    public function updateMany(iterable $documents): void
+    {
+        $this->replaceMany($documents, strict: true);
+    }
+
+    /**
+     * Create or replace multiple documents in a single transaction.
+     *
+     * Non-existent IDs are inserted; existing IDs are replaced.
+     *
+     * @param iterable<array<string, mixed>> $documents Documents to upsert; each must contain an 'id' key.
+     * @throws QueryException If any document has no 'id' key.
+     */
+    public function upsertMany(iterable $documents): void
+    {
+        $this->replaceMany($documents, strict: false);
+    }
+
+    /**
+     * Shared implementation for update() and upsert().
+     *
+     * @param array<string, mixed> $document
+     * @throws QueryException
+     */
+    private function replaceOne(array $document, bool $strict): void
     {
         if (!array_key_exists('id', $document)) {
             throw new QueryException("Document must contain an 'id' key.");
         }
-        $this->wrapInTransaction(function () use ($document): void {
-            $oldLength = $this->removeDocumentData(self::extractId($document['id']));
-            $newLength = $this->processDocument($document);
+        $this->wrapInTransaction(function () use ($document, $strict): void {
+            $id        = self::extractId($document['id']);
+            $oldLength = $this->removeDocumentData($id);
 
             if ($oldLength === false) {
-                // Document did not exist — treat as insert: increment total_documents.
+                if ($strict) {
+                    throw new QueryException("Document {$id} does not exist. Use upsert() to create or replace it.");
+                }
+                $newLength = $this->processDocument($document);
                 $this->adjustStats(1, $newLength);
             } else {
-                // Replace: total_documents unchanged; adjust avg for the length delta.
+                $newLength = $this->processDocument($document);
                 /** @infection-ignore-all CastInt: removeDocumentData already returns int; the cast is defensive only */
                 $this->adjustStats(0, $newLength - (int) $oldLength);
             }
@@ -581,22 +630,57 @@ class Index
     }
 
     /**
-     * Replace multiple documents in a single transaction with one stats update.
+     * Shared implementation for updateMany() and upsertMany().
      *
-     * Each document must contain an 'id' key. Non-existent IDs are inserted
-     * (upsert semantics), exactly like calling update() on each individually.
-     *
-     * @param iterable<array<string, mixed>> $documents Documents to update; each must contain an 'id' key.
+     * @param iterable<array<string, mixed>> $documents
+     * @throws QueryException
      */
-    public function updateMany(iterable $documents): void
+    private function replaceMany(iterable $documents, bool $strict): void
     {
-        $this->wrapInTransaction(function () use ($documents): void {
+        /** @infection-ignore-all LogicalNot: iterator_to_array() accepts arrays in PHP 8.1+; converting an array produces the same array */
+        if (!is_array($documents)) {
+            $documents = iterator_to_array($documents, false);
+        }
+
+        $this->wrapInTransaction(function () use ($documents, $strict): void {
             $docDelta    = 0;
             $lengthDelta = 0;
 
-            foreach ($documents as $document) {
+            if ($strict) {
+                $ids = [];
+                foreach ($documents as $i => $document) {
+                    if (!array_key_exists('id', $document)) {
+                        throw new QueryException("Document at index {$i} must contain an 'id' key.");
+                    }
+                    $ids[] = self::extractId($document['id']);
+                }
+
+                if ($ids !== []) {
+                    $missing = $ids;
+                    foreach (array_chunk($ids, self::CHUNK_1P) as $chunk) {
+                        /** @infection-ignore-all IncrementInteger: array_fill start index does not affect implode output */
+                        $placeholders = implode(',', array_fill(0, count($chunk), '?'));
+                        $stmt = $this->prepare(
+                            "SELECT doc_id FROM doc_lengths WHERE doc_id IN ({$placeholders})"
+                        );
+                        $stmt->execute($chunk);
+                        $found = $stmt->fetchAll(PDO::FETCH_COLUMN);
+                        /** @infection-ignore-all CastInt,DecrementInteger,IncrementInteger,UnwrapArrayMap: PDO always returns scalar values for FETCH_COLUMN; the fallback 0 is unreachable */
+                        $foundIds = array_map(fn(mixed $v): int => is_scalar($v) ? (int) $v : 0, $found);
+                        $missing  = array_diff($missing, $foundIds);
+                    }
+                    if ($missing !== []) {
+                        throw new QueryException(
+                            'Documents do not exist with ids: '
+                                . implode(', ', $missing) . '. Use upsertMany() to create or replace them.'
+                        );
+                    }
+                }
+            }
+
+            foreach ($documents as $i => $document) {
                 if (!array_key_exists('id', $document)) {
-                    throw new QueryException("Document must contain an 'id' key.");
+                    throw new QueryException("Document at index {$i} must contain an 'id' key.");
                 }
 
                 $oldLength = $this->removeDocumentData(self::extractId($document['id']));
