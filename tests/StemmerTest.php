@@ -95,7 +95,7 @@ class StemmerTest extends TestCase
         $index = new Index($this->dbPath, language: 'en');
         $index->insert(['id' => 1, 'body' => 'running quickly']);
 
-        $this->assertContains(1, $index->search('run', asYouType: false)['ids']);
+        $this->assertContains(1, $index->search('run', asYouType: false)->ids);
     }
 
     public function testDifferentSurfaceFormsMatchSameStem(): void
@@ -104,8 +104,8 @@ class StemmerTest extends TestCase
         $index->insert(['id' => 1, 'body' => 'connection to the server']);
 
         // Both "connect" and "connections" stem to "connect"
-        $this->assertContains(1, $index->search('connect', asYouType: false)['ids']);
-        $this->assertContains(1, $index->search('connections', asYouType: false)['ids']);
+        $this->assertContains(1, $index->search('connect', asYouType: false)->ids);
+        $this->assertContains(1, $index->search('connections', asYouType: false)->ids);
     }
 
     public function testWithoutLanguageNoStemming(): void
@@ -114,8 +114,8 @@ class StemmerTest extends TestCase
         $index = new Index($this->dbPath);
         $index->insert(['id' => 1, 'body' => 'running quickly']);
 
-        $this->assertSame([], $index->search('run', asYouType: false)['ids']);
-        $this->assertContains(1, $index->search('running', asYouType: false)['ids']);
+        $this->assertSame([], $index->search('run', asYouType: false)->ids);
+        $this->assertContains(1, $index->search('running', asYouType: false)->ids);
     }
 
     public function testBooleanSearchAppliesStemming(): void
@@ -126,8 +126,8 @@ class StemmerTest extends TestCase
 
         // "connected" stems to "connect", same as "connections" — doc 1 must match
         $result = $index->searchBoolean('connected');
-        $this->assertContains(1, $result['ids']);
-        $this->assertNotContains(2, $result['ids']);
+        $this->assertContains(1, $result->ids);
+        $this->assertNotContains(2, $result->ids);
     }
 
     public function testLanguageWithNoStemmerIndexesExactTokens(): void
@@ -137,7 +137,7 @@ class StemmerTest extends TestCase
         $index->insert(['id' => 1, 'body' => 'running quickly']);
 
         // stemming disabled — "run" should not match "running"
-        $this->assertSame([], $index->search('run', asYouType: false)['ids']);
+        $this->assertSame([], $index->search('run', asYouType: false)->ids);
     }
 
     public function testInsertManyWithStemming(): void
@@ -148,7 +148,7 @@ class StemmerTest extends TestCase
             ['id' => 2, 'body' => 'running fast'],
         ]);
 
-        $this->assertContains(1, $index->search('connect', asYouType: false)['ids']);
-        $this->assertContains(2, $index->search('run', asYouType: false)['ids']);
+        $this->assertContains(1, $index->search('connect', asYouType: false)->ids);
+        $this->assertContains(2, $index->search('run', asYouType: false)->ids);
     }
 }

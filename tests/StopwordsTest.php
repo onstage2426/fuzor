@@ -122,10 +122,10 @@ class StopwordsTest extends TestCase
         $index->insert(['id' => 1, 'body' => 'the quick brown fox']);
 
         // 'the' is a stopword — searching for it should return no results
-        $this->assertSame([], $index->search('the')['ids']);
+        $this->assertSame([], $index->search('the')->ids);
 
         // content terms should still be findable
-        $this->assertContains(1, $index->search('fox')['ids']);
+        $this->assertContains(1, $index->search('fox')->ids);
     }
 
     public function testWithoutLanguageStopwordsAreIndexed(): void
@@ -134,7 +134,7 @@ class StopwordsTest extends TestCase
         // no language set — 'the' is indexed normally
         $index->insert(['id' => 1, 'body' => 'the quick brown fox']);
 
-        $this->assertContains(1, $index->search('the')['ids']);
+        $this->assertContains(1, $index->search('the')->ids);
     }
 
     public function testAllStopwordQueryDoesNotCrash(): void
@@ -147,6 +147,6 @@ class StopwordsTest extends TestCase
 
         $result = $index->search('the and or');
         // 'the', 'and', 'or' are stopwords and were never indexed — no matches expected
-        $this->assertSame([], $result['ids']);
+        $this->assertSame([], $result->ids);
     }
 }

@@ -932,10 +932,14 @@ class Index
      * @param  bool   $asYouType  When true, the last keyword is matched as a prefix.
      * @param  int    $limit      Maximum number of document IDs to return.
      * @param  int    $offset     Number of top-ranked results to skip (for pagination).
-     * @return array{ids: list<int>, hits: int, docScores: array<int, float>}
      */
-    public function search(string $phrase, bool $fuzzy = false, bool $asYouType = true, int $limit = 100, int $offset = 0): array
-    {
+    public function search(
+        string $phrase,
+        bool $fuzzy = false,
+        bool $asYouType = true,
+        int $limit = 100,
+        int $offset = 0,
+    ): SearchResult {
         /** @var list<string> $keywords */
         $keywords = $this->filterQueryTokens($phrase)['filtered'];
 
@@ -977,13 +981,14 @@ class Index
 
         /** @infection-ignore-all DecrementInteger: $total is count(); -1 is impossible, so the guard fires identically for any realistic input */
         if ($total === 0 || $limit === 0) {
-            return ['ids' => [], 'hits' => $total, 'docScores' => $docScores];
+            return new SearchResult(ids: [], hits: $total, scores: $docScores);
         }
 
         /** @infection-ignore-all LessThanOrEqualTo: when total===numOfResults the fast arsort path and the heap path both return the same set of doc IDs; ordering may differ for ties but is unspecified */
         if ($total <= $offset + $limit) {
             arsort($docScores);
-            return ['ids' => array_slice(array_keys($docScores), $offset, $limit), 'hits' => $total, 'docScores' => $docScores];
+            $ids = array_slice(array_keys($docScores), $offset, $limit);
+            return new SearchResult(ids: $ids, hits: $total, scores: $docScores);
         }
 
         // Partial sort: min-heap capped at $offset + $limit keeps the top window of scoring docs.
@@ -1019,7 +1024,7 @@ class Index
             $ids[] = $heap->extract()[1];
         }
 
-        return ['ids' => array_slice(array_reverse($ids), $offset, $limit), 'hits' => $total, 'docScores' => $docScores];
+        return new SearchResult(ids: array_slice(array_reverse($ids), $offset, $limit), hits: $total, scores: $docScores); // phpcs:ignore Generic.Files.LineLength
     }
 
     /**
@@ -1032,10 +1037,13 @@ class Index
      * @param  bool   $asYouType  When true, the last keyword is matched as a prefix.
      * @param  int    $limit      Maximum number of document IDs to return.
      * @param  int    $offset     Number of results to skip (for pagination).
-     * @return array{ids: list<int>, hits: int, docScores: null}
      */
-    public function searchBoolean(string $phrase, bool $asYouType = true, int $limit = 100, int $offset = 0): array
-    {
+    public function searchBoolean(
+        string $phrase,
+        bool $asYouType = true,
+        int $limit = 100,
+        int $offset = 0,
+    ): SearchResult {
         // Prepend "|" so the Shunting-Yard algorithm always has a left-hand operand.
         // OR with an empty set is the identity, so it does not affect the result.
         /** @infection-ignore-all ConcatOperandRemoval: '|' prefix is the OR identity; removing it or appending instead yields identical postfix because '|' is always the lowest-priority operator */
@@ -1117,7 +1125,7 @@ class Index
         $total  = count($docIds);
         $docIds = array_slice($docIds, $offset, $limit);
 
-        return ['ids' => $docIds, 'hits' => $total, 'docScores' => null];
+        return new SearchResult(ids: $docIds, hits: $total);
     }
 
     /**
