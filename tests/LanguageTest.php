@@ -133,11 +133,4 @@ class LanguageTest extends TestCase
         $instance = new $class();
         $this->assertInstanceOf(SnowballStemmer::class, $instance);
     }
-
-    // --- Index::languages ---
-
-    public function testIndexLanguagesMatchesLanguageAll(): void
-    {
-        $this->assertSame(Language::all(), Index::languages());
-    }
 }

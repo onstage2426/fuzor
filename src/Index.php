@@ -163,19 +163,6 @@ class Index
     }
 
     /**
-     * Return all supported languages as a sorted BCP 47 tag => display name map.
-     *
-     * Suitable for populating a select list. Every tag in this map is a valid
-     * $language argument for Index::create().
-     *
-     * @return array<string, string>
-     */
-    public static function languages(): array
-    {
-        return Language::all();
-    }
-
-    /**
      * Return true if a valid Fuzor index exists at $path.
      *
      * Returns false for non-existent paths, non-SQLite files, and SQLite files
