@@ -3,7 +3,6 @@
 namespace Fuzor\Tests;
 
 use Fuzor\Index;
-use Fuzor\IndexHandle;
 use PHPUnit\Framework\TestCase;
 
 class IndexTest extends TestCase
@@ -29,7 +28,7 @@ class IndexTest extends TestCase
     public function testCreateReturnsIndexInstance(): void
     {
         $index = Index::create($this->dbPath);
-        $this->assertInstanceOf(IndexHandle::class, $index);
+        $this->assertInstanceOf(Index::class, $index);
     }
 
     public function testOpenReturnsIndexInstance(): void
@@ -37,7 +36,7 @@ class IndexTest extends TestCase
         Index::create($this->dbPath)->close();
 
         $index = Index::open($this->dbPath);
-        $this->assertInstanceOf(IndexHandle::class, $index);
+        $this->assertInstanceOf(Index::class, $index);
     }
 
     public function testCloseReleasesConnection(): void
@@ -1820,16 +1819,16 @@ class IndexTest extends TestCase
 
     // --- rebuild ---
 
-    public function testRebuildReturnsIndexHandle(): void
+    public function testRebuildReturnsIndex(): void
     {
         $index = Index::create($this->dbPath);
         $index->close();
 
-        $rebuilt = Index::rebuild($this->dbPath, function (IndexHandle $new): void {
+        $rebuilt = Index::rebuild($this->dbPath, function (Index $new): void {
             $new->insert(['id' => 1, 'title' => 'sedan']);
         });
 
-        $this->assertInstanceOf(IndexHandle::class, $rebuilt);
+        $this->assertInstanceOf(Index::class, $rebuilt);
     }
 
     public function testRebuildNewContentIsSearchable(): void
@@ -1837,7 +1836,7 @@ class IndexTest extends TestCase
         $index = Index::create($this->dbPath);
         $index->close();
 
-        $rebuilt = Index::rebuild($this->dbPath, function (IndexHandle $new): void {
+        $rebuilt = Index::rebuild($this->dbPath, function (Index $new): void {
             $new->insert(['id' => 1, 'title' => 'sedan']);
         });
 
@@ -1850,7 +1849,7 @@ class IndexTest extends TestCase
         $index->insert(['id' => 1, 'title' => 'old content']);
         $index->close();
 
-        $rebuilt = Index::rebuild($this->dbPath, function (IndexHandle $new): void {
+        $rebuilt = Index::rebuild($this->dbPath, function (Index $new): void {
             $new->insert(['id' => 2, 'title' => 'new content']);
         });
 
@@ -1865,7 +1864,7 @@ class IndexTest extends TestCase
         $index->close();
 
         try {
-            Index::rebuild($this->dbPath, function (IndexHandle $new): void {
+            Index::rebuild($this->dbPath, function (Index $new): void {
                 $new->insert(['id' => 2, 'title' => 'partial']);
                 throw new \RuntimeException('simulated failure');
             });
@@ -1910,7 +1909,7 @@ class IndexTest extends TestCase
     {
         Index::create($this->dbPath, language: 'en')->close();
 
-        $rebuilt = Index::rebuild($this->dbPath, function (IndexHandle $new): void {
+        $rebuilt = Index::rebuild($this->dbPath, function (Index $new): void {
             $new->insert(['id' => 1, 'title' => 'running']);
         });
 
@@ -1919,7 +1918,7 @@ class IndexTest extends TestCase
 
     public function testRebuildWorksWhenFileDoesNotExistYet(): void
     {
-        $rebuilt = Index::rebuild($this->dbPath, function (IndexHandle $new): void {
+        $rebuilt = Index::rebuild($this->dbPath, function (Index $new): void {
             $new->insert(['id' => 1, 'title' => 'sedan']);
         });
 
@@ -1932,7 +1931,7 @@ class IndexTest extends TestCase
         $index->insertMany([['id' => 1, 'title' => 'a'], ['id' => 2, 'title' => 'b']]);
         $index->close();
 
-        $rebuilt = Index::rebuild($this->dbPath, function (IndexHandle $new): void {
+        $rebuilt = Index::rebuild($this->dbPath, function (Index $new): void {
             $new->insert(['id' => 10, 'title' => 'only one']);
         });
 
