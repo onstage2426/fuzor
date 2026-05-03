@@ -3,6 +3,8 @@
 namespace Fuzor\Tests;
 
 use Fuzor\Index;
+use Fuzor\Exceptions\IOException;
+use Fuzor\Exceptions\QueryException;
 use PHPUnit\Framework\TestCase;
 
 class IndexTest extends TestCase
@@ -65,13 +67,13 @@ class IndexTest extends TestCase
 
     public function testConstructorThrowsIfDirectoryDoesNotExist(): void
     {
-        $this->expectException(\RuntimeException::class);
+        $this->expectException(IOException::class);
         new Index('/nonexistent/fuzor_no_such.db');
     }
 
     public function testConstructorThrowsIfDirectoryDoesNotExistLong(): void
     {
-        $this->expectException(\RuntimeException::class);
+        $this->expectException(IOException::class);
         new Index('/nonexistent/dir/index.db');
     }
 
@@ -79,8 +81,8 @@ class IndexTest extends TestCase
     {
         // Language guard must fire before resolvePath(); using a non-existent directory
         // proves it: without the early throw the code would reach resolvePath() and produce
-        // a RuntimeException instead of InvalidArgumentException.
-        $this->expectException(\InvalidArgumentException::class);
+        // an IOException instead of QueryException.
+        $this->expectException(QueryException::class);
         new Index('/nonexistent/dir/index.db', language: 'xx');
     }
 
@@ -98,7 +100,7 @@ class IndexTest extends TestCase
     {
         file_put_contents($this->dbPath, 'this is not a sqlite file');
 
-        $this->expectException(\RuntimeException::class);
+        $this->expectException(IOException::class);
         $this->expectExceptionMessageMatches('/Refusing to overwrite non-Fuzor file/');
         new Index($this->dbPath, force: true);
 
@@ -107,7 +109,7 @@ class IndexTest extends TestCase
 
     public function testCreateErrorMessageContainsDirectory(): void
     {
-        $this->expectException(\RuntimeException::class);
+        $this->expectException(IOException::class);
         // Require BOTH the fixed prefix AND the path so that mutants which reverse the
         // concatenation order (path . "Directory does not exist: ") or drop the prefix
         // (leaving just the path) are caught.
@@ -160,7 +162,7 @@ class IndexTest extends TestCase
     public function testInsertWithoutIdThrows(): void
     {
         $index = new Index($this->dbPath);
-        $this->expectException(\InvalidArgumentException::class);
+        $this->expectException(QueryException::class);
         $index->insert(['title' => 'no id here']);
     }
 
@@ -169,14 +171,14 @@ class IndexTest extends TestCase
         $index = new Index($this->dbPath);
         $index->insert(['id' => 1, 'title' => 'sedan']);
 
-        $this->expectException(\RuntimeException::class);
+        $this->expectException(QueryException::class);
         $index->insert(['id' => 1, 'title' => 'duplicate']);
     }
 
     public function testInsertManyWithMissingIdThrows(): void
     {
         $index = new Index($this->dbPath);
-        $this->expectException(\InvalidArgumentException::class);
+        $this->expectException(QueryException::class);
         $index->insertMany([
             ['id' => 1, 'title' => 'sedan'],
             ['title' => 'no id'],
@@ -186,7 +188,7 @@ class IndexTest extends TestCase
     public function testInsertManyWithDuplicateInputIdsThrows(): void
     {
         $index = new Index($this->dbPath);
-        $this->expectException(\InvalidArgumentException::class);
+        $this->expectException(QueryException::class);
         $index->insertMany([
             ['id' => 1, 'title' => 'sedan'],
             ['id' => 1, 'title' => 'duplicate in same batch'],
@@ -198,7 +200,7 @@ class IndexTest extends TestCase
         $index = new Index($this->dbPath);
         $index->insert(['id' => 1, 'title' => 'sedan']);
 
-        $this->expectException(\RuntimeException::class);
+        $this->expectException(QueryException::class);
         // Require the full structure: prefix, then the conflicting ID, then the suffix.
         // This kills concat-order mutations (ID moved to front/end) and partial-removal
         // mutations (missing ID or missing "Use update()" suffix).
@@ -209,7 +211,7 @@ class IndexTest extends TestCase
     public function testUpdateWithoutIdThrows(): void
     {
         $index = new Index($this->dbPath);
-        $this->expectException(\InvalidArgumentException::class);
+        $this->expectException(QueryException::class);
         $index->update(['title' => 'no id here']);
     }
 
@@ -761,7 +763,7 @@ class IndexTest extends TestCase
     {
         $index = new Index($this->dbPath);
 
-        $this->expectException(\InvalidArgumentException::class);
+        $this->expectException(QueryException::class);
         $this->expectExceptionMessage("Document must contain an 'id' key.");
         $index->updateMany([['title' => 'sedan']]);
     }

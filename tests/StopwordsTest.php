@@ -3,6 +3,7 @@
 namespace Fuzor\Tests;
 
 use Fuzor\Index;
+use Fuzor\Exceptions\QueryException;
 use Fuzor\Stopwords;
 use PHPUnit\Framework\TestCase;
 
@@ -111,7 +112,7 @@ class StopwordsTest extends TestCase
 
     public function testUnknownLanguageAtCreationThrows(): void
     {
-        $this->expectException(\InvalidArgumentException::class);
+        $this->expectException(QueryException::class);
         new Index($this->dbPath, language: 'xx');
     }
 

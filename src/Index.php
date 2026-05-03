@@ -2,6 +2,8 @@
 
 namespace Fuzor;
 
+use Fuzor\Exceptions\IOException;
+use Fuzor\Exceptions\QueryException;
 use Fuzor\Highlighter;
 use Fuzor\Levenshtein;
 use Fuzor\Snippeter;
@@ -119,13 +121,13 @@ class Index
      * @param  string|null $language BCP 47 language tag persisted at creation time (e.g. 'en').
      *                               Ignored when opening an existing index.
      * @param  bool        $force    Overwrite any existing file at $path.
-     * @throws \RuntimeException        If the parent directory does not exist.
-     * @throws \InvalidArgumentException If $language is set but has no stopword list or stemmer.
+     * @throws IOException    If the parent directory does not exist.
+     * @throws QueryException If $language is set but has no stopword list or stemmer.
      */
     public function __construct(string $path, ?string $language = null, bool $force = false)
     {
         if ($language !== null && !Language::supports($language)) {
-            throw new \InvalidArgumentException("No stopword list or stemmer for language: '{$language}'");
+            throw new QueryException("No stopword list or stemmer for language: '{$language}'");
         }
         $resolved          = self::resolvePath($path);
         $this->storagePath = dirname($resolved) . DIRECTORY_SEPARATOR;
@@ -151,13 +153,13 @@ class Index
      *
      * @param  string $path Absolute or relative path to resolve.
      * @return string       Canonical absolute path.
-     * @throws \RuntimeException If the parent directory does not exist.
+     * @throws IOException If the parent directory does not exist.
      */
     private static function resolvePath(string $path): string
     {
         $dir = realpath(dirname($path));
         if ($dir === false) {
-            throw new \RuntimeException("Directory does not exist: " . dirname($path));
+            throw new IOException("Directory does not exist: " . dirname($path));
         }
         return $dir . DIRECTORY_SEPARATOR . basename($path);
     }
@@ -220,7 +222,7 @@ class Index
 
             /** @infection-ignore-all Throw_: rename() returns false only on OS-level failure (cross-device, permissions); not reproducible in unit tests without filesystem mocking */
             if (!rename($tmp, $resolved)) {
-                throw new \RuntimeException("Failed to atomically replace index at {$resolved}.");
+                throw new IOException("Failed to atomically replace index at {$resolved}.");
             }
         } catch (\Throwable $e) {
             @unlink($tmp);
@@ -246,15 +248,15 @@ class Index
      * @param  string|null $language  BCP 47 language tag persisted in the index (e.g. 'en');
      *                                null disables stopword filtering and stemming.
      * @return static
-     * @throws \RuntimeException        If the index file already exists and $force is false.
-     * @throws \InvalidArgumentException If $language is set but has no stopword list or stemmer.
+     * @throws IOException    If the index file already exists and $force is false.
+     * @throws QueryException If $language is set but has no stopword list or stemmer.
      */
     /** @infection-ignore-all FalseValue: default $force=false is never exercised; callers always pass force explicitly */
     private function createIndex(string $indexName, bool $force = false, ?string $language = null): static
     {
         $path = $this->storagePath . $indexName;
         if (!$force && file_exists($path)) {
-            throw new \RuntimeException(
+            throw new IOException(
                 "Index already exists: {$path}. Pass force: true to overwrite."
             );
         }
@@ -324,13 +326,13 @@ class Index
      * Open an existing index file for searching.
      *
      * @param  string $indexName Filename of the index to open (e.g. 'articles.db').
-     * @throws \RuntimeException If the index file does not exist.
+     * @throws IOException If the index file does not exist.
      */
     private function selectIndex(string $indexName): void
     {
         $path = $this->storagePath . $indexName;
         if (!file_exists($path)) {
-            throw new \RuntimeException("Index {$path} does not exist", 1);
+            throw new IOException("Index {$path} does not exist", 1);
         }
         $this->pdo           = new PDO('sqlite:' . $path);
         $this->stmtCache     = [];
@@ -378,13 +380,12 @@ class Index
      * total_documents counter in the info table.
      *
      * @param array<string, mixed> $document Document fields; must contain an 'id' key.
-     * @throws \InvalidArgumentException If the document has no 'id' key.
-     * @throws \RuntimeException         If a document with the same ID already exists.
+     * @throws QueryException If the document has no 'id' key or the ID already exists.
      */
     public function insert(array $document): void
     {
         if (!array_key_exists('id', $document)) {
-            throw new \InvalidArgumentException("Document must contain an 'id' key.");
+            throw new QueryException("Document must contain an 'id' key.");
         }
 
         $this->wrapInTransaction(function () use ($document): void {
@@ -392,7 +393,7 @@ class Index
             $check = $this->stmt('docExistsCheck', 'SELECT 1 FROM doc_lengths WHERE doc_id = :id LIMIT 1');
             $check->execute([':id' => $id]);
             if ($check->fetchColumn() !== false) {
-                throw new \RuntimeException("Document {$id} already exists. Use update() to replace it.");
+                throw new QueryException("Document {$id} already exists. Use update() to replace it.");
             }
             /** @infection-ignore-all MethodCallRemoval: closeCursor is a resource-management call; omitting it leaves the cursor open but does not affect WAL-mode write correctness */
             $check->closeCursor();
@@ -414,9 +415,8 @@ class Index
      * Accepts any iterable, including generators, for memory-efficient streaming.
      *
      * @param iterable<array<string, mixed>> $documents Documents to index; each must contain an 'id' key.
-     * @throws \InvalidArgumentException If any document is missing an 'id' key, or if the input
-     *                                   contains duplicate IDs.
-     * @throws \RuntimeException         If any document ID already exists in the index.
+     * @throws QueryException If any document is missing an 'id' key, contains duplicate IDs,
+     *                        or any document ID already exists in the index.
      */
     public function insertMany(iterable $documents): void
     {
@@ -433,11 +433,11 @@ class Index
         $ids = [];
         foreach ($documents as $i => $document) {
             if (!array_key_exists('id', $document)) {
-                throw new \InvalidArgumentException("Document at index {$i} must contain an 'id' key.");
+                throw new QueryException("Document at index {$i} must contain an 'id' key.");
             }
             $id = self::extractId($document['id']);
             if (isset($ids[$id])) {
-                throw new \InvalidArgumentException("Duplicate id {$id} at index {$i}.");
+                throw new QueryException("Duplicate id {$id} at index {$i}.");
             }
             /** @infection-ignore-all TrueValue: isset() returns true for any non-null value including false; both true and false mark the slot as occupied */
             $ids[$id] = true;
@@ -509,7 +509,7 @@ class Index
                             $stmt->fetchAll(PDO::FETCH_COLUMN)
                         );
                         if ($existing !== []) {
-                            throw new \RuntimeException(
+                            throw new QueryException(
                                 'Documents already exist with ids: '
                                     . implode(', ', $existing) . '. Use update() to replace them.'
                             );
@@ -558,12 +558,12 @@ class Index
      * incremented (upsert semantics matching the previous delete+insert behaviour).
      *
      * @param array<string, mixed> $document New document data; must contain an 'id' key.
-     * @throws \InvalidArgumentException If the document has no 'id' key.
+     * @throws QueryException If the document has no 'id' key.
      */
     public function update(array $document): void
     {
         if (!array_key_exists('id', $document)) {
-            throw new \InvalidArgumentException("Document must contain an 'id' key.");
+            throw new QueryException("Document must contain an 'id' key.");
         }
         $this->wrapInTransaction(function () use ($document): void {
             $oldLength = $this->removeDocumentData(self::extractId($document['id']));
@@ -596,7 +596,7 @@ class Index
 
             foreach ($documents as $document) {
                 if (!array_key_exists('id', $document)) {
-                    throw new \InvalidArgumentException("Document must contain an 'id' key.");
+                    throw new QueryException("Document must contain an 'id' key.");
                 }
 
                 $oldLength = $this->removeDocumentData(self::extractId($document['id']));
@@ -2091,7 +2091,7 @@ class Index
     /**
      * Validate and extract an integer document ID from a raw value.
      *
-     * @throws \InvalidArgumentException If the value is not an integer or integer-like string.
+     * @throws QueryException If the value is not an integer or integer-like string.
      */
     private static function extractId(mixed $value): int
     {
@@ -2101,7 +2101,7 @@ class Index
         if (is_string($value) && preg_match('/^-?\d+$/', $value)) {
             return (int) $value;
         }
-        throw new \InvalidArgumentException(
+        throw new QueryException(
             "Document 'id' must be an integer, got " . get_debug_type($value) . '.'
         );
     }
@@ -2111,12 +2111,12 @@ class Index
      *
      * Called internally by createIndex() and selectIndex(). Passing null clears both.
      *
-     * @throws \InvalidArgumentException If $language is set but has no stopword list or stemmer.
+     * @throws QueryException If $language is set but has no stopword list or stemmer.
      */
     private function applyLanguage(?string $language): void
     {
         if ($language !== null && !Language::supports($language)) {
-            throw new \InvalidArgumentException("No stopword list or stemmer for language: '{$language}'");
+            throw new QueryException("No stopword list or stemmer for language: '{$language}'");
         }
         $this->language  = $language;
         $this->stopwords = $language !== null && Language::hasStopwords($language) ? new Stopwords($language) : null;
@@ -2161,7 +2161,7 @@ class Index
         $path = $this->storagePath . $indexName;
         if (file_exists($path)) {
             if (!$this->isFuzorIndex($path)) {
-                throw new \RuntimeException("Refusing to overwrite non-Fuzor file: {$path}");
+                throw new IOException("Refusing to overwrite non-Fuzor file: {$path}");
             }
             unlink($path);
             /** @infection-ignore-all Concat,ConcatOperandRemoval: WAL/SHM suffixes are cleanup artefacts; omitting them only leaves journal files on disk */
