@@ -80,15 +80,6 @@ class Index
     /** Active stemmer; null when no language is set or language has no stemmer. */
     private ?Stemmer $stemmer = null;
 
-    /** True when a stopword filter is active on this connection. */
-    public bool $stopwordsActive {
-        get => $this->stopwords !== null;
-    }
-
-    /** True when a stemmer is active on this connection. */
-    public bool $stemmerActive {
-        get => $this->stemmer !== null;
-    }
 
     // --- Constructor --------------------------------------------------------
 
@@ -897,8 +888,8 @@ class Index
         return [
             'raw_tokens'       => $verbose['raw_tokens'],
             'filtered_tokens'  => $filteredTokens,
-            'stopwords_active' => $this->stopwordsActive,
-            'stemmer_active'   => $this->stemmerActive,
+            'stopwords_active' => $this->stopwords !== null,
+            'stemmer_active'   => $this->stemmer !== null,
             'all_stripped'     => $verbose['all_stripped'],
             'index_info'       => $indexInfo,
             'tokens'           => $tokens,
