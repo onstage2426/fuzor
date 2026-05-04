@@ -31,8 +31,8 @@ class Index
     /** Max rows per chunk when each row uses 3 bind variables. */
     private const CHUNK_3P = 10_922;
 
-    /** Absolute path to the storage directory (guaranteed trailing slash). */
-    private string $storagePath;
+    /** Absolute path to the open SQLite index file. */
+    private string $path;
 
     /** Active PDO connection to the open SQLite index file; null after close(). */
     private ?PDO $pdo = null;
@@ -117,12 +117,12 @@ class Index
         if ($language !== null && !Language::supports($language)) {
             throw new QueryException("No stopword list or stemmer for language: '{$language}'");
         }
-        $resolved          = self::resolvePath($path);
-        $this->storagePath = dirname($resolved) . DIRECTORY_SEPARATOR;
+        $resolved    = self::resolvePath($path);
+        $this->path  = $resolved;
         if (file_exists($resolved) && !$force) {
-            $this->selectIndex(basename($resolved));
+            $this->selectIndex();
         } else {
-            $this->createIndex(basename($resolved), $force, $language);
+            $this->createIndex($force, $language);
         }
     }
 
@@ -231,7 +231,6 @@ class Index
      * type safety. doclist is WITHOUT ROWID (clustered on term_id, doc_id), replacing
      * the old term_id secondary index with a zero-heap-fetch primary scan.
      *
-     * @param  string      $indexName Filename for the SQLite database (e.g. 'articles.db').
      * @param  bool        $force     When true, any existing file is deleted before creation.
      * @param  string|null $language  BCP 47 language tag persisted in the index (e.g. 'en');
      *                                null disables stopword filtering and stemming.
@@ -241,19 +240,17 @@ class Index
      */
     /** @infection-ignore-all FalseValue: default $force=false is never exercised; callers always pass force explicitly */
     private function createIndex(
-        string $indexName,
         bool $force = false,
         ?string $language = null,
     ): static {
-        $path = $this->storagePath . $indexName;
-        if (!$force && file_exists($path)) {
+        if (!$force && file_exists($this->path)) {
             throw new IOException(
-                "Index already exists: {$path}. Pass force: true to overwrite."
+                "Index already exists: {$this->path}. Pass force: true to overwrite."
             );
         }
-        $this->flushIndex($indexName);
+        $this->flushIndex();
 
-        $pdo = new PDO('sqlite:' . $this->storagePath . $indexName);
+        $pdo = new PDO('sqlite:' . $this->path);
         $this->pdo           = $pdo;
         $this->stmtCache     = [];
         $this->bulkStmtCache = [];
@@ -327,16 +324,14 @@ class Index
     /**
      * Open an existing index file for searching.
      *
-     * @param  string $indexName Filename of the index to open (e.g. 'articles.db').
      * @throws IOException If the index file does not exist.
      */
-    private function selectIndex(string $indexName): void
+    private function selectIndex(): void
     {
-        $path = $this->storagePath . $indexName;
-        if (!file_exists($path)) {
-            throw new IOException("Index {$path} does not exist", 1);
+        if (!file_exists($this->path)) {
+            throw new IOException("Index {$this->path} does not exist", 1);
         }
-        $this->pdo           = new PDO('sqlite:' . $path);
+        $this->pdo           = new PDO('sqlite:' . $this->path);
         $this->stmtCache     = [];
         $this->bulkStmtCache = [];
         $this->infoCache     = null;
@@ -2489,18 +2484,16 @@ class Index
      * Removes the main file plus the `-wal` and `-shm` companions created by
      * WAL journal mode. No-ops silently for any file that does not exist.
      *
-     * @param string $indexName Filename of the index to delete.
      */
-    private function flushIndex(string $indexName): void
+    private function flushIndex(): void
     {
-        $path = $this->storagePath . $indexName;
-        if (file_exists($path)) {
-            if (!$this->isFuzorIndex($path)) {
-                throw new IOException("Refusing to overwrite non-Fuzor file: {$path}");
+        if (file_exists($this->path)) {
+            if (!$this->isFuzorIndex($this->path)) {
+                throw new IOException("Refusing to overwrite non-Fuzor file: {$this->path}");
             }
-            unlink($path);
+            unlink($this->path);
             /** @infection-ignore-all Concat,ConcatOperandRemoval: WAL/SHM suffixes are cleanup artefacts; omitting them only leaves journal files on disk */
-            foreach ([$path . '-wal', $path . '-shm'] as $journal) {
+            foreach ([$this->path . '-wal', $this->path . '-shm'] as $journal) {
                 if (file_exists($journal)) {
                     unlink($journal);
                 }
