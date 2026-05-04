@@ -90,9 +90,6 @@ class Index
         get => $this->stemmer !== null;
     }
 
-    /** True when this index stores term positions (enables proximity ranking and phrase search). */
-    public private(set) bool $storePositions = false;
-
     // --- Constructor --------------------------------------------------------
 
     /**
@@ -102,13 +99,11 @@ class Index
      * and the stored language is restored automatically — $language is ignored.
      * If the file does not exist, or $force is true, a new index is created.
      *
-     * @param  string      $path           Absolute or relative path to the SQLite index file.
-     * @param  string|null $language       BCP 47 language tag persisted at creation time (e.g. 'en').
-     *                                     Ignored when opening an existing index.
-     * @param  bool        $force          Overwrite any existing file at $path.
-     * @param  Config|null $config         Search tuning; null uses all defaults.
-     * @param  bool        $storePositions Persist term positions for proximity ranking and phrase search.
-     *                                     Ignored when opening an existing index.
+     * @param  string      $path     Absolute or relative path to the SQLite index file.
+     * @param  string|null $language BCP 47 language tag persisted at creation time (e.g. 'en').
+     *                               Ignored when opening an existing index.
+     * @param  bool        $force    Overwrite any existing file at $path.
+     * @param  Config|null $config   Search tuning; null uses all defaults.
      * @throws IOException    If the parent directory does not exist.
      * @throws QueryException If $language is set but has no stopword list or stemmer.
      */
@@ -117,7 +112,6 @@ class Index
         ?string $language = null,
         bool $force = false,
         ?Config $config = null,
-        bool $storePositions = false,
     ) {
         $this->config = $config ?? new Config();
         if ($language !== null && !Language::supports($language)) {
@@ -128,7 +122,7 @@ class Index
         if (file_exists($resolved) && !$force) {
             $this->selectIndex(basename($resolved));
         } else {
-            $this->createIndex(basename($resolved), $force, $language, $storePositions);
+            $this->createIndex(basename($resolved), $force, $language);
         }
     }
 
@@ -250,7 +244,6 @@ class Index
         string $indexName,
         bool $force = false,
         ?string $language = null,
-        bool $storePositions = false,
     ): static {
         $path = $this->storagePath . $indexName;
         if (!$force && file_exists($path)) {
@@ -313,20 +306,16 @@ class Index
         $stmt = $pdo->prepare("INSERT INTO info (key, value) VALUES ('language', ?)");
         $stmt->execute([$language ?? '']);
 
-        $pdo->exec("INSERT INTO info (key, value) VALUES ('store_positions', '" . ($storePositions ? '1' : '0') . "')");
-
-        if ($storePositions) {
-            $pdo->exec(
-                "CREATE TABLE IF NOT EXISTS positions (
-                    term_id  INTEGER NOT NULL,
-                    doc_id   INTEGER NOT NULL,
-                    position INTEGER NOT NULL,
-                    PRIMARY KEY (term_id, doc_id, position)
-                ) WITHOUT ROWID, STRICT"
-            );
-            $pdo->exec("CREATE INDEX IF NOT EXISTS 'main'.'positions_doc_id' ON positions ('doc_id');");
-            $this->storePositions = true;
-        }
+        $pdo->exec(
+            "CREATE TABLE IF NOT EXISTS positions (
+                term_id  INTEGER NOT NULL,
+                doc_id   INTEGER NOT NULL,
+                position INTEGER NOT NULL,
+                PRIMARY KEY (term_id, doc_id, position)
+            ) WITHOUT ROWID, STRICT"
+        );
+        /** @infection-ignore-all MethodCallRemoval: positions_doc_id is a performance index; DELETE-by-doc_id still works via full scan */
+        $pdo->exec("CREATE INDEX IF NOT EXISTS 'main'.'positions_doc_id' ON positions ('doc_id');");
 
         if ($language !== null) {
             $this->applyLanguage($language);
@@ -364,10 +353,6 @@ class Index
         /** @var array<int, string>|false $row */
         $lang  = (is_array($row) && $row[0] !== '') ? $row[0] : null;
         $this->applyLanguage($lang);
-
-        $stmtPos = $pdo->query("SELECT value FROM info WHERE key = 'store_positions' LIMIT 1");
-        $posRow  = $stmtPos ? $stmtPos->fetch(PDO::FETCH_NUM) : false;
-        $this->storePositions = is_array($posRow) && $posRow[0] === '1';
     }
 
     /**
@@ -1021,7 +1006,7 @@ class Index
             }
         }
 
-        if ($this->storePositions && count($termGroups) >= 2 && $this->config->proximityBoost > 0.0) {
+        if (count($termGroups) >= 2 && $this->config->proximityBoost > 0.0) {
             $this->applyProximityBoost($docScores, $termGroups);
         }
 
@@ -1310,11 +1295,9 @@ class Index
         $this->stmt('doclistDeleteByDoc', 'DELETE FROM doclist WHERE doc_id = :documentId')
             ->execute([':documentId' => $documentId]);
 
-        // Remove positions rows if this index stores them.
-        if ($this->storePositions) {
-            $this->stmt('positionsDeleteByDoc', 'DELETE FROM positions WHERE doc_id = :documentId')
-                ->execute([':documentId' => $documentId]);
-        }
+        // 4. Remove positions rows for this document.
+        $this->stmt('positionsDeleteByDoc', 'DELETE FROM positions WHERE doc_id = :documentId')
+            ->execute([':documentId' => $documentId]);
 
         // 4. Remove doc_lengths and return the old token count (false if the document was not found).
         $delStmt = $this->stmt(
@@ -1335,11 +1318,10 @@ class Index
     }
 
     /**
-     * Tokenise all non-id fields of a document and accumulate per-term counts.
+     * Tokenise all non-id fields of a document and accumulate per-term counts and positions.
      *
+     * Positions use a global counter across all fields so cross-field proximity is meaningful.
      * Shared by processDocument() and buildBatchBuffer().
-     * array_count_values is C-implemented: counts all tokens in one native pass,
-     * leaving only unique-term iteration to PHP.
      *
      * @param  array<string, mixed> $fields Document fields; 'id' is skipped.
      * @return array{termCounts: array<string, int>, termPositions: array<string, list<int>>, length: int}
@@ -1368,16 +1350,9 @@ class Index
                 if ($this->stemmer !== null) {
                     $tokens = $this->stemmer->stemTokens($tokens);
                 }
-                if ($this->storePositions) {
-                    foreach ($tokens as $token) {
-                        $termCounts[$token]      = ($termCounts[$token] ?? 0) + 1;
-                        $termPositions[$token][] = $position++;
-                    }
-                } else {
-                    foreach (array_count_values($tokens) as $token => $count) {
-                        /** @infection-ignore-all Coalesce: changing ?? 0 to (0 ?? ...) always yields 0; visible only for multi-field docs where a term appears in both fields */
-                        $termCounts[$token] = ($termCounts[$token] ?? 0) + $count;
-                    }
+                foreach ($tokens as $token) {
+                    $termCounts[$token]      = ($termCounts[$token] ?? 0) + 1;
+                    $termPositions[$token][] = $position++;
                 }
             }
         }
@@ -1402,7 +1377,7 @@ class Index
 
         $termIds = $this->upsertWordlist($termCounts);
         $this->saveDoclist($documentId, $termIds);
-        if ($this->storePositions && $termPositions !== []) {
+        if ($termPositions !== []) {
             $termIdPositions = [];
             foreach ($termPositions as $term => $positions) {
                 $termId = $this->termIdCache[$term] ?? null;
@@ -1512,11 +1487,9 @@ class Index
             ['termCounts' => $termCounts, 'termPositions' => $termPositions, 'length' => $length]
                 = $this->tokenizeDocumentFields($document);
 
-            $docTermBuffer[$documentId]   = $termCounts;
-            $docLengthBuffer[$documentId] = $length;
-            if ($this->storePositions) {
-                $docPositionBuffer[$documentId] = $termPositions;
-            }
+            $docTermBuffer[$documentId]      = $termCounts;
+            $docLengthBuffer[$documentId]    = $length;
+            $docPositionBuffer[$documentId]  = $termPositions;
 
             foreach ($termCounts as $term => $hits) {
                 if (isset($wordBuffer[$term])) {
@@ -1621,7 +1594,7 @@ class Index
         // Step 4: bulk-insert positions in (term_id, doc_id, position) PK order.
         // Mirrors the doclist sorted-insertion strategy: inserting in clustered PK order
         // turns random leaf-page seeks into sequential B-tree appends.
-        if ($this->storePositions && $docPositionBuffer !== []) {
+        if ($docPositionBuffer !== []) {
             $termDocPosMap = [];
             foreach ($docPositionBuffer as $docId => $termPositions) {
                 foreach ($termPositions as $term => $positions) {

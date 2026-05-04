@@ -2124,27 +2124,11 @@ class IndexTest extends TestCase
         $this->assertNotContains(2, $result->ids);
     }
 
-    // --- storePositions ---
+    // --- positions ---
 
-    public function testStorePositionsFlagDefaultsFalse(): void
+    public function testPositionsWritesCorrectRowCount(): void
     {
         $index = new Index($this->dbPath);
-        $this->assertFalse($index->storePositions);
-    }
-
-    public function testStorePositionsFlagPersistedAndRestoredOnOpen(): void
-    {
-        $index = new Index($this->dbPath, storePositions: true);
-        $this->assertTrue($index->storePositions);
-        $index->close();
-
-        $reopened = new Index($this->dbPath);
-        $this->assertTrue($reopened->storePositions);
-    }
-
-    public function testStorePositionsWritesCorrectRowCount(): void
-    {
-        $index = new Index($this->dbPath, storePositions: true);
         // "city car" → 2 tokens → 2 position rows
         $index->insert(['id' => 1, 'title' => 'city car']);
         $index->close();
@@ -2158,7 +2142,7 @@ class IndexTest extends TestCase
 
     public function testStorePositionsRecordsCorrectPositionValues(): void
     {
-        $index = new Index($this->dbPath, storePositions: true);
+        $index = new Index($this->dbPath);
         $index->insert(['id' => 1, 'title' => 'city car review']);
 
         $pdo  = new \PDO('sqlite:' . $this->dbPath);
@@ -2180,7 +2164,7 @@ class IndexTest extends TestCase
 
     public function testStorePositionsGlobalCounterAcrossFields(): void
     {
-        $index = new Index($this->dbPath, storePositions: true);
+        $index = new Index($this->dbPath);
         // title contributes tokens at 0, 1; body continues from 2, 3
         $index->insert(['id' => 1, 'title' => 'city car', 'body' => 'fast sedan']);
 
@@ -2203,7 +2187,7 @@ class IndexTest extends TestCase
 
     public function testStorePositionsDeletedOnDocumentRemoval(): void
     {
-        $index = new Index($this->dbPath, storePositions: true);
+        $index = new Index($this->dbPath);
         $index->insert(['id' => 1, 'title' => 'city car']);
         $index->delete(1);
         $index->close();
@@ -2217,7 +2201,7 @@ class IndexTest extends TestCase
 
     public function testStorePositionsInsertManyWritesCorrectRows(): void
     {
-        $index = new Index($this->dbPath, storePositions: true);
+        $index = new Index($this->dbPath);
         $index->insertMany([
             ['id' => 1, 'title' => 'city car'],     // 2 tokens
             ['id' => 2, 'title' => 'fast sedan review'], // 3 tokens
@@ -2235,14 +2219,14 @@ class IndexTest extends TestCase
         $this->assertSame(3, $c2);
     }
 
-    public function testNoPositionsTableWhenFlagFalse(): void
+    public function testPositionsTableAlwaysCreated(): void
     {
         new Index($this->dbPath);
         $pdo   = new \PDO('sqlite:' . $this->dbPath);
         $stmt  = $pdo->query("SELECT name FROM sqlite_master WHERE type='table'");
         $this->assertNotFalse($stmt);
         $tables = $stmt->fetchAll(\PDO::FETCH_COLUMN);
-        $this->assertNotContains('positions', $tables);
+        $this->assertContains('positions', $tables);
     }
 
     // --- Proximity ranking ---------------------------------------------------
@@ -2250,7 +2234,7 @@ class IndexTest extends TestCase
     public function testProximityBoostRanksCloserTermsHigher(): void
     {
         // doc 1: terms adjacent (minSpan = 1), doc 2: terms far apart (minSpan = 10)
-        $index = new Index($this->dbPath, storePositions: true);
+        $index = new Index($this->dbPath);
         $index->insertMany([
             ['id' => 1, 'title' => 'fast car review review review review review review review review review'],
             ['id' => 2, 'title' => 'fast review review review review review review review review review car'],
@@ -2265,7 +2249,7 @@ class IndexTest extends TestCase
     public function testProximityBoostDisabledWhenBoostIsZero(): void
     {
         $config = new Config(proximityBoost: 0.0);
-        $index  = new Index($this->dbPath, storePositions: true, config: $config);
+        $index  = new Index($this->dbPath, config: $config);
         $index->insertMany([
             ['id' => 1, 'title' => 'fast car review review review review review review review review review'],
             ['id' => 2, 'title' => 'fast review review review review review review review review review car'],
@@ -2278,22 +2262,9 @@ class IndexTest extends TestCase
         $this->assertContains(2, $results->ids);
     }
 
-    public function testProximityBoostNoEffectWithoutPositions(): void
-    {
-        // Index without storePositions — proximity should silently do nothing.
-        $index = new Index($this->dbPath);
-        $index->insertMany([
-            ['id' => 1, 'title' => 'fast car review review review review review review review review review'],
-            ['id' => 2, 'title' => 'fast review review review review review review review review review car'],
-        ]);
-
-        $results = $index->search('fast car');
-        $this->assertCount(2, $results->ids);
-    }
-
     public function testProximityBoostNoEffectOnSingleKeyword(): void
     {
-        $index = new Index($this->dbPath, storePositions: true);
+        $index = new Index($this->dbPath);
         $index->insertMany([
             ['id' => 1, 'title' => 'fast sedan'],
             ['id' => 2, 'title' => 'fast coupe'],
@@ -2307,7 +2278,7 @@ class IndexTest extends TestCase
     public function testProximityBoostPartialMatchDocNotBoosted(): void
     {
         // doc 1 has both terms, doc 2 has only "fast" — partial match should not get boosted.
-        $index = new Index($this->dbPath, storePositions: true);
+        $index = new Index($this->dbPath);
         $index->insertMany([
             ['id' => 1, 'title' => 'fast car'],
             ['id' => 2, 'title' => 'fast review'],
