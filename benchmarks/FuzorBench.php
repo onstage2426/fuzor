@@ -50,12 +50,22 @@ class FuzorBench
     // Shared helpers
     // -----------------------------------------------------------------------
 
+    private const MOVIES_URL   = 'https://www.meilisearch.com/movies.json';
+    private const MOVIES_CACHE = '/tmp/fuzor_phpbench_movies.json';
+
     private static function loadDocs(): void
     {
         if (self::$docs !== []) {
             return;
         }
-        $json = (string) file_get_contents(__DIR__ . '/../resources/datasets/movies.json');
+        if (!file_exists(self::MOVIES_CACHE)) {
+            $data = file_get_contents(self::MOVIES_URL);
+            if ($data === false) {
+                throw new \RuntimeException('Failed to download movies dataset from ' . self::MOVIES_URL);
+            }
+            file_put_contents(self::MOVIES_CACHE, $data);
+        }
+        $json = (string) file_get_contents(self::MOVIES_CACHE);
         /** @var list<array<string, mixed>> $movies */
         $movies = json_decode($json, true);
         self::$docs = array_map(fn(array $m): array => [
@@ -71,7 +81,7 @@ class FuzorBench
             return;
         }
         self::loadDocs();
-        $idx = new Index(self::SEARCH_DB, force: true);
+        $idx = new Index(self::SEARCH_DB, force: true, language: 'en');
         $idx->insertMany(self::$docs);
         $idx->close();
     }
@@ -104,14 +114,14 @@ class FuzorBench
 
     #[Groups(['index'])]
     #[BeforeMethods('setUpIndex')]
-    #[Iterations(3)]
+    #[Iterations(2)]
     #[Revs(1)]
     #[Warmup(1)]
     public function benchInsertMany(): void
     {
         $path = sys_get_temp_dir() . '/fuzor_bench_im_' . getmypid() . '.db';
         @unlink($path);
-        $idx = new Index($path, force: true);
+        $idx = new Index($path, force: true, language: 'en');
         $idx->insertMany(self::$docs);
         $idx->close();
         @unlink($path);
@@ -126,8 +136,8 @@ class FuzorBench
     {
         $path = sys_get_temp_dir() . '/fuzor_bench_is_' . getmypid() . '.db';
         @unlink($path);
-        $idx = new Index($path, force: true);
-        foreach (self::$docs as $doc) {
+        $idx = new Index($path, force: true, language: 'en');
+        foreach (array_slice(self::$docs, 0, 1000) as $doc) {
             $idx->insert($doc);
         }
         $idx->close();

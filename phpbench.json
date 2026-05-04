@@ -4,7 +4,7 @@
     "runner.path": "benchmarks",
     "runner.file_pattern": "*Bench.php",
     "runner.php_config": {
-        "memory_limit": "512M"
+        "memory_limit": "2048M"
     },
     "report.generators": {
         "default": {
