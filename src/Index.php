@@ -704,14 +704,7 @@ class Index
      */
     public function delete(int $id): void
     {
-        $this->wrapInTransaction(function () use ($id): void {
-            $length = $this->removeDocumentData($id);
-
-            if ($length !== false) {
-                /** @infection-ignore-all CastInt: removeDocumentData already returns int; the cast is defensive only */
-                $this->adjustStats(-1, -(int) $length);
-            }
-        });
+        $this->deleteMany([$id]);
     }
 
     /**
@@ -752,12 +745,7 @@ class Index
      */
     public function has(int $id): bool
     {
-        $stmt = $this->stmt('docExistsCheck', 'SELECT 1 FROM doc_lengths WHERE doc_id = :id LIMIT 1');
-        $stmt->execute([':id' => $id]);
-        $result = $stmt->fetchColumn() !== false;
-        /** @infection-ignore-all MethodCallRemoval: closeCursor is resource cleanup; omitting it does not affect the returned boolean */
-        $stmt->closeCursor();
-        return $result;
+        return $this->hasMany([$id])[$id];
     }
 
     /**
