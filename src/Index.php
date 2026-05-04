@@ -1285,7 +1285,8 @@ class Index
         // Orphan terms may have been pruned from wordlist; stale cache entries would
         // corrupt the doclist on re-insertion of those terms in a future insertMany call.
         /** @infection-ignore-all MethodCallRemoval: skipping cache invalidation leaves stale termId/wordlist entries; visible only on delete+re-insert within the same session (not covered by tests) */
-        $this->invalidateWriteCaches();
+        $this->termIdCache   = [];
+        $this->wordlistCache = [];
 
         /** @infection-ignore-all FalseValue,CastInt: the FalseValue branch is only reached when $length is false (doc not found); callers check !== false so returning true is equivalent for the branch-not-taken case. CastInt: $length from RETURNING is already int-like */
         return $length === false ? false : (int) $length;
@@ -1776,12 +1777,6 @@ class Index
      * wordlistCache: num_hits / num_docs on wordlist rows have changed, so cached
      *                search results would return stale scoring data.
      */
-    private function invalidateWriteCaches(): void
-    {
-        $this->termIdCache   = [];
-        $this->wordlistCache = [];
-    }
-
     /**
      * Update total_documents and avg_doc_length after any document mutation.
      *
@@ -1819,10 +1814,9 @@ class Index
         $statsStmt->execute([':n' => (string) $newN, ':avg' => (string) $newAvg]);
 
         // Keep infoCache coherent so the next getInfoValues() call needs no DB read.
-        // wordlistCache: num_hits / num_docs on wordlist rows changed — must clear.
-        // termIdCache:   term→ID mappings are stable after a stats-only write; IDs only
-        //                become stale when terms are pruned, which removeDocumentData()
-        //                handles via its own invalidateWriteCaches() call.
+        // wordlistCache must be cleared: num_hits/num_docs on wordlist rows changed.
+        // termIdCache is stable after a stats-only write; IDs only become stale when
+        // terms are pruned, which removeDocumentData() handles directly.
         $this->infoCache = [
             'total_documents' => (string) $newN,
             /** @infection-ignore-all CastString: infoCache stores strings for consistency with PDO fetch; float stored in cache is coerced to string on next read */
