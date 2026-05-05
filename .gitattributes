@@ -1,14 +1,18 @@
 # CI / dev tooling
-.github/           export-ignore
-phpstan.neon       export-ignore
-phpunit.xml.dist   export-ignore
+/.git*              export-ignore
+/.editorconfig      export-ignore
+/phpstan.neon       export-ignore
+/phpunit.xml.dist   export-ignore
+/phpcs.xml.dist     export-ignore
+/composer.lock      export-ignore
 
 # Test suite
-tests/             export-ignore
+/tests/             export-ignore
+/infection.json5    export-ignore
 
 # Documentation
-docs/              export-ignore
+/docs/              export-ignore
 
 # Benchmarks and data
-benchmarks/        export-ignore
-phpbench.json      export-ignore
+/benchmarks/        export-ignore
+/phpbench.json      export-ignore
