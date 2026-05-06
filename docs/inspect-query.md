@@ -5,6 +5,7 @@
 ```php
 $result = $index->inspectQuery('fast connections');
 $result = $index->inspectQuery('fast connections', fuzzy: true);
+$result = $index->inspectQuery('fast con', asYouType: true); // prefix on last token
 ```
 
 Read-only: makes no writes and does not affect search results.

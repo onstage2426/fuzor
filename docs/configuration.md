@@ -1,31 +1,28 @@
 # Configuration
 
-All configuration properties on an `IndexHandle` instance. Properties are set directly and take effect on the next search call.
+## Search tuning — `Config` DTO
+
+Pass a `Config` object at construction time to tune BM25 and fuzzy behaviour. All properties are read-only; create a new instance to use different values.
 
 ```php
-$index = Index::open('/path/to/articles.db');
+use Fuzor\Config;
+use Fuzor\Index;
 
-$index->asYouType        = false;
-$index->fuzzyDistance    = 1;
-$index->maxDocs          = 200;
+$index = new Index('/path/to/articles.db', config: new Config(
+    maxDocs: 200,
+    k1:      1.5,
+    b:       0.8,
+));
 ```
 
-## Properties
+Omitting `config` uses the optimised defaults shown below.
 
 | Property             | Default | Effect                                                                 |
 |----------------------|---------|------------------------------------------------------------------------|
-| `asYouType`          | `true`  | Last query word matched as a prefix — `"cit"` matches `"city"`        |
-| `fuzzyPrefixLength`  | `3`     | Characters that must match exactly before fuzzy edit distance kicks in |
-| `fuzzyMaxExpansions` | `50`    | Max wordlist candidates evaluated during fuzzy search                  |
-| `fuzzyDistance`      | `2`     | Max Levenshtein edit distance accepted as a fuzzy match                |
 | `maxDocs`            | `500`   | Max documents fetched per keyword before BM25 scoring                  |
 | `k1`                 | `1.2`   | BM25 term frequency saturation — lower reduces weight of repeated terms|
 | `b`                  | `0.75`  | BM25 length normalisation — `0` disables it, `1` fully normalises     |
-
-## Read-only
-
-| Property   | Effect                                                                        |
-|------------|-------------------------------------------------------------------------------|
-| `language` | BCP 47 language tag active on this index; `null` if none was set at creation  |
-
-Language is set at index creation time and cannot be changed. See [language.md](language.md).
+| `fuzzyPrefixLength`  | `3`     | Characters that must match exactly before fuzzy edit distance kicks in |
+| `fuzzyMaxExpansions` | `50`    | Max wordlist candidates evaluated during fuzzy search                  |
+| `fuzzyDistance`      | `2`     | Max Levenshtein edit distance accepted as a fuzzy match                |
+| `proximityBoost`     | `1.0`   | Strength of bonus for multi-term queries where terms appear close together; `0` disables |

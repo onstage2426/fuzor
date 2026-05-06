@@ -9,14 +9,6 @@ echo $hl->highlight('fast sedan', $doc['title']);
 // "<mark>Fast</mark> <mark>sedan</mark> review"
 ```
 
-You can also instantiate `Highlighter` directly if you need it without an index handle:
-
-```php
-use Fuzor\Highlighter;
-
-$hl = new Highlighter();
-```
-
 ## Multiple fields at once
 
 Prefer `highlightMany()` over calling `highlight()` in a loop — it builds the regex once and applies it to all fields:
@@ -35,16 +27,11 @@ Prefer `highlightMany()` over calling `highlight()` in a loop — it builds the 
 | `open`      | `'<mark>'`   | Tag inserted before each match                           |
 | `close`     | `'</mark>'`  | Tag inserted after each match                            |
 | `asYouType` | `true`       | Last token matched as a prefix — `"merc"` highlights `"Mercedes"` |
-| `language`  | `null`       | BCP 47 tag for tokenisation; must match the index        |
+
+The language is taken from the index automatically.
 
 ```php
-$hl = new Highlighter(open: '<b>', close: '</b>');
-
-// Disable prefix matching on the last token
-$hl = new Highlighter(asYouType: false);
-
-// Direct construction with a language (matches CJK tokenisation)
-$hl = new Highlighter(language: 'zh');
+$hl = $index->highlighter(open: '<b>', close: '</b>', asYouType: false);
 ```
 
 ## Notes

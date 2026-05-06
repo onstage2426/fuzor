@@ -25,38 +25,43 @@ composer require onstage2426/fuzor
 
 ## Quickstart
 
-### Creating and opening an index
+### Opening and creating an index
+
+The constructor opens an existing index or creates a new one:
 
 ```php
 use Fuzor\Index;
 
-// Create a new index
-$index = Index::create('/path/to/articles.db');
-
-// Open an existing index
-$index = Index::open('/path/to/articles.db');
+$index = new Index('/path/to/articles.db');              // open or create
+$index = new Index('/path/to/articles.db', force: true); // overwrite existing
 ```
 
 ### Adding, updating, and removing items
 
 Each document requires an `id`. All other fields are concatenated and indexed together.
 
+The `Many` variants are significantly faster when indexing multiple documents.
+
 ```php
 // Add one item
 $index->insert(['id' => 1, 'title' => 'Fast sedan', 'body' => 'Comfortable city car.']);
-
-// Add many at once — faster than inserting one by one
 $index->insertMany([
     ['id' => 1, 'title' => 'Fast sedan',    'body' => 'Comfortable city car with great fuel economy.'],
     ['id' => 2, 'title' => 'Off-road SUV',  'body' => 'Built for adventure. Handles any terrain.'],
     ['id' => 3, 'title' => 'Electric coupe','body' => 'Zero emissions, instant torque, sporty design.'],
 ]);
 
-// Replace an item
+// Replace an existing item (throws if ID not found)
 $index->update(['id' => 1, 'title' => 'Updated sedan', 'body' => 'New content.']);
+$index->updateMany(...);
+
+// Create or replace (upsert semantics)
+$index->upsert(['id' => 1, 'title' => 'Updated sedan', 'body' => 'New content.']);
+$index->upsertMany(...);
 
 // Remove an item
 $index->delete(2);
+$index->deleteMany([1, 2, 3]);
 ```
 
 ### Searching
@@ -73,7 +78,7 @@ $results = $index->searchBoolean('sedan or coupe -electric');
 Pass a BCP 47 language tag to enable stopword filtering and stemming:
 
 ```php
-$index = Index::create($path, language: 'en');
+$index = new Index($path, language: 'en');
 ```
 
 ### Snippeting and highlighting
@@ -85,4 +90,5 @@ echo $snip->snippet('fast connections', $doc['body']);
 
 $hl = $index->highlighter();
 echo $hl->highlight('fast sedan', $doc['title']);
+// "Sporty <mark>fast sedan</mark> for sale"
 ```

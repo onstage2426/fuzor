@@ -1,11 +1,11 @@
 # Language
 
-Pass a BCP 47 language tag to `Index::create()` to enable stopword filtering and Snowball stemming. If your documents are in a known language, setting it will significantly improve search quality — if unsure, leave it off.
+Pass a BCP 47 language tag to the `Index` constructor to enable stopword filtering and Snowball stemming. If your documents are in a known language, setting it will significantly improve search quality — if unsure, leave it off.
 
-The language is persisted in the index file and immutable after creation. It is restored automatically on `Index::open()` — you never need to re-specify it.
+The language is persisted in the index file and immutable after creation. It is restored automatically when you open an existing index — you never need to re-specify it.
 
 ```php
-$index = Index::create('/path/to/articles.db', language: 'en');
+$index = new Index('/path/to/articles.db', language: 'en');
 ```
 
 ## What it does
@@ -39,7 +39,7 @@ If you need higher precision for Chinese content at scale, you can pre-segment w
 Language cannot be changed on an existing index. Recreate the index from your document store:
 
 ```php
-$index = Index::create($path, force: true, language: 'fr');
+$index = new Index($path, force: true, language: 'fr');
 $index->insertMany($yourDocs);
 ```
 
@@ -51,14 +51,14 @@ $index->language; // 'en', 'fr', null, …
 
 ## Supported languages
 
-To get the full list at runtime — useful for building a select list in a UI — call `Index::languages()`:
+To get the full list at runtime — useful for building a select list in a UI — call `Language::all()`:
 
 ```php
-$languages = Index::languages();
+$languages = \Fuzor\Language::all();
 // ['af' => 'Afrikaans', 'ar' => 'Arabic', 'en' => 'English', …]
 ```
 
-Every tag returned is a valid `$language` argument for `Index::create()`.
+Every tag returned is a valid `$language` argument for the `Index` constructor.
 
 | Code | Language   | Stopwords | Stemmer |
 |------|------------|:---------:|:-------:|
