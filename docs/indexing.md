@@ -33,6 +33,13 @@ use Fuzor\Config;
 
 $index = new Index('/path/to/articles.db', config: new Config(maxDocs: 200));
 ```
+
+Pass `readonly: true` to open an existing index in read-only mode. All write methods throw `IOException`; searches work normally:
+
+```php
+$index = new Index('/path/to/articles-read.db', readonly: true);
+```
+
 ## Inserting
 
 
@@ -152,6 +159,14 @@ Returns the total number of indexed documents. Reads from the cached `info` tabl
 
 ```php
 $index->count(); // int
+```
+
+## Snapshots
+
+Writes an atomic point-in-time copy of the index to a new path. Safe to call while writes are in progress.
+
+```php
+$index->snapshotTo('/path/to/articles-snapshot.db');
 ```
 
 ## Atomic rebuild

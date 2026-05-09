@@ -80,6 +80,9 @@ class Index
     /** Active stemmer; null when no language is set or language has no stemmer. */
     private ?Stemmer $stemmer = null;
 
+    /** Whether this index was opened in read-only mode. */
+    private bool $readonly = false;
+
 
     // --- Constructor --------------------------------------------------------
 
@@ -95,21 +98,31 @@ class Index
      *                               Ignored when opening an existing index.
      * @param  bool        $force    Overwrite any existing file at $path.
      * @param  Config|null $config   Search tuning; null uses all defaults.
-     * @throws IOException    If the parent directory does not exist.
-     * @throws QueryException If $language is set but has no stopword list or stemmer.
+     * @param  bool        $readonly Open in read-only mode; all write methods throw IOException.
+     * @throws IOException    If the parent directory does not exist, or readonly is true and the file does not exist.
+     * @throws QueryException If $language is set but has no stopword list or stemmer,
+     *                        or if both $readonly and $force are true.
      */
     public function __construct(
         string $path,
         ?string $language = null,
         bool $force = false,
         ?Config $config = null,
+        bool $readonly = false,
     ) {
-        $this->config = $config ?? new Config();
+        $this->config   = $config ?? new Config();
+        $this->readonly = $readonly;
+        if ($readonly && $force) {
+            throw new QueryException("Cannot force-create a readonly index.");
+        }
         if ($language !== null && !Language::supports($language)) {
             throw new QueryException("No stopword list or stemmer for language: '{$language}'");
         }
-        $resolved    = self::resolvePath($path);
-        $this->path  = $resolved;
+        $resolved   = self::resolvePath($path);
+        $this->path = $resolved;
+        if ($readonly && !file_exists($resolved)) {
+            throw new IOException("Index does not exist: {$resolved}");
+        }
         if (file_exists($resolved) && !$force) {
             $this->selectIndex();
         } else {
@@ -211,6 +224,53 @@ class Index
         }
 
         return new self($resolved);
+    }
+
+    /**
+     * Write an atomic snapshot of this index to $path.
+     *
+     * Uses VACUUM INTO to copy the current state to a uniquely-named temp file on the
+     * same filesystem, then renames it over $path in a single POSIX-atomic operation.
+     * Concurrent readers of the old file at $path are unaffected — the inode stays
+     * alive until their last open file descriptor is closed.
+     *
+     * Safe to call while writes are in progress on this index: VACUUM INTO reads a
+     * consistent snapshot under a shared read transaction; WAL mode ensures writers
+     * are never blocked.
+     *
+     * Any stale .tmp-* files left by previous crashed snapshot attempts are removed
+     * before the new temp file is created. The new temp file is removed if the
+     * VACUUM INTO or rename fails.
+     *
+     * @param  string $path Absolute or relative path for the snapshot file.
+     * @throws IOException If the rename fails or the parent directory does not exist.
+     */
+    public function snapshotTo(string $path): void
+    {
+        $resolved = self::resolvePath($path);
+
+        foreach (glob($resolved . '.tmp-*') ?: [] as $stale) {
+            @unlink($stale);
+        }
+
+        $tmp = $resolved . '.tmp-' . bin2hex(random_bytes(4));
+
+        try {
+            assert($this->pdo !== null);
+            $this->pdo->exec('VACUUM INTO ' . $this->pdo->quote($tmp));
+            if (!rename($tmp, $resolved)) {
+                throw new IOException("Failed to atomically write snapshot to {$resolved}.");
+            }
+        } catch (\Throwable $e) {
+            @unlink($tmp);
+            throw $e;
+        }
+
+        foreach (['-wal', '-shm'] as $suffix) {
+            if (file_exists($resolved . $suffix)) {
+                @unlink($resolved . $suffix);
+            }
+        }
     }
 
     // --- Index lifecycle (private, called by static factories) --------------
@@ -322,7 +382,11 @@ class Index
         if (!file_exists($this->path)) {
             throw new IOException("Index {$this->path} does not exist", 1);
         }
-        $this->pdo           = new PDO('sqlite:' . $this->path);
+        $encodedPath         = implode('/', array_map('rawurlencode', explode('/', $this->path)));
+        $dsn                 = $this->readonly
+            ? 'sqlite:file://' . $encodedPath . '?mode=ro'
+            : 'sqlite:' . $this->path;
+        $this->pdo           = new PDO($dsn);
         $this->stmtCache     = [];
         $this->bulkStmtCache = [];
         $this->infoCache     = null;
@@ -356,7 +420,9 @@ class Index
         $this->termIdCache   = [];
         $this->wordlistCache = [];
         /** @infection-ignore-all MethodCallRemoval: SQLite triggers WAL checkpointing automatically on connection close; explicit TRUNCATE is a performance hint */
-        $this->pdo?->exec('PRAGMA wal_checkpoint(TRUNCATE)');
+        if (!$this->readonly) {
+            $this->pdo?->exec('PRAGMA wal_checkpoint(TRUNCATE)');
+        }
         $this->pdo = null;
     }
 
@@ -373,6 +439,7 @@ class Index
      */
     public function insert(array $document): void
     {
+        $this->assertWritable();
         if (!array_key_exists('id', $document)) {
             throw new QueryException("Document must contain an 'id' key.");
         }
@@ -409,6 +476,7 @@ class Index
      */
     public function insertMany(iterable $documents): void
     {
+        $this->assertWritable();
         /** @infection-ignore-all LogicalNot: iterator_to_array() accepts arrays in PHP 8.1+; converting an array produces the same array */
         if (!is_array($documents)) {
             $documents = iterator_to_array($documents, false);
@@ -547,6 +615,7 @@ class Index
      */
     public function update(array $document): void
     {
+        $this->assertWritable();
         $this->replaceOne($document, strict: true);
     }
 
@@ -560,6 +629,7 @@ class Index
      */
     public function upsert(array $document): void
     {
+        $this->assertWritable();
         $this->replaceOne($document, strict: false);
     }
 
@@ -574,6 +644,7 @@ class Index
      */
     public function updateMany(iterable $documents): void
     {
+        $this->assertWritable();
         $this->replaceMany($documents, strict: true);
     }
 
@@ -587,6 +658,7 @@ class Index
      */
     public function upsertMany(iterable $documents): void
     {
+        $this->assertWritable();
         $this->replaceMany($documents, strict: false);
     }
 
@@ -704,6 +776,7 @@ class Index
      */
     public function delete(int $id): void
     {
+        $this->assertWritable();
         $this->deleteMany([$id]);
     }
 
@@ -714,6 +787,7 @@ class Index
      */
     public function deleteMany(array $ids): void
     {
+        $this->assertWritable();
         /** @infection-ignore-all ReturnRemoval: empty $ids produces zero iterations and docDelta=0; adjustStats is not called — identical result */
         if (empty($ids)) {
             return;
@@ -2392,6 +2466,18 @@ class Index
     }
 
     /**
+     * Throw if this index was opened in read-only mode.
+     *
+     * @throws IOException
+     */
+    private function assertWritable(): void
+    {
+        if ($this->readonly) {
+            throw new IOException("Cannot write to a readonly index.");
+        }
+    }
+
+    /**
      * Validate and extract an integer document ID from a raw value.
      *
      * @throws QueryException If the value is not an integer or integer-like string.
@@ -2441,9 +2527,13 @@ class Index
     private function applyPragmas(): void
     {
         assert($this->pdo !== null);
+        if (!$this->readonly) {
+            $this->pdo->exec('
+                PRAGMA journal_mode  = WAL;
+                PRAGMA synchronous   = NORMAL;
+            ');
+        }
         $this->pdo->exec('
-            PRAGMA journal_mode       = WAL;
-            PRAGMA synchronous        = NORMAL;
             PRAGMA cache_size         = -65536;
             PRAGMA temp_store         = MEMORY;
             PRAGMA mmap_size          = 2147483648;

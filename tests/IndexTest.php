@@ -2288,4 +2288,199 @@ class IndexTest extends TestCase
         // doc 1 should rank above doc 2 (has both terms; doc 2 misses "car").
         $this->assertSame(1, $results->ids[0]);
     }
+
+    // --- readonly ---
+
+    public function testReadonlyOpenSucceeds(): void
+    {
+        new Index($this->dbPath)->close();
+        $index = new Index($this->dbPath, readonly: true);
+        $this->assertInstanceOf(Index::class, $index);
+    }
+
+    public function testReadonlyWithForceTrowsQueryException(): void
+    {
+        $this->expectException(QueryException::class);
+        new Index($this->dbPath, force: true, readonly: true);
+    }
+
+    public function testReadonlyWithNonExistentFileThrowsIOException(): void
+    {
+        $this->expectException(IOException::class);
+        new Index($this->dbPath, readonly: true);
+    }
+
+    public function testReadonlySearchWorks(): void
+    {
+        $write = new Index($this->dbPath);
+        $write->insert(['id' => 1, 'title' => 'electric sedan']);
+        $write->close();
+
+        $read = new Index($this->dbPath, readonly: true);
+        $this->assertContains(1, $read->search('sedan')->ids);
+    }
+
+    public function testReadonlyInsertThrows(): void
+    {
+        new Index($this->dbPath)->close();
+        $this->expectException(IOException::class);
+        (new Index($this->dbPath, readonly: true))->insert(['id' => 1, 'title' => 'x']);
+    }
+
+    public function testReadonlyInsertManyThrows(): void
+    {
+        new Index($this->dbPath)->close();
+        $this->expectException(IOException::class);
+        (new Index($this->dbPath, readonly: true))->insertMany([['id' => 1, 'title' => 'x']]);
+    }
+
+    public function testReadonlyUpdateThrows(): void
+    {
+        $write = new Index($this->dbPath);
+        $write->insert(['id' => 1, 'title' => 'x']);
+        $write->close();
+        $this->expectException(IOException::class);
+        (new Index($this->dbPath, readonly: true))->update(['id' => 1, 'title' => 'y']);
+    }
+
+    public function testReadonlyUpsertThrows(): void
+    {
+        new Index($this->dbPath)->close();
+        $this->expectException(IOException::class);
+        (new Index($this->dbPath, readonly: true))->upsert(['id' => 1, 'title' => 'x']);
+    }
+
+    public function testReadonlyUpdateManyThrows(): void
+    {
+        new Index($this->dbPath)->close();
+        $this->expectException(IOException::class);
+        (new Index($this->dbPath, readonly: true))->updateMany([['id' => 1, 'title' => 'x']]);
+    }
+
+    public function testReadonlyUpsertManyThrows(): void
+    {
+        new Index($this->dbPath)->close();
+        $this->expectException(IOException::class);
+        (new Index($this->dbPath, readonly: true))->upsertMany([['id' => 1, 'title' => 'x']]);
+    }
+
+    public function testReadonlyDeleteThrows(): void
+    {
+        new Index($this->dbPath)->close();
+        $this->expectException(IOException::class);
+        (new Index($this->dbPath, readonly: true))->delete(1);
+    }
+
+    public function testReadonlyDeleteManyThrows(): void
+    {
+        new Index($this->dbPath)->close();
+        $this->expectException(IOException::class);
+        (new Index($this->dbPath, readonly: true))->deleteMany([1]);
+    }
+
+    // --- snapshotTo ---
+
+    public function testSnapshotToCreatesFile(): void
+    {
+        $readPath = sys_get_temp_dir() . '/fuzor_snap_' . uniqid() . '.db';
+        try {
+            $write = new Index($this->dbPath);
+            $write->insert(['id' => 1, 'title' => 'electric sedan']);
+            $write->snapshotTo($readPath);
+            $this->assertFileExists($readPath);
+        } finally {
+            @unlink($readPath);
+        }
+    }
+
+    public function testSnapshotToIsSearchable(): void
+    {
+        $readPath = sys_get_temp_dir() . '/fuzor_snap_' . uniqid() . '.db';
+        try {
+            $write = new Index($this->dbPath);
+            $write->insertMany([
+                ['id' => 1, 'title' => 'electric sedan'],
+                ['id' => 2, 'title' => 'off-road suv'],
+            ]);
+            $write->snapshotTo($readPath);
+
+            $read = new Index($readPath);
+            $this->assertContains(1, $read->search('sedan')->ids);
+            $this->assertContains(2, $read->search('suv')->ids);
+            $read->close();
+        } finally {
+            foreach ([$readPath, $readPath . '-wal', $readPath . '-shm'] as $f) {
+                @unlink($f);
+            }
+        }
+    }
+
+    public function testSnapshotToIsOpenableReadonly(): void
+    {
+        $readPath = sys_get_temp_dir() . '/fuzor_snap_' . uniqid() . '.db';
+        try {
+            $write = new Index($this->dbPath);
+            $write->insert(['id' => 1, 'title' => 'sedan']);
+            $write->snapshotTo($readPath);
+
+            $read = new Index($readPath, readonly: true);
+            $this->assertContains(1, $read->search('sedan')->ids);
+            $read->close();
+        } finally {
+            @unlink($readPath);
+        }
+    }
+
+    public function testSnapshotToAtomicallyReplacesExistingFile(): void
+    {
+        $readPath = sys_get_temp_dir() . '/fuzor_snap_' . uniqid() . '.db';
+        try {
+            $write = new Index($this->dbPath);
+            $write->insert(['id' => 1, 'title' => 'first']);
+            $write->snapshotTo($readPath);
+
+            $write->insert(['id' => 2, 'title' => 'second']);
+            $write->snapshotTo($readPath);
+
+            $read = new Index($readPath);
+            $this->assertContains(2, $read->search('second')->ids);
+            $read->close();
+        } finally {
+            @unlink($readPath);
+        }
+    }
+
+    public function testSnapshotToCleansUpStaleTempFiles(): void
+    {
+        $readPath = sys_get_temp_dir() . '/fuzor_snap_' . uniqid() . '.db';
+        $stale    = $readPath . '.tmp-deadbeef';
+        try {
+            file_put_contents($stale, 'leftover');
+
+            $write = new Index($this->dbPath);
+            $write->insert(['id' => 1, 'title' => 'sedan']);
+            $write->snapshotTo($readPath);
+
+            $this->assertFileDoesNotExist($stale);
+        } finally {
+            @unlink($readPath);
+            @unlink($stale);
+        }
+    }
+
+    public function testSnapshotToPreservesLanguage(): void
+    {
+        $readPath = sys_get_temp_dir() . '/fuzor_snap_' . uniqid() . '.db';
+        try {
+            $write = new Index($this->dbPath, language: 'en');
+            $write->insert(['id' => 1, 'title' => 'running fast']);
+            $write->snapshotTo($readPath);
+
+            $read = new Index($readPath);
+            $this->assertSame('en', $read->language);
+            $read->close();
+        } finally {
+            @unlink($readPath);
+        }
+    }
 }
