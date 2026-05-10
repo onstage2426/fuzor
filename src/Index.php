@@ -471,10 +471,12 @@ class Index
      * Accepts any iterable, including generators, for memory-efficient streaming.
      *
      * @param iterable<array<string, mixed>> $documents Documents to index; each must contain an 'id' key.
+     * @param callable(int $done, int $total): void|null $progress Called after each document is tokenised
+     *                                                              in phase 1; $done starts at 1.
      * @throws QueryException If any document is missing an 'id' key, contains duplicate IDs,
      *                        or any document ID already exists in the index.
      */
-    public function insertMany(iterable $documents): void
+    public function insertMany(iterable $documents, ?callable $progress = null): void
     {
         $this->assertWritable();
         /** @infection-ignore-all LogicalNot: iterator_to_array() accepts arrays in PHP 8.1+; converting an array produces the same array */
@@ -551,7 +553,7 @@ class Index
         }
         /** @infection-ignore-all UnwrapFinally: removing the try-finally wrapper only affects exception safety of the pragma restore; on the success path the behaviour is identical */
         try {
-            $this->wrapInTransaction(function () use ($documents, $ids, $indexIsEmpty): void {
+            $this->wrapInTransaction(function () use ($documents, $ids, $indexIsEmpty, $progress): void {
                 // Skip the duplicate-ID check on a known-empty table: nothing can already exist.
                 if (!$indexIsEmpty) {
                     /** @infection-ignore-all UnwrapArrayKeys,DecrementInteger,IncrementInteger: removing array_keys passes values instead of keys; the chunk size constant change only affects chunk count, not correctness */
@@ -577,7 +579,7 @@ class Index
                 ['wordBuffer'        => $wordBuffer,
                  'docTermBuffer'     => $docTermBuffer,
                  'docLengthBuffer'   => $docLengthBuffer,
-                 'docPositionBuffer' => $docPositionBuffer] = $this->buildBatchBuffer($documents);
+                 'docPositionBuffer' => $docPositionBuffer] = $this->buildBatchBuffer($documents, $progress);
 
                 $totalLength = $this->flushBatch($wordBuffer, $docTermBuffer, $docLengthBuffer, $docPositionBuffer);
 
@@ -1519,7 +1521,7 @@ class Index
      *     docPositionBuffer: array<int, array<string, list<int>>>
      * }
      */
-    private function buildBatchBuffer(array $documents): array
+    private function buildBatchBuffer(array $documents, ?callable $progress = null): array
     {
         /** @var array<string, array{totalHits: int, numDocs: int}> $wordBuffer */
         $wordBuffer     = [];
@@ -1529,6 +1531,9 @@ class Index
         $docLengthBuffer = [];
         /** @var array<int, array<string, list<int>>> $docPositionBuffer */
         $docPositionBuffer = [];
+
+        $total = count($documents);
+        $done  = 0;
 
         foreach ($documents as $document) {
             $documentId = self::extractId($document['id']);
@@ -1550,6 +1555,10 @@ class Index
                     /** @infection-ignore-all DecrementInteger: numDocs=0 vs 1 on first occurrence only affects BM25 scoring, not result membership */
                     $wordBuffer[$term] = ['totalHits' => $hits, 'numDocs' => 1];
                 }
+            }
+
+            if ($progress !== null) {
+                $progress(++$done, $total);
             }
         }
 

@@ -2289,6 +2289,57 @@ class IndexTest extends TestCase
         $this->assertSame(1, $results->ids[0]);
     }
 
+    // --- insertMany progress callback ---
+
+    public function testInsertManyProgressCallbackFiresForEachDocument(): void
+    {
+        $index = new Index($this->dbPath);
+        $docs  = [
+            ['id' => 1, 'title' => 'sedan'],
+            ['id' => 2, 'title' => 'coupe'],
+            ['id' => 3, 'title' => 'suv'],
+        ];
+
+        $calls = [];
+        $index->insertMany($docs, progress: function (int $done, int $total) use (&$calls): void {
+            $calls[] = [$done, $total];
+        });
+
+        $this->assertSame([[1, 3], [2, 3], [3, 3]], $calls);
+    }
+
+    public function testInsertManyProgressTotalIsConsistent(): void
+    {
+        $index  = new Index($this->dbPath);
+        $docs   = array_map(fn(int $i) => ['id' => $i, 'title' => "doc $i"], range(1, 10));
+        $totals = [];
+
+        $index->insertMany($docs, progress: function (int $done, int $total) use (&$totals): void {
+            $totals[] = $total;
+        });
+
+        $this->assertSame(array_fill(0, 10, 10), $totals);
+    }
+
+    public function testInsertManyProgressNullCallbackIsDefault(): void
+    {
+        $index = new Index($this->dbPath);
+        $index->insertMany([['id' => 1, 'title' => 'sedan']]);
+        $this->assertContains(1, $index->search('sedan')->ids);
+    }
+
+    public function testInsertManyProgressEmptyBatchFiresZeroTimes(): void
+    {
+        $index = new Index($this->dbPath);
+        $fired = false;
+
+        $index->insertMany([], progress: function () use (&$fired): void {
+            $fired = true;
+        });
+
+        $this->assertFalse($fired);
+    }
+
     // --- readonly ---
 
     public function testReadonlyOpenSucceeds(): void

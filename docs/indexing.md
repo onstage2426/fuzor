@@ -73,6 +73,14 @@ $index->insertMany(function () use ($db) {
 }());
 ```
 
+Pass a `progress` callback to track indexing progress. It is called after each document is tokenised, with the number of documents done and the total:
+
+```php
+$index->insertMany($docs, progress: function (int $done, int $total): void {
+    echo "$done / $total\n";
+});
+```
+
 ## Updating
 
 Replaces an existing document. Old index data is removed and the document is re-indexed in a single transaction. Throws `QueryException` if the ID does not exist — use `upsert()` if you want create-or-replace semantics.
