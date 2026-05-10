@@ -696,6 +696,11 @@ class Index
     /**
      * Shared implementation for updateMany() and upsertMany().
      *
+     * Uses the same two-phase bulk path as insertMany(): a single bulk-remove pass over all
+     * existing documents followed by buildBatchBuffer() + flushBatch() for all incoming documents.
+     * This avoids the per-document removeDocumentData() + processDocument() loop that wipes caches
+     * and issues individual prepared statements for every row.
+     *
      * @param iterable<array<string, mixed>> $documents
      * @throws QueryException
      */
@@ -706,11 +711,27 @@ class Index
             $documents = iterator_to_array($documents, false);
         }
 
-        $this->wrapInTransaction(function () use ($documents, $strict): void {
-            $docDelta    = 0;
-            $lengthDelta = 0;
+        if (empty($documents)) {
+            return;
+        }
 
-            if ($strict) {
+        $pdo = $this->pdo;
+        if ($pdo === null) {
+            throw new \LogicException('Index connection is closed.');
+        }
+
+        $this->bulkStmtCache = [];
+
+        $pdo->exec('
+            PRAGMA synchronous        = OFF;
+            PRAGMA cache_size         = -524288;
+            PRAGMA mmap_size          = 4294967296;
+            PRAGMA wal_autocheckpoint = 8000;
+        ');
+
+        try {
+            $this->wrapInTransaction(function () use ($documents, $strict): void {
+                // 1. Collect IDs and fetch existing doc lengths in one pass.
                 $ids = [];
                 foreach ($documents as $i => $document) {
                     if (!array_key_exists('id', $document)) {
@@ -719,20 +740,22 @@ class Index
                     $ids[] = self::extractId($document['id']);
                 }
 
-                if ($ids !== []) {
-                    $missing = $ids;
-                    foreach (array_chunk($ids, self::CHUNK_1P) as $chunk) {
-                        /** @infection-ignore-all IncrementInteger: array_fill start index does not affect implode output */
-                        $placeholders = implode(',', array_fill(0, count($chunk), '?'));
-                        $stmt = $this->prepare(
-                            "SELECT doc_id FROM doc_lengths WHERE doc_id IN ({$placeholders})"
-                        );
-                        $stmt->execute($chunk);
-                        $found = $stmt->fetchAll(PDO::FETCH_COLUMN);
-                        /** @infection-ignore-all CastInt,DecrementInteger,IncrementInteger,UnwrapArrayMap: PDO always returns scalar values for FETCH_COLUMN; the fallback 0 is unreachable */
-                        $foundIds = array_map(fn(mixed $v): int => is_scalar($v) ? (int) $v : 0, $found);
-                        $missing  = array_diff($missing, $foundIds);
+                $oldLengths = [];
+                foreach (array_chunk($ids, self::CHUNK_1P) as $chunk) {
+                    /** @infection-ignore-all IncrementInteger: array_fill start index does not affect implode output */
+                    $placeholders = implode(',', array_fill(0, count($chunk), '?'));
+                    $stmt = $this->prepare(
+                        "SELECT doc_id, length FROM doc_lengths WHERE doc_id IN ({$placeholders})"
+                    );
+                    $stmt->execute($chunk);
+                    foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
+                        $oldLengths[(int) $row['doc_id']] = (int) $row['length'];
                     }
+                }
+
+                // 2. Strict mode: every ID must already exist.
+                if ($strict) {
+                    $missing = array_diff($ids, array_keys($oldLengths));
                     if ($missing !== []) {
                         throw new QueryException(
                             'Documents do not exist with ids: '
@@ -740,30 +763,44 @@ class Index
                         );
                     }
                 }
-            }
 
-            foreach ($documents as $i => $document) {
-                if (!array_key_exists('id', $document)) {
-                    throw new QueryException("Document at index {$i} must contain an 'id' key.");
+                // 3. Bulk-remove all documents that currently exist in the index.
+                $existingIds = array_keys($oldLengths);
+                if ($existingIds !== []) {
+                    $this->bulkRemoveDocuments($existingIds);
                 }
 
-                $oldLength = $this->removeDocumentData(self::extractId($document['id']));
-                $newLength = $this->processDocument($document);
+                // 4. Bulk-insert all documents using the same two-phase path as insertMany().
+                ['wordBuffer'        => $wordBuffer,
+                 'docTermBuffer'     => $docTermBuffer,
+                 'docLengthBuffer'   => $docLengthBuffer,
+                 'docPositionBuffer' => $docPositionBuffer] = $this->buildBatchBuffer($documents);
 
-                if ($oldLength === false) {
-                    $docDelta++;
-                    $lengthDelta += $newLength;
-                } else {
-                    /** @infection-ignore-all CastInt: removeDocumentData already returns int; the cast is defensive only */
-                    $lengthDelta += $newLength - (int) $oldLength;
+                $totalNewLength = $this->flushBatch(
+                    $wordBuffer,
+                    $docTermBuffer,
+                    $docLengthBuffer,
+                    $docPositionBuffer,
+                );
+
+                // 5. Update stats: only truly new documents change the document count.
+                $docDelta    = count($ids) - count($existingIds);
+                $lengthDelta = $totalNewLength - array_sum($oldLengths);
+
+                /** @infection-ignore-all NotIdentical: diverges only when docDelta≠0 and lengthDelta=0, which requires new docs with zero tokens — impossible in practice */
+                if ($docDelta !== 0 || $lengthDelta !== 0) {
+                    $this->adjustStats($docDelta, $lengthDelta);
                 }
-            }
-
-            /** @infection-ignore-all NotIdentical: diverges only when docDelta≠0 and lengthDelta=0, which requires new docs with zero tokens — impossible in practice */
-            if ($docDelta !== 0 || $lengthDelta !== 0) {
-                $this->adjustStats($docDelta, $lengthDelta);
-            }
-        });
+            });
+        } finally {
+            $pdo->exec('
+                PRAGMA synchronous        = NORMAL;
+                PRAGMA cache_size         = -65536;
+                PRAGMA mmap_size          = 2147483648;
+                PRAGMA wal_autocheckpoint = 1000;
+            ');
+            $this->bulkStmtCache = [];
+        }
     }
 
     /**
@@ -1303,6 +1340,67 @@ class Index
     }
 
     // --- Private write helpers ----------------------------------------------
+
+    /**
+     * Remove a set of documents from the index in bulk without adjusting total_documents or avg_doc_length.
+     *
+     * Equivalent to calling removeDocumentData() in a loop but issues one CTE-based UPDATE and a handful
+     * of bulk DELETEs per chunk rather than 4–5 individual prepared statements per document. Orphan
+     * terms are pruned from the wordlist scoped to the affected term set (no full table scan).
+     *
+     * @param int[] $ids Document IDs to remove; all must exist in the index.
+     */
+    private function bulkRemoveDocuments(array $ids): void
+    {
+        $pdo = $this->pdo;
+        assert($pdo !== null);
+
+        foreach (array_chunk($ids, self::CHUNK_1P) as $chunk) {
+            /** @infection-ignore-all IncrementInteger: array_fill start index does not affect implode output */
+            $n            = count($chunk);
+            $placeholders = implode(',', array_fill(0, $n, '?'));
+
+            // Capture affected term IDs before any deletion so orphan pruning can be scoped.
+            $termStmt = $this->prepare(
+                "SELECT DISTINCT term_id FROM doclist WHERE doc_id IN ({$placeholders})"
+            );
+            $termStmt->execute($chunk);
+            /** @var list<int> $affectedTermIds */
+            $affectedTermIds = $termStmt->fetchAll(PDO::FETCH_COLUMN);
+
+            // Decrement wordlist stats for every affected term in a single CTE UPDATE.
+            $this->prepare(
+                "WITH doc_terms AS (
+                     SELECT term_id,
+                            SUM(hit_count)         AS total_hits,
+                            COUNT(DISTINCT doc_id) AS doc_count
+                     FROM doclist WHERE doc_id IN ({$placeholders})
+                     GROUP BY term_id
+                 )
+                 UPDATE wordlist SET
+                     num_hits = num_hits - doc_terms.total_hits,
+                     num_docs = num_docs - doc_terms.doc_count
+                 FROM doc_terms WHERE wordlist.id = doc_terms.term_id"
+            )->execute($chunk);
+
+            $this->prepare("DELETE FROM doclist   WHERE doc_id IN ({$placeholders})")->execute($chunk);
+            $this->prepare("DELETE FROM positions WHERE doc_id IN ({$placeholders})")->execute($chunk);
+            $this->prepare("DELETE FROM doc_lengths WHERE doc_id IN ({$placeholders})")->execute($chunk);
+
+            // Prune orphan terms scoped to the affected set; avoids a full wordlist table scan.
+            if ($affectedTermIds !== []) {
+                $tp = implode(',', array_fill(0, count($affectedTermIds), '?'));
+                $this->prepare(
+                    "DELETE FROM wordlist WHERE num_hits <= 0 AND id IN ({$tp})"
+                )->execute($affectedTermIds);
+            }
+        }
+
+        // Orphan pruning may have removed terms; stale cache entries would corrupt doclist
+        // on re-insertion of those terms in the subsequent flushBatch() call.
+        $this->termIdCache   = [];
+        $this->wordlistCache = [];
+    }
 
     /**
      * Remove a document's index data (wordlist stats, doclist rows, doc_length) without touching
