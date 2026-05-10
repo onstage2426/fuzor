@@ -527,17 +527,8 @@ class Index
         $dropIndexes = $indexIsEmpty || count($documents) >= 1_000;
 
         // Bulk-import pragma overrides: restored in the finally block.
-        // - synchronous=OFF: skip fsyncs; WAL writes are sequential. Risk: data loss on OS crash only.
-        // - cache_size=-524288: 512 MB page cache keeps the wordlist B-tree hot across the batch.
-        // - mmap_size=4GB: OS page-cache reads at VM speed rather than via read() syscall.
-        // - wal_autocheckpoint=8000: defer WAL→DB merges until after the import (32 MB threshold).
         /** @infection-ignore-all MethodCallRemoval: bulk-import pragma overrides are performance tuning only; correctness is unaffected */
-        $pdo->exec('
-            PRAGMA synchronous        = OFF;
-            PRAGMA cache_size         = -524288;
-            PRAGMA mmap_size          = 4294967296;
-            PRAGMA wal_autocheckpoint = 8000;
-        ');
+        $this->applyBulkPragmas();
 
         // Drop indexes after acquiring the exclusive lock so there is no lock-ordering
         // conflict on subsequent insertMany() calls (the previous call's locking_mode=NORMAL
@@ -597,12 +588,7 @@ class Index
                 ');
             }
             /** @infection-ignore-all MethodCallRemoval: restoring pragmas after bulk load is a performance step; the next connection will re-apply from applyPragmas() */
-            $pdo->exec('
-                PRAGMA synchronous        = NORMAL;
-                PRAGMA cache_size         = -65536;
-                PRAGMA mmap_size          = 2147483648;
-                PRAGMA wal_autocheckpoint = 1000;
-            ');
+            $this->restoreNormalPragmas();
             // Release bulk-load statements so they don't stay open as SQLite tracked-statements
             // during subsequent single-doc insert() transactions.
             $this->bulkStmtCache = [];
@@ -722,12 +708,7 @@ class Index
 
         $this->bulkStmtCache = [];
 
-        $pdo->exec('
-            PRAGMA synchronous        = OFF;
-            PRAGMA cache_size         = -524288;
-            PRAGMA mmap_size          = 4294967296;
-            PRAGMA wal_autocheckpoint = 8000;
-        ');
+        $this->applyBulkPragmas();
 
         try {
             $this->wrapInTransaction(function () use ($documents, $strict): void {
@@ -793,12 +774,7 @@ class Index
                 }
             });
         } finally {
-            $pdo->exec('
-                PRAGMA synchronous        = NORMAL;
-                PRAGMA cache_size         = -65536;
-                PRAGMA mmap_size          = 2147483648;
-                PRAGMA wal_autocheckpoint = 1000;
-            ');
+            $this->restoreNormalPragmas();
             $this->bulkStmtCache = [];
         }
     }
@@ -2631,6 +2607,26 @@ class Index
      *   search correctness is unaffected because all terms are lowercased before storage and query,
      *   making case_sensitive_like moot for correctness
      */
+    private function applyBulkPragmas(): void
+    {
+        assert($this->pdo !== null);
+        $this->pdo->exec('
+            PRAGMA synchronous        = OFF;
+            PRAGMA cache_size         = -524288;
+            PRAGMA wal_autocheckpoint = 8000;
+        ');
+    }
+
+    private function restoreNormalPragmas(): void
+    {
+        assert($this->pdo !== null);
+        $this->pdo->exec('
+            PRAGMA synchronous        = NORMAL;
+            PRAGMA cache_size         = -65536;
+            PRAGMA wal_autocheckpoint = 1000;
+        ');
+    }
+
     private function applyPragmas(): void
     {
         assert($this->pdo !== null);
@@ -2643,7 +2639,7 @@ class Index
         $this->pdo->exec('
             PRAGMA cache_size         = -65536;
             PRAGMA temp_store         = MEMORY;
-            PRAGMA mmap_size          = 2147483648;
+            PRAGMA mmap_size          = 536870912;
             PRAGMA case_sensitive_like = ON;
         ');
     }
