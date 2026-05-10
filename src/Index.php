@@ -665,7 +665,7 @@ class Index
             $id        = self::extractId($document['id']);
             $oldLength = $this->removeDocumentData($id);
 
-            if ($oldLength === false) {
+            if ($oldLength === null) {
                 if ($strict) {
                     throw new QueryException("Document {$id} does not exist. Use upsert() to create or replace it.");
                 }
@@ -673,8 +673,7 @@ class Index
                 $this->adjustStats(1, $newLength);
             } else {
                 $newLength = $this->processDocument($document);
-                /** @infection-ignore-all CastInt: removeDocumentData already returns int; the cast is defensive only */
-                $this->adjustStats(0, $newLength - (int) $oldLength);
+                $this->adjustStats(0, $newLength - $oldLength);
             }
         });
     }
@@ -815,7 +814,7 @@ class Index
             foreach ($ids as $id) {
                 /** @infection-ignore-all CastInt: $id comes from list<int>; the cast is defensive only */
                 $length = $this->removeDocumentData((int) $id);
-                if ($length !== false) {
+                if ($length !== null) {
                     $docDelta--;
                     $lengthDelta -= $length;
                 }
@@ -1380,13 +1379,13 @@ class Index
 
     /**
      * Remove a document's index data (wordlist stats, doclist rows, doc_length) without touching
-     * total_documents or avg_doc_length. Returns the document's token length, or false if the
+     * total_documents or avg_doc_length. Returns the document's token length, or null if the
      * document was not found.
      *
-     * @param  int        $documentId ID of the document to remove.
-     * @return int|false              Token length of the removed document, or false if not found.
+     * @param  int      $documentId ID of the document to remove.
+     * @return int|null             Token length of the removed document, or null if not found.
      */
-    private function removeDocumentData(int $documentId): int|false
+    private function removeDocumentData(int $documentId): ?int
     {
         // 1. Decrement wordlist stats for every term this document contributed.
         // UPDATE … FROM (SQLite 3.33+) joins once rather than running a correlated subquery per row.
@@ -1423,7 +1422,7 @@ class Index
         $this->stmt('positionsDeleteByDoc', 'DELETE FROM positions WHERE doc_id = :documentId')
             ->execute([':documentId' => $documentId]);
 
-        // 4. Remove doc_lengths and return the old token count (false if the document was not found).
+        // 4. Remove doc_lengths and return the old token count (null if the document was not found).
         $delStmt = $this->stmt(
             'docLengthsDelete',
             'DELETE FROM doc_lengths WHERE doc_id = :documentId RETURNING length'
@@ -1438,8 +1437,8 @@ class Index
         $this->termIdCache   = [];
         $this->wordlistCache = [];
 
-        /** @infection-ignore-all FalseValue,CastInt: the FalseValue branch is only reached when $length is false (doc not found); callers check !== false so returning true is equivalent for the branch-not-taken case. CastInt: $length from RETURNING is already int-like */
-        return $length === false ? false : (int) $length;
+        /** @infection-ignore-all NullValue,CastInt: the NullValue branch is only reached when $length is false (doc not found); CastInt: $length from RETURNING is already int-like */
+        return $length === false ? null : (int) $length;
     }
 
     /**
