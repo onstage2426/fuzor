@@ -887,6 +887,18 @@ class Index
     }
 
     /**
+     * Return the Unix timestamp of the most recent write to this index.
+     *
+     * Checks both the main DB file and the WAL file (which receives writes first in WAL
+     * journal mode) and returns whichever is newer — no DB query required.
+     */
+    public function lastModified(): int
+    {
+        $walMtime = @filemtime($this->path . '-wal');
+        return (int) max(filemtime($this->path), $walMtime !== false ? $walMtime : 0);
+    }
+
+    /**
      * Explain what the engine does internally with a query string.
      *
      * Answers "why did my search return these results (or nothing)?" by walking the same

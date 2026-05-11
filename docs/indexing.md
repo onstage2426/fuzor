@@ -169,6 +169,14 @@ Returns the total number of indexed documents. Reads from the cached `info` tabl
 $index->count(); // int
 ```
 
+## Last modified
+
+Returns a Unix timestamp reflecting the most recent write to the index. Checks both the main database file and the WAL file (writes land there first in WAL journal mode) and returns whichever is newer — no database query required.
+
+```php
+$index->lastModified(); // int — Unix timestamp
+```
+
 ## Snapshots
 
 Writes an atomic point-in-time copy of the index to a new path. Safe to call while writes are in progress.

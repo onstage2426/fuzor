@@ -1098,6 +1098,44 @@ class IndexTest extends TestCase
         $this->assertSame(2, new Index($this->dbPath)->count());
     }
 
+    // --- lastModified ---
+
+    public function testLastModifiedReturnsNonZeroAfterCreate(): void
+    {
+        $index = new Index($this->dbPath);
+        $this->assertGreaterThan(0, $index->lastModified());
+    }
+
+    public function testLastModifiedIsWithinReasonableRange(): void
+    {
+        $before = time();
+        $index  = new Index($this->dbPath);
+        $after  = time();
+
+        $mtime = $index->lastModified();
+        $this->assertGreaterThanOrEqual($before, $mtime);
+        $this->assertLessThanOrEqual($after + 1, $mtime);
+    }
+
+    public function testLastModifiedUpdatesAfterInsert(): void
+    {
+        $index = new Index($this->dbPath);
+        $before = $index->lastModified();
+
+        // Ensure at least one second passes so mtime can change
+        $index->close();
+        $path = $this->dbPath;
+
+        clearstatcache();
+        touch($path, time() + 2);
+
+        $index = new Index($path);
+        $index->insert(['id' => 1, 'title' => 'sedan']);
+
+        clearstatcache();
+        $this->assertGreaterThanOrEqual($before, $index->lastModified());
+    }
+
     // --- has ---
 
     public function testHasReturnsTrueForExistingDocument(): void
