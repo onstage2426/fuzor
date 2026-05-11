@@ -1117,23 +1117,24 @@ class IndexTest extends TestCase
         $this->assertLessThanOrEqual($after + 1, $mtime);
     }
 
-    public function testLastModifiedUpdatesAfterInsert(): void
+    public function testLastModifiedAdvancesAfterWriteAndClose(): void
     {
+        // Backdate the file so any checkpoint write is detectable regardless of clock granularity.
         $index = new Index($this->dbPath);
-        $before = $index->lastModified();
-
-        // Ensure at least one second passes so mtime can change
         $index->close();
-        $path = $this->dbPath;
-
+        touch($this->dbPath, time() - 10);
         clearstatcache();
-        touch($path, time() + 2);
 
-        $index = new Index($path);
+        $before = (new Index($this->dbPath))->lastModified();
+
+        // A write followed by close triggers a WAL checkpoint, which writes pages back to the
+        // main DB file and updates its mtime.
+        $index = new Index($this->dbPath);
         $index->insert(['id' => 1, 'title' => 'sedan']);
-
+        $index->close();
         clearstatcache();
-        $this->assertGreaterThanOrEqual($before, $index->lastModified());
+
+        $this->assertGreaterThan($before, (new Index($this->dbPath))->lastModified());
     }
 
     // --- has ---

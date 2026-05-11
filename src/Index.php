@@ -896,8 +896,7 @@ class Index
      */
     public function lastModified(): int
     {
-        $walMtime = @filemtime($this->path . '-wal');
-        return (int) max(filemtime($this->path), $walMtime !== false ? $walMtime : 0);
+        return (int) filemtime($this->path);
     }
 
     /**

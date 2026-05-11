@@ -171,7 +171,7 @@ $index->count(); // int
 
 ## Last modified
 
-Returns a Unix timestamp reflecting the most recent write to the index. Checks both the main database file and the WAL file (writes land there first in WAL journal mode) and returns whichever is newer — no database query required.
+Returns a Unix timestamp reflecting the most recent write to the index. Reads the main database file's mtime — updated on each WAL checkpoint — no database query required.
 
 ```php
 $index->lastModified(); // int — Unix timestamp
