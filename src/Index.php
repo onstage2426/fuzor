@@ -190,19 +190,26 @@ class Index
      * Atomically rebuild an index by writing to a temporary file and renaming it over the target.
      *
      * The callback receives a fresh, empty Index to populate. If the callback throws,
-     * the temporary file is removed and the original index is left untouched. Language is
-     * preserved from the existing index when one already exists at $path.
+     * the temporary file is removed and the original index is left untouched.
      *
-     * @param  string   $path     Absolute or relative path to the index file to rebuild.
-     * @param  callable $callback fn(Index $new): void — populate the new index here.
+     * Language resolution order:
+     *  - Pass a BCP 47 string to use that language regardless of what the existing index has.
+     *  - Pass null to explicitly build with no language (overrides the existing index).
+     *  - Omit the parameter (default false) to inherit the language from the existing index.
+     *
+     * @param  string            $path     Absolute or relative path to the index file to rebuild.
+     * @param  callable          $callback fn(Index $new): void — populate the new index here.
+     * @param  false|string|null $language BCP 47 tag, null (no language), or false (inherit).
      * @return self               Open index pointing at the rebuilt file.
      * @throws \RuntimeException  If the rename fails or the parent directory does not exist.
      */
-    public static function rebuild(string $path, callable $callback): self
+    public static function rebuild(string $path, callable $callback, false|string|null $language = false): self
     {
         $resolved = self::resolvePath($path);
         $existing = file_exists($resolved) ? new self($resolved) : null;
-        $language = $existing?->language;
+        if ($language === false) {
+            $language = $existing?->language;
+        }
         /** @infection-ignore-all MethodCallRemoval: resource cleanup; GC closes the connection if skipped, no observable effect on the rebuild outcome */
         $existing?->close();
 
