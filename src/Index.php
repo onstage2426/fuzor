@@ -737,8 +737,10 @@ class Index
                         "SELECT doc_id, length FROM doc_lengths WHERE doc_id IN ({$placeholders})"
                     );
                     $stmt->execute($chunk);
-                    foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
-                        $oldLengths[(int) $row['doc_id']] = (int) $row['length'];
+                    /** @var list<array{doc_id: int, length: int}> $rows */
+                    $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+                    foreach ($rows as $row) {
+                        $oldLengths[$row['doc_id']] = $row['length'];
                     }
                 }
 
