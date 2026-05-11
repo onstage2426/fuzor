@@ -195,4 +195,25 @@ Index::rebuild('/path/to/articles.db', function (Index $new) use ($docs) {
 });
 ```
 
-Internally, `rebuild` writes to a temporary file alongside the target, then renames it over the original — a POSIX-atomic operation on the same filesystem. The language configured on the existing index is read first and applied to the new one automatically, so tokenisation and stemming remain consistent without any extra configuration.
+Internally, `rebuild` writes to a temporary file alongside the target, then renames it over the original — a POSIX-atomic operation on the same filesystem.
+
+### Language on rebuild
+
+The `language` argument controls which language the rebuilt index uses:
+
+| Value | Effect |
+|-------|--------|
+| *(omitted)* / `false` | Inherit the language from the existing index (default) |
+| `null` | Build with no language, regardless of what the existing index has |
+| `'en'`, `'de'`, … | Use this BCP 47 tag, overriding the existing index |
+
+```php
+// Inherit (default) — tokenisation stays consistent without extra config
+Index::rebuild('/path/to/articles.db', callback: fn (Index $new) => $new->insertMany($docs));
+
+// Clear language
+Index::rebuild('/path/to/articles.db', callback: fn (Index $new) => $new->insertMany($docs), language: null);
+
+// Override language
+Index::rebuild('/path/to/articles.db', callback: fn (Index $new) => $new->insertMany($docs), language: 'de');
+```
