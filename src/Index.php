@@ -187,6 +187,19 @@ class Index
     }
 
     /**
+     * Return the Unix timestamp of the most recent write to the index at $path.
+     *
+     * Reads the main database file's mtime — updated on each WAL checkpoint — no
+     * database connection required. Returns 0 if the file does not exist.
+     *
+     * @param string $path Absolute or relative path to the index file.
+     */
+    public static function lastModified(string $path): int
+    {
+        return (int) @filemtime($path);
+    }
+
+    /**
      * Atomically rebuild an index by writing to a temporary file and renaming it over the target.
      *
      * The callback receives a fresh, empty Index to populate. If the callback throws,
@@ -886,17 +899,6 @@ class Index
     {
         /** @infection-ignore-all DecrementInteger|IncrementInteger: ?? fallback is only reached on a corrupt/missing info table row; all writes keep total_documents consistent, so this path is unreachable in tests */
         return (int) ($this->getInfoValues(['total_documents'])['total_documents'] ?? 0);
-    }
-
-    /**
-     * Return the Unix timestamp of the most recent write to this index.
-     *
-     * Checks both the main DB file and the WAL file (which receives writes first in WAL
-     * journal mode) and returns whichever is newer — no DB query required.
-     */
-    public function lastModified(): int
-    {
-        return (int) filemtime($this->path);
     }
 
     /**

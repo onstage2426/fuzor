@@ -1102,19 +1102,24 @@ class IndexTest extends TestCase
 
     public function testLastModifiedReturnsNonZeroAfterCreate(): void
     {
-        $index = new Index($this->dbPath);
-        $this->assertGreaterThan(0, $index->lastModified());
+        new Index($this->dbPath);
+        $this->assertGreaterThan(0, Index::lastModified($this->dbPath));
     }
 
     public function testLastModifiedIsWithinReasonableRange(): void
     {
         $before = time();
-        $index  = new Index($this->dbPath);
+        new Index($this->dbPath);
         $after  = time();
 
-        $mtime = $index->lastModified();
+        $mtime = Index::lastModified($this->dbPath);
         $this->assertGreaterThanOrEqual($before, $mtime);
         $this->assertLessThanOrEqual($after + 1, $mtime);
+    }
+
+    public function testLastModifiedReturnsZeroForMissingFile(): void
+    {
+        $this->assertSame(0, Index::lastModified('/nonexistent/path.db'));
     }
 
     public function testLastModifiedAdvancesAfterWriteAndClose(): void
@@ -1125,7 +1130,7 @@ class IndexTest extends TestCase
         touch($this->dbPath, time() - 10);
         clearstatcache();
 
-        $before = (new Index($this->dbPath))->lastModified();
+        $before = Index::lastModified($this->dbPath);
 
         // A write followed by close triggers a WAL checkpoint, which writes pages back to the
         // main DB file and updates its mtime.
@@ -1134,7 +1139,7 @@ class IndexTest extends TestCase
         $index->close();
         clearstatcache();
 
-        $this->assertGreaterThan($before, (new Index($this->dbPath))->lastModified());
+        $this->assertGreaterThan($before, Index::lastModified($this->dbPath));
     }
 
     // --- has ---

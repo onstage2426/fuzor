@@ -171,10 +171,10 @@ $index->count(); // int
 
 ## Last modified
 
-Returns a Unix timestamp reflecting the most recent write to the index. Reads the main database file's mtime — updated on each WAL checkpoint — no database query required.
+Returns a Unix timestamp reflecting the most recent write to the index. Reads the main database file's mtime — updated on each WAL checkpoint — no database connection required. Returns `0` if the file does not exist.
 
 ```php
-$index->lastModified(); // int — Unix timestamp
+Index::lastModified('/path/to/articles.db'); // int — Unix timestamp
 ```
 
 ## Snapshots
