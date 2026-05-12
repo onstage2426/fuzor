@@ -21,7 +21,7 @@ final class Config
         /** @infection-ignore-all IncrementInteger: default value; exact distance only affects match breadth, not correctness */
         public readonly int $fuzzyDistance = 2,
         /**
-         * Proximity ranking weight applied when storePositions is enabled and the query has ≥2 terms.
+         * Proximity ranking weight applied to queries with ≥2 terms.
          * Each document's BM25 score is multiplied by 1 / (1 + proximityBoost * minSpan), where
          * minSpan is the smallest token-position window containing one occurrence of every query term.
          * Set to 0.0 to disable proximity ranking entirely.

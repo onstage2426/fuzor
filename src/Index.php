@@ -46,7 +46,8 @@ class Index
      * Ephemeral statement cache for bulk-load operations (flushBatch, batchUpsertWordlist).
      * Isolated from $stmtCache so that large-N bulk INSERT statements don't stay open as
      * SQLite tracked-statements during subsequent single-doc insert() transactions (which
-     * would add overhead to every COMMIT). Cleared at the start and end of each insertMany().
+     * would add overhead to every COMMIT). Cleared at the start and end of each insertMany()
+     * and replaceMany().
      *
      * @var array<string, \PDOStatement>
      */
@@ -295,7 +296,7 @@ class Index
         }
     }
 
-    // --- Index lifecycle (private, called by static factories) --------------
+    // --- Index lifecycle (private, called by the constructor) ---------------
 
     /**
      * Create a new SQLite index file and initialise the schema.
@@ -395,7 +396,7 @@ class Index
     }
 
     /**
-     * Open an existing index file for searching.
+     * Open an existing index file.
      *
      * @throws IOException If the index file does not exist.
      */
@@ -552,10 +553,9 @@ class Index
         /** @infection-ignore-all MethodCallRemoval: bulk-import pragma overrides are performance tuning only; correctness is unaffected */
         $this->applyBulkPragmas();
 
-        // Drop indexes after acquiring the exclusive lock so there is no lock-ordering
-        // conflict on subsequent insertMany() calls (the previous call's locking_mode=NORMAL
-        // restore does not release the WAL lock until the next read; dropping indexes after
-        // taking EXCLUSIVE avoids the "database table is locked" race).
+        // Drop indexes after applyBulkPragmas() so the DROP sees the same WAL state as
+        // the subsequent INSERT. Dropping before the bulk pragmas are active risks a
+        // "database table is locked" race on concurrent insertMany() calls.
         /** @infection-ignore-all IfNegation: inverting $dropIndexes only affects whether indexes are dropped; correctness is unaffected */
         if ($dropIndexes) {
             /** @infection-ignore-all MethodCallRemoval: dropping secondary indexes before bulk INSERT is a performance optimisation; correctness unaffected */
@@ -600,7 +600,7 @@ class Index
             });
         } finally {
             // Rebuild dropped indexes from the completed dataset while bulk-load pragmas
-            // are still active (large cache + mmap + synchronous=OFF).
+            // are still active (large cache + synchronous=OFF).
             /** @infection-ignore-all IfNegation: inverting $dropIndexes only affects whether indexes are rebuilt; correctness is unaffected */
             if ($dropIndexes) {
                 /** @infection-ignore-all MethodCallRemoval: rebuilding secondary indexes is a performance step; correctness is unaffected */
@@ -863,7 +863,7 @@ class Index
     /**
      * Return a map of id => bool for each requested ID.
      *
-     * More efficient than calling has() in a loop — resolves all IDs in a single query.
+     * More efficient than calling has() in a loop — resolves all IDs in one query per chunk.
      *
      * @param  list<int>       $ids Document IDs to check.
      * @return array<int, bool>     Keys are the requested IDs; value is true if present, false if absent.
@@ -1330,7 +1330,7 @@ class Index
      *   " or " → |,   " -" → &~,   " " → &
      *
      * @param  string      $expression Raw query string.
-     * @return list<string>            Alternating word tokens and operator characters.
+     * @return list<string>            Word tokens and operator characters.
      */
     private function lexExpression(string $expression): array
     {
@@ -1349,7 +1349,7 @@ class Index
      * Remove a set of documents from the index in bulk without adjusting total_documents or avg_doc_length.
      *
      * Equivalent to calling removeDocumentData() in a loop but issues one CTE-based UPDATE and a handful
-     * of bulk DELETEs per chunk rather than 4–5 individual prepared statements per document. Orphan
+     * of bulk DELETEs per chunk rather than 5 individual prepared statements per document. Orphan
      * terms are pruned from the wordlist scoped to the affected term set (no full table scan).
      *
      * @param int[] $ids Document IDs to remove; all must exist in the index.
@@ -1407,9 +1407,9 @@ class Index
     }
 
     /**
-     * Remove a document's index data (wordlist stats, doclist rows, doc_length) without touching
-     * total_documents or avg_doc_length. Returns the document's token length, or null if the
-     * document was not found.
+     * Remove a document's index data (wordlist stats, doclist rows, positions rows, and
+     * doc_lengths) without touching total_documents or avg_doc_length. Returns the
+     * document's token length, or null if the document was not found.
      *
      * @param  int      $documentId ID of the document to remove.
      * @return int|null             Token length of the removed document, or null if not found.
@@ -1451,7 +1451,7 @@ class Index
         $this->stmt('positionsDeleteByDoc', 'DELETE FROM positions WHERE doc_id = :documentId')
             ->execute([':documentId' => $documentId]);
 
-        // 4. Remove doc_lengths and return the old token count (null if the document was not found).
+        // 5. Remove doc_lengths and return the old token count (null if the document was not found).
         $delStmt = $this->stmt(
             'docLengthsDelete',
             'DELETE FROM doc_lengths WHERE doc_id = :documentId RETURNING length'
@@ -1548,9 +1548,10 @@ class Index
     /**
      * Upsert terms into the wordlist table and return a term_id → hit_count map.
      *
-     * Uses a single batched INSERT … ON CONFLICT … RETURNING id, term to upsert
-     * all terms for a document in one round-trip per chunk (chunks respect
-     * SQLite's 32766-variable limit at 2 params per term → 16383 terms per chunk).
+     * Iterates per-term using two cached single-row statements: known terms (in termIdCache)
+     * are updated via a plain UPDATE; new terms use INSERT … ON CONFLICT … RETURNING to
+     * obtain the assigned ID and populate the cache. Both statements are reused across calls
+     * within the same connection, keeping COMMIT overhead negligible.
      *
      * @param  array<string, int> $termCounts Term → hit count for the document.
      * @return array<int, int>                term_id → hit_count with resolved wordlist IDs.
@@ -1608,12 +1609,13 @@ class Index
      * Phase 1 of the two-phase bulk load: tokenise all documents and accumulate
      * per-term and per-document statistics in PHP memory without touching the DB.
      *
-     * Returns three buffers:
-     *   wordBuffer     — per unique term across the batch: total hit count and
-     *                    number of distinct documents containing the term.
-     *   docTermBuffer  — per document: term text → hit count (term IDs are not
-     *                    yet known; resolved in Phase 2 after the wordlist upsert).
-     *   docLengthBuffer — per document: total token count for BM25 length normalisation.
+     * Returns four buffers:
+     *   wordBuffer        — per unique term across the batch: total hit count and
+     *                       number of distinct documents containing the term.
+     *   docTermBuffer     — per document: term text → hit count (term IDs are not
+     *                       yet known; resolved in Phase 2 after the wordlist upsert).
+     *   docLengthBuffer   — per document: total token count for BM25 length normalisation.
+     *   docPositionBuffer — per document: term text → ordered position list.
      *
      * @param  array<array<string, mixed>> $documents
      * @return array{
@@ -1670,10 +1672,11 @@ class Index
     /**
      * Phase 2 of the two-phase bulk load: write the accumulated buffers to the DB.
      *
-     * Performs three bulk writes inside the caller's open transaction:
+     * Performs four bulk writes inside the caller's open transaction:
      *   1. batchUpsertWordlist() — one probe per unique term (not per document × term).
      *   2. Doclist INSERT        — all (term_id, doc_id, hit_count) rows in bulk.
      *   3. Doc_lengths INSERT    — all (doc_id, length) rows in bulk.
+     *   4. Positions INSERT      — all (term_id, doc_id, position) rows in bulk.
      *
      * @param  array<string, array{totalHits: int, numDocs: int}> $wordBuffer
      * @param  array<int, array<string, int>>                     $docTermBuffer
@@ -1735,7 +1738,8 @@ class Index
         }
 
         // Step 3: bulk-insert all doc_lengths rows.
-        // No ON CONFLICT needed: insertMany already verified these doc_ids do not exist.
+        // No ON CONFLICT needed: callers guarantee no pre-existing doc_ids
+        // (insertMany verifies; replaceMany pre-deletes via bulkRemoveDocuments).
         foreach (array_chunk($docLengthBuffer, self::CHUNK_2P, true) as $chunk) {
             $n      = count($chunk);
             $params = [];
@@ -1892,8 +1896,9 @@ class Index
     /**
      * Write term→document hit counts to the doclist table.
      *
-     * Uses a single batched INSERT per chunk (3 params per row; chunks respect
-     * SQLite's 32766-variable limit → 10922 rows per chunk).
+     * Uses a single-row cached statement executed once per term. A multi-row batch INSERT
+     * is not faster here: single-document inserts have small row counts, so the overhead of
+     * a variable-shape prepared statement outweighs the savings.
      *
      * @param int             $documentId Document ID.
      * @param array<int, int> $termIds    term_id → hit_count map from upsertWordlist().
@@ -1954,14 +1959,6 @@ class Index
         )->execute([':id' => $documentId, ':len' => $length]);
     }
 
-    /**
-     * Clear all write-sensitive caches after any index mutation.
-     *
-     * termIdCache: may contain IDs for terms that were just pruned from the wordlist
-     *              (removeDocumentData), so a subsequent insertMany would resolve stale IDs.
-     * wordlistCache: num_hits / num_docs on wordlist rows have changed, so cached
-     *                search results would return stale scoring data.
-     */
     /**
      * Update total_documents and avg_doc_length after any document mutation.
      *
@@ -2315,9 +2312,9 @@ class Index
     /**
      * Look up a keyword in the wordlist with optional prefix and fuzzy fallback.
      *
-     * When $asYouType is true and $isLastWord is true, a trailing-wildcard LIKE
-     * query is used instead of an exact match, returning up to $fuzzyMaxExpansions
-     * candidates ordered by shortest term first, then by num_hits descending.
+     * When $isLastWord is true, a trailing-wildcard LIKE query is used instead of an
+     * exact match, returning up to $fuzzyMaxExpansions candidates ordered by shortest
+     * term first, then by num_hits descending.
      * When $fuzzy is true and no match is found, fuzzySearch() is called as a fallback.
      *
      * @param  string                    $keyword    Term to look up.
@@ -2550,7 +2547,7 @@ class Index
     /**
      * Run $fn inside a transaction, committing on success and rolling back on exception.
      *
-     * When already inside a transaction (e.g. update() calling delete() + insert()),
+     * When already inside a transaction (e.g. replaceMany() calling bulkRemoveDocuments()),
      * the callback runs in the existing transaction rather than starting a nested one.
      *
      * @param callable(): void $fn
@@ -2624,16 +2621,14 @@ class Index
     }
 
     /**
-     * Apply connection-level SQLite pragmas for optimal performance.
+     * Override connection pragmas for bulk-load performance.
      *
-     * - journal_mode=WAL: concurrent readers, faster commits.
-     * - synchronous=NORMAL: safe with WAL (no data loss on crash), far fewer fsyncs than FULL.
-     * - cache_size=-65536: 64 MB page cache; sufficient for search workloads.
-     * - temp_store=MEMORY: sort/index temp tables stay in RAM.
+     * - synchronous=OFF: no fsync per commit; safe because a crash during bulk load
+     *   leaves the index in a partially-written state that the caller can recreate.
+     * - cache_size=-524288: 512 MB page cache; reduces B-tree splits during large INSERTs.
+     * - wal_autocheckpoint=8000: delays WAL checkpointing until after the bulk write completes.
      *
-     * @infection-ignore-all MethodCallRemoval: removing the exec call only affects performance/WAL mode;
-     *   search correctness is unaffected because all terms are lowercased before storage and query,
-     *   making case_sensitive_like moot for correctness
+     * Restored by restoreNormalPragmas() in the finally block after the transaction commits.
      */
     private function applyBulkPragmas(): void
     {
@@ -2677,7 +2672,6 @@ class Index
      *
      * Removes the main file plus the `-wal` and `-shm` companions created by
      * WAL journal mode. No-ops silently for any file that does not exist.
-     *
      */
     private function flushIndex(): void
     {

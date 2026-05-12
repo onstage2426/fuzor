@@ -13,6 +13,10 @@ namespace Fuzor;
  */
 final class Levenshtein
 {
+    private function __construct()
+    {
+    }
+
     /**
      * Unicode-aware Levenshtein edit distance.
      *

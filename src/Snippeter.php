@@ -14,10 +14,18 @@ namespace Fuzor;
  */
 final class Snippeter
 {
+    /** Stemmer for the configured language; null if none is available for that language. */
     private readonly ?Stemmer $stemmer;
 
+    /** N-gram window size for the configured language. */
     private readonly int $ngramSize;
 
+    /**
+     * @param int     $windowSize  Maximum display characters per excerpt window.
+     * @param int     $maxSnippets Maximum number of non-overlapping windows to return.
+     * @param string  $ellipsis    Separator placed between windows and at truncation boundaries.
+     * @param ?string $language    BCP 47 tag; drives stemming and n-gram tokenisation. Null disables both.
+     */
     public function __construct(
         private readonly int $windowSize = 200,
         private readonly int $maxSnippets = 1,

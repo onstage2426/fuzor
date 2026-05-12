@@ -14,8 +14,15 @@ namespace Fuzor;
  */
 final class Highlighter
 {
+    /** N-gram window size for the configured language. */
     private readonly int $ngramSize;
 
+    /**
+     * @param string  $open      Opening tag placed before each match.
+     * @param string  $close     Closing tag placed after each match.
+     * @param bool    $asYouType When true, the last query token is matched as a word prefix.
+     * @param ?string $language  BCP 47 tag; drives n-gram tokenisation. Null for whitespace-delimited languages.
+     */
     public function __construct(
         private readonly string $open = '<mark>',
         private readonly string $close = '</mark>',
@@ -116,6 +123,7 @@ final class Highlighter
         return '/' . implode('|', $parts) . '/iu';
     }
 
+    /** Apply a compiled pattern to $text, wrapping each match in open/close tags. */
     private function apply(string $pattern, string $text): string
     {
         return preg_replace_callback(

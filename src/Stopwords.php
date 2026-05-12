@@ -15,13 +15,8 @@ final class Stopwords
     /** @var array<string, true>|null Associative map for O(1) lookup; null until first use. */
     private ?array $words = null;
 
+    /** BCP 47 language tag for the loaded stopword list. */
     private string $lang;
-
-    /** Whether a stopword list exists for the given BCP 47 language tag. */
-    public static function supports(string $lang): bool
-    {
-        return Language::hasStopwords($lang);
-    }
 
     /**
      * @param string $lang BCP 47 language tag (e.g. 'en', 'fr', 'de').
@@ -33,6 +28,12 @@ final class Stopwords
             throw new \InvalidArgumentException("No stopword list for language: '{$lang}'");
         }
         $this->lang = $lang;
+    }
+
+    /** Whether a stopword list exists for the given BCP 47 language tag. */
+    public static function supports(string $lang): bool
+    {
+        return Language::hasStopwords($lang);
     }
 
     /**

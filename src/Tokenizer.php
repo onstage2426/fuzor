@@ -18,6 +18,10 @@ namespace Fuzor;
  */
 final class Tokenizer
 {
+    private function __construct()
+    {
+    }
+
     /** Languages that use contiguous scripts with no whitespace word delimiters. */
     private const NGRAM_SCRIPTS = [
         'zh' => 2, 'ja' => 2, 'ko' => 2, 'th' => 3,
