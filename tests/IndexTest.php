@@ -1049,6 +1049,68 @@ class IndexTest extends TestCase
         $this->assertEmpty($index->search('coupe')->ids);
     }
 
+    // --- clear ---
+
+    public function testClearRemovesAllDocuments(): void
+    {
+        $index = new Index($this->dbPath);
+        $index->insertMany([
+            ['id' => 1, 'title' => 'sedan'],
+            ['id' => 2, 'title' => 'coupe'],
+            ['id' => 3, 'title' => 'suv'],
+        ]);
+        $index->clear();
+
+        $this->assertEmpty($index->search('sedan')->ids);
+        $this->assertEmpty($index->search('coupe')->ids);
+        $this->assertEmpty($index->search('suv')->ids);
+    }
+
+    public function testClearResetsDocumentCount(): void
+    {
+        $index = new Index($this->dbPath);
+        $index->insertMany([
+            ['id' => 1, 'title' => 'sedan'],
+            ['id' => 2, 'title' => 'coupe'],
+        ]);
+        $index->clear();
+
+        $this->assertSame(0, $index->count());
+    }
+
+    public function testClearResetsAverageDocLength(): void
+    {
+        $index = new Index($this->dbPath);
+        $index->insertMany([
+            ['id' => 1, 'title' => 'alpha beta gamma'],
+            ['id' => 2, 'title' => 'delta epsilon'],
+        ]);
+        $index->clear();
+
+        $info = $index->inspectQuery('any')['index_info'];
+        $this->assertEqualsWithDelta(0.0, (float) $info['avg_doc_length'], 0.001);
+    }
+
+    public function testClearAllowsReinsertionAfterwards(): void
+    {
+        $index = new Index($this->dbPath);
+        $index->insert(['id' => 1, 'title' => 'sedan']);
+        $index->clear();
+        $index->insert(['id' => 1, 'title' => 'coupe']);
+
+        $this->assertEmpty($index->search('sedan')->ids);
+        $this->assertContains(1, $index->search('coupe')->ids);
+        $this->assertSame(1, $index->count());
+    }
+
+    public function testClearOnEmptyIndexIsNoop(): void
+    {
+        $index = new Index($this->dbPath);
+        $index->clear();
+
+        $this->assertSame(0, $index->count());
+    }
+
     // --- count ---
 
     public function testCountReturnsZeroOnFreshIndex(): void
@@ -2471,6 +2533,13 @@ class IndexTest extends TestCase
         new Index($this->dbPath)->close();
         $this->expectException(IOException::class);
         (new Index($this->dbPath, readonly: true))->deleteMany([1]);
+    }
+
+    public function testReadonlyClearThrows(): void
+    {
+        new Index($this->dbPath)->close();
+        $this->expectException(IOException::class);
+        (new Index($this->dbPath, readonly: true))->clear();
     }
 
     // --- snapshotTo ---

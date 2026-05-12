@@ -851,6 +851,39 @@ class Index
     }
 
     /**
+     * Remove all documents from the index in a single transaction.
+     *
+     * Faster than deleteMany() over every ID: four unconditional DELETEs replace
+     * per-document bookkeeping. Stats and all caches are reset in-place.
+     */
+    public function clear(): void
+    {
+        $this->assertWritable();
+
+        $this->wrapInTransaction(function (): void {
+            $pdo = $this->pdo;
+            assert($pdo !== null);
+
+            $pdo->exec('DELETE FROM doclist');
+            $pdo->exec('DELETE FROM positions');
+            $pdo->exec('DELETE FROM doc_lengths');
+            $pdo->exec('DELETE FROM wordlist');
+
+            $this->stmt(
+                'statsWrite',
+                "UPDATE info SET value = CASE key
+                     WHEN 'total_documents' THEN :n
+                     WHEN 'avg_doc_length'  THEN :avg
+                 END WHERE key IN ('total_documents', 'avg_doc_length')"
+            )->execute([':n' => '0', ':avg' => '0']);
+        });
+
+        $this->infoCache     = ['total_documents' => '0', 'avg_doc_length' => '0'];
+        $this->termIdCache   = [];
+        $this->wordlistCache = [];
+    }
+
+    /**
      * Return true if a document with the given ID exists in the index.
      *
      * @param int $id Document ID to check.
