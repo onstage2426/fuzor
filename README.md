@@ -1,16 +1,16 @@
-# ⚡ Fuzor
+<p align="center"><a href="https://github.com/onstage2426/fuzor" target="_blank"><img src="https://raw.githubusercontent.com/onstage2426/fuzor/refs/heads/assets/logo.svg" width="400" alt="Fuzor Logo"></a></p>
 
-![PHP 8.5+](https://img.shields.io/badge/PHP-8.5%2B-777BB4?logo=php&logoColor=white) ![License](https://img.shields.io/badge/license-MIT-green) ![Packagist Version](https://img.shields.io/packagist/v/onstage2426/fuzor)
+<p align="center"><img alt="PHP 8.5+" src="https://img.shields.io/badge/PHP-8.5%2B-777BB4?logo=php&amp;logoColor=white"> <img alt="License" src="https://img.shields.io/badge/license-MIT-green"> <img alt="Packagist Version" src="https://img.shields.io/packagist/v/onstage2426/fuzor"> <img alt="CI" src="https://github.com/onstage2426/fuzor/actions/workflows/ci.yml/badge.svg"></p>
 
-Lightweight dependency-free full-text search for PHP. Tokenises documents, stores an inverted index in a SQLite file, and scores results with Okapi BM25.
+## About
 
-- BM25 ranked full-text search with fuzzy and boolean modes
-- Search-as-you-type with built-in prefix matching
-- Stopword filtering and Snowball stemming for 60+ languages
-- Snippet extraction and result highlighting included
+Fuzor is a dependency-free full-text search library for PHP. It tokenises your documents, stores an inverted index in a single SQLite file, and scores results with Okapi BM25 — no external services required.
+
+- BM25 ranked search with fuzzy and boolean modes
+- Search-as-you-type prefix matching
+- Stopword filtering and Snowball stemming for 62 languages
+- Snippet extraction and result highlighting
 - One SQLite file per index — zero infrastructure
-
-[Documentation](docs/) · [Benchmarks](benchmarks/results.txt)
 
 ## Installation
 
@@ -18,77 +18,34 @@ Lightweight dependency-free full-text search for PHP. Tokenises documents, store
 composer require onstage2426/fuzor
 ```
 
-## Requirements
+**Requirements:** PHP 8.5+, SQLite 3.37.0+
 
-- PHP 8.5+
-- SQLite 3.37.0+
-
-## Quickstart
-
-### Opening and creating an index
-
-The constructor opens an existing index or creates a new one:
+## Usage
 
 ```php
 use Fuzor\Index;
 
-$index = new Index('/path/to/articles.db');              // open or create
-$index = new Index('/path/to/articles.db', force: true); // overwrite existing
-```
-
-### Adding, updating, and removing items
-
-Each document requires an `id`. All other fields are concatenated and indexed together.
-
-The `Many` variants are significantly faster when indexing multiple documents.
-
-```php
-// Add one item
-$index->insert(['id' => 1, 'title' => 'Fast sedan', 'body' => 'Comfortable city car.']);
+// Create an index and add documents
+$index = new Index('/path/to/articles.db', language: 'en');
 $index->insertMany([
-    ['id' => 1, 'title' => 'Fast sedan',    'body' => 'Comfortable city car with great fuel economy.'],
-    ['id' => 2, 'title' => 'Off-road SUV',  'body' => 'Built for adventure. Handles any terrain.'],
-    ['id' => 3, 'title' => 'Electric coupe','body' => 'Zero emissions, instant torque, sporty design.'],
+    ['id' => 1, 'title' => 'Fast sedan',     'body' => 'Comfortable city car with great fuel economy.'],
+    ['id' => 2, 'title' => 'Off-road SUV',   'body' => 'Built for adventure. Handles any terrain.'],
+    ['id' => 3, 'title' => 'Electric coupe', 'body' => 'Zero emissions, instant torque, sporty design.'],
 ]);
 
-// Replace an existing item (throws if ID not found)
-$index->update(['id' => 1, 'title' => 'Updated sedan', 'body' => 'New content.']);
-$index->updateMany(...);
-
-// Create or replace (upsert semantics)
-$index->upsert(['id' => 1, 'title' => 'Updated sedan', 'body' => 'New content.']);
-$index->upsertMany(...);
-
-// Remove an item
-$index->delete(2);
-$index->deleteMany([1, 2, 3]);
-```
-
-### Searching
-
-```php
-$results = $index->search('city car');
-$results = $index->search('economi', fuzzy: true); // tolerates typos
-
+// Search
+$results = $index->search('economi', fuzzy: true);
 $results = $index->searchBoolean('sedan or coupe -electric');
 ```
 
-### Stopword filtering and stemming
+## Documentation
 
-Pass a BCP 47 language tag to enable stopword filtering and stemming:
+- [Indexing](docs/indexing.md) — bulk loading, upsert, rebuild, snapshots
+- [Search](docs/search.md) — BM25 tuning, fuzzy, boolean, prefix
+- [Language](docs/language.md) — stopwords, stemming, CJK/Thai n-grams
+- [Configuration](docs/configuration.md) — all tuning parameters
+- [Snippeting](docs/snippeting.md) and [Highlighting](docs/highlighting.md)
 
-```php
-$index = new Index($path, language: 'en');
-```
+## License
 
-### Snippeting and highlighting
-
-```php
-$snip = $index->snippeter();
-echo $snip->snippet('fast connections', $doc['body']);
-// "… offers fast broadband connections for …"
-
-$hl = $index->highlighter();
-echo $hl->highlight('fast sedan', $doc['title']);
-// "Sporty <mark>fast sedan</mark> for sale"
-```
+MIT — see [LICENSE](LICENSE).
