@@ -875,12 +875,17 @@ class Index
             return [];
         }
 
-        /** @infection-ignore-all DecrementInteger,IncrementInteger: array_fill start index 0 vs ±1 only changes array keys; implode() ignores keys */
-        $placeholders = implode(',', array_fill(0, count($ids), '?'));
-        $stmt = $this->prepare("SELECT doc_id FROM doc_lengths WHERE doc_id IN ($placeholders)");
-        $stmt->execute($ids);
         /** @var list<int> $found */
-        $found    = $stmt->fetchAll(\PDO::FETCH_COLUMN);
+        $found = [];
+        /** @infection-ignore-all DecrementInteger,IncrementInteger: array_fill start index 0 vs ±1 only changes array keys; implode() ignores keys */
+        foreach (array_chunk($ids, self::CHUNK_1P) as $chunk) {
+            $placeholders = implode(',', array_fill(0, count($chunk), '?'));
+            $stmt = $this->prepare("SELECT doc_id FROM doc_lengths WHERE doc_id IN ($placeholders)");
+            $stmt->execute($chunk);
+            /** @var list<int> $rows */
+            $rows  = $stmt->fetchAll(\PDO::FETCH_COLUMN);
+            $found = array_merge($found, $rows);
+        }
         $foundSet = array_flip($found);
 
         $result = [];
