@@ -3,6 +3,10 @@
          xsi:noNamespaceSchemaLocation="https://schema.phpunit.de/13.1/phpunit.xsd"
          bootstrap="vendor/autoload.php"
          colors="true"
+         failOnWarning="true"
+         failOnRisky="true"
+         failOnDeprecation="true"
+         failOnNotice="true"
          displayDetailsOnTestsThatTriggerWarnings="true"
          displayDetailsOnTestsThatTriggerDeprecations="true">
 
@@ -16,6 +20,9 @@
         <include>
             <directory>src</directory>
         </include>
+        <exclude>
+            <directory>src/Stemmers</directory>
+        </exclude>
     </source>
 
 </phpunit>
