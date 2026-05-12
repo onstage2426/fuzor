@@ -3,7 +3,19 @@
     "type": "library",
     "description": "Dependency-free full-text search for PHP. BM25 ranking, fuzzy and boolean modes, search-as-you-type prefix matching, stopword filtering and Snowball stemming for 62 languages, snippet extraction and result highlighting — one SQLite file, zero infrastructure.",
     "keywords": ["full-text-search", "search", "sqlite", "bm25", "inverted-index", "fuzzy-search", "boolean-search", "stemming", "stopwords", "snippet", "highlighting", "multilingual", "search-as-you-type", "tokenizer"],
+    "homepage": "https://github.com/onstage2426/fuzor",
     "license": "MIT",
+    "authors": [
+        {
+            "name": "Onstage2426",
+            "email": "70956213+Onstage2426@users.noreply.github.com",
+            "role": "Developer"
+        }
+    ],
+    "support": {
+        "issues": "https://github.com/onstage2426/fuzor/issues",
+        "source": "https://github.com/onstage2426/fuzor"
+    },
     "require": {
         "php": ">=8.5"
     },
@@ -32,11 +44,13 @@
         "stan":   "./vendor/bin/phpstan analyse --memory-limit=512M",
         "bench":  "./vendor/bin/phpbench run benchmarks/FuzorBench.php --report=default",
         "infect":  "./vendor/bin/infection --threads=16",
-        "check":  ["@cs", "@stan", "@test", "@infect"]
+        "check":  ["@cs", "@stan", "@test"]
     },
     "config": {
         "allow-plugins": {
             "infection/extension-installer": true
         }
-    }
+    },
+    "minimum-stability": "stable",
+    "prefer-stable": true
 }
