@@ -33,6 +33,9 @@ class Index
     /** Max rows per chunk when each row uses 3 bind variables. */
     private const int CHUNK_3P = 10_922;
 
+    /** Max rows per chunk for document store bulk-INSERT (2 params/row, capped conservatively for large BLOBs). */
+    private const int CHUNK_DOCS = 500;
+
     /** Absolute path to the open SQLite index file. */
     private readonly string $path;
 
@@ -77,6 +80,9 @@ class Index
     /** BCP 47 language tag active on this index; null means no stopword filtering or stemming. */
     public private(set) ?string $language = null;
 
+    /** Whether the optional document store is active on this index. */
+    public private(set) bool $documentStoreEnabled = false;
+
     /** Active stopword filter; null when no language is set or language has no stopword list. */
     private ?Stopwords $stopwords = null;
 
@@ -99,6 +105,10 @@ class Index
      * @param  bool        $force    Overwrite any existing file at $path.
      * @param  Config|null $config   Search tuning; null uses all defaults.
      * @param  bool        $readonly Open in read-only mode; all write methods throw IOException.
+     * @param  bool        $store    Enable the document store; persists raw documents alongside
+     *                               the inverted index so search results can be hydrated without
+     *                               a separate data layer. Ignored when opening an existing index
+     *                               (the stored has_document_store info value takes precedence).
      * @throws IOException    If the parent directory does not exist, or readonly is true and the file does not exist.
      * @throws QueryException If $language is set but has no stopword list or stemmer,
      *                        or if both $readonly and $force are true.
@@ -109,6 +119,7 @@ class Index
         bool $force = false,
         ?Config $config = null,
         private readonly bool $readonly = false,
+        bool $store = false,
     ) {
         $this->config   = $config ?? new Config();
         if ($this->readonly && $force) {
@@ -125,7 +136,7 @@ class Index
         if (file_exists($resolved) && !$force) {
             $this->selectIndex();
         } else {
-            $this->createIndex($force, $language);
+            $this->createIndex($force, $language, $store);
         }
     }
 
@@ -210,15 +221,23 @@ class Index
      * @param  string            $path     Absolute or relative path to the index file to rebuild.
      * @param  callable          $callback fn(Index $new): void — populate the new index here.
      * @param  false|string|null $language BCP 47 tag, null (no language), or false (inherit).
+     * @param  ?bool             $store    true/false to force enable/disable; null (default) inherits from existing.
      * @return self               Open index pointing at the rebuilt file.
      * @throws \RuntimeException  If the rename fails or the parent directory does not exist.
      */
-    public static function rebuild(string $path, callable $callback, false|string|null $language = false): self
-    {
+    public static function rebuild(
+        string $path,
+        callable $callback,
+        false|string|null $language = false,
+        ?bool $store = null,
+    ): self {
         $resolved = self::resolvePath($path);
         $existing = file_exists($resolved) ? new self($resolved) : null;
         if ($language === false) {
             $language = $existing?->language;
+        }
+        if ($store === null) {
+            $store = $existing !== null && $existing->documentStoreEnabled;
         }
         /** @infection-ignore-all MethodCallRemoval: resource cleanup; GC closes the connection if skipped, no observable effect on the rebuild outcome */
         $existing?->close();
@@ -227,7 +246,7 @@ class Index
         $tmp = $resolved . '.tmp-' . bin2hex(random_bytes(4));
 
         try {
-            $handle = new self($tmp, language: $language);
+            $handle = new self($tmp, language: $language, store: $store);
             $callback($handle);
             $handle->close();
 
@@ -312,6 +331,7 @@ class Index
     private function createIndex(
         bool $force = false,
         ?string $language = null,
+        bool $store = false,
     ): static {
         if (!$force && file_exists($this->path)) {
             throw new IOException(
@@ -384,6 +404,17 @@ class Index
         /** @infection-ignore-all MethodCallRemoval: positions_doc_id is a performance index; DELETE-by-doc_id still works via full scan */
         $pdo->exec("CREATE INDEX IF NOT EXISTS 'main'.'positions_doc_id' ON positions ('doc_id');");
 
+        if ($store) {
+            $pdo->exec(
+                "CREATE TABLE IF NOT EXISTS documents (
+                    doc_id INTEGER PRIMARY KEY,
+                    data   TEXT NOT NULL
+                ) STRICT"
+            );
+            $pdo->exec("INSERT INTO info (key, value) VALUES ('has_document_store', '1')");
+            $this->documentStoreEnabled = true;
+        }
+
         if ($language !== null) {
             $this->applyLanguage($language);
         }
@@ -416,12 +447,16 @@ class Index
 
         assert($this->pdo instanceof \PDO);
         $pdo   = $this->pdo;
-        $stmt  = $pdo->query("SELECT value FROM info WHERE key = 'language' LIMIT 1");
-        /** @infection-ignore-all FalseValue: if $stmt is false the ternary else-branch is taken; changing false→true makes $row=true which is not an array so $lang remains null — same result */
-        $row   = $stmt ? $stmt->fetch(PDO::FETCH_NUM) : false;
-        /** @var array<int, string>|false $row */
-        $lang  = (is_array($row) && $row[0] !== '') ? $row[0] : null;
+        $stmt  = $pdo->query("SELECT key, value FROM info WHERE key IN ('language', 'has_document_store')");
+        $infoRows = [];
+        if ($stmt) {
+            /** @var array<string, string> $fetched */
+            $fetched  = $stmt->fetchAll(PDO::FETCH_KEY_PAIR);
+            $infoRows = $fetched;
+        }
+        $lang = ($infoRows['language'] ?? '') !== '' ? $infoRows['language'] : null;
         $this->applyLanguage($lang);
+        $this->documentStoreEnabled = ($infoRows['has_document_store'] ?? '0') === '1';
     }
 
     /**
@@ -590,7 +625,20 @@ class Index
                  'docLengthBuffer'   => $docLengthBuffer,
                  'docPositionBuffer' => $docPositionBuffer] = $this->buildBatchBuffer($documents, $progress);
 
-                $totalLength = $this->flushBatch($wordBuffer, $docTermBuffer, $docLengthBuffer, $docPositionBuffer);
+                $rawDocuments = [];
+                if ($this->documentStoreEnabled) {
+                    foreach ($documents as $doc) {
+                        $rawDocuments[$this->extractId($doc['id'])] = $doc;
+                    }
+                }
+
+                $totalLength = $this->flushBatch(
+                    $wordBuffer,
+                    $docTermBuffer,
+                    $docLengthBuffer,
+                    $docPositionBuffer,
+                    $rawDocuments
+                );
 
                 $this->adjustStats(count($documents), $totalLength);
             });
@@ -776,11 +824,19 @@ class Index
                  'docLengthBuffer'   => $docLengthBuffer,
                  'docPositionBuffer' => $docPositionBuffer] = $this->buildBatchBuffer($documents);
 
+                $rawDocuments = [];
+                if ($this->documentStoreEnabled) {
+                    foreach ($documents as $doc) {
+                        $rawDocuments[$this->extractId($doc['id'])] = $doc;
+                    }
+                }
+
                 $totalNewLength = $this->flushBatch(
                     $wordBuffer,
                     $docTermBuffer,
                     $docLengthBuffer,
                     $docPositionBuffer,
+                    $rawDocuments,
                 );
 
                 // 5. Update stats: only truly new documents change the document count.
@@ -864,6 +920,9 @@ class Index
             $pdo->exec('DELETE FROM positions');
             $pdo->exec('DELETE FROM doc_lengths');
             $pdo->exec('DELETE FROM wordlist');
+            if ($this->documentStoreEnabled) {
+                $pdo->exec('DELETE FROM documents');
+            }
 
             $this->stmt(
                 'statsWrite',
@@ -920,6 +979,62 @@ class Index
         $result = [];
         foreach ($ids as $id) {
             $result[$id] = isset($foundSet[$id]);
+        }
+        return $result;
+    }
+
+    /**
+     * Fetch a stored document by ID, or null if not found.
+     *
+     * Requires the document store to be enabled (store: true at creation time).
+     *
+     * @param  int                      $id Document ID to fetch.
+     * @return array<string, mixed>|null    The raw document array, or null if not found.
+     * @throws QueryException If the document store is not enabled on this index.
+     */
+    public function get(int $id): ?array
+    {
+        $result = $this->getMany([$id]);
+        return $result[$id] ?? null;
+    }
+
+    /**
+     * Fetch stored documents by ID in one query per chunk.
+     *
+     * Returns a map keyed by doc_id. IDs absent from the store are silently omitted.
+     * To preserve result order, iterate your ID list and index into the returned map.
+     *
+     * Requires the document store to be enabled (store: true at creation time).
+     *
+     * @param  list<int>                         $ids Document IDs to fetch.
+     * @return array<int, array<string, mixed>>       Map of doc_id => document array.
+     * @throws QueryException If the document store is not enabled on this index.
+     */
+    public function getMany(array $ids): array
+    {
+        if (!$this->documentStoreEnabled) {
+            throw new QueryException(
+                'Document store is not enabled on this index. Pass store: true at construction.'
+            );
+        }
+        if ($ids === []) {
+            return [];
+        }
+
+        $result = [];
+        foreach (array_chunk($ids, self::CHUNK_1P) as $chunk) {
+            $placeholders = implode(',', array_fill(0, count($chunk), '?'));
+            $stmt = $this->prepare(
+                "SELECT doc_id, data FROM documents WHERE doc_id IN ({$placeholders})"
+            );
+            $stmt->execute($chunk);
+            /** @var list<array{doc_id: int, data: string}> $rows */
+            $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+            foreach ($rows as $row) {
+                /** @var array<string, mixed> $decoded */
+                $decoded = json_decode($row['data'], true, 512, JSON_THROW_ON_ERROR);
+                $result[(int) $row['doc_id']] = $decoded;
+            }
         }
         return $result;
     }
@@ -1134,14 +1249,14 @@ class Index
 
         /** @infection-ignore-all DecrementInteger: $total is count(); -1 is impossible, so the guard fires identically for any realistic input */
         if ($total === 0 || $limit === 0) {
-            return new SearchResult(ids: [], hits: $total, scores: $docScores);
+            return new SearchResult(ids: [], hits: $total, scores: $docScores, documents: $this->hydrateIds([]));
         }
 
         /** @infection-ignore-all LessThanOrEqualTo: when total===numOfResults the fast arsort path and the heap path both return the same set of doc IDs; ordering may differ for ties but is unspecified */
         if ($total <= $offset + $limit) {
             arsort($docScores);
             $ids = array_slice(array_keys($docScores), $offset, $limit);
-            return new SearchResult(ids: $ids, hits: $total, scores: $docScores);
+            return new SearchResult(ids: $ids, hits: $total, scores: $docScores, documents: $this->hydrateIds($ids));
         }
 
         // Partial sort: min-heap capped at $offset + $limit keeps the top window of scoring docs.
@@ -1175,7 +1290,13 @@ class Index
             $ids[] = $heap->extract()[1];
         }
 
-        return new SearchResult(ids: array_slice(array_reverse($ids), $offset, $limit), hits: $total, scores: $docScores); // phpcs:ignore Generic.Files.LineLength
+        $pagedIds = array_slice(array_reverse($ids), $offset, $limit);
+        return new SearchResult(
+            ids: $pagedIds,
+            hits: $total,
+            scores: $docScores,
+            documents: $this->hydrateIds($pagedIds)
+        );
     }
 
     /**
@@ -1276,7 +1397,30 @@ class Index
         $total  = count($docIds);
         $docIds = array_slice($docIds, $offset, $limit);
 
-        return new SearchResult(ids: $docIds, hits: $total);
+        return new SearchResult(ids: $docIds, hits: $total, documents: $this->hydrateIds($docIds));
+    }
+
+    /**
+     * Fetch documents for $ids from the store and return them in $ids order.
+     * Returns null when the document store is disabled so SearchResult::$documents
+     * signals "no store" rather than "empty result".
+     *
+     * @param  list<int> $ids
+     * @return array<int, array<string, mixed>>|null
+     */
+    private function hydrateIds(array $ids): ?array
+    {
+        if (!$this->documentStoreEnabled || $ids === []) {
+            return $this->documentStoreEnabled ? [] : null;
+        }
+        $map    = $this->getMany($ids);
+        $result = [];
+        foreach ($ids as $id) {
+            if (isset($map[$id])) {
+                $result[$id] = $map[$id];
+            }
+        }
+        return $result;
     }
 
     /**
@@ -1417,6 +1561,9 @@ class Index
             $this->prepare("DELETE FROM doclist   WHERE doc_id IN ({$placeholders})")->execute($chunk);
             $this->prepare("DELETE FROM positions WHERE doc_id IN ({$placeholders})")->execute($chunk);
             $this->prepare("DELETE FROM doc_lengths WHERE doc_id IN ({$placeholders})")->execute($chunk);
+            if ($this->documentStoreEnabled) {
+                $this->prepare("DELETE FROM documents WHERE doc_id IN ({$placeholders})")->execute($chunk);
+            }
 
             // Prune orphan terms scoped to the affected set; avoids a full wordlist table scan.
             if ($affectedTermIds !== []) {
@@ -1493,6 +1640,11 @@ class Index
         $this->termIdCache   = [];
         $this->wordlistCache = [];
 
+        if ($this->documentStoreEnabled) {
+            $this->stmt('documentDelete', 'DELETE FROM documents WHERE doc_id = :documentId')
+                ->execute([':documentId' => $documentId]);
+        }
+
         /** @infection-ignore-all NullValue,CastInt: the NullValue branch is only reached when $length is false (doc not found); CastInt: $length from RETURNING is already int-like */
         return $length === false ? null : (int) $length;
     }
@@ -1568,6 +1720,14 @@ class Index
             $this->savePositions($documentId, $termIdPositions);
         }
         $this->saveDocLength($documentId, $length);
+
+        if ($this->documentStoreEnabled) {
+            $this->stmt(
+                'documentSave',
+                'INSERT INTO documents (doc_id, data) VALUES (?, ?)
+                 ON CONFLICT(doc_id) DO UPDATE SET data = excluded.data'
+            )->execute([$documentId, json_encode($row, JSON_THROW_ON_ERROR)]);
+        }
 
         return $length;
     }
@@ -1714,6 +1874,7 @@ class Index
      * @param  array<int, array<string, int>>                     $docTermBuffer
      * @param  array<int, int>                                    $docLengthBuffer
      * @param  array<int, array<string, list<int>>>               $docPositionBuffer
+     * @param  array<int, array<string, mixed>>  $rawDocuments  doc_id → document array (store path only)
      * @return int Total token count across all documents (for adjustStats).
      */
     private function flushBatch(
@@ -1721,6 +1882,7 @@ class Index
         array $docTermBuffer,
         array $docLengthBuffer,
         array $docPositionBuffer = [],
+        array $rawDocuments = [],
     ): int {
         $pdo = $this->pdo;
         assert($pdo instanceof \PDO);
@@ -1825,6 +1987,22 @@ class Index
                 ($this->bulkStmtCache["positionsChunk:{$rowCount}"] ??= $pdo->prepare(
                     'INSERT INTO positions (term_id, doc_id, position) VALUES '
                         . implode(',', array_fill(0, $rowCount, '(?,?,?)'))
+                ))->execute($params);
+            }
+        }
+
+        // Step 5: bulk-insert documents into the document store.
+        if ($this->documentStoreEnabled && $rawDocuments !== []) {
+            foreach (array_chunk($rawDocuments, self::CHUNK_DOCS, true) as $chunk) {
+                $n      = count($chunk);
+                $params = [];
+                foreach ($chunk as $docId => $doc) {
+                    $params[] = $docId;
+                    $params[] = json_encode($doc, JSON_THROW_ON_ERROR);
+                }
+                ($this->bulkStmtCache["documentsChunk:{$n}"] ??= $pdo->prepare(
+                    'INSERT INTO documents (doc_id, data) VALUES '
+                        . implode(',', array_fill(0, $n, '(?,?)'))
                 ))->execute($params);
             }
         }

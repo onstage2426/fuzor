@@ -2648,4 +2648,418 @@ class IndexTest extends TestCase
             @unlink($readPath);
         }
     }
+
+    // --- Document store: construction ---
+
+    public function testDocumentStoreDisabledByDefault(): void
+    {
+        $index = new Index($this->dbPath);
+        $this->assertFalse($index->documentStoreEnabled);
+    }
+
+    public function testDocumentStoreEnabledWhenStoreFlagSet(): void
+    {
+        $index = new Index($this->dbPath, store: true);
+        $this->assertTrue($index->documentStoreEnabled);
+    }
+
+    public function testDocumentStorePersistedAfterReopen(): void
+    {
+        new Index($this->dbPath, store: true)->close();
+
+        $index = new Index($this->dbPath);
+        $this->assertTrue($index->documentStoreEnabled);
+    }
+
+    public function testDocumentStoreNotRestoredWhenNeverEnabled(): void
+    {
+        new Index($this->dbPath)->close();
+
+        $index = new Index($this->dbPath);
+        $this->assertFalse($index->documentStoreEnabled);
+    }
+
+    // --- Document store: get / getMany guards ---
+
+    public function testGetThrowsWhenStoreNotEnabled(): void
+    {
+        $index = new Index($this->dbPath);
+        $index->insert(['id' => 1, 'title' => 'sedan']);
+
+        $this->expectException(QueryException::class);
+        $index->get(1);
+    }
+
+    public function testGetManyThrowsWhenStoreNotEnabled(): void
+    {
+        $index = new Index($this->dbPath);
+        $index->insert(['id' => 1, 'title' => 'sedan']);
+
+        $this->expectException(QueryException::class);
+        $index->getMany([1]);
+    }
+
+    public function testGetReturnsNullForMissingId(): void
+    {
+        $index = new Index($this->dbPath, store: true);
+        $this->assertNull($index->get(999));
+    }
+
+    public function testGetManyEmptyArrayReturnsEmpty(): void
+    {
+        $index = new Index($this->dbPath, store: true);
+        $this->assertSame([], $index->getMany([]));
+    }
+
+    public function testGetManyOmitsMissingIds(): void
+    {
+        $index = new Index($this->dbPath, store: true);
+        $index->insert(['id' => 1, 'title' => 'sedan']);
+
+        $result = $index->getMany([1, 999]);
+        $this->assertArrayHasKey(1, $result);
+        $this->assertArrayNotHasKey(999, $result);
+    }
+
+    // --- Document store: insert ---
+
+    public function testInsertStoresDocument(): void
+    {
+        $doc   = ['id' => 1, 'title' => 'sedan', 'body' => 'city car'];
+        $index = new Index($this->dbPath, store: true);
+        $index->insert($doc);
+
+        $this->assertSame($doc, $index->get(1));
+    }
+
+    public function testInsertDoesNotStoreWhenDisabled(): void
+    {
+        $index = new Index($this->dbPath);
+        $index->insert(['id' => 1, 'title' => 'sedan']);
+
+        $this->expectException(QueryException::class);
+        $index->get(1);
+    }
+
+    // --- Document store: insertMany ---
+
+    public function testInsertManyStoresAllDocuments(): void
+    {
+        $docs = [
+            ['id' => 1, 'title' => 'sedan'],
+            ['id' => 2, 'title' => 'coupe'],
+            ['id' => 3, 'title' => 'suv'],
+        ];
+        $index = new Index($this->dbPath, store: true);
+        $index->insertMany($docs);
+
+        $this->assertSame($docs[0], $index->get(1));
+        $this->assertSame($docs[1], $index->get(2));
+        $this->assertSame($docs[2], $index->get(3));
+    }
+
+    // --- Document store: update ---
+
+    public function testUpdateReplacesStoredDocument(): void
+    {
+        $index = new Index($this->dbPath, store: true);
+        $index->insert(['id' => 1, 'title' => 'old title']);
+        $index->update(['id' => 1, 'title' => 'new title']);
+
+        $this->assertSame(['id' => 1, 'title' => 'new title'], $index->get(1));
+    }
+
+    // --- Document store: upsert ---
+
+    public function testUpsertStoresNewDocument(): void
+    {
+        $doc   = ['id' => 1, 'title' => 'sedan'];
+        $index = new Index($this->dbPath, store: true);
+        $index->upsert($doc);
+
+        $this->assertSame($doc, $index->get(1));
+    }
+
+    public function testUpsertReplacesStoredDocument(): void
+    {
+        $index = new Index($this->dbPath, store: true);
+        $index->insert(['id' => 1, 'title' => 'old']);
+        $index->upsert(['id' => 1, 'title' => 'new']);
+
+        $this->assertSame(['id' => 1, 'title' => 'new'], $index->get(1));
+    }
+
+    // --- Document store: updateMany ---
+
+    public function testUpdateManyReplacesStoredDocuments(): void
+    {
+        $index = new Index($this->dbPath, store: true);
+        $index->insertMany([
+            ['id' => 1, 'title' => 'old one'],
+            ['id' => 2, 'title' => 'old two'],
+        ]);
+        $index->updateMany([
+            ['id' => 1, 'title' => 'new one'],
+            ['id' => 2, 'title' => 'new two'],
+        ]);
+
+        $this->assertSame(['id' => 1, 'title' => 'new one'], $index->get(1));
+        $this->assertSame(['id' => 2, 'title' => 'new two'], $index->get(2));
+    }
+
+    // --- Document store: upsertMany ---
+
+    public function testUpsertManyStoresNewAndReplacesExisting(): void
+    {
+        $index = new Index($this->dbPath, store: true);
+        $index->insert(['id' => 1, 'title' => 'old']);
+        $index->upsertMany([
+            ['id' => 1, 'title' => 'replaced'],
+            ['id' => 2, 'title' => 'new'],
+        ]);
+
+        $this->assertSame(['id' => 1, 'title' => 'replaced'], $index->get(1));
+        $this->assertSame(['id' => 2, 'title' => 'new'], $index->get(2));
+    }
+
+    // --- Document store: delete ---
+
+    public function testDeleteRemovesDocumentFromStore(): void
+    {
+        $index = new Index($this->dbPath, store: true);
+        $index->insert(['id' => 1, 'title' => 'sedan']);
+        $index->delete(1);
+
+        $this->assertNull($index->get(1));
+    }
+
+    // --- Document store: deleteMany ---
+
+    public function testDeleteManyRemovesDocumentsFromStore(): void
+    {
+        $index = new Index($this->dbPath, store: true);
+        $index->insertMany([
+            ['id' => 1, 'title' => 'sedan'],
+            ['id' => 2, 'title' => 'coupe'],
+        ]);
+        $index->deleteMany([1, 2]);
+
+        $this->assertNull($index->get(1));
+        $this->assertNull($index->get(2));
+    }
+
+    // --- Document store: clear ---
+
+    public function testClearRemovesAllDocumentsFromStore(): void
+    {
+        $index = new Index($this->dbPath, store: true);
+        $index->insertMany([
+            ['id' => 1, 'title' => 'sedan'],
+            ['id' => 2, 'title' => 'coupe'],
+        ]);
+        $index->clear();
+
+        $this->assertNull($index->get(1));
+        $this->assertNull($index->get(2));
+    }
+
+    public function testClearOnStoreDisabledIndexDoesNotThrow(): void
+    {
+        $index = new Index($this->dbPath);
+        $index->insert(['id' => 1, 'title' => 'sedan']);
+        $index->clear();
+
+        $this->assertSame(0, $index->count());
+    }
+
+    // --- Document store: hasDocuments ---
+
+    public function testHasDocumentsFalseWhenStoreDisabled(): void
+    {
+        $index = new Index($this->dbPath);
+        $index->insert(['id' => 1, 'title' => 'sedan']);
+
+        $this->assertFalse($index->search('sedan')->hasDocuments());
+    }
+
+    public function testHasDocumentsTrueWhenStoreEnabled(): void
+    {
+        $index = new Index($this->dbPath, store: true);
+        $index->insert(['id' => 1, 'title' => 'sedan']);
+
+        $this->assertTrue($index->search('sedan')->hasDocuments());
+    }
+
+    public function testHasDocumentsTrueEvenWhenNoResults(): void
+    {
+        $index = new Index($this->dbPath, store: true);
+        $index->insert(['id' => 1, 'title' => 'sedan']);
+
+        $this->assertTrue($index->search('coupe')->hasDocuments());
+    }
+
+    public function testDocumentReturnsDocForIdInResult(): void
+    {
+        $doc   = ['id' => 1, 'title' => 'sedan'];
+        $index = new Index($this->dbPath, store: true);
+        $index->insert($doc);
+
+        $this->assertSame($doc, $index->search('sedan')->document(1));
+    }
+
+    public function testDocumentReturnsNullForIdNotInResult(): void
+    {
+        $index = new Index($this->dbPath, store: true);
+        $index->insert(['id' => 1, 'title' => 'sedan']);
+
+        $this->assertNull($index->search('sedan')->document(99));
+    }
+
+    public function testDocumentReturnsNullWhenStoreDisabled(): void
+    {
+        $index = new Index($this->dbPath);
+        $index->insert(['id' => 1, 'title' => 'sedan']);
+
+        $this->assertNull($index->search('sedan')->document(1));
+    }
+
+    // --- Document store: search hydration ---
+
+    public function testSearchDocumentsIsNullWhenStoreDisabled(): void
+    {
+        $index = new Index($this->dbPath);
+        $index->insert(['id' => 1, 'title' => 'sedan']);
+
+        $result = $index->search('sedan');
+        $this->assertFalse($result->hasDocuments());
+        $this->assertNull($result->document(1));
+    }
+
+    public function testSearchDocumentsIsEmptyArrayWhenNoMatch(): void
+    {
+        $index = new Index($this->dbPath, store: true);
+        $index->insert(['id' => 1, 'title' => 'sedan']);
+
+        $result = $index->search('coupe');
+        $this->assertTrue($result->hasDocuments());
+        $this->assertEmpty($result->ids);
+        $this->assertNull($result->document(1));
+    }
+
+    public function testSearchHydratesDocuments(): void
+    {
+        $doc   = ['id' => 1, 'title' => 'sedan', 'body' => 'city car'];
+        $index = new Index($this->dbPath, store: true);
+        $index->insert($doc);
+
+        $result = $index->search('sedan');
+        $this->assertTrue($result->hasDocuments());
+        $this->assertSame($doc, $result->document(1));
+    }
+
+    public function testSearchDocumentsKeyedByDocId(): void
+    {
+        $index = new Index($this->dbPath, store: true);
+        $index->insertMany([
+            ['id' => 10, 'title' => 'fast sedan'],
+            ['id' => 20, 'title' => 'sedan coupe'],
+        ]);
+
+        $result = $index->search('sedan');
+        $this->assertTrue($result->hasDocuments());
+        $doc10 = $result->document(10);
+        $doc20 = $result->document(20);
+        $this->assertNotNull($doc10);
+        $this->assertNotNull($doc20);
+        $this->assertSame(10, $doc10['id']);
+        $this->assertSame(20, $doc20['id']);
+    }
+
+    public function testSearchBooleanDocumentsIsNullWhenStoreDisabled(): void
+    {
+        $index = new Index($this->dbPath);
+        $index->insert(['id' => 1, 'title' => 'sedan']);
+
+        $result = $index->searchBoolean('sedan');
+        $this->assertFalse($result->hasDocuments());
+        $this->assertNull($result->document(1));
+    }
+
+    public function testSearchBooleanHydratesDocuments(): void
+    {
+        $doc   = ['id' => 1, 'title' => 'sedan', 'body' => 'city car'];
+        $index = new Index($this->dbPath, store: true);
+        $index->insert($doc);
+
+        $result = $index->searchBoolean('sedan');
+        $this->assertTrue($result->hasDocuments());
+        $this->assertSame($doc, $result->document(1));
+    }
+
+    // --- Document store: rebuild ---
+
+    public function testRebuildInheritsStoreFromExistingIndex(): void
+    {
+        new Index($this->dbPath, store: true)->close();
+
+        $rebuilt = Index::rebuild($this->dbPath, function (Index $new): void {
+            $new->insert(['id' => 1, 'title' => 'sedan']);
+        });
+
+        $this->assertTrue($rebuilt->documentStoreEnabled);
+    }
+
+    public function testRebuildCanEnableStore(): void
+    {
+        new Index($this->dbPath)->close();
+
+        $rebuilt = Index::rebuild($this->dbPath, function (Index $new): void {
+            $new->insert(['id' => 1, 'title' => 'sedan']);
+        }, store: true);
+
+        $this->assertTrue($rebuilt->documentStoreEnabled);
+    }
+
+    public function testRebuildCanDisableStore(): void
+    {
+        new Index($this->dbPath, store: true)->close();
+
+        $rebuilt = Index::rebuild($this->dbPath, function (Index $new): void {
+            $new->insert(['id' => 1, 'title' => 'sedan']);
+        }, store: false);
+
+        $this->assertFalse($rebuilt->documentStoreEnabled);
+    }
+
+    public function testRebuildWithStoreStoresDocuments(): void
+    {
+        new Index($this->dbPath)->close();
+
+        $doc     = ['id' => 1, 'title' => 'sedan'];
+        $rebuilt = Index::rebuild($this->dbPath, function (Index $new) use ($doc): void {
+            $new->insert($doc);
+        }, store: true);
+
+        $this->assertSame($doc, $rebuilt->get(1));
+    }
+
+    // --- Document store: snapshotTo ---
+
+    public function testSnapshotPreservesDocumentStore(): void
+    {
+        $snapPath = sys_get_temp_dir() . '/fuzor_snap_' . uniqid() . '.db';
+        try {
+            $doc   = ['id' => 1, 'title' => 'sedan'];
+            $write = new Index($this->dbPath, store: true);
+            $write->insert($doc);
+            $write->snapshotTo($snapPath);
+
+            $snap = new Index($snapPath);
+            $this->assertTrue($snap->documentStoreEnabled);
+            $this->assertSame($doc, $snap->get(1));
+            $snap->close();
+        } finally {
+            @unlink($snapPath);
+        }
+    }
 }
