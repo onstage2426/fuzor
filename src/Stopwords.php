@@ -16,7 +16,7 @@ final class Stopwords
     private ?array $words = null;
 
     /** BCP 47 language tag for the loaded stopword list. */
-    private string $lang;
+    private readonly string $lang;
 
     /**
      * @param string $lang BCP 47 language tag (e.g. 'en', 'fr', 'de').

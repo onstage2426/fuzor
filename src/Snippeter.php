@@ -12,13 +12,13 @@ namespace Fuzor;
  * not applied to the query — stopwords score zero and the fallback handles all-stopword
  * queries gracefully. Languages without a Snowball stemmer silently skip stemming.
  */
-final class Snippeter
+final readonly class Snippeter
 {
     /** Stemmer for the configured language; null if none is available for that language. */
-    private readonly ?Stemmer $stemmer;
+    private ?Stemmer $stemmer;
 
     /** N-gram window size for the configured language. */
-    private readonly int $ngramSize;
+    private int $ngramSize;
 
     /**
      * @param int     $windowSize  Maximum display characters per excerpt window.
@@ -27,10 +27,10 @@ final class Snippeter
      * @param ?string $language    BCP 47 tag; drives stemming and n-gram tokenisation. Null disables both.
      */
     public function __construct(
-        private readonly int $windowSize = 200,
-        private readonly int $maxSnippets = 1,
-        private readonly string $ellipsis = '…',
-        private readonly ?string $language = null,
+        private int $windowSize = 200,
+        private int $maxSnippets = 1,
+        private string $ellipsis = '…',
+        private ?string $language = null,
     ) {
         $this->stemmer   = $language !== null && Stemmer::supports($language) ? new Stemmer($language) : null;
         $this->ngramSize = Tokenizer::ngramSize($language);
@@ -147,7 +147,7 @@ final class Snippeter
 
         $set = array_fill_keys($tokens, true);
 
-        $stems = $this->stemmer !== null ? $this->stemmer->stemTokens($tokens) : $tokens;
+        $stems = $this->stemmer instanceof \Fuzor\Stemmer ? $this->stemmer->stemTokens($tokens) : $tokens;
         foreach ($stems as $stem) {
             /** @infection-ignore-all TrueValue: isset() treats false the same as true (both non-null) */
             $set[$stem] = true;
@@ -167,7 +167,7 @@ final class Snippeter
     {
         $scores = [];
         foreach ($bodyTokens as [$token]) {
-            $stem     = $this->stemmer !== null ? $this->stemmer->stemToken($token) : $token;
+            $stem     = $this->stemmer instanceof \Fuzor\Stemmer ? $this->stemmer->stemToken($token) : $token;
             $scores[] = (isset($querySet[$token]) || isset($querySet[$stem])) ? 1.0 : 0.0;
         }
         return $scores;
@@ -323,6 +323,6 @@ final class Snippeter
     private function isWhitespace(string $char): bool
     {
         /** @infection-ignore-all remaining LogicalOr→&& mutations make \t or \r non-whitespace; snap boundaries are never exactly at these chars in realistic text (splitWithOffsets produces word-start offsets, and preceding/following chars are typically spaces) */
-        return $char === ' ' || $char === "\t" || $char === "\n" || $char === "\r";
+        return in_array($char, [' ', "\t", "\n", "\r"], true);
     }
 }

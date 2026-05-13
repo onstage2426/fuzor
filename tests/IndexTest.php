@@ -292,7 +292,7 @@ class IndexTest extends TestCase
     {
         // Insert 101 docs so the parameterless call must cap at exactly 100 — not 99 or 101.
         $index = new Index($this->dbPath);
-        $index->insertMany(array_map(fn($i) => ['id' => $i, 'title' => 'sedan'], range(1, 101)));
+        $index->insertMany(array_map(fn($i): array => ['id' => $i, 'title' => 'sedan'], range(1, 101)));
 
         $result = $index->search('sedan');
         $this->assertCount(100, $result->ids);
@@ -457,8 +457,9 @@ class IndexTest extends TestCase
         $this->assertCount(3, $result->ids);
         // Doc 5 has the highest TF so it must be ranked first.
         $this->assertSame(5, $result->ids[0]);
+        $counter = count($result->ids);
         // Results must be in descending score order.
-        for ($i = 1; $i < count($result->ids); $i++) {
+        for ($i = 1; $i < $counter; $i++) {
             $prev = $result->ids[$i - 1];
             $curr = $result->ids[$i];
             $this->assertGreaterThanOrEqual(
@@ -2417,7 +2418,7 @@ class IndexTest extends TestCase
     public function testInsertManyProgressTotalIsConsistent(): void
     {
         $index  = new Index($this->dbPath);
-        $docs   = array_map(fn(int $i) => ['id' => $i, 'title' => "doc $i"], range(1, 10));
+        $docs   = array_map(fn(int $i): array => ['id' => $i, 'title' => "doc $i"], range(1, 10));
         $totals = [];
 
         $index->insertMany($docs, progress: function (int $done, int $total) use (&$totals): void {
@@ -2481,14 +2482,14 @@ class IndexTest extends TestCase
     {
         new Index($this->dbPath)->close();
         $this->expectException(IOException::class);
-        (new Index($this->dbPath, readonly: true))->insert(['id' => 1, 'title' => 'x']);
+        new Index($this->dbPath, readonly: true)->insert(['id' => 1, 'title' => 'x']);
     }
 
     public function testReadonlyInsertManyThrows(): void
     {
         new Index($this->dbPath)->close();
         $this->expectException(IOException::class);
-        (new Index($this->dbPath, readonly: true))->insertMany([['id' => 1, 'title' => 'x']]);
+        new Index($this->dbPath, readonly: true)->insertMany([['id' => 1, 'title' => 'x']]);
     }
 
     public function testReadonlyUpdateThrows(): void
@@ -2497,49 +2498,49 @@ class IndexTest extends TestCase
         $write->insert(['id' => 1, 'title' => 'x']);
         $write->close();
         $this->expectException(IOException::class);
-        (new Index($this->dbPath, readonly: true))->update(['id' => 1, 'title' => 'y']);
+        new Index($this->dbPath, readonly: true)->update(['id' => 1, 'title' => 'y']);
     }
 
     public function testReadonlyUpsertThrows(): void
     {
         new Index($this->dbPath)->close();
         $this->expectException(IOException::class);
-        (new Index($this->dbPath, readonly: true))->upsert(['id' => 1, 'title' => 'x']);
+        new Index($this->dbPath, readonly: true)->upsert(['id' => 1, 'title' => 'x']);
     }
 
     public function testReadonlyUpdateManyThrows(): void
     {
         new Index($this->dbPath)->close();
         $this->expectException(IOException::class);
-        (new Index($this->dbPath, readonly: true))->updateMany([['id' => 1, 'title' => 'x']]);
+        new Index($this->dbPath, readonly: true)->updateMany([['id' => 1, 'title' => 'x']]);
     }
 
     public function testReadonlyUpsertManyThrows(): void
     {
         new Index($this->dbPath)->close();
         $this->expectException(IOException::class);
-        (new Index($this->dbPath, readonly: true))->upsertMany([['id' => 1, 'title' => 'x']]);
+        new Index($this->dbPath, readonly: true)->upsertMany([['id' => 1, 'title' => 'x']]);
     }
 
     public function testReadonlyDeleteThrows(): void
     {
         new Index($this->dbPath)->close();
         $this->expectException(IOException::class);
-        (new Index($this->dbPath, readonly: true))->delete(1);
+        new Index($this->dbPath, readonly: true)->delete(1);
     }
 
     public function testReadonlyDeleteManyThrows(): void
     {
         new Index($this->dbPath)->close();
         $this->expectException(IOException::class);
-        (new Index($this->dbPath, readonly: true))->deleteMany([1]);
+        new Index($this->dbPath, readonly: true)->deleteMany([1]);
     }
 
     public function testReadonlyClearThrows(): void
     {
         new Index($this->dbPath)->close();
         $this->expectException(IOException::class);
-        (new Index($this->dbPath, readonly: true))->clear();
+        new Index($this->dbPath, readonly: true)->clear();
     }
 
     // --- snapshotTo ---

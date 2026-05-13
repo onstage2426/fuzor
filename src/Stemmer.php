@@ -12,7 +12,7 @@ use Fuzor\Stemmers\SnowballStemmer;
  * Maps BCP 47 language tags to generated Snowball stemmer classes.
  * Instantiated by Index when $language is set and a stemmer exists.
  */
-final class Stemmer
+final readonly class Stemmer
 {
     /** Active Snowball stemmer implementation for the configured language. */
     private SnowballStemmer $impl;

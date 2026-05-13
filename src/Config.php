@@ -5,21 +5,21 @@ declare(strict_types=1);
 namespace Fuzor;
 
 /** Per-instance search tuning — set once at construction, applies to every query on the index. */
-final class Config
+final readonly class Config
 {
     public function __construct(
         /** @infection-ignore-all DecrementInteger,IncrementInteger: default value; exact number only affects result cap, not correctness */
-        public readonly int $maxDocs = 500,
+        public int $maxDocs = 500,
         /** BM25 term frequency saturation parameter. */
-        public readonly float $k1 = 1.2,
+        public float $k1 = 1.2,
         /** BM25 document length normalisation weight (0 = none, 1 = full). */
-        public readonly float $b = 0.75,
+        public float $b = 0.75,
         /** @infection-ignore-all DecrementInteger: default value; exact prefix length only affects candidate breadth, not correctness */
-        public readonly int $fuzzyPrefixLength = 3,
+        public int $fuzzyPrefixLength = 3,
         /** @infection-ignore-all DecrementInteger,IncrementInteger: default value; exact number only affects how many candidates are evaluated, not correctness */
-        public readonly int $fuzzyMaxExpansions = 50,
+        public int $fuzzyMaxExpansions = 50,
         /** @infection-ignore-all IncrementInteger: default value; exact distance only affects match breadth, not correctness */
-        public readonly int $fuzzyDistance = 2,
+        public int $fuzzyDistance = 2,
         /**
          * Proximity ranking weight applied to queries with ≥2 terms.
          * Each document's BM25 score is multiplied by 1 / (1 + proximityBoost * minSpan), where
@@ -28,7 +28,7 @@ final class Config
          *
          * @infection-ignore-all: default value; mutations only affect ranking magnitude, not correctness
          */
-        public readonly float $proximityBoost = 1.0,
+        public float $proximityBoost = 1.0,
     ) {
     }
 }

@@ -124,7 +124,7 @@ final class Language
      */
     public static function all(): array
     {
-        return array_map(fn($v) => $v['name'], self::LANG_MAP);
+        return array_map(fn(array $v): string => $v['name'], self::LANG_MAP);
     }
 
     /** Whether the language has any support (stopwords or stemming). */

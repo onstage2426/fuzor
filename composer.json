@@ -24,7 +24,8 @@
         "squizlabs/php_codesniffer": "^4.0",
         "phpstan/phpstan": "^2.1",
         "phpbench/phpbench": "^1.5",
-        "infection/infection": "^0.32.6"
+        "infection/infection": "^0.32.6",
+        "rector/rector": "^2.4"
     },
     "autoload": {
         "psr-4": {
@@ -44,6 +45,8 @@
         "stan":   "./vendor/bin/phpstan analyse --memory-limit=512M",
         "bench":  "./vendor/bin/phpbench run benchmarks/FuzorBench.php --report=default",
         "infect":  "./vendor/bin/infection --threads=16",
+        "rector":  "./vendor/bin/rector",
+        "rector-dry": "./vendor/bin/rector --dry-run",
         "check":  ["@cs", "@stan", "@test"]
     },
     "config": {

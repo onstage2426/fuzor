@@ -25,16 +25,16 @@ use PDO;
 class Index
 {
     /** Max rows per chunk when each row uses 1 bind variable (SQLite 32 766-variable ceiling). */
-    private const CHUNK_1P = 32_766;
+    private const int CHUNK_1P = 32_766;
 
     /** Max rows per chunk when each row uses 2 bind variables. */
-    private const CHUNK_2P = 16_383;
+    private const int CHUNK_2P = 16_383;
 
     /** Max rows per chunk when each row uses 3 bind variables. */
-    private const CHUNK_3P = 10_922;
+    private const int CHUNK_3P = 10_922;
 
     /** Absolute path to the open SQLite index file. */
-    private string $path;
+    private readonly string $path;
 
     /** Active PDO connection to the open SQLite index file; null after close(). */
     private ?PDO $pdo = null;
@@ -72,7 +72,7 @@ class Index
     private array $wordlistCache = [];
 
     /** Search tuning; immutable after construction. */
-    private Config $config;
+    private readonly Config $config;
 
     /** BCP 47 language tag active on this index; null means no stopword filtering or stemming. */
     public private(set) ?string $language = null;
@@ -82,9 +82,6 @@ class Index
 
     /** Active stemmer; null when no language is set or language has no stemmer. */
     private ?Stemmer $stemmer = null;
-
-    /** Whether this index was opened in read-only mode. */
-    private bool $readonly = false;
 
 
     // --- Constructor --------------------------------------------------------
@@ -111,11 +108,10 @@ class Index
         ?string $language = null,
         bool $force = false,
         ?Config $config = null,
-        bool $readonly = false,
+        private readonly bool $readonly = false,
     ) {
         $this->config   = $config ?? new Config();
-        $this->readonly = $readonly;
-        if ($readonly && $force) {
+        if ($this->readonly && $force) {
             throw new QueryException("Cannot force-create a readonly index.");
         }
         if ($language !== null && !Language::supports($language)) {
@@ -123,7 +119,7 @@ class Index
         }
         $resolved   = self::resolvePath($path);
         $this->path = $resolved;
-        if ($readonly && !file_exists($resolved)) {
+        if ($this->readonly && !file_exists($resolved)) {
             throw new IOException("Index does not exist: {$resolved}");
         }
         if (file_exists($resolved) && !$force) {
@@ -279,7 +275,7 @@ class Index
         $tmp = $resolved . '.tmp-' . bin2hex(random_bytes(4));
 
         try {
-            assert($this->pdo !== null);
+            assert($this->pdo instanceof \PDO);
             $this->pdo->exec('VACUUM INTO ' . $this->pdo->quote($tmp));
             if (!rename($tmp, $resolved)) {
                 throw new IOException("Failed to atomically write snapshot to {$resolved}.");
@@ -405,7 +401,7 @@ class Index
         if (!file_exists($this->path)) {
             throw new IOException("Index {$this->path} does not exist", 1);
         }
-        $encodedPath         = implode('/', array_map('rawurlencode', explode('/', $this->path)));
+        $encodedPath         = implode('/', array_map(rawurlencode(...), explode('/', $this->path)));
         $dsn                 = $this->readonly
             ? 'sqlite:file://' . $encodedPath . '?mode=ro'
             : 'sqlite:' . $this->path;
@@ -418,7 +414,7 @@ class Index
         /** @infection-ignore-all MethodCallRemoval: applyPragmas sets WAL/cache/case_sensitive_like; all terms are stored/queried in lowercase so LIKE correctness is unaffected without it */
         $this->applyPragmas();
 
-        assert($this->pdo !== null);
+        assert($this->pdo instanceof \PDO);
         $pdo   = $this->pdo;
         $stmt  = $pdo->query("SELECT value FROM info WHERE key = 'language' LIMIT 1");
         /** @infection-ignore-all FalseValue: if $stmt is false the ternary else-branch is taken; changing false→true makes $row=true which is not an array so $lang remains null — same result */
@@ -468,7 +464,7 @@ class Index
         }
 
         $this->wrapInTransaction(function () use ($document): void {
-            $id    = self::extractId($document['id']);
+            $id    = $this->extractId($document['id']);
             $check = $this->stmt('docExistsCheck', 'SELECT 1 FROM doc_lengths WHERE doc_id = :id LIMIT 1');
             $check->execute([':id' => $id]);
             if ($check->fetchColumn() !== false) {
@@ -508,7 +504,7 @@ class Index
         }
 
         /** @infection-ignore-all ReturnRemoval: empty batch produces no SQL writes; adjustStats(0,0) is a no-op when no tokens are processed */
-        if (empty($documents)) {
+        if ($documents === []) {
             return;
         }
 
@@ -517,7 +513,7 @@ class Index
             if (!array_key_exists('id', $document)) {
                 throw new QueryException("Document at index {$i} must contain an 'id' key.");
             }
-            $id = self::extractId($document['id']);
+            $id = $this->extractId($document['id']);
             if (isset($ids[$id])) {
                 throw new QueryException("Duplicate id {$id} at index {$i}.");
             }
@@ -526,7 +522,7 @@ class Index
         }
 
         $pdo = $this->pdo;
-        if ($pdo === null) {
+        if (!$pdo instanceof \PDO) {
             throw new \LogicException('Index connection is closed.');
         }
 
@@ -684,7 +680,7 @@ class Index
             throw new QueryException("Document must contain an 'id' key.");
         }
         $this->wrapInTransaction(function () use ($document, $strict): void {
-            $id        = self::extractId($document['id']);
+            $id        = $this->extractId($document['id']);
             $oldLength = $this->removeDocumentData($id);
 
             if ($oldLength === null) {
@@ -718,12 +714,12 @@ class Index
             $documents = iterator_to_array($documents, false);
         }
 
-        if (empty($documents)) {
+        if ($documents === []) {
             return;
         }
 
         $pdo = $this->pdo;
-        if ($pdo === null) {
+        if (!$pdo instanceof \PDO) {
             throw new \LogicException('Index connection is closed.');
         }
 
@@ -739,7 +735,7 @@ class Index
                     if (!array_key_exists('id', $document)) {
                         throw new QueryException("Document at index {$i} must contain an 'id' key.");
                     }
-                    $ids[] = self::extractId($document['id']);
+                    $ids[] = $this->extractId($document['id']);
                 }
 
                 $oldLengths = [];
@@ -827,7 +823,7 @@ class Index
     {
         $this->assertWritable();
         /** @infection-ignore-all ReturnRemoval: empty $ids produces zero iterations and docDelta=0; adjustStats is not called — identical result */
-        if (empty($ids)) {
+        if ($ids === []) {
             return;
         }
 
@@ -862,7 +858,7 @@ class Index
 
         $this->wrapInTransaction(function (): void {
             $pdo = $this->pdo;
-            assert($pdo !== null);
+            assert($pdo instanceof \PDO);
 
             $pdo->exec('DELETE FROM doclist');
             $pdo->exec('DELETE FROM positions');
@@ -904,7 +900,7 @@ class Index
     public function hasMany(array $ids): array
     {
         /** @infection-ignore-all ReturnRemoval: SQLite evaluates IN() as no-match and returns an empty result set; removing the early return produces the same [] */
-        if (empty($ids)) {
+        if ($ids === []) {
             return [];
         }
 
@@ -1014,9 +1010,9 @@ class Index
                 'match_type'    => $matchType,
                 'wordlist_rows' => $wordlistRows,
                 /** @infection-ignore-all CastInt: array_sum() on numeric strings returns int in PHP 8; the cast is defensive documentation, not a type change */
-                'num_hits'      => (int) array_sum(array_column($rows, 'num_hits')),
+                'num_hits'      => array_sum(array_column($rows, 'num_hits')),
                 /** @infection-ignore-all CastInt: same as num_hits — array_sum already returns int here */
-                'num_docs'      => (int) array_sum(array_column($rows, 'num_docs')),
+                'num_docs'      => array_sum(array_column($rows, 'num_docs')),
             ];
         }
 
@@ -1026,8 +1022,8 @@ class Index
         return [
             'raw_tokens'       => $verbose['raw_tokens'],
             'filtered_tokens'  => $filteredTokens,
-            'stopwords_active' => $this->stopwords !== null,
-            'stemmer_active'   => $this->stemmer !== null,
+            'stopwords_active' => $this->stopwords instanceof \Fuzor\Stopwords,
+            'stemmer_active'   => $this->stemmer instanceof \Fuzor\Stemmer,
             'all_stripped'     => $verbose['all_stripped'],
             'index_info'       => $indexInfo,
             'tokens'           => $tokens,
@@ -1163,13 +1159,11 @@ class Index
                 if ($heapSize === $window) {
                     $heapMin = $heap->top()[0];
                 }
-            } else {
+            } elseif ($score > $heapMin) {
                 /** @infection-ignore-all GreaterThan: when score===heapMin the replaced doc is a valid equal-score member; tied-score ordering is intentionally unspecified */
-                if ($score > $heapMin) {
-                    $heap->extract();
-                    $heap->insert([$score, $docId]);
-                    $heapMin = $heap->top()[0];
-                }
+                $heap->extract();
+                $heap->insert([$score, $docId]);
+                $heapMin = $heap->top()[0];
             }
         }
 
@@ -1390,7 +1384,7 @@ class Index
     private function bulkRemoveDocuments(array $ids): void
     {
         $pdo = $this->pdo;
-        assert($pdo !== null);
+        assert($pdo instanceof \PDO);
 
         foreach (array_chunk($ids, self::CHUNK_1P) as $chunk) {
             /** @infection-ignore-all IncrementInteger: array_fill start index does not affect implode output */
@@ -1528,12 +1522,12 @@ class Index
             $text = trim(strval($col)); // @phpstan-ignore argument.type
             if ($text !== '') {
                 $tokens = Tokenizer::tokenize($text, $this->language);
-                if ($this->stopwords !== null) {
+                if ($this->stopwords instanceof \Fuzor\Stopwords) {
                     $tokens = $this->stopwords->filter($tokens);
                 }
                 /** @infection-ignore-all Assignment: changing += to = only matters for multi-field docs where the same term appears in both fields; single-field tests are unaffected */
                 $length += count($tokens);
-                if ($this->stemmer !== null) {
+                if ($this->stemmer instanceof \Fuzor\Stemmer) {
                     $tokens = $this->stemmer->stemTokens($tokens);
                 }
                 foreach ($tokens as $token) {
@@ -1556,7 +1550,7 @@ class Index
      */
     private function processDocument(array $row): int
     {
-        $documentId = self::extractId($row['id']);
+        $documentId = $this->extractId($row['id']);
 
         ['termCounts' => $termCounts, 'termPositions' => $termPositions, 'length' => $length]
             = $this->tokenizeDocumentFields($row);
@@ -1591,7 +1585,7 @@ class Index
      */
     private function upsertWordlist(array $termCounts): array
     {
-        if (empty($termCounts)) {
+        if ($termCounts === []) {
             return [];
         }
 
@@ -1673,7 +1667,7 @@ class Index
         $done  = 0;
 
         foreach ($documents as $document) {
-            $documentId = self::extractId($document['id']);
+            $documentId = $this->extractId($document['id']);
 
             ['termCounts' => $termCounts, 'termPositions' => $termPositions, 'length' => $length]
                 = $this->tokenizeDocumentFields($document);
@@ -1699,7 +1693,12 @@ class Index
             }
         }
 
-        return compact('wordBuffer', 'docTermBuffer', 'docLengthBuffer', 'docPositionBuffer');
+        return [
+            'wordBuffer'       => $wordBuffer,
+            'docTermBuffer'    => $docTermBuffer,
+            'docLengthBuffer'  => $docLengthBuffer,
+            'docPositionBuffer' => $docPositionBuffer,
+        ];
     }
 
     /**
@@ -1724,7 +1723,7 @@ class Index
         array $docPositionBuffer = [],
     ): int {
         $pdo = $this->pdo;
-        assert($pdo !== null);
+        assert($pdo instanceof \PDO);
 
         // Step 1: upsert all unique terms; get back term text → wordlist ID mapping.
         $termIdMap = $this->batchUpsertWordlist($wordBuffer);
@@ -1848,12 +1847,12 @@ class Index
      */
     private function batchUpsertWordlist(array $wordBuffer): array
     {
-        if (empty($wordBuffer)) {
+        if ($wordBuffer === []) {
             return [];
         }
 
         $pdo = $this->pdo;
-        assert($pdo !== null);
+        assert($pdo instanceof \PDO);
 
         /** @var array<string, int> $termIdMap */
         $termIdMap  = [];
@@ -1887,7 +1886,7 @@ class Index
                  FROM delta WHERE wordlist.id = delta.id'
             ))->execute($params);
 
-            foreach ($chunk as $term => $_) {
+            foreach (array_keys($chunk) as $term) {
                 $termIdMap[$term] = $this->termIdCache[$term];
             }
         }
@@ -1938,7 +1937,7 @@ class Index
      */
     private function saveDoclist(int $documentId, array $termIds): void
     {
-        if (empty($termIds)) {
+        if ($termIds === []) {
             return;
         }
 
@@ -1963,7 +1962,7 @@ class Index
      */
     private function savePositions(int $documentId, array $termIdPositions): void
     {
-        if (empty($termIdPositions)) {
+        if ($termIdPositions === []) {
             return;
         }
         $stmt = $this->stmt(
@@ -2075,7 +2074,7 @@ class Index
         /** @infection-ignore-all IncrementInteger,Ternary,CastInt: numDocs feeds BM25 scoring only; for single-term prefix results array_sum equals word[0]['num_docs']; CastInt: array_sum returns int */
         $numDocs = count($word) === 1
             ? $word[0]['num_docs']
-            : (int) array_sum(array_column($word, 'num_docs'));
+            : array_sum(array_column($word, 'num_docs'));
 
         return ['documents' => $documents, 'numDocs' => $numDocs];
     }
@@ -2094,7 +2093,7 @@ class Index
     private function resolveWordlistIds(string $keyword, bool $isLastKeyword): array
     {
         $tokens = Tokenizer::tokenize($keyword, $this->language);
-        if ($this->stemmer !== null) {
+        if ($this->stemmer instanceof \Fuzor\Stemmer) {
             $tokens = $this->stemmer->stemTokens($tokens);
         }
         $ids  = [];
@@ -2224,7 +2223,7 @@ class Index
             $left    = 0;
             $minSpan = PHP_INT_MAX;
 
-            foreach ($merged as $rightIdx => [$rightPos, $rightG]) {
+            foreach ($merged as [$rightPos, $rightG]) {
                 if ($count[$rightG] === 0) {
                     $have++;
                 }
@@ -2305,13 +2304,13 @@ class Index
         $allStripped  = false;
 
         /** @infection-ignore-all GreaterThan,GreaterThanNegotiation,Ternary: mutations only affect stopword-enabled indexes or multi-token results; tests without a language set are unaffected */
-        if ($this->stopwords !== null && count($survivingRaw) > 1) {
+        if ($this->stopwords instanceof \Fuzor\Stopwords && count($survivingRaw) > 1) {
             $afterStop    = $this->stopwords->filter($survivingRaw);
             $allStripped  = $afterStop === [];
             $survivingRaw = $allStripped ? $survivingRaw : $afterStop;
         }
 
-        $filtered = $this->stemmer !== null
+        $filtered = $this->stemmer instanceof \Fuzor\Stemmer
             ? $this->stemmer->stemTokens($survivingRaw)
             : $survivingRaw;
 
@@ -2484,7 +2483,7 @@ class Index
         // Uses IN() since the CASE sort mixes two orderings that the index cannot satisfy.
         /** @infection-ignore-all DecrementInteger,IncrementInteger: array_fill start index 0 vs ±1 only changes array keys; implode() ignores keys */
         $placeholders = implode(',', array_fill(0, $n, '?'));
-        $cases        = implode(' ', array_map(fn(int $i) => "WHEN ? THEN {$i}", range(0, $n - 1)));
+        $cases        = implode(' ', array_map(fn(int $i): string => "WHEN ? THEN {$i}", range(0, $n - 1)));
         $stmt         = $this->prepare(
             "SELECT sub.term_id, sub.doc_id, sub.hit_count, dl.length AS doc_length
               FROM (SELECT term_id, doc_id, hit_count FROM doclist
@@ -2511,7 +2510,7 @@ class Index
     private function fuzzySearch(string $keyword): array
     {
         /** @infection-ignore-all MBString,CastInt: ASCII fuzzy tests are unaffected by mb_ vs byte strlen; CastInt: mb_strlen returns int already */
-        $keywordLength = (int) mb_strlen($keyword);
+        $keywordLength = mb_strlen($keyword);
 
         $stmt = $this->stmt(
             'fuzzyWordlistLookup',
@@ -2540,8 +2539,8 @@ class Index
             }
         }
 
-        /** @infection-ignore-all Spaceship: swapping the secondary sort (num_hits) from DESC to ASC only changes the order among equally-distant candidates; assertContains tests are order-agnostic */
-        usort($resultSet, fn($a, $b) => $a['distance'] <=> $b['distance'] ?: $b['num_hits'] <=> $a['num_hits']);
+        /** @infection-ignore-all Spaceship: swapping secondary sort (num_hits) DESC→ASC only reorders equally-distant candidates; assertContains tests are order-agnostic */
+        usort($resultSet, fn(array $a, array $b): int => $a['distance'] <=> $b['distance'] ?: $b['num_hits'] <=> $a['num_hits']); // phpcs:ignore Generic.Files.LineLength.TooLong
 
         return $resultSet;
     }
@@ -2560,7 +2559,7 @@ class Index
     private function stmt(string $key, string $sql): \PDOStatement
     {
         $pdo = $this->pdo;
-        if ($pdo === null) {
+        if (!$pdo instanceof \PDO) {
             throw new \LogicException('Index connection is closed.');
         }
         /** @infection-ignore-all AssignCoalesce: removing ??= only disables statement caching; every call re-prepares the same SQL but produces identical results */
@@ -2571,7 +2570,7 @@ class Index
     private function prepare(string $sql): \PDOStatement
     {
         $pdo = $this->pdo;
-        if ($pdo === null) {
+        if (!$pdo instanceof \PDO) {
             throw new \LogicException('Index connection is closed.');
         }
         return $pdo->prepare($sql);
@@ -2588,7 +2587,7 @@ class Index
     private function wrapInTransaction(callable $fn): void
     {
         $pdo = $this->pdo;
-        if ($pdo === null) {
+        if (!$pdo instanceof \PDO) {
             throw new \LogicException('Index connection is closed.');
         }
         /** @infection-ignore-all IfNegation: inverting inTransaction() only affects nested calls; no test exercises wrapInTransaction while already in a transaction */
@@ -2623,7 +2622,7 @@ class Index
      *
      * @throws QueryException If the value is not an integer or integer-like string.
      */
-    private static function extractId(mixed $value): int
+    private function extractId(mixed $value): int
     {
         if (is_int($value)) {
             return $value;
@@ -2665,7 +2664,7 @@ class Index
      */
     private function applyBulkPragmas(): void
     {
-        assert($this->pdo !== null);
+        assert($this->pdo instanceof \PDO);
         $this->pdo->exec('
             PRAGMA synchronous        = OFF;
             PRAGMA cache_size         = -524288;
@@ -2675,7 +2674,7 @@ class Index
 
     private function restoreNormalPragmas(): void
     {
-        assert($this->pdo !== null);
+        assert($this->pdo instanceof \PDO);
         $this->pdo->exec('
             PRAGMA synchronous        = NORMAL;
             PRAGMA cache_size         = -65536;
@@ -2685,7 +2684,7 @@ class Index
 
     private function applyPragmas(): void
     {
-        assert($this->pdo !== null);
+        assert($this->pdo instanceof \PDO);
         if (!$this->readonly) {
             $this->pdo->exec('
                 PRAGMA journal_mode  = WAL;

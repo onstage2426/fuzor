@@ -23,7 +23,7 @@ final class Tokenizer
     }
 
     /** Languages that use contiguous scripts with no whitespace word delimiters. */
-    private const NGRAM_SCRIPTS = [
+    private const array NGRAM_SCRIPTS = [
         'zh' => 2, 'ja' => 2, 'ko' => 2, 'th' => 3,
     ];
 
@@ -171,7 +171,6 @@ final class Tokenizer
             usort($out, fn(array $a, array $b): int => $a[1] <=> $b[1]);
         }
 
-        /** @var list<array{0: string, 1: int<0, max>}> */
         return $out;
     }
 

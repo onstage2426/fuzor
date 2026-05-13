@@ -12,10 +12,10 @@ namespace Fuzor;
  * a word prefix — "merc" highlights the full word "Mercedes". Stemming is
  * intentionally not applied: raw query terms are highlighted, not their stems.
  */
-final class Highlighter
+final readonly class Highlighter
 {
     /** N-gram window size for the configured language. */
-    private readonly int $ngramSize;
+    private int $ngramSize;
 
     /**
      * @param string  $open      Opening tag placed before each match.
@@ -24,10 +24,10 @@ final class Highlighter
      * @param ?string $language  BCP 47 tag; drives n-gram tokenisation. Null for whitespace-delimited languages.
      */
     public function __construct(
-        private readonly string $open = '<mark>',
-        private readonly string $close = '</mark>',
-        private readonly bool $asYouType = true,
-        private readonly ?string $language = null,
+        private string $open = '<mark>',
+        private string $close = '</mark>',
+        private bool $asYouType = true,
+        private ?string $language = null,
     ) {
         $this->ngramSize = Tokenizer::ngramSize($language);
     }
