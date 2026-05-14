@@ -33,6 +33,37 @@ $results->hasDocuments(); // true
 
 When the store is disabled, `$results->documents()` returns `null` and `$results->hasDocuments()` returns `false`. An empty result page (store enabled, no matches) returns an empty array `[]` from `documents()`, not `null`.
 
+## Metadata (`_meta`)
+
+The reserved `_meta` key is stored but never indexed. Use it to attach data you need at retrieval time but do not want to affect search results — permalinks, image URLs, timestamps, and so on. It is recognised by all write methods: `insert`, `update`, `upsert`, and their bulk variants.
+
+```php
+$index->insert([
+    'id'    => 1,
+    'title' => 'Fast sedan',
+    'body'  => 'Comfortable city car.',
+    '_meta' => [
+        'permalink' => '/cars/fast-sedan',
+        'image'     => 'https://example.com/sedan.jpg',
+        'published' => '2026-05-14',
+    ],
+]);
+
+// _meta is replaced atomically with the rest of the document on update
+$index->update([
+    'id'    => 1,
+    'title' => 'Fast sedan',
+    'body'  => 'Comfortable city car.',
+    '_meta' => ['permalink' => '/cars/fast-sedan', 'published' => '2026-06-01'],
+]);
+```
+
+`_meta` is returned as-is alongside the rest of the document:
+
+```php
+$index->search('sedan')->document(1)['_meta']['permalink']; // '/cars/fast-sedan'
+```
+
 ## Fetching documents by ID
 
 Retrieve documents directly without a search:

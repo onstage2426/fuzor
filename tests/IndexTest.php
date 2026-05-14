@@ -225,6 +225,30 @@ class IndexTest extends TestCase
         $this->assertContains(1, $result->ids);
     }
 
+    public function testMetaFieldIsNotIndexed(): void
+    {
+        $index = new Index($this->dbPath);
+        $index->insert([
+            'id'    => 1,
+            'title' => 'sedan',
+            '_meta' => ['permalink' => '/cars/sedan', 'unique' => 'shouldnotbeindexed'],
+        ]);
+
+        $this->assertSame([1], $index->search('sedan')->ids);
+        $this->assertSame([], $index->search('shouldnotbeindexed')->ids);
+        $this->assertSame([], $index->search('permalink')->ids);
+    }
+
+    public function testMetaFieldIsPreservedInDocumentStore(): void
+    {
+        $meta = ['permalink' => '/cars/sedan', 'published' => '2026-05-14'];
+        $doc  = ['id' => 1, 'title' => 'sedan', '_meta' => $meta];
+        $index = new Index($this->dbPath, store: true);
+        $index->insert($doc);
+
+        $this->assertSame($doc, $index->search('sedan')->document(1));
+    }
+
     public function testSearchReturnsEmptyForNoMatch(): void
     {
         $index = new Index($this->dbPath);

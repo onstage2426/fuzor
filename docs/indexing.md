@@ -1,7 +1,5 @@
 # Indexing
 
-
-
 ## Creating and opening an index
 
 Pass a path to the constructor. If the file exists it is opened; if it does not, a new index is created.
@@ -47,7 +45,6 @@ $index = new Index('/path/to/articles.db', config: new Config(maxDocs: 200));
 ```
 
 ## Inserting
-
 
 Every document must have a unique integer `id` field; all other fields are indexed as full-text.
 
@@ -241,4 +238,3 @@ Index::rebuild('/path/to/articles.db', callback: fn (Index $new) => $new->insert
 // Force the store on
 Index::rebuild('/path/to/articles.db', callback: fn (Index $new) => $new->insertMany($docs), store: true);
 ```
-

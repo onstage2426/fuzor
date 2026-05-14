@@ -1667,7 +1667,7 @@ class Index
         $length        = 0;
         $position      = 0;
         foreach ($fields as $key => $col) {
-            if ($key === 'id') {
+            if ($key === 'id' || $key === '_meta') {
                 continue;
             }
             /** @infection-ignore-all UnwrapTrim: leading/trailing whitespace in field values is uncommon in tests; trimming is a defensive clean-up step */
