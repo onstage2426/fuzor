@@ -602,7 +602,7 @@ class Index
                 if (!$indexIsEmpty) {
                     /** @infection-ignore-all UnwrapArrayKeys,DecrementInteger,IncrementInteger: removing array_keys passes values instead of keys; the chunk size constant change only affects chunk count, not correctness */
                     foreach (array_chunk(array_keys($ids), self::CHUNK_1P) as $chunk) {
-                        $placeholders = implode(',', array_fill(0, count($chunk), '?'));
+                        $placeholders = self::placeholders(count($chunk));
                         $stmt = $this->prepare(
                             "SELECT doc_id FROM doc_lengths WHERE doc_id IN ({$placeholders})"
                         );
@@ -788,8 +788,7 @@ class Index
 
                 $oldLengths = [];
                 foreach (array_chunk($ids, self::CHUNK_1P) as $chunk) {
-                    /** @infection-ignore-all IncrementInteger: array_fill start index does not affect implode output */
-                    $placeholders = implode(',', array_fill(0, count($chunk), '?'));
+                    $placeholders = self::placeholders(count($chunk));
                     $stmt = $this->prepare(
                         "SELECT doc_id, length FROM doc_lengths WHERE doc_id IN ({$placeholders})"
                     );
@@ -965,9 +964,8 @@ class Index
 
         /** @var list<int> $found */
         $found = [];
-        /** @infection-ignore-all DecrementInteger,IncrementInteger: array_fill start index 0 vs ±1 only changes array keys; implode() ignores keys */
         foreach (array_chunk($ids, self::CHUNK_1P) as $chunk) {
-            $placeholders = implode(',', array_fill(0, count($chunk), '?'));
+            $placeholders = self::placeholders(count($chunk));
             $stmt = $this->prepare("SELECT doc_id FROM doc_lengths WHERE doc_id IN ($placeholders)");
             $stmt->execute($chunk);
             /** @var list<int> $rows */
@@ -1023,7 +1021,7 @@ class Index
 
         $result = [];
         foreach (array_chunk($ids, self::CHUNK_1P) as $chunk) {
-            $placeholders = implode(',', array_fill(0, count($chunk), '?'));
+            $placeholders = self::placeholders(count($chunk));
             $stmt = $this->prepare(
                 "SELECT doc_id, data FROM documents WHERE doc_id IN ({$placeholders})"
             );
@@ -1531,9 +1529,8 @@ class Index
         assert($pdo instanceof \PDO);
 
         foreach (array_chunk($ids, self::CHUNK_1P) as $chunk) {
-            /** @infection-ignore-all IncrementInteger: array_fill start index does not affect implode output */
             $n            = count($chunk);
-            $placeholders = implode(',', array_fill(0, $n, '?'));
+            $placeholders = self::placeholders($n);
 
             // Capture affected term IDs before any deletion so orphan pruning can be scoped.
             $termStmt = $this->prepare(
@@ -1567,7 +1564,7 @@ class Index
 
             // Prune orphan terms scoped to the affected set; avoids a full wordlist table scan.
             if ($affectedTermIds !== []) {
-                $tp = implode(',', array_fill(0, count($affectedTermIds), '?'));
+                $tp = self::placeholders(count($affectedTermIds));
                 $this->prepare(
                     "DELETE FROM wordlist WHERE num_hits <= 0 AND id IN ({$tp})"
                 )->execute($affectedTermIds);
@@ -2317,8 +2314,7 @@ class Index
             return $rows;
         }
 
-        /** @infection-ignore-all DecrementInteger,IncrementInteger: array_fill start index 0 vs ±1 only changes array keys; implode() ignores keys */
-        $placeholders = implode(',', array_fill(0, $n, '?'));
+        $placeholders = self::placeholders($n);
         $stmt         = $this->stmt(
             "boolDocIds:{$n}",
             "SELECT doc_id FROM doclist WHERE term_id IN ({$placeholders}) ORDER BY hit_count DESC LIMIT ?"
@@ -2441,8 +2437,8 @@ class Index
             return [];
         }
 
-        $dPlaceholders = implode(',', array_fill(0, count($docIds), '?'));
-        $tPlaceholders = implode(',', array_fill(0, count($termIds), '?'));
+        $dPlaceholders = self::placeholders(count($docIds));
+        $tPlaceholders = self::placeholders(count($termIds));
 
         $stmt = $this->prepare(
             "SELECT doc_id, term_id, position
@@ -2659,8 +2655,7 @@ class Index
 
         // Fuzzy: ORDER BY a CASE expression that encodes the fuzzy relevance rank (closest match first).
         // Uses IN() since the CASE sort mixes two orderings that the index cannot satisfy.
-        /** @infection-ignore-all DecrementInteger,IncrementInteger: array_fill start index 0 vs ±1 only changes array keys; implode() ignores keys */
-        $placeholders = implode(',', array_fill(0, $n, '?'));
+        $placeholders = self::placeholders($n);
         $cases        = implode(' ', array_map(fn(int $i): string => "WHEN ? THEN {$i}", range(0, $n - 1)));
         $stmt         = $this->prepare(
             "SELECT sub.term_id, sub.doc_id, sub.hit_count, dl.length AS doc_length
@@ -2752,6 +2747,11 @@ class Index
             throw new \LogicException('Index connection is closed.');
         }
         return $pdo->prepare($sql);
+    }
+
+    private static function placeholders(int $n): string
+    {
+        return implode(',', array_fill(0, $n, '?'));
     }
 
     /**
