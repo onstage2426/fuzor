@@ -6,47 +6,34 @@ Fuzor has two search methods: `search()` for BM25 ranked results and `searchBool
 
 Both methods return a `SearchResult` object:
 
-| Member          | Type           | Description                                              |
-|-----------------|----------------|----------------------------------------------------------|
-| `$ids`          | `int[]`        | Document IDs in relevance order (current page only)      |
-| `$hits`         | `int`          | Total matching documents across all pages                |
-| `score(int $id)`| `float\|null`  | BM25 score for a doc ID; `null` in boolean mode          |
+| Member              | Type                           | Description                                                              |
+|---------------------|--------------------------------|--------------------------------------------------------------------------|
+| `$ids`              | `int[]`                        | Document IDs in relevance order (current page only)                      |
+| `$hits`             | `int`                          | Total matching documents across all pages                                |
+| `hasScores()`       | `bool`                         | `true` for BM25 results; `false` for boolean search                      |
+| `score(int $id)`    | `float\|null`                  | BM25 score for a doc ID; `null` in boolean mode or ID not in result      |
+| `scores()`          | `array<int,float>`             | All BM25 scores keyed by doc ID; empty array for boolean search          |
+| `hasDocuments()`    | `bool`                         | `true` when the document store is enabled on this result                 |
+| `document(int $id)` | `array\|null`                  | Single hydrated document; `null` when store is off or ID not in result   |
+| `documents()`       | `array<int,array>\|null`       | All hydrated documents keyed by doc ID; `null` when document store is off |
 
 ```php
 $results = $index->search('city car');
 
-$results->ids;        // [3, 1, 7]
-$results->hits;       // total matches (may exceed count($results->ids) when paginating)
-$results->score(3);   // 1.4  — BM25 score for doc 3
-$results->score(99);  // null — doc not in result set
+$results->ids;          // [3, 1, 7]
+$results->hits;         // total matches (may exceed count($results->ids) when paginating)
+$results->hasScores();  // true
+$results->score(3);     // 1.4  — BM25 score for doc 3
+$results->score(99);    // null — doc not in result set
+$results->scores();     // [3 => 1.4, 1 => 0.9, 7 => 0.3]
 ```
 
-## Full-text search
-
-Scores results with Okapi BM25. Documents are ranked by how relevant each term is relative to the rest of the index.
+When the [document store](document-store.md) is enabled, documents are automatically populated:
 
 ```php
-# Search
-
-Fuzor has two search methods: `search()` for BM25 ranked results and `searchBoolean()` for set-based filtering. Both tokenise the query, apply stopword filtering and stemming if a language is set, and support as-you-type prefix matching.
-
-## Result object
-
-Both methods return a `SearchResult` object:
-
-| Member          | Type           | Description                                              |
-|-----------------|----------------|----------------------------------------------------------|
-| `$ids`          | `int[]`        | Document IDs in relevance order (current page only)      |
-| `$hits`         | `int`          | Total matching documents across all pages                |
-| `score(int $id)`| `float\|null`  | BM25 score for a doc ID; `null` in boolean mode          |
-
-```php
-$results = $index->search('city car');
-
-$results->ids;        // [3, 1, 7]
-$results->hits;       // total matches (may exceed count($results->ids) when paginating)
-$results->score(3);   // 1.4  — BM25 score for doc 3
-$results->score(99);  // null — doc not in result set
+$results->hasDocuments(); // true
+$results->document(3);    // the full document array for doc 3, or null if not in result
+$results->documents();    // array<int, array> keyed by doc ID, in relevance order
 ```
 
 ## Full-text search

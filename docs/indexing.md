@@ -1,6 +1,6 @@
 # Indexing
 
-Fuzor stores only the inverted index — you own the document layer.
+
 
 ## Creating and opening an index
 
@@ -20,24 +20,30 @@ Pass `force: true` to overwrite an existing index file:
 $index = new Index('/path/to/articles.db', force: true);
 ```
 
-Pass a BCP 47 language tag to enable stopword filtering and stemming at creation time:
+Pass a BCP 47 `language` tag to enable stopword filtering and stemming at creation time:
 
 ```php
 $index = new Index('/path/to/articles.db', language: 'en');
-```
-
-Pass a `Config` object to tune BM25 and fuzzy behaviour:
-
-```php
-use Fuzor\Config;
-
-$index = new Index('/path/to/articles.db', config: new Config(maxDocs: 200));
 ```
 
 Pass `readonly: true` to open an existing index in read-only mode. All write methods throw `IOException`; searches work normally:
 
 ```php
 $index = new Index('/path/to/articles-read.db', readonly: true);
+```
+
+Pass `store: true` to enable the document store. Raw documents are stored as JSON inside the same SQLite file, and search results are automatically hydrated — no separate document database needed. See [document-store.md](document-store.md) for details.
+
+```php
+$index = new Index('/path/to/articles.db', store: true);
+```
+
+Pass a `Config` object to tune BM25 and fuzzy behaviour. See [configuration.md](configuration.md) for details.
+
+```php
+use Fuzor\Config;
+
+$index = new Index('/path/to/articles.db', config: new Config(maxDocs: 200));
 ```
 
 ## Inserting
@@ -217,3 +223,22 @@ Index::rebuild('/path/to/articles.db', callback: fn (Index $new) => $new->insert
 // Override language
 Index::rebuild('/path/to/articles.db', callback: fn (Index $new) => $new->insertMany($docs), language: 'de');
 ```
+
+### Document store on rebuild
+
+The `store` argument controls whether the rebuilt index has the document store enabled:
+
+| Value | Effect |
+|-------|--------|
+| `null` (default) | Inherit from the existing index |
+| `true` | Enable the store in the rebuilt index |
+| `false` | Disable the store in the rebuilt index |
+
+```php
+// Inherit (default)
+Index::rebuild('/path/to/articles.db', callback: fn (Index $new) => $new->insertMany($docs));
+
+// Force the store on
+Index::rebuild('/path/to/articles.db', callback: fn (Index $new) => $new->insertMany($docs), store: true);
+```
+
