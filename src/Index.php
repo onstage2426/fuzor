@@ -2895,7 +2895,7 @@ class Index
     private function flushIndex(): void
     {
         if (file_exists($this->path)) {
-            if (!$this->isFuzorIndex($this->path)) {
+            if (!self::exists($this->path)) {
                 throw new IOException("Refusing to overwrite non-Fuzor file: {$this->path}");
             }
             unlink($this->path);
@@ -2905,22 +2905,6 @@ class Index
                     unlink($journal);
                 }
             }
-        }
-    }
-
-    /**
-     * Returns true if $path opens as SQLite and contains the Fuzor wordlist table.
-     *
-     * @param string $path Absolute path to the file to inspect.
-     */
-    private function isFuzorIndex(string $path): bool
-    {
-        try {
-            $pdo = new PDO('sqlite:' . $path);
-            $result = $pdo->query("SELECT 1 FROM wordlist LIMIT 1");
-            return $result !== false;
-        } catch (\Exception) {
-            return false;
         }
     }
 }
