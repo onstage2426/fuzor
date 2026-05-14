@@ -625,12 +625,7 @@ class Index
                  'docLengthBuffer'   => $docLengthBuffer,
                  'docPositionBuffer' => $docPositionBuffer] = $this->buildBatchBuffer($documents, $progress);
 
-                $rawDocuments = [];
-                if ($this->documentStoreEnabled) {
-                    foreach ($documents as $doc) {
-                        $rawDocuments[$this->extractId($doc['id'])] = $doc;
-                    }
-                }
+                $rawDocuments = $this->buildRawDocuments($documents);
 
                 $totalLength = $this->flushBatch(
                     $wordBuffer,
@@ -823,12 +818,7 @@ class Index
                  'docLengthBuffer'   => $docLengthBuffer,
                  'docPositionBuffer' => $docPositionBuffer] = $this->buildBatchBuffer($documents);
 
-                $rawDocuments = [];
-                if ($this->documentStoreEnabled) {
-                    foreach ($documents as $doc) {
-                        $rawDocuments[$this->extractId($doc['id'])] = $doc;
-                    }
-                }
+                $rawDocuments = $this->buildRawDocuments($documents);
 
                 $totalNewLength = $this->flushBatch(
                     $wordBuffer,
@@ -1856,6 +1846,25 @@ class Index
             'docLengthBuffer'  => $docLengthBuffer,
             'docPositionBuffer' => $docPositionBuffer,
         ];
+    }
+
+    /**
+     * Build the doc_id → raw document map passed to flushBatch() for the document store.
+     * Returns an empty array when the store is not enabled.
+     *
+     * @param  array<array<string, mixed>> $documents
+     * @return array<int, array<string, mixed>>
+     */
+    private function buildRawDocuments(array $documents): array
+    {
+        if (!$this->documentStoreEnabled) {
+            return [];
+        }
+        $result = [];
+        foreach ($documents as $doc) {
+            $result[$this->extractId($doc['id'])] = $doc;
+        }
+        return $result;
     }
 
     /**
