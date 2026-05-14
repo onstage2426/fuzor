@@ -2923,6 +2923,31 @@ class IndexTest extends TestCase
         $this->assertNull($index->search('sedan')->document(1));
     }
 
+    public function testDocumentsReturnsNullWhenStoreDisabled(): void
+    {
+        $index = new Index($this->dbPath);
+        $index->insert(['id' => 1, 'title' => 'sedan']);
+
+        $this->assertNull($index->search('sedan')->documents());
+    }
+
+    public function testDocumentsReturnsFullMap(): void
+    {
+        $index = new Index($this->dbPath, store: true);
+        $index->insertMany([
+            ['id' => 10, 'title' => 'sedan'],
+            ['id' => 20, 'title' => 'sedan coupe'],
+        ]);
+
+        $result = $index->search('sedan');
+        $docs = $result->documents();
+        $this->assertNotNull($docs);
+        $this->assertArrayHasKey(10, $docs);
+        $this->assertArrayHasKey(20, $docs);
+        $this->assertSame($result->document(10), $docs[10]);
+        $this->assertSame($result->document(20), $docs[20]);
+    }
+
     // --- Document store: search hydration ---
 
     public function testSearchDocumentsIsNullWhenStoreDisabled(): void
