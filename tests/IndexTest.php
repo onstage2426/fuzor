@@ -249,6 +249,46 @@ class IndexTest extends TestCase
         $this->assertGreaterThan(0.0, $result->score(1));
     }
 
+    public function testHasScoresTrueForBm25Search(): void
+    {
+        $index = new Index($this->dbPath);
+        $index->insert(['id' => 1, 'title' => 'sedan']);
+
+        $this->assertTrue($index->search('sedan')->hasScores());
+    }
+
+    public function testHasScoresFalseForBooleanSearch(): void
+    {
+        $index = new Index($this->dbPath);
+        $index->insert(['id' => 1, 'title' => 'sedan']);
+
+        $this->assertFalse($index->searchBoolean('sedan')->hasScores());
+    }
+
+    public function testScoresReturnsFullMap(): void
+    {
+        $index = new Index($this->dbPath);
+        $index->insertMany([
+            ['id' => 1, 'title' => 'sedan car'],
+            ['id' => 2, 'title' => 'sedan coupe'],
+        ]);
+
+        $result = $index->search('sedan');
+        $scores = $result->scores();
+        $this->assertArrayHasKey(1, $scores);
+        $this->assertArrayHasKey(2, $scores);
+        $this->assertSame($result->score(1), $scores[1]);
+        $this->assertSame($result->score(2), $scores[2]);
+    }
+
+    public function testScoresEmptyForBooleanSearch(): void
+    {
+        $index = new Index($this->dbPath);
+        $index->insert(['id' => 1, 'title' => 'sedan']);
+
+        $this->assertSame([], $index->searchBoolean('sedan')->scores());
+    }
+
     public function testSearchHitsCountsAllMatchingDocs(): void
     {
         $index = new Index($this->dbPath);

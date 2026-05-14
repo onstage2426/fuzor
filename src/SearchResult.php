@@ -20,10 +20,26 @@ class SearchResult
     ) {
     }
 
+    /** True when BM25 scores are available (false for boolean search results). */
+    public function hasScores(): bool
+    {
+        return $this->scores !== [];
+    }
+
     /** BM25 score for the given doc ID, or null in boolean mode or if the ID is not in the result. */
     public function score(int $id): float|null
     {
         return $this->scores[$id] ?? null;
+    }
+
+    /**
+     * All BM25 scores keyed by doc ID, or an empty array for boolean search results.
+     *
+     * @return array<int, float>
+     */
+    public function scores(): array
+    {
+        return $this->scores;
     }
 
     /** True when the document store is enabled on the index that produced this result. */
