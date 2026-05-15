@@ -1919,20 +1919,15 @@ class Index
         // Step 3: bulk-insert all doc_lengths rows.
         // No ON CONFLICT needed: callers guarantee no pre-existing doc_ids
         // (insertMany verifies; replaceMany pre-deletes via bulkRemoveDocuments).
-        foreach (array_chunk($docLengthBuffer, self::CHUNK_2P, true) as $chunk) {
-            $n      = count($chunk);
-            $params = [];
-            foreach ($chunk as $docId => $length) {
-                $params[] = $docId;
-                $params[] = $length;
-            }
-            /** @infection-ignore-all AssignCoalesce: removing ??= only disables statement caching; correctness is unaffected */
-            ($this->bulkStmtCache["docLengthChunk:{$n}"] ??= $pdo->prepare(
-                'INSERT INTO doc_lengths (doc_id, length) VALUES '
-                    /** @infection-ignore-all DecrementInteger,IncrementInteger: array_fill start index 0 vs ±1 only changes array keys; implode() ignores keys */
-                    . implode(',', array_fill(0, $n, '(?,?)'))
-            ))->execute($params);
-        }
+        $this->bulkChunkInsert(
+            $pdo,
+            $docLengthBuffer,
+            self::CHUNK_2P,
+            'docLengthChunk',
+            'INSERT INTO doc_lengths (doc_id, length) VALUES ',
+            '(?,?)',
+            fn(int $docId, int $length): array => [$docId, $length],
+        );
 
         // Step 4: bulk-insert positions in (term_id, doc_id, position) PK order.
         // Mirrors the doclist sorted-insertion strategy: inserting in clustered PK order
@@ -1958,18 +1953,16 @@ class Index
 
         // Step 5: bulk-insert documents into the document store.
         if ($this->documentStoreEnabled && $rawDocuments !== []) {
-            foreach (array_chunk($rawDocuments, self::CHUNK_DOCS, true) as $chunk) {
-                $n      = count($chunk);
-                $params = [];
-                foreach ($chunk as $docId => $doc) {
-                    $params[] = $docId;
-                    $params[] = json_encode($doc, JSON_THROW_ON_ERROR);
-                }
-                ($this->bulkStmtCache["documentsChunk:{$n}"] ??= $pdo->prepare(
-                    'INSERT INTO documents (doc_id, data) VALUES '
-                        . implode(',', array_fill(0, $n, '(?,?)'))
-                ))->execute($params);
-            }
+            $this->bulkChunkInsert(
+                $pdo,
+                $rawDocuments,
+                self::CHUNK_DOCS,
+                'documentsChunk',
+                'INSERT INTO documents (doc_id, data) VALUES ',
+                '(?,?)',
+                fn(int $docId, array $doc): array =>
+                    [$docId, json_encode($doc, JSON_THROW_ON_ERROR)],
+            );
         }
 
         return array_sum($docLengthBuffer);
@@ -2023,6 +2016,42 @@ class Index
                 $insertPrefix
                     /** @infection-ignore-all DecrementInteger,IncrementInteger: array_fill start index 0 vs ±1 only changes array keys; implode() ignores keys */
                     . implode(',', array_fill(0, $rowCount, '(?,?,?)'))
+            ))->execute($params);
+        }
+    }
+
+    /**
+     * Bulk-INSERT items in chunks, caching prepared statements keyed by chunk size.
+     *
+     * @template TKey of array-key
+     * @template TValue
+     * @param array<TKey, TValue> $items        Items to insert; iterated in key-preserving chunk order.
+     * @param positive-int $chunkSize           Max rows per statement (use the CHUNK_XP constant for the col count).
+     * @param string $cachePrefix              bulkStmtCache key prefix (e.g. 'docLengthChunk').
+     * @param string $insertPrefix             SQL through "VALUES " — table and column names vary per caller.
+     * @param string $rowTpl                   Placeholder template for one row (e.g. "(?,?)").
+     * @param callable(TKey, TValue): list<mixed> $bindRow  Returns flat params for one row.
+     */
+    private function bulkChunkInsert(
+        \PDO $pdo,
+        array $items,
+        int $chunkSize,
+        string $cachePrefix,
+        string $insertPrefix,
+        string $rowTpl,
+        callable $bindRow,
+    ): void {
+        foreach (array_chunk($items, $chunkSize, true) as $chunk) {
+            $n      = count($chunk);
+            $params = [];
+            foreach ($chunk as $k => $v) {
+                array_push($params, ...$bindRow($k, $v));
+            }
+            /** @infection-ignore-all AssignCoalesce: removing ??= only disables statement caching; correctness is unaffected */
+            ($this->bulkStmtCache["{$cachePrefix}:{$n}"] ??= $pdo->prepare(
+                $insertPrefix
+                    /** @infection-ignore-all DecrementInteger,IncrementInteger: array_fill start index 0 vs ±1 only changes array keys; implode() ignores keys */
+                    . implode(',', array_fill(0, $n, $rowTpl))
             ))->execute($params);
         }
     }
