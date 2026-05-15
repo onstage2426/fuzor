@@ -1905,37 +1905,13 @@ class Index
                 $termDocMap[$termIdMap[$term]][$docId] = $hits;
             }
         }
-        /** @infection-ignore-all FunctionCallRemoval: ksort on termDocMap orders INSERTs by PK for B-tree performance; omitting only degrades write speed */
-        ksort($termDocMap);
-
-        $rowCount = 0;
-        $params   = [];
-        foreach ($termDocMap as $termId => $docs) {
-            /** @infection-ignore-all FunctionCallRemoval: ksort on docs orders by doc_id for PK order; omitting only degrades write speed */
-            ksort($docs);
-            foreach ($docs as $docId => $hits) {
-                $params[] = $termId;
-                $params[] = $docId;
-                $params[] = $hits;
-                if (++$rowCount === self::CHUNK_3P) {
-                    ($this->bulkStmtCache['doclistChunk:' . self::CHUNK_3P] ??= $pdo->prepare(
-                        'INSERT INTO doclist (term_id, doc_id, hit_count) VALUES '
-                            . implode(',', array_fill(0, self::CHUNK_3P, '(?,?,?)'))
-                    ))->execute($params);
-                    $params   = [];
-                    $rowCount = 0;
-                }
-            }
-        }
-        /** @infection-ignore-all GreaterThan: changing > 0 to >= 0 only matters when rowCount=0 (no partial chunk); tests always produce at least one row so this branch is always true regardless */
-        if ($rowCount > 0) {
-            /** @infection-ignore-all AssignCoalesce: removing ??= only disables statement caching; correctness is unaffected */
-            ($this->bulkStmtCache["doclistChunk:{$rowCount}"] ??= $pdo->prepare(
-                'INSERT INTO doclist (term_id, doc_id, hit_count) VALUES '
-                    /** @infection-ignore-all DecrementInteger,IncrementInteger: array_fill start index 0 vs ±1 only changes array keys; implode() ignores keys */
-                    . implode(',', array_fill(0, $rowCount, '(?,?,?)'))
-            ))->execute($params);
-        }
+        $this->bulkInsertTermDocRows(
+            $pdo,
+            'doclistChunk',
+            'INSERT INTO doclist (term_id, doc_id, hit_count) VALUES ',
+            $termDocMap,
+            fn(int $termId, int $docId, int $hits): array => [[$termId, $docId, $hits]],
+        );
 
         // Step 3: bulk-insert all doc_lengths rows.
         // No ON CONFLICT needed: callers guarantee no pre-existing doc_ids
@@ -1967,34 +1943,14 @@ class Index
                     }
                 }
             }
-            ksort($termDocPosMap);
-
-            $rowCount = 0;
-            $params   = [];
-            foreach ($termDocPosMap as $termId => $docs) {
-                ksort($docs);
-                foreach ($docs as $docId => $positions) {
-                    foreach ($positions as $position) {
-                        $params[] = $termId;
-                        $params[] = $docId;
-                        $params[] = $position;
-                        if (++$rowCount === self::CHUNK_3P) {
-                            ($this->bulkStmtCache['positionsChunk:' . self::CHUNK_3P] ??= $pdo->prepare(
-                                'INSERT INTO positions (term_id, doc_id, position) VALUES '
-                                    . implode(',', array_fill(0, self::CHUNK_3P, '(?,?,?)'))
-                            ))->execute($params);
-                            $params   = [];
-                            $rowCount = 0;
-                        }
-                    }
-                }
-            }
-            if ($rowCount > 0) {
-                ($this->bulkStmtCache["positionsChunk:{$rowCount}"] ??= $pdo->prepare(
-                    'INSERT INTO positions (term_id, doc_id, position) VALUES '
-                        . implode(',', array_fill(0, $rowCount, '(?,?,?)'))
-                ))->execute($params);
-            }
+            $this->bulkInsertTermDocRows(
+                $pdo,
+                'positionsChunk',
+                'INSERT INTO positions (term_id, doc_id, position) VALUES ',
+                $termDocPosMap,
+                fn(int $termId, int $docId, array $positions): array =>
+                    array_map(fn(int $pos): array => [$termId, $docId, $pos], $positions),
+            );
         }
 
         // Step 5: bulk-insert documents into the document store.
@@ -2014,6 +1970,58 @@ class Index
         }
 
         return array_sum($docLengthBuffer);
+    }
+
+    /**
+     * Bulk-insert rows from a term_id → doc_id → value map in clustered PK order.
+     *
+     * Sorts both levels (term_id, then doc_id) before iteration so that inserts land in
+     * B-tree PK order — critical for WITHOUT ROWID tables such as doclist and positions.
+     *
+     * @template TValue
+     * @param \PDO $pdo            Active connection.
+     * @param string $cachePrefix  bulkStmtCache key prefix (e.g. 'doclistChunk').
+     * @param string $insertPrefix SQL through "VALUES " — table and column names vary per caller.
+     * @param array<int, array<int, TValue>> $termDocMap  term_id → doc_id → value (unsorted; sorted here).
+     * @param callable(int, int, TValue): list<list<int>> $rows  One or more [p1, p2, p3] arrays per leaf.
+     */
+    private function bulkInsertTermDocRows(
+        \PDO $pdo,
+        string $cachePrefix,
+        string $insertPrefix,
+        array $termDocMap,
+        callable $rows,
+    ): void {
+        /** @infection-ignore-all FunctionCallRemoval: ksort on termDocMap orders INSERTs by PK for B-tree performance; omitting only degrades write speed */
+        ksort($termDocMap);
+        $rowCount = 0;
+        $params   = [];
+        foreach ($termDocMap as $termId => $docs) {
+            /** @infection-ignore-all FunctionCallRemoval: ksort on docs orders by doc_id for PK order; omitting only degrades write speed */
+            ksort($docs);
+            foreach ($docs as $docId => $value) {
+                foreach ($rows($termId, $docId, $value) as $rowParams) {
+                    array_push($params, ...$rowParams);
+                    if (++$rowCount === self::CHUNK_3P) {
+                        /** @infection-ignore-all AssignCoalesce: removing ??= only disables statement caching; correctness is unaffected */
+                        ($this->bulkStmtCache["{$cachePrefix}:" . self::CHUNK_3P] ??= $pdo->prepare(
+                            $insertPrefix . implode(',', array_fill(0, self::CHUNK_3P, '(?,?,?)'))
+                        ))->execute($params);
+                        $params   = [];
+                        $rowCount = 0;
+                    }
+                }
+            }
+        }
+        /** @infection-ignore-all GreaterThan: changing > 0 to >= 0 only matters when rowCount=0 (no partial chunk); tests always produce at least one row so this branch is always true regardless */
+        if ($rowCount > 0) {
+            /** @infection-ignore-all AssignCoalesce: removing ??= only disables statement caching; correctness is unaffected */
+            ($this->bulkStmtCache["{$cachePrefix}:{$rowCount}"] ??= $pdo->prepare(
+                $insertPrefix
+                    /** @infection-ignore-all DecrementInteger,IncrementInteger: array_fill start index 0 vs ±1 only changes array keys; implode() ignores keys */
+                    . implode(',', array_fill(0, $rowCount, '(?,?,?)'))
+            ))->execute($params);
+        }
     }
 
     /**
