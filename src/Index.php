@@ -602,7 +602,7 @@ class Index
                 if (!$indexIsEmpty) {
                     /** @infection-ignore-all UnwrapArrayKeys,DecrementInteger,IncrementInteger: removing array_keys passes values instead of keys; the chunk size constant change only affects chunk count, not correctness */
                     foreach (array_chunk(array_keys($ids), self::CHUNK_1P) as $chunk) {
-                        $placeholders = self::placeholders(count($chunk));
+                        $placeholders = $this->placeholders(count($chunk));
                         $stmt = $this->prepare(
                             "SELECT doc_id FROM doc_lengths WHERE doc_id IN ({$placeholders})"
                         );
@@ -783,7 +783,7 @@ class Index
 
                 $oldLengths = [];
                 foreach (array_chunk($ids, self::CHUNK_1P) as $chunk) {
-                    $placeholders = self::placeholders(count($chunk));
+                    $placeholders = $this->placeholders(count($chunk));
                     $stmt = $this->prepare(
                         "SELECT doc_id, length FROM doc_lengths WHERE doc_id IN ({$placeholders})"
                     );
@@ -955,7 +955,7 @@ class Index
         /** @var list<int> $found */
         $found = [];
         foreach (array_chunk($ids, self::CHUNK_1P) as $chunk) {
-            $placeholders = self::placeholders(count($chunk));
+            $placeholders = $this->placeholders(count($chunk));
             $stmt = $this->prepare("SELECT doc_id FROM doc_lengths WHERE doc_id IN ($placeholders)");
             $stmt->execute($chunk);
             /** @var list<int> $rows */
@@ -1011,7 +1011,7 @@ class Index
 
         $result = [];
         foreach (array_chunk($ids, self::CHUNK_1P) as $chunk) {
-            $placeholders = self::placeholders(count($chunk));
+            $placeholders = $this->placeholders(count($chunk));
             $stmt = $this->prepare(
                 "SELECT doc_id, data FROM documents WHERE doc_id IN ({$placeholders})"
             );
@@ -1520,7 +1520,7 @@ class Index
 
         foreach (array_chunk($ids, self::CHUNK_1P) as $chunk) {
             $n            = count($chunk);
-            $placeholders = self::placeholders($n);
+            $placeholders = $this->placeholders($n);
 
             // Capture affected term IDs before any deletion so orphan pruning can be scoped.
             $termStmt = $this->prepare(
@@ -1554,7 +1554,7 @@ class Index
 
             // Prune orphan terms scoped to the affected set; avoids a full wordlist table scan.
             if ($affectedTermIds !== []) {
-                $tp = self::placeholders(count($affectedTermIds));
+                $tp = $this->placeholders(count($affectedTermIds));
                 $this->prepare(
                     "DELETE FROM wordlist WHERE num_hits <= 0 AND id IN ({$tp})"
                 )->execute($affectedTermIds);
@@ -1654,7 +1654,10 @@ class Index
         $length        = 0;
         $position      = 0;
         foreach ($fields as $key => $col) {
-            if ($key === 'id' || $key === '_meta') {
+            if ($key === 'id') {
+                continue;
+            }
+            if ($key === '_meta') {
                 continue;
             }
             /** @infection-ignore-all UnwrapTrim: leading/trailing whitespace in field values is uncommon in tests; trimming is a defensive clean-up step */
@@ -2331,7 +2334,7 @@ class Index
             return $rows;
         }
 
-        $placeholders = self::placeholders($n);
+        $placeholders = $this->placeholders($n);
         $stmt         = $this->stmt(
             "boolDocIds:{$n}",
             "SELECT doc_id FROM doclist WHERE term_id IN ({$placeholders}) ORDER BY hit_count DESC LIMIT ?"
@@ -2454,8 +2457,8 @@ class Index
             return [];
         }
 
-        $dPlaceholders = self::placeholders(count($docIds));
-        $tPlaceholders = self::placeholders(count($termIds));
+        $dPlaceholders = $this->placeholders(count($docIds));
+        $tPlaceholders = $this->placeholders(count($termIds));
 
         $stmt = $this->prepare(
             "SELECT doc_id, term_id, position
@@ -2672,7 +2675,7 @@ class Index
 
         // Fuzzy: ORDER BY a CASE expression that encodes the fuzzy relevance rank (closest match first).
         // Uses IN() since the CASE sort mixes two orderings that the index cannot satisfy.
-        $placeholders = self::placeholders($n);
+        $placeholders = $this->placeholders($n);
         $cases        = implode(' ', array_map(fn(int $i): string => "WHEN ? THEN {$i}", range(0, $n - 1)));
         $stmt         = $this->prepare(
             "SELECT sub.term_id, sub.doc_id, sub.hit_count, dl.length AS doc_length
@@ -2766,7 +2769,7 @@ class Index
         return $pdo->prepare($sql);
     }
 
-    private static function placeholders(int $n): string
+    private function placeholders(int $n): string
     {
         return implode(',', array_fill(0, $n, '?'));
     }
