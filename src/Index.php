@@ -594,6 +594,7 @@ class Index
             $pdo->exec('
                 DROP INDEX IF EXISTS doclist_term_hitcount;
                 DROP INDEX IF EXISTS doc_id_index;
+                DROP INDEX IF EXISTS positions_doc_id;
             ');
         }
         /** @infection-ignore-all UnwrapFinally: removing the try-finally wrapper only affects exception safety of the pragma restore; on the success path the behaviour is identical */
@@ -621,7 +622,8 @@ class Index
                     }
                 }
 
-                ['wordBuffer'        => $wordBuffer,
+                ['wordHits'          => $wordHits,
+                 'wordDocs'          => $wordDocs,
                  'docTermBuffer'     => $docTermBuffer,
                  'docLengthBuffer'   => $docLengthBuffer,
                  'docPositionBuffer' => $docPositionBuffer] = $this->buildBatchBuffer($documents, $progress);
@@ -629,7 +631,8 @@ class Index
                 $rawDocuments = $this->buildRawDocuments($documents);
 
                 $totalLength = $this->flushBatch(
-                    $wordBuffer,
+                    $wordHits,
+                    $wordDocs,
                     $docTermBuffer,
                     $docLengthBuffer,
                     $docPositionBuffer,
@@ -647,6 +650,7 @@ class Index
                 $pdo->exec('
                     CREATE INDEX IF NOT EXISTS doc_id_index ON doclist (doc_id);
                     CREATE INDEX IF NOT EXISTS doclist_term_hitcount ON doclist (term_id, hit_count DESC);
+                    CREATE INDEX IF NOT EXISTS positions_doc_id ON positions (doc_id);
                 ');
             }
             /** @infection-ignore-all MethodCallRemoval: restoring pragmas after bulk load is a performance step; the next connection will re-apply from applyPragmas() */
@@ -814,7 +818,8 @@ class Index
                 }
 
                 // 4. Bulk-insert all documents using the same two-phase path as insertMany().
-                ['wordBuffer'        => $wordBuffer,
+                ['wordHits'          => $wordHits,
+                 'wordDocs'          => $wordDocs,
                  'docTermBuffer'     => $docTermBuffer,
                  'docLengthBuffer'   => $docLengthBuffer,
                  'docPositionBuffer' => $docPositionBuffer] = $this->buildBatchBuffer($documents);
@@ -822,7 +827,8 @@ class Index
                 $rawDocuments = $this->buildRawDocuments($documents);
 
                 $totalNewLength = $this->flushBatch(
-                    $wordBuffer,
+                    $wordHits,
+                    $wordDocs,
                     $docTermBuffer,
                     $docLengthBuffer,
                     $docPositionBuffer,
@@ -1717,7 +1723,8 @@ class Index
      *
      * @param  array<array<string, mixed>> $documents
      * @return array{
-     *     wordBuffer:        array<string, array{totalHits: int, numDocs: int}>,
+     *     wordHits:          array<string, int>,
+     *     wordDocs:          array<string, int>,
      *     docTermBuffer:     array<int, array<string, int>>,
      *     docLengthBuffer:   array<int, int>,
      *     docPositionBuffer: array<int, array<string, list<int>>>
@@ -1725,12 +1732,14 @@ class Index
      */
     private function buildBatchBuffer(array $documents, ?callable $progress = null): array
     {
-        /** @var array<string, array{totalHits: int, numDocs: int}> $wordBuffer */
-        $wordBuffer     = [];
+        /** @var array<string, int> $wordHits */
+        $wordHits          = [];
+        /** @var array<string, int> $wordDocs */
+        $wordDocs          = [];
         /** @var array<int, array<string, int>> $docTermBuffer */
-        $docTermBuffer  = [];
+        $docTermBuffer     = [];
         /** @var array<int, int> $docLengthBuffer */
-        $docLengthBuffer = [];
+        $docLengthBuffer   = [];
         /** @var array<int, array<string, list<int>>> $docPositionBuffer */
         $docPositionBuffer = [];
 
@@ -1743,19 +1752,20 @@ class Index
             ['termCounts' => $termCounts, 'termPositions' => $termPositions, 'length' => $length]
                 = $this->tokenizeDocumentFields($document);
 
-            $docTermBuffer[$documentId]      = $termCounts;
-            $docLengthBuffer[$documentId]    = $length;
-            $docPositionBuffer[$documentId]  = $termPositions;
+            $docTermBuffer[$documentId]     = $termCounts;
+            $docLengthBuffer[$documentId]   = $length;
+            $docPositionBuffer[$documentId] = $termPositions;
 
             foreach ($termCounts as $term => $hits) {
-                if (isset($wordBuffer[$term])) {
+                if (isset($wordHits[$term])) {
                     /** @infection-ignore-all Assignment,PlusEqual: totalHits accumulates across documents; mutation only affects wordlist num_hits (BM25 scoring), not result membership */
-                    $wordBuffer[$term]['totalHits'] += $hits;
+                    $wordHits[$term] += $hits;
                     /** @infection-ignore-all DecrementInteger,Assignment: numDocs tracks distinct documents per term; off-by-one only affects BM25 scoring, not result membership */
-                    $wordBuffer[$term]['numDocs']   += 1;
+                    $wordDocs[$term]++;
                 } else {
+                    $wordHits[$term] = $hits;
                     /** @infection-ignore-all DecrementInteger: numDocs=0 vs 1 on first occurrence only affects BM25 scoring, not result membership */
-                    $wordBuffer[$term] = ['totalHits' => $hits, 'numDocs' => 1];
+                    $wordDocs[$term] = 1;
                 }
             }
 
@@ -1765,9 +1775,10 @@ class Index
         }
 
         return [
-            'wordBuffer'       => $wordBuffer,
-            'docTermBuffer'    => $docTermBuffer,
-            'docLengthBuffer'  => $docLengthBuffer,
+            'wordHits'          => $wordHits,
+            'wordDocs'          => $wordDocs,
+            'docTermBuffer'     => $docTermBuffer,
+            'docLengthBuffer'   => $docLengthBuffer,
             'docPositionBuffer' => $docPositionBuffer,
         ];
     }
@@ -1800,15 +1811,17 @@ class Index
      *   3. Doc_lengths INSERT    — all (doc_id, length) rows in bulk.
      *   4. Positions INSERT      — all (term_id, doc_id, position) rows in bulk.
      *
-     * @param  array<string, array{totalHits: int, numDocs: int}> $wordBuffer
-     * @param  array<int, array<string, int>>                     $docTermBuffer
-     * @param  array<int, int>                                    $docLengthBuffer
-     * @param  array<int, array<string, list<int>>>               $docPositionBuffer
-     * @param  array<int, array<string, mixed>>  $rawDocuments  doc_id → document array (store path only)
+     * @param  array<string, int>                   $wordHits   Term → total hit count across all documents.
+     * @param  array<string, int>                   $wordDocs   Term → distinct document count.
+     * @param  array<int, array<string, int>>       $docTermBuffer
+     * @param  array<int, int>                      $docLengthBuffer
+     * @param  array<int, array<string, list<int>>> $docPositionBuffer
+     * @param  array<int, array<string, mixed>>     $rawDocuments  doc_id → document array (store path only)
      * @return int Total token count across all documents (for adjustStats).
      */
     private function flushBatch(
-        array $wordBuffer,
+        array $wordHits,
+        array $wordDocs,
         array $docTermBuffer,
         array $docLengthBuffer,
         array $docPositionBuffer = [],
@@ -1818,24 +1831,25 @@ class Index
         assert($pdo instanceof \PDO);
 
         // Step 1: upsert all unique terms; get back term text → wordlist ID mapping.
-        $termIdMap = $this->batchUpsertWordlist($wordBuffer);
+        $termIdMap = $this->batchUpsertWordlist($wordHits, $wordDocs);
 
-        // Step 2: invert docTermBuffer to (term_id → doc_id → hits) and sort by the clustered PK.
+        // Step 2: invert both docTermBuffer and docPositionBuffer in a single pass.
         // doclist is WITHOUT ROWID with PK (term_id, doc_id): inserting in PK order turns
-        // random leaf-page seeks into sequential B-tree appends, which is ~5-10× faster.
-        $termDocMap = [];
+        // random leaf-page seeks into sequential B-tree appends.
+        // Both buffers share the same (docId, term) key space — every term in docTermBuffer
+        // is guaranteed to appear in docPositionBuffer for the same docId — so one outer loop
+        // and one inner loop cover both inversions without a second full traversal.
+        $termDocMap    = [];
+        $termDocPosMap = [];
         foreach ($docTermBuffer as $docId => $termCounts) {
+            $termPositions = $docPositionBuffer[$docId];
             foreach ($termCounts as $term => $hits) {
-                $termDocMap[$termIdMap[$term]][$docId] = $hits;
+                $termId = $termIdMap[$term];
+                $termDocMap[$termId][$docId]    = $hits;
+                $termDocPosMap[$termId][$docId] = $termPositions[$term];
             }
         }
-        $this->bulkInsertTermDocRows(
-            $pdo,
-            'doclistChunk',
-            'INSERT INTO doclist (term_id, doc_id, hit_count) VALUES ',
-            $termDocMap,
-            fn(int $termId, int $docId, int $hits): array => [[$termId, $docId, $hits]],
-        );
+        $this->bulkInsertDoclistRows($termDocMap);
 
         // Step 3: bulk-insert all doc_lengths rows.
         // No ON CONFLICT needed: callers guarantee no pre-existing doc_ids
@@ -1851,25 +1865,8 @@ class Index
         );
 
         // Step 4: bulk-insert positions in (term_id, doc_id, position) PK order.
-        // Mirrors the doclist sorted-insertion strategy: inserting in clustered PK order
-        // turns random leaf-page seeks into sequential B-tree appends.
-        if ($docPositionBuffer !== []) {
-            $termDocPosMap = [];
-            foreach ($docPositionBuffer as $docId => $termPositions) {
-                foreach ($termPositions as $term => $positions) {
-                    if (isset($termIdMap[$term])) {
-                        $termDocPosMap[$termIdMap[$term]][$docId] = $positions;
-                    }
-                }
-            }
-            $this->bulkInsertTermDocRows(
-                $pdo,
-                'positionsChunk',
-                'INSERT INTO positions (term_id, doc_id, position) VALUES ',
-                $termDocPosMap,
-                fn(int $termId, int $docId, array $positions): array =>
-                    array_map(fn(int $pos): array => [$termId, $docId, $pos], $positions),
-            );
+        if ($termDocPosMap !== []) {
+            $this->bulkInsertPositionRows($termDocPosMap);
         }
 
         // Step 5: bulk-insert documents into the document store.
@@ -1890,39 +1887,78 @@ class Index
     }
 
     /**
-     * Bulk-insert rows from a term_id → doc_id → value map in clustered PK order.
+     * Bulk-insert doclist rows in clustered PK order (term_id, doc_id).
      *
-     * Sorts both levels (term_id, then doc_id) before iteration so that inserts land in
-     * B-tree PK order — critical for WITHOUT ROWID tables such as doclist and positions.
+     * Specialized inline variant of the former generic bulkInsertTermDocRows — avoids callable
+     * dispatch, outer array wrapping, and array_push spread overhead on every row.
      *
-     * @template TValue
-     * @param \PDO $pdo            Active connection.
-     * @param string $cachePrefix  bulkStmtCache key prefix (e.g. 'doclistChunk').
-     * @param string $insertPrefix SQL through "VALUES " — table and column names vary per caller.
-     * @param array<int, array<int, TValue>> $termDocMap  term_id → doc_id → value (unsorted; sorted here).
-     * @param callable(int, int, TValue): list<list<int>> $rows  One or more [p1, p2, p3] arrays per leaf.
+     * @param array<int, array<int, int>> $termDocMap  term_id → doc_id → hit_count (unsorted; sorted here)
      */
-    private function bulkInsertTermDocRows(
-        \PDO $pdo,
-        string $cachePrefix,
-        string $insertPrefix,
-        array $termDocMap,
-        callable $rows,
-    ): void {
-        /** @infection-ignore-all FunctionCallRemoval: ksort on termDocMap orders INSERTs by PK for B-tree performance; omitting only degrades write speed */
+    private function bulkInsertDoclistRows(array $termDocMap): void
+    {
+        $pdo = $this->pdo;
+        assert($pdo instanceof \PDO);
+        /** @infection-ignore-all FunctionCallRemoval: ksort orders INSERTs by term_id PK for B-tree performance; omitting only degrades write speed */
         ksort($termDocMap);
         $rowCount = 0;
         $params   = [];
         foreach ($termDocMap as $termId => $docs) {
-            /** @infection-ignore-all FunctionCallRemoval: ksort on docs orders by doc_id for PK order; omitting only degrades write speed */
+            /** @infection-ignore-all FunctionCallRemoval: ksort orders by doc_id for clustered PK order; omitting only degrades write speed */
             ksort($docs);
-            foreach ($docs as $docId => $value) {
-                foreach ($rows($termId, $docId, $value) as $rowParams) {
-                    array_push($params, ...$rowParams);
+            foreach ($docs as $docId => $hits) {
+                $params[] = $termId;
+                $params[] = $docId;
+                $params[] = $hits;
+                if (++$rowCount === self::CHUNK_3P) {
+                    /** @infection-ignore-all AssignCoalesce: removing ??= only disables statement caching; correctness is unaffected */
+                    ($this->bulkStmtCache['doclistChunk:' . self::CHUNK_3P] ??= $pdo->prepare(
+                        'INSERT INTO doclist (term_id, doc_id, hit_count) VALUES '
+                        . implode(',', array_fill(0, self::CHUNK_3P, '(?,?,?)'))
+                    ))->execute($params);
+                    $params   = [];
+                    $rowCount = 0;
+                }
+            }
+        }
+        /** @infection-ignore-all GreaterThan: changing > 0 to >= 0 only matters when rowCount=0 (no partial chunk); tests always produce at least one row so this branch is always true regardless */
+        if ($rowCount > 0) {
+            /** @infection-ignore-all AssignCoalesce: removing ??= only disables statement caching; correctness is unaffected */
+            ($this->bulkStmtCache["doclistChunk:{$rowCount}"] ??= $pdo->prepare(
+                'INSERT INTO doclist (term_id, doc_id, hit_count) VALUES '
+                . implode(',', array_fill(0, $rowCount, '(?,?,?)'))
+            ))->execute($params);
+        }
+    }
+
+    /**
+     * Bulk-insert positions rows in clustered PK order (term_id, doc_id, position).
+     *
+     * Specialized inline variant — eliminates the array_map + inner closure that were called
+     * a lot in the generic path, building params directly with $params[] assignments.
+     *
+     * @param array<int, array<int, list<int>>> $termDocPosMap  term_id → doc_id → position list (unsorted; sorted here)
+     */
+    private function bulkInsertPositionRows(array $termDocPosMap): void
+    {
+        $pdo = $this->pdo;
+        assert($pdo instanceof \PDO);
+        /** @infection-ignore-all FunctionCallRemoval: ksort orders INSERTs by term_id PK for B-tree performance; omitting only degrades write speed */
+        ksort($termDocPosMap);
+        $rowCount = 0;
+        $params   = [];
+        foreach ($termDocPosMap as $termId => $docs) {
+            /** @infection-ignore-all FunctionCallRemoval: ksort orders by doc_id for clustered PK order; omitting only degrades write speed */
+            ksort($docs);
+            foreach ($docs as $docId => $positions) {
+                foreach ($positions as $pos) {
+                    $params[] = $termId;
+                    $params[] = $docId;
+                    $params[] = $pos;
                     if (++$rowCount === self::CHUNK_3P) {
                         /** @infection-ignore-all AssignCoalesce: removing ??= only disables statement caching; correctness is unaffected */
-                        ($this->bulkStmtCache["{$cachePrefix}:" . self::CHUNK_3P] ??= $pdo->prepare(
-                            $insertPrefix . implode(',', array_fill(0, self::CHUNK_3P, '(?,?,?)'))
+                        ($this->bulkStmtCache['positionsChunk:' . self::CHUNK_3P] ??= $pdo->prepare(
+                            'INSERT INTO positions (term_id, doc_id, position) VALUES '
+                            . implode(',', array_fill(0, self::CHUNK_3P, '(?,?,?)'))
                         ))->execute($params);
                         $params   = [];
                         $rowCount = 0;
@@ -1933,10 +1969,9 @@ class Index
         /** @infection-ignore-all GreaterThan: changing > 0 to >= 0 only matters when rowCount=0 (no partial chunk); tests always produce at least one row so this branch is always true regardless */
         if ($rowCount > 0) {
             /** @infection-ignore-all AssignCoalesce: removing ??= only disables statement caching; correctness is unaffected */
-            ($this->bulkStmtCache["{$cachePrefix}:{$rowCount}"] ??= $pdo->prepare(
-                $insertPrefix
-                    /** @infection-ignore-all DecrementInteger,IncrementInteger: array_fill start index 0 vs ±1 only changes array keys; implode() ignores keys */
-                    . implode(',', array_fill(0, $rowCount, '(?,?,?)'))
+            ($this->bulkStmtCache["positionsChunk:{$rowCount}"] ??= $pdo->prepare(
+                'INSERT INTO positions (term_id, doc_id, position) VALUES '
+                . implode(',', array_fill(0, $rowCount, '(?,?,?)'))
             ))->execute($params);
         }
     }
@@ -1987,12 +2022,13 @@ class Index
      *
      * Uses 3 params per term → 10922 terms per chunk (SQLite 32766-variable limit).
      *
-     * @param  array<string, array{totalHits: int, numDocs: int}> $wordBuffer
+     * @param  array<string, int> $wordHits Term → total hit count across all documents.
+     * @param  array<string, int> $wordDocs Term → distinct document count.
      * @return array<string, int> term text → wordlist ID
      */
-    private function batchUpsertWordlist(array $wordBuffer): array
+    private function batchUpsertWordlist(array $wordHits, array $wordDocs): array
     {
-        if ($wordBuffer === []) {
+        if ($wordHits === []) {
             return [];
         }
 
@@ -2001,27 +2037,31 @@ class Index
 
         /** @var array<string, int> $termIdMap */
         $termIdMap  = [];
-        $knownTerms = [];
-        $newTerms   = [];
+        $knownHits  = [];
+        $knownDocs  = [];
+        $newHits    = [];
+        $newDocs    = [];
 
-        foreach ($wordBuffer as $term => $counts) {
+        foreach ($wordHits as $term => $hits) {
             if (isset($this->termIdCache[$term])) {
-                $knownTerms[$term] = $counts;
+                $knownHits[$term] = $hits;
+                $knownDocs[$term] = $wordDocs[$term];
             } else {
-                $newTerms[$term] = $counts;
+                $newHits[$term] = $hits;
+                $newDocs[$term] = $wordDocs[$term];
             }
         }
 
         // Path A: known terms — UPDATE by INTEGER PRIMARY KEY via CTE-VALUES; no RETURNING needed.
-        // 3 params/row (id, hits, docs) → 10 922 rows/chunk.
+        // 3 params/row (id, hits, docs) → chunk rows/chunk.
         /** @infection-ignore-all UnwrapArrayChunk,Foreach_: Path A is never entered on fresh indexes (termIdCache is empty); mutations that skip or mishandle chunks have no effect when knownTerms is empty */
-        foreach (array_chunk($knownTerms, self::CHUNK_3P, true) as $chunk) {
+        foreach (array_chunk($knownHits, self::CHUNK_3P, true) as $chunk) {
             $n      = count($chunk);
             $params = [];
-            foreach ($chunk as $term => ['totalHits' => $hits, 'numDocs' => $numDocs]) {
+            foreach ($chunk as $term => $hits) {
                 $params[] = $this->termIdCache[$term];
                 $params[] = $hits;
-                $params[] = $numDocs;
+                $params[] = $knownDocs[$term];
             }
             ($this->bulkStmtCache["batchWordlistUpdate:{$n}"] ??= $pdo->prepare(
                 'WITH delta(id, hits, docs) AS (VALUES ' . implode(',', array_fill(0, $n, '(?,?,?)')) . ')
@@ -2037,14 +2077,14 @@ class Index
         }
 
         // Path B: new terms — UPSERT via text UNIQUE index + RETURNING; IDs added to cache.
-        // 3 params/term → 10 922 terms/chunk.
-        foreach (array_chunk($newTerms, self::CHUNK_3P, true) as $chunk) {
+        // 3 params/term → chunk terms/chunk.
+        foreach (array_chunk($newHits, self::CHUNK_3P, true) as $chunk) {
             $n      = count($chunk);
             $params = [];
-            foreach ($chunk as $term => ['totalHits' => $hits, 'numDocs' => $numDocs]) {
+            foreach ($chunk as $term => $hits) {
                 $params[] = $term;
                 $params[] = $hits;
-                $params[] = $numDocs;
+                $params[] = $newDocs[$term];
             }
             /** @infection-ignore-all AssignCoalesce: removing ??= only disables statement caching; correctness is unaffected */
             $stmt = ($this->bulkStmtCache["batchWordlistUpsert:{$n}"] ??= $pdo->prepare(
