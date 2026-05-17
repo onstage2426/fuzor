@@ -1018,8 +1018,10 @@ class Index
 
         $result = [];
         foreach (array_chunk($ids, self::CHUNK_1P) as $chunk) {
-            $placeholders = $this->placeholders(count($chunk));
-            $stmt = $this->prepare(
+            $n            = count($chunk);
+            $placeholders = $this->placeholders($n);
+            $stmt = $this->stmt(
+                "getManyDocs:{$n}",
                 "SELECT doc_id, data FROM documents WHERE doc_id IN ({$placeholders})"
             );
             $stmt->execute($chunk);
@@ -1237,7 +1239,17 @@ class Index
         }
 
         if (count($termGroups) >= 2 && $this->config->proximityBoost > 0.0) {
-            $this->applyProximityBoost($docScores, $termGroups);
+            $proxWindow = max(($offset + $limit) * 5, 200);
+            if (count($docScores) > $proxWindow) {
+                arsort($docScores);
+                $proxSlice = array_slice($docScores, 0, $proxWindow, true);
+                $this->applyProximityBoost($proxSlice, $termGroups);
+                foreach ($proxSlice as $id => $s) {
+                    $docScores[$id] = $s;
+                }
+            } else {
+                $this->applyProximityBoost($docScores, $termGroups);
+            }
         }
 
         $total = count($docScores);
@@ -1247,45 +1259,10 @@ class Index
             return new SearchResult(ids: [], hits: $total, scores: $docScores, documents: $this->hydrateIds([]));
         }
 
-        /** @infection-ignore-all LessThanOrEqualTo: when total===numOfResults the fast arsort path and the heap path both return the same set of doc IDs; ordering may differ for ties but is unspecified */
-        if ($total <= $offset + $limit) {
-            arsort($docScores);
-            $ids = array_slice(array_keys($docScores), $offset, $limit);
-            return new SearchResult(ids: $ids, hits: $total, scores: $docScores, documents: $this->hydrateIds($ids));
-        }
-
-        // Partial sort: min-heap capped at $offset + $limit keeps the top window of scoring docs.
-        // SplMinHeap::top() is the weakest entry currently kept; anything that can't beat it
-        // is discarded, so the heap never grows beyond $offset + $limit elements.
-        $window   = $offset + $limit;
-        /** @var \SplMinHeap<array{float, int}> $heap */
-        $heap     = new \SplMinHeap();
-        $heapSize = 0;
-        $heapMin  = -INF;
-        foreach ($docScores as $docId => $score) {
-            if ($heapSize < $window) {
-                $heap->insert([$score, $docId]);
-                $heapSize++;
-                if ($heapSize === $window) {
-                    $heapMin = $heap->top()[0];
-                }
-            } elseif ($score > $heapMin) {
-                /** @infection-ignore-all GreaterThan: when score===heapMin the replaced doc is a valid equal-score member; tied-score ordering is intentionally unspecified */
-                $heap->extract();
-                $heap->insert([$score, $docId]);
-                $heapMin = $heap->top()[0];
-            }
-        }
-
-        // extract() yields ascending order; reverse so ids are sorted by score descending,
-        // then slice to the requested page window.
-        /** @var list<int> $ids */
-        $ids = [];
-        while (!$heap->isEmpty()) {
-            $ids[] = $heap->extract()[1];
-        }
-
-        $pagedIds = array_slice(array_reverse($ids), $offset, $limit);
+        // arsort is C-native and faster than a PHP-level SplMinHeap for the result-set
+        // sizes produced by this engine (maxDocs=500 per term, typical total < 2000).
+        arsort($docScores);
+        $pagedIds = array_slice(array_keys($docScores), $offset, $limit);
         return new SearchResult(
             ids: $pagedIds,
             hits: $total,
@@ -2367,8 +2344,11 @@ class Index
             }
         }
 
-        $numGroups = count($termGroups);
-        $boost     = $this->config->proximityBoost;
+        $numGroups     = count($termGroups);
+        $boost         = $this->config->proximityBoost;
+        // Single-term groups have positions already in ORDER BY position order from the DB query.
+        // Only multi-term groups (prefix/fuzzy expansion) need an explicit sort.
+        $groupNeedSort = array_map(fn(array $tids): bool => count($tids) > 1, $termGroups);
 
         foreach ($positions as $docId => $termPositions) {
             // Partition positions into per-keyword-group buckets.
@@ -2394,7 +2374,9 @@ class Index
             /** @var list<array{0: int, 1: int}> $merged */
             $merged = [];
             foreach ($groupPositions as $g => $posList) {
-                sort($posList);
+                if ($groupNeedSort[$g]) {
+                    sort($posList);
+                }
                 foreach ($posList as $pos) {
                     $merged[] = [$pos, $g];
                 }
@@ -2447,10 +2429,13 @@ class Index
             return [];
         }
 
-        $dPlaceholders = $this->placeholders(count($docIds));
-        $tPlaceholders = $this->placeholders(count($termIds));
+        $nDocs         = count($docIds);
+        $nTerms        = count($termIds);
+        $dPlaceholders = $this->placeholders($nDocs);
+        $tPlaceholders = $this->placeholders($nTerms);
 
-        $stmt = $this->prepare(
+        $stmt = $this->stmt(
+            "fetchPositions:{$nDocs}:{$nTerms}",
             "SELECT doc_id, term_id, position
              FROM positions
              WHERE doc_id IN ({$dPlaceholders}) AND term_id IN ({$tPlaceholders})
