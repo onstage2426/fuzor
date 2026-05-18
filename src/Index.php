@@ -7,6 +7,7 @@ namespace Fuzor;
 use Fuzor\BooleanParser;
 use Fuzor\Exceptions\IOException;
 use Fuzor\Exceptions\QueryException;
+use Fuzor\FacetRange;
 use Fuzor\Highlighter;
 use Fuzor\Levenshtein;
 use Fuzor\Snippeter;
@@ -34,8 +35,19 @@ class Index
     /** Max rows per chunk when each row uses 3 bind variables. */
     private const int CHUNK_3P = 10_922;
 
+    /** Max rows per chunk when each row uses 4 bind variables (facet_values bulk INSERT). */
+    private const int CHUNK_4P = 8_191;
+
     /** Max rows per chunk for document store bulk-INSERT (2 params/row, capped conservatively for large BLOBs). */
     private const int CHUNK_DOCS = 500;
+
+    /**
+     * When N (result-set size) is at or below this threshold, facet counts are fetched
+     * with a single CROSS JOIN query driven from the doc ID side (O(N × avg_facets)) rather
+     * than one sequential PK scan per key (O(num_keys × K)). For narrow searches this is
+     * dramatically faster; for broad searches the sequential scan wins.
+     */
+    private const int FACET_JOIN_THRESHOLD = 2_000;
 
     /** Absolute path to the open SQLite index file. */
     private readonly string $path;
@@ -84,6 +96,12 @@ class Index
     /** Whether the optional document store is active on this index. */
     public private(set) bool $documentStoreEnabled = false;
 
+    /** Whether the facet index is active on this index. */
+    public private(set) bool $facetsEnabled = false;
+
+    /** @var array<string, int> Maps facet key name → facet_keys.id; populated lazily; cleared on connection change. */
+    private array $facetKeyCache = [];
+
     /** Active stopword filter; null when no language is set or language has no stopword list. */
     private ?Stopwords $stopwords = null;
 
@@ -110,6 +128,10 @@ class Index
      *                               the inverted index so search results can be hydrated without
      *                               a separate data layer. Ignored when opening an existing index
      *                               (the stored has_document_store info value takes precedence).
+     * @param  bool        $facets   Enable the facet index; stores _facets values in a separate
+     *                               inverted index for filtered search and aggregation.
+     *                               Ignored when opening an existing index
+     *                               (the stored has_facets info value takes precedence).
      * @throws IOException    If the parent directory does not exist, or readonly is true and the file does not exist.
      * @throws QueryException If $language is set but has no stopword list or stemmer,
      *                        or if both $readonly and $force are true.
@@ -121,6 +143,7 @@ class Index
         ?Config $config = null,
         private readonly bool $readonly = false,
         bool $store = false,
+        bool $facets = false,
     ) {
         $this->config   = $config ?? new Config();
         if ($this->readonly && $force) {
@@ -137,7 +160,7 @@ class Index
         if (file_exists($resolved) && !$force) {
             $this->selectIndex();
         } else {
-            $this->createIndex($force, $language, $store);
+            $this->createIndex($force, $language, $store, $facets);
         }
     }
 
@@ -231,6 +254,7 @@ class Index
         callable $callback,
         false|string|null $language = false,
         ?bool $store = null,
+        ?bool $facets = null,
     ): self {
         $resolved = self::resolvePath($path);
         $existing = file_exists($resolved) ? new self($resolved) : null;
@@ -240,6 +264,9 @@ class Index
         if ($store === null) {
             $store = $existing !== null && $existing->documentStoreEnabled;
         }
+        if ($facets === null) {
+            $facets = $existing !== null && $existing->facetsEnabled;
+        }
         /** @infection-ignore-all MethodCallRemoval: resource cleanup; GC closes the connection if skipped, no observable effect on the rebuild outcome */
         $existing?->close();
 
@@ -247,7 +274,7 @@ class Index
         $tmp = $resolved . '.tmp-' . bin2hex(random_bytes(4));
 
         try {
-            $handle = new self($tmp, language: $language, store: $store);
+            $handle = new self($tmp, language: $language, store: $store, facets: $facets);
             $callback($handle);
             $handle->close();
 
@@ -333,6 +360,7 @@ class Index
         bool $force = false,
         ?string $language = null,
         bool $store = false,
+        bool $facets = false,
     ): static {
         if (!$force && file_exists($this->path)) {
             throw new IOException(
@@ -348,6 +376,7 @@ class Index
         $this->infoCache     = null;
         $this->termIdCache   = [];
         $this->wordlistCache = [];
+        $this->facetKeyCache = [];
         // page_size must be set before any data is written; ignored on existing files.
         // 16 384 bytes (4× default) reduces B-tree depth for multi-GB doclist tables.
         /** @infection-ignore-all MethodCallRemoval: page_size pragma affects only on-disk structure, not query correctness */
@@ -416,6 +445,40 @@ class Index
             $this->documentStoreEnabled = true;
         }
 
+        if ($facets) {
+            // facet_keys: one row per unique facet field name (~10–100 entries; fully cached in PHP).
+            $pdo->exec(
+                "CREATE TABLE IF NOT EXISTS facet_keys (
+                    id   INTEGER PRIMARY KEY,
+                    name TEXT NOT NULL UNIQUE
+                ) STRICT"
+            );
+            // facet_values: inverted index clustered on (key_id, value, doc_id).
+            // WITHOUT ROWID → range scan on (key_id, value) is a pure B-tree leaf scan, no heap fetch.
+            $pdo->exec(
+                "CREATE TABLE IF NOT EXISTS facet_values (
+                    key_id    INTEGER NOT NULL,
+                    value     TEXT    NOT NULL,
+                    doc_id    INTEGER NOT NULL,
+                    num_value REAL,
+                    PRIMARY KEY (key_id, value, doc_id)
+                ) WITHOUT ROWID, STRICT"
+            );
+            // Covers DELETE-by-doc_id and the GROUP BY count query path.
+            $pdo->exec(
+                "CREATE INDEX IF NOT EXISTS 'main'.'facet_doc_id_index'
+                 ON facet_values (doc_id)"
+            );
+            // Covers numeric range filter queries; partial keeps the B-tree small.
+            $pdo->exec(
+                "CREATE INDEX IF NOT EXISTS 'main'.'facet_numeric_index'
+                 ON facet_values (key_id, num_value, doc_id)
+                 WHERE num_value IS NOT NULL"
+            );
+            $pdo->exec("INSERT INTO info (key, value) VALUES ('has_facets', '1')");
+            $this->facetsEnabled = true;
+        }
+
         if ($language !== null) {
             $this->applyLanguage($language);
         }
@@ -443,12 +506,15 @@ class Index
         $this->infoCache     = null;
         $this->termIdCache   = [];
         $this->wordlistCache = [];
+        $this->facetKeyCache = [];
         /** @infection-ignore-all MethodCallRemoval: applyPragmas sets WAL/cache/case_sensitive_like; all terms are stored/queried in lowercase so LIKE correctness is unaffected without it */
         $this->applyPragmas();
 
         assert($this->pdo instanceof \PDO);
         $pdo   = $this->pdo;
-        $stmt  = $pdo->query("SELECT key, value FROM info WHERE key IN ('language', 'has_document_store')");
+        $stmt  = $pdo->query(
+            "SELECT key, value FROM info WHERE key IN ('language', 'has_document_store', 'has_facets')"
+        );
         $infoRows = [];
         if ($stmt) {
             /** @var array<string, string> $fetched */
@@ -458,6 +524,7 @@ class Index
         $lang = ($infoRows['language'] ?? '') !== '' ? $infoRows['language'] : null;
         $this->applyLanguage($lang);
         $this->documentStoreEnabled = ($infoRows['has_document_store'] ?? '0') === '1';
+        $this->facetsEnabled        = ($infoRows['has_facets']          ?? '0') === '1';
     }
 
     /**
@@ -474,6 +541,7 @@ class Index
         $this->infoCache     = null;
         $this->termIdCache   = [];
         $this->wordlistCache = [];
+        $this->facetKeyCache = [];
         /** @infection-ignore-all MethodCallRemoval: SQLite triggers WAL checkpointing automatically on connection close; explicit TRUNCATE is a performance hint */
         if (!$this->readonly) {
             $this->pdo?->exec('PRAGMA wal_checkpoint(TRUNCATE)');
@@ -595,6 +663,8 @@ class Index
                 DROP INDEX IF EXISTS doclist_term_hitcount;
                 DROP INDEX IF EXISTS doc_id_index;
                 DROP INDEX IF EXISTS positions_doc_id;
+                DROP INDEX IF EXISTS facet_doc_id_index;
+                DROP INDEX IF EXISTS facet_numeric_index;
             ');
         }
         /** @infection-ignore-all UnwrapFinally: removing the try-finally wrapper only affects exception safety of the pragma restore; on the success path the behaviour is identical */
@@ -626,7 +696,8 @@ class Index
                  'wordDocs'          => $wordDocs,
                  'docTermBuffer'     => $docTermBuffer,
                  'docLengthBuffer'   => $docLengthBuffer,
-                 'docPositionBuffer' => $docPositionBuffer] = $this->buildBatchBuffer($documents, $progress);
+                 'docPositionBuffer' => $docPositionBuffer,
+                 'facetBuffer'       => $facetBuffer] = $this->buildBatchBuffer($documents, $progress);
 
                 $rawDocuments = $this->buildRawDocuments($documents);
 
@@ -636,7 +707,8 @@ class Index
                     $docTermBuffer,
                     $docLengthBuffer,
                     $docPositionBuffer,
-                    $rawDocuments
+                    $rawDocuments,
+                    $facetBuffer
                 );
 
                 $this->adjustStats(count($documents), $totalLength);
@@ -652,6 +724,13 @@ class Index
                     CREATE INDEX IF NOT EXISTS doclist_term_hitcount ON doclist (term_id, hit_count DESC);
                     CREATE INDEX IF NOT EXISTS positions_doc_id ON positions (doc_id);
                 ');
+                if ($this->facetsEnabled) {
+                    $pdo->exec('
+                        CREATE INDEX IF NOT EXISTS facet_doc_id_index ON facet_values (doc_id);
+                        CREATE INDEX IF NOT EXISTS facet_numeric_index ON facet_values (key_id, num_value, doc_id)
+                            WHERE num_value IS NOT NULL;
+                    ');
+                }
             }
             /** @infection-ignore-all MethodCallRemoval: restoring pragmas after bulk load is a performance step; the next connection will re-apply from applyPragmas() */
             $this->restoreNormalPragmas();
@@ -822,7 +901,8 @@ class Index
                  'wordDocs'          => $wordDocs,
                  'docTermBuffer'     => $docTermBuffer,
                  'docLengthBuffer'   => $docLengthBuffer,
-                 'docPositionBuffer' => $docPositionBuffer] = $this->buildBatchBuffer($documents);
+                 'docPositionBuffer' => $docPositionBuffer,
+                 'facetBuffer'       => $facetBuffer] = $this->buildBatchBuffer($documents);
 
                 $rawDocuments = $this->buildRawDocuments($documents);
 
@@ -833,6 +913,7 @@ class Index
                     $docLengthBuffer,
                     $docPositionBuffer,
                     $rawDocuments,
+                    $facetBuffer,
                 );
 
                 // 5. Update stats: only truly new documents change the document count.
@@ -919,6 +1000,9 @@ class Index
             if ($this->documentStoreEnabled) {
                 $pdo->exec('DELETE FROM documents');
             }
+            if ($this->facetsEnabled) {
+                $pdo->exec('DELETE FROM facet_values');
+            }
 
             $this->stmt(
                 'statsWrite',
@@ -932,6 +1016,7 @@ class Index
         $this->infoCache     = ['total_documents' => '0', 'avg_doc_length' => '0'];
         $this->termIdCache   = [];
         $this->wordlistCache = [];
+        $this->facetKeyCache = [];
     }
 
     /**
@@ -1179,11 +1264,13 @@ class Index
      * (respects Config::$fuzzyDistance, $fuzzyPrefixLength, and $fuzzyMaxExpansions).
      * When false, exact + optional as-you-type prefix matching is used.
      *
-     * @param  string $phrase     Raw search phrase; will be tokenised.
-     * @param  bool   $fuzzy      When true, use Levenshtein matching.
-     * @param  bool   $asYouType  When true, the last keyword is matched as a prefix.
-     * @param  int    $limit      Maximum number of document IDs to return.
-     * @param  int    $offset     Number of top-ranked results to skip (for pagination).
+     * @param  string                                        $phrase    Raw search phrase; will be tokenised.
+     * @param  bool                                          $fuzzy     When true, use Levenshtein matching.
+     * @param  bool                                          $asYouType Last keyword matched as prefix when true.
+     * @param  int                                           $limit     Maximum number of document IDs to return.
+     * @param  int                                           $offset    Number of top-ranked results to skip.
+     * @param  array<string, string|list<string>|FacetRange> $filter   Facet filters; keyed by facet key name.
+     * @param  list<string>                                  $facets    Facet key names to compute counts for.
      */
     public function search(
         string $phrase,
@@ -1191,6 +1278,8 @@ class Index
         bool $asYouType = true,
         int $limit = 100,
         int $offset = 0,
+        array $filter = [],
+        array $facets = [],
     ): SearchResult {
         /** @var list<string> $keywords */
         $keywords = $this->filterQueryTokens($phrase)['filtered'];
@@ -1252,11 +1341,40 @@ class Index
             }
         }
 
+        // Phase 1: Load per-key filter doc ID sets and intersect to get the global filter.
+        // Phase 3: Apply it to the score map.
+        $filterSets   = $this->loadFacetKeySets($filter, $this->config->filterMaxDocs);
+        $rawDocScores = $docScores;
+        if ($filterSets !== []) {
+            $globalFilter = array_reduce(
+                $filterSets,
+                /** @param array<int, true>|null $carry */
+                fn(?array $carry, array $set): array => $carry === null ? $set : array_intersect_key($carry, $set),
+                null,
+            ) ?? [];
+            $docScores = array_intersect_key($docScores, $globalFilter);
+        }
+
+        // Phase 4: Compute disjunctive facet counts on the full filtered result set.
+        $facetCounts = $this->computeFacetCounts(
+            $facets,
+            $filterSets,
+            $rawDocScores,
+            $docScores,
+            $this->config->maxFacetCountDocs,
+        );
+
         $total = count($docScores);
 
         /** @infection-ignore-all DecrementInteger: $total is count(); -1 is impossible, so the guard fires identically for any realistic input */
         if ($total === 0 || $limit === 0) {
-            return new SearchResult(ids: [], hits: $total, scores: $docScores, documents: $this->hydrateIds([]));
+            return new SearchResult(
+                ids: [],
+                hits: $total,
+                scores: $docScores,
+                documents: $this->hydrateIds([]),
+                facetCounts: $facetCounts,
+            );
         }
 
         // arsort is C-native and faster than a PHP-level SplMinHeap for the result-set
@@ -1267,7 +1385,8 @@ class Index
             ids: $pagedIds,
             hits: $total,
             scores: $docScores,
-            documents: $this->hydrateIds($pagedIds)
+            documents: $this->hydrateIds($pagedIds),
+            facetCounts: $facetCounts,
         );
     }
 
@@ -1277,16 +1396,20 @@ class Index
      * Operator precedence (tightest to loosest): NOT (~) > AND (&, space) > OR ( or ).
      * Parentheses override precedence. docScores is always null.
      *
-     * @param  string $phrase     Boolean query string.
-     * @param  bool   $asYouType  When true, the last keyword is matched as a prefix.
-     * @param  int    $limit      Maximum number of document IDs to return.
-     * @param  int    $offset     Number of results to skip (for pagination).
+     * @param  string                                        $phrase    Boolean query string.
+     * @param  bool                                          $asYouType Last keyword matched as prefix when true.
+     * @param  int                                           $limit     Maximum number of document IDs to return.
+     * @param  int                                           $offset    Number of results to skip (for pagination).
+     * @param  array<string, string|list<string>|FacetRange> $filter   Facet filters; keyed by facet key name.
+     * @param  list<string>                                  $facets    Facet key names to compute counts for.
      */
     public function searchBoolean(
         string $phrase,
         bool $asYouType = true,
         int $limit = 100,
         int $offset = 0,
+        array $filter = [],
+        array $facets = [],
     ): SearchResult {
         // Prepend "|" so the Shunting-Yard algorithm always has a left-hand operand.
         // OR with an empty set is the identity, so it does not affect the result.
@@ -1366,10 +1489,40 @@ class Index
 
         /** @var list<int> $docIds */
         $docIds = $ids(array_pop($stack) ?? null);
+
+        // Phase 1 + 3: load filter sets and apply global intersection.
+        // array_flip($docIds) gives doc_id → position, usable as a set for array_intersect_key.
+        $filterSets = $this->loadFacetKeySets($filter, $this->config->filterMaxDocs);
+        $rawDocSet  = array_flip($docIds);
+        if ($filterSets !== []) {
+            $globalFilter = array_reduce(
+                $filterSets,
+                /** @param array<int, true>|null $carry */
+                fn(?array $carry, array $set): array => $carry === null ? $set : array_intersect_key($carry, $set),
+                null,
+            ) ?? [];
+            $docIds = array_keys(array_intersect_key($rawDocSet, $globalFilter));
+        }
+
+        // Phase 4: disjunctive facet counts on the full filtered result.
+        $filteredDocSet = array_flip($docIds);
+        $facetCounts    = $this->computeFacetCounts(
+            $facets,
+            $filterSets,
+            $rawDocSet,
+            $filteredDocSet,
+            $this->config->maxFacetCountDocs,
+        );
+
         $total  = count($docIds);
         $docIds = array_slice($docIds, $offset, $limit);
 
-        return new SearchResult(ids: $docIds, hits: $total, documents: $this->hydrateIds($docIds));
+        return new SearchResult(
+            ids: $docIds,
+            hits: $total,
+            documents: $this->hydrateIds($docIds),
+            facetCounts: $facetCounts,
+        );
     }
 
     /**
@@ -1449,11 +1602,14 @@ class Index
                  FROM doc_terms WHERE wordlist.id = doc_terms.term_id"
             )->execute($chunk);
 
-            $this->prepare("DELETE FROM doclist   WHERE doc_id IN ({$placeholders})")->execute($chunk);
-            $this->prepare("DELETE FROM positions WHERE doc_id IN ({$placeholders})")->execute($chunk);
-            $this->prepare("DELETE FROM doc_lengths WHERE doc_id IN ({$placeholders})")->execute($chunk);
+            $this->prepare("DELETE FROM doclist      WHERE doc_id IN ({$placeholders})")->execute($chunk);
+            $this->prepare("DELETE FROM positions    WHERE doc_id IN ({$placeholders})")->execute($chunk);
+            $this->prepare("DELETE FROM doc_lengths  WHERE doc_id IN ({$placeholders})")->execute($chunk);
             if ($this->documentStoreEnabled) {
                 $this->prepare("DELETE FROM documents WHERE doc_id IN ({$placeholders})")->execute($chunk);
+            }
+            if ($this->facetsEnabled) {
+                $this->prepare("DELETE FROM facet_values WHERE doc_id IN ({$placeholders})")->execute($chunk);
             }
 
             // Prune orphan terms scoped to the affected set; avoids a full wordlist table scan.
@@ -1516,6 +1672,12 @@ class Index
         $this->stmt('positionsDeleteByDoc', 'DELETE FROM positions WHERE doc_id = :documentId')
             ->execute([':documentId' => $documentId]);
 
+        // 4b. Remove facet rows for this document.
+        if ($this->facetsEnabled) {
+            $this->stmt('facetValuesDeleteByDoc', 'DELETE FROM facet_values WHERE doc_id = :documentId')
+                ->execute([':documentId' => $documentId]);
+        }
+
         // 5. Remove doc_lengths and return the old token count (null if the document was not found).
         $delStmt = $this->stmt(
             'docLengthsDelete',
@@ -1562,6 +1724,9 @@ class Index
                 continue;
             }
             if ($key === '_meta') {
+                continue;
+            }
+            if ($key === '_facets') {
                 continue;
             }
             /** @infection-ignore-all UnwrapTrim: leading/trailing whitespace in field values is uncommon in tests; trimming is a defensive clean-up step */
@@ -1614,6 +1779,10 @@ class Index
             $this->savePositions($documentId, $termIdPositions);
         }
         $this->saveDocLength($documentId, $length);
+
+        if ($this->facetsEnabled) {
+            $this->saveFacets($documentId, $row['_facets'] ?? []);
+        }
 
         if ($this->documentStoreEnabled) {
             $this->stmt(
@@ -1704,7 +1873,8 @@ class Index
      *     wordDocs:          array<string, int>,
      *     docTermBuffer:     array<int, array<string, int>>,
      *     docLengthBuffer:   array<int, int>,
-     *     docPositionBuffer: array<int, array<string, list<int>>>
+     *     docPositionBuffer: array<int, array<string, list<int>>>,
+     *     facetBuffer:       array<int, list<array{name: string, value: string, numValue: float|null}>>
      * }
      */
     private function buildBatchBuffer(array $documents, ?callable $progress = null): array
@@ -1719,6 +1889,8 @@ class Index
         $docLengthBuffer   = [];
         /** @var array<int, array<string, list<int>>> $docPositionBuffer */
         $docPositionBuffer = [];
+        /** @var array<int, list<array{name: string, value: string, numValue: float|null}>> $facetBuffer */
+        $facetBuffer       = [];
 
         $total = count($documents);
         $done  = 0;
@@ -1732,6 +1904,9 @@ class Index
             $docTermBuffer[$documentId]     = $termCounts;
             $docLengthBuffer[$documentId]   = $length;
             $docPositionBuffer[$documentId] = $termPositions;
+            if ($this->facetsEnabled) {
+                $facetBuffer[$documentId] = $this->normalizeFacets($document['_facets'] ?? []);
+            }
 
             foreach ($termCounts as $term => $hits) {
                 if (isset($wordHits[$term])) {
@@ -1757,6 +1932,7 @@ class Index
             'docTermBuffer'     => $docTermBuffer,
             'docLengthBuffer'   => $docLengthBuffer,
             'docPositionBuffer' => $docPositionBuffer,
+            'facetBuffer'       => $facetBuffer,
         ];
     }
 
@@ -1794,6 +1970,7 @@ class Index
      * @param  array<int, int>                      $docLengthBuffer
      * @param  array<int, array<string, list<int>>> $docPositionBuffer
      * @param  array<int, array<string, mixed>>     $rawDocuments  doc_id → document array (store path only)
+     * @param  array<int, list<array{name: string, value: string, numValue: float|null}>> $facetBuffer
      * @return int Total token count across all documents (for adjustStats).
      */
     private function flushBatch(
@@ -1803,6 +1980,7 @@ class Index
         array $docLengthBuffer,
         array $docPositionBuffer = [],
         array $rawDocuments = [],
+        array $facetBuffer = [],
     ): int {
         $pdo = $this->pdo;
         assert($pdo instanceof \PDO);
@@ -1858,6 +2036,12 @@ class Index
                 fn(int $docId, array $doc): array =>
                     [$docId, json_encode($doc, JSON_THROW_ON_ERROR)],
             );
+        }
+
+        // Step 6: bulk-insert facet values sorted by (key_id, value, doc_id) for
+        // WITHOUT ROWID clustered B-tree sequential appends.
+        if ($this->facetsEnabled && $facetBuffer !== []) {
+            $this->bulkFlushFacets($facetBuffer);
         }
 
         return array_sum($docLengthBuffer);
@@ -2711,6 +2895,514 @@ class Index
         usort($resultSet, fn(array $a, array $b): int => $a['distance'] <=> $b['distance'] ?: $b['num_hits'] <=> $a['num_hits']); // phpcs:ignore Generic.Files.LineLength.TooLong
 
         return $resultSet;
+    }
+
+    // --- Facet helpers -------------------------------------------------------
+
+    /**
+     * Normalise a document's _facets value into flat (name, value, numValue) rows.
+     *
+     * PHP int/float values populate num_value for numeric range filtering.
+     * PHP strings populate value only (num_value=null).
+     * Array values expand into multiple rows (multi-value facets).
+     *
+     * @param  mixed $facets  Raw value of $doc['_facets']; non-array or empty returns [].
+     * @return list<array{name: string, value: string, numValue: float|null}>
+     */
+    private function normalizeFacets(mixed $facets): array
+    {
+        if (!is_array($facets) || $facets === []) {
+            return [];
+        }
+        $rows = [];
+        foreach ($facets as $name => $rawValue) {
+            if (!is_string($name) || $name === '') {
+                continue;
+            }
+            $values = is_array($rawValue) ? $rawValue : [$rawValue];
+            foreach ($values as $v) {
+                if (is_int($v) || is_float($v)) {
+                    $rows[] = ['name' => $name, 'value' => (string) $v, 'numValue' => (float) $v];
+                } elseif (is_string($v) && $v !== '') {
+                    $rows[] = ['name' => $name, 'value' => $v, 'numValue' => null];
+                }
+            }
+        }
+        return $rows;
+    }
+
+    /**
+     * Resolve a facet key name to its facet_keys.id, inserting it if new.
+     * Uses $facetKeyCache for O(1) repeat lookups within a connection.
+     */
+    private function resolveFacetKeyId(string $name): int
+    {
+        if (isset($this->facetKeyCache[$name])) {
+            return $this->facetKeyCache[$name];
+        }
+        // INSERT OR IGNORE would not return the ID on conflict; DO UPDATE is the only
+        // way to get RETURNING to fire whether the row is inserted or already exists.
+        $stmt = $this->stmt(
+            'facetKeyUpsert',
+            'INSERT INTO facet_keys (name) VALUES (?)
+             ON CONFLICT(name) DO UPDATE SET name = excluded.name
+             RETURNING id'
+        );
+        $stmt->execute([$name]);
+        $row = $stmt->fetch(PDO::FETCH_ASSOC);
+        $stmt->closeCursor();
+        assert($row !== false);
+        /** @var array{id: int} $row */
+        $id = (int) $row['id'];
+        $this->facetKeyCache[$name] = $id;
+        return $id;
+    }
+
+    /**
+     * Look up a facet key ID without inserting (safe for read paths).
+     * Returns null when the key does not exist in the index.
+     */
+    private function lookupFacetKeyId(string $name): ?int
+    {
+        if (isset($this->facetKeyCache[$name])) {
+            return $this->facetKeyCache[$name];
+        }
+        $stmt = $this->stmt(
+            'facetKeyLookup',
+            'SELECT id FROM facet_keys WHERE name = ? LIMIT 1'
+        );
+        $stmt->execute([$name]);
+        $id = $stmt->fetchColumn();
+        if ($id === false) {
+            return null;
+        }
+        $this->facetKeyCache[$name] = (int) $id;
+        return (int) $id;
+    }
+
+    /**
+     * Write facet rows for a single document (single-insert path).
+     *
+     * @param int   $documentId
+     * @param mixed $facets     Raw value of $doc['_facets'].
+     */
+    private function saveFacets(int $documentId, mixed $facets): void
+    {
+        $rows = $this->normalizeFacets($facets);
+        if ($rows === []) {
+            return;
+        }
+        $stmt = $this->stmt(
+            'facetValueSave',
+            'INSERT INTO facet_values (key_id, value, doc_id, num_value) VALUES (?,?,?,?)
+             ON CONFLICT(key_id, value, doc_id) DO NOTHING'
+        );
+        foreach ($rows as $row) {
+            $keyId = $this->resolveFacetKeyId($row['name']);
+            $stmt->execute([$keyId, $row['value'], $documentId, $row['numValue']]);
+        }
+    }
+
+    /**
+     * Bulk-upsert facet keys and insert facet_values rows in (key_id, value, doc_id) PK order.
+     *
+     * Mirrors the bulkInsertDoclistRows pattern: sort by the clustered PK before chunking
+     * so WITHOUT ROWID B-tree inserts are sequential rather than random.
+     *
+     * @param array<int, list<array{name: string, value: string, numValue: float|null}>> $facetBuffer doc_id → rows
+     */
+    private function bulkFlushFacets(array $facetBuffer): void
+    {
+        $pdo = $this->pdo;
+        assert($pdo instanceof \PDO);
+
+        // 1. Resolve all facet key names that are not yet in the cache.
+        $newNames = [];
+        foreach ($facetBuffer as $rows) {
+            foreach ($rows as $row) {
+                if (!isset($this->facetKeyCache[$row['name']])) {
+                    $newNames[$row['name']] = true;
+                }
+            }
+        }
+        if ($newNames !== []) {
+            $names = array_keys($newNames);
+            foreach (array_chunk($names, self::CHUNK_1P) as $chunk) {
+                $n    = count($chunk);
+                $stmt = ($this->bulkStmtCache["facetKeyUpsert:{$n}"] ??= $pdo->prepare(
+                    'INSERT INTO facet_keys (name) VALUES '
+                    . implode(',', array_fill(0, $n, '(?)'))
+                    . ' ON CONFLICT(name) DO UPDATE SET name = excluded.name RETURNING id, name'
+                ));
+                $stmt->execute($chunk);
+                /** @var list<array{id: int, name: string}> $fetched */
+                $fetched = $stmt->fetchAll(PDO::FETCH_ASSOC);
+                foreach ($fetched as $returned) {
+                    $this->facetKeyCache[$returned['name']] = (int) $returned['id'];
+                }
+            }
+        }
+
+        // 2. Build a nested map (key_id → value → doc_id → num_value) and sort each level
+        //    so rows are inserted in clustered PK order (key_id, value, doc_id).
+        /** @var array<int, array<string, array<int, float|null>>> $kvdMap */
+        $kvdMap = [];
+        foreach ($facetBuffer as $docId => $rows) {
+            foreach ($rows as $row) {
+                $keyId = $this->facetKeyCache[$row['name']];
+                $kvdMap[$keyId][$row['value']][$docId] = $row['numValue'];
+            }
+        }
+        ksort($kvdMap);
+
+        // 3. Flatten into sorted (key_id, value, doc_id, num_value) rows and bulk-INSERT in chunks.
+        $rowCount = 0;
+        $params   = [];
+        foreach ($kvdMap as $keyId => $values) {
+            ksort($values);
+            foreach ($values as $value => $docs) {
+                ksort($docs);
+                foreach ($docs as $docId => $numValue) {
+                    $params[] = $keyId;
+                    $params[] = $value;
+                    $params[] = $docId;
+                    $params[] = $numValue;
+                    if (++$rowCount === self::CHUNK_4P) {
+                        ($this->bulkStmtCache['facetValuesChunk:' . self::CHUNK_4P] ??= $pdo->prepare(
+                            'INSERT INTO facet_values (key_id, value, doc_id, num_value) VALUES '
+                            . implode(',', array_fill(0, self::CHUNK_4P, '(?,?,?,?)'))
+                        ))->execute($params);
+                        $params   = [];
+                        $rowCount = 0;
+                    }
+                }
+            }
+        }
+        if ($rowCount > 0) {
+            ($this->bulkStmtCache["facetValuesChunk:{$rowCount}"] ??= $pdo->prepare(
+                'INSERT INTO facet_values (key_id, value, doc_id, num_value) VALUES '
+                . implode(',', array_fill(0, $rowCount, '(?,?,?,?)'))
+            ))->execute($params);
+        }
+    }
+
+    /**
+     * Load per-filter-key doc ID sets from facet_values.
+     *
+     * Called once at the start of search(); all sets are retained in memory so
+     * disjunctive facet counting can reuse them without extra DB round-trips.
+     *
+     * @param  array<string, string|list<string>|FacetRange> $filter
+     * @param  int                                           $filterMaxDocs Cap per key.
+     * @return array<string, array<int, true>>               Key name → flipped doc ID set.
+     */
+    private function loadFacetKeySets(array $filter, int $filterMaxDocs): array
+    {
+        if ($filter === [] || !$this->facetsEnabled) {
+            return [];
+        }
+        $sets = [];
+        foreach ($filter as $name => $filterValue) {
+            $keyId = $this->lookupFacetKeyId($name);
+            if ($keyId === null) {
+                $sets[$name] = [];
+                continue;
+            }
+            if ($filterValue instanceof FacetRange) {
+                $sets[$name] = $this->fetchFacetDocIdsByRange($keyId, $filterValue, $filterMaxDocs);
+            } else {
+                $values = is_array($filterValue) ? $filterValue : [$filterValue];
+                $sets[$name] = $this->fetchFacetDocIdsByValues($keyId, $values, $filterMaxDocs);
+            }
+        }
+        return $sets;
+    }
+
+    /**
+     * Fetch doc IDs matching any of the given string values for a facet key.
+     *
+     * Uses the clustered (key_id, value, doc_id) PK: the range scan for
+     * (key_id=X, value IN (?)) is a set of contiguous B-tree leaf ranges.
+     *
+     * @param  list<string>        $values
+     * @return array<int, true>
+     */
+    private function fetchFacetDocIdsByValues(int $keyId, array $values, int $limit): array
+    {
+        $n    = count($values);
+        $ph   = $this->placeholders($n);
+        $stmt = $this->prepare(
+            "SELECT doc_id FROM facet_values WHERE key_id = ? AND value IN ({$ph}) LIMIT ?"
+        );
+        $stmt->execute([$keyId, ...$values, $limit]);
+        /** @var list<int> $ids */
+        $ids = $stmt->fetchAll(PDO::FETCH_COLUMN);
+        return array_fill_keys($ids, true);
+    }
+
+    /**
+     * Fetch doc IDs matching a numeric range for a facet key.
+     *
+     * Uses facet_numeric_index (key_id, num_value, doc_id) WHERE num_value IS NOT NULL.
+     *
+     * @return array<int, true>
+     */
+    private function fetchFacetDocIdsByRange(int $keyId, FacetRange $range, int $limit): array
+    {
+        $conditions = ['key_id = ?', 'num_value IS NOT NULL'];
+        $params     = [$keyId];
+        if ($range->gte !== null) {
+            $conditions[] = 'num_value >= ?';
+            $params[] = $range->gte;
+        }
+        if ($range->gt  !== null) {
+            $conditions[] = 'num_value > ?';
+            $params[] = $range->gt;
+        }
+        if ($range->lte !== null) {
+            $conditions[] = 'num_value <= ?';
+            $params[] = $range->lte;
+        }
+        if ($range->lt  !== null) {
+            $conditions[] = 'num_value < ?';
+            $params[] = $range->lt;
+        }
+        $params[] = $limit;
+        $stmt = $this->prepare(
+            'SELECT doc_id FROM facet_values WHERE ' . implode(' AND ', $conditions) . ' LIMIT ?'
+        );
+        $stmt->execute($params);
+        /** @var list<int> $ids */
+        $ids = $stmt->fetchAll(PDO::FETCH_COLUMN);
+        return array_fill_keys($ids, true);
+    }
+
+    /**
+     * Compute disjunctive facet value counts for each requested key.
+     *
+     * For keys that are also active filters, counts are computed on the result set
+     * excluding that key's filter (disjunctive), so users see all available options
+     * even while one value is selected. For non-filtered keys, the fully-filtered
+     * result set is used.
+     *
+     * @param  list<string>                $facetKeys      Facet key names to count.
+     * @param  array<string, array<int, true>> $filterSets Per-key filter doc ID sets.
+     * @param  array<int, mixed>           $rawDocScores   All scored docs before any facet filter.
+     * @param  array<int, mixed>           $filteredScores Docs after all facet filters.
+     * @param  int                         $maxDocs        Cap on doc IDs sent in the IN() clause.
+     * @return array<string, array<string, int>|array{min: float, max: float, count: int}>
+     */
+    private function computeFacetCounts(
+        array $facetKeys,
+        array $filterSets,
+        array $rawDocScores,
+        array $filteredScores,
+        int $maxDocs,
+    ): array {
+        if ($facetKeys === [] || !$this->facetsEnabled) {
+            return [];
+        }
+
+        $counts      = [];
+        // Keys that use the common filteredScores doc set (non-disjunctive).
+        /** @var array<string, int> $commonNameToId */
+        $commonNameToId = [];
+
+        foreach ($facetKeys as $keyName) {
+            $keyId = $this->lookupFacetKeyId($keyName);
+            if ($keyId === null) {
+                continue;
+            }
+
+            if (!isset($filterSets[$keyName])) {
+                $commonNameToId[$keyName] = $keyId;
+                continue;
+            }
+
+            // Disjunctive: count against the raw result set with all OTHER filters applied.
+            $otherSets = array_diff_key($filterSets, [$keyName => true]);
+            if ($otherSets === []) {
+                $countSet = $rawDocScores;
+            } else {
+                $countBase = array_reduce(
+                    $otherSets,
+                    fn(?array $carry, array $set): array =>
+                        $carry === null ? $set : array_intersect_key($carry, $set),
+                    null,
+                ) ?? [];
+                $countSet = array_intersect_key($rawDocScores, $countBase);
+            }
+            $docIds = array_keys($countSet);
+            if ($docIds === []) {
+                continue;
+            }
+            if (count($docIds) > $maxDocs) {
+                $docIds = array_slice($docIds, 0, $maxDocs);
+            }
+            $result = count($docIds) <= self::FACET_JOIN_THRESHOLD
+                ? $this->fetchAllFacetCountsJoin([$keyName => $keyId], $docIds)
+                : [$keyName => $this->fetchFacetCountsForKey($keyId, $docIds)];
+            foreach ($result as $k => $v) {
+                if ($v !== []) {
+                    $counts[$k] = $v;
+                }
+            }
+        }
+
+        if ($commonNameToId !== []) {
+            $docIds = array_keys($filteredScores);
+            if ($docIds !== []) {
+                if (count($docIds) > $maxDocs) {
+                    $docIds = array_slice($docIds, 0, $maxDocs);
+                }
+                if (count($docIds) <= self::FACET_JOIN_THRESHOLD) {
+                    // One query for all keys driven from doc IDs — O(N × avg_facets).
+                    foreach ($this->fetchAllFacetCountsJoin($commonNameToId, $docIds) as $k => $v) {
+                        if ($v !== []) {
+                            $counts[$k] = $v;
+                        }
+                    }
+                } else {
+                    // Per-key sequential PK scan — O(K) per key, optimal for large N.
+                    foreach ($commonNameToId as $keyName => $keyId) {
+                        $result = $this->fetchFacetCountsForKey($keyId, $docIds);
+                        if ($result !== []) {
+                            $counts[$keyName] = $result;
+                        }
+                    }
+                }
+            }
+        }
+
+        return $counts;
+    }
+
+    /**
+     * Fetch value counts for one or more facet keys in a single query driven from the doc IDs.
+     *
+     * Uses CROSS JOIN with json_each(docIds) to force SQLite to drive the join from the doc_id
+     * side via facet_doc_id_index, giving O(N × avg_facets_per_doc) instead of the sequential
+     * O(K) PK scan per key. CROSS JOIN prevents the planner from flipping the join direction.
+     * Aggregation is done in PHP after fetching raw (key_id, value, num_value) rows.
+     *
+     * Suitable when N ≤ FACET_JOIN_THRESHOLD; for larger N the sequential scan path is cheaper.
+     *
+     * @param  array<string, int> $nameToId  Facet key name → key_id.
+     * @param  list<int>          $docIds
+     * @return array<string, array<string, int>|array{min: float, max: float, count: int}>
+     */
+    private function fetchAllFacetCountsJoin(array $nameToId, array $docIds): array
+    {
+        $stmt = $this->stmt(
+            'facetCountsJoin',
+            'SELECT fv.key_id, fv.value, fv.num_value
+             FROM json_each(?) je
+             CROSS JOIN facet_values fv ON fv.doc_id = je.value
+             WHERE fv.key_id IN (SELECT value FROM json_each(?))'
+        );
+        $stmt->execute([json_encode($docIds), json_encode(array_values($nameToId))]);
+        /** @var list<array{0: int, 1: string, 2: string|null}> $rows */
+        $rows = $stmt->fetchAll(PDO::FETCH_NUM);
+
+        /** @var array<int, array<string, int>> $valueCounts */
+        $valueCounts = [];
+        /** @var array<int, int> $totalCount */
+        $totalCount  = [];
+        /** @var array<int, int> $numCount */
+        $numCount    = [];
+        /** @var array<int, array<string, float>> $numValues */
+        $numValues   = [];
+
+        foreach ($rows as [$keyId, $value, $rawNum]) {
+            $valueCounts[$keyId][$value] = ($valueCounts[$keyId][$value] ?? 0) + 1;
+            $totalCount[$keyId]          = ($totalCount[$keyId] ?? 0) + 1;
+            if ($rawNum !== null) {
+                $numCount[$keyId] = ($numCount[$keyId] ?? 0) + 1;
+                // All rows sharing (key_id, value) have the same num_value — store once.
+                $numValues[$keyId][$value] ??= (float) $rawNum;
+            }
+        }
+
+        $counts = [];
+        foreach ($nameToId as $keyName => $keyId) {
+            $kCounts = $valueCounts[$keyId] ?? [];
+            if ($kCounts === []) {
+                continue;
+            }
+            $total  = $totalCount[$keyId] ?? 0;
+            $numCnt = $numCount[$keyId] ?? 0;
+            if ($numCnt === $total && $numCnt > 0) {
+                $nums = array_values($numValues[$keyId] ?? []);
+                $counts[$keyName] = [
+                    'min'   => $nums !== [] ? (float) min($nums) : 0.0,
+                    'max'   => $nums !== [] ? (float) max($nums) : 0.0,
+                    'count' => $total,
+                ];
+            } else {
+                arsort($kCounts);
+                $counts[$keyName] = $kCounts;
+            }
+        }
+        return $counts;
+    }
+
+    /**
+     * Fetch value counts for a single facet key over the given doc ID set.
+     *
+     * Detects numeric facets (where all matching rows have num_value set) and
+     * returns min/max/count stats instead of a value → count map.
+     *
+     * Uses json_each() as a WHERE IN subquery so the SQL is a fixed string (cacheable
+     * via stmt()). SQLite drives from the facet_values PK (sequential scan for key_id),
+     * materialises json_each into a hash set, then tests doc_id membership per row —
+     * identical execution plan to the original IN(?,?,?) but without variable-arity
+     * compilation overhead.
+     *
+     * @param  list<int> $docIds
+     * @return array<string, int>|array{min: float, max: float, count: int}
+     */
+    private function fetchFacetCountsForKey(int $keyId, array $docIds): array
+    {
+        $stmt = $this->stmt(
+            'facetCountsForKey',
+            'SELECT value,
+                    COUNT(*)                                          AS n,
+                    MIN(num_value)                                    AS min_num,
+                    MAX(num_value)                                    AS max_num,
+                    SUM(CASE WHEN num_value IS NOT NULL THEN 1 ELSE 0 END) AS num_count
+             FROM facet_values
+             WHERE key_id = ? AND doc_id IN (SELECT value FROM json_each(?))
+             GROUP BY value
+             ORDER BY n DESC'
+        );
+        $stmt->execute([$keyId, json_encode($docIds)]);
+        /** @var list<array{value: string, n: string, min_num: string|null, max_num: string|null, num_count: string}> $rows */
+        $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+        if ($rows === []) {
+            return [];
+        }
+
+        $totalCount = (int) array_sum(array_column($rows, 'n'));
+        $numCount   = (int) array_sum(array_column($rows, 'num_count'));
+
+        // If every row has a num_value, treat as a numeric facet and return stats.
+        if ($numCount === $totalCount && $numCount > 0) {
+            $minNums = array_filter(array_column($rows, 'min_num'));
+            $maxNums = array_filter(array_column($rows, 'max_num'));
+            return [
+                'min'   => $minNums !== [] ? (float) min($minNums) : 0.0,
+                'max'   => $maxNums !== [] ? (float) max($maxNums) : 0.0,
+                'count' => $totalCount,
+            ];
+        }
+
+        // String facet: return value → count map ordered by count desc.
+        $result = [];
+        foreach ($rows as $row) {
+            $result[$row['value']] = (int) $row['n'];
+        }
+        return $result;
     }
 
     // --- Infrastructure -----------------------------------------------------

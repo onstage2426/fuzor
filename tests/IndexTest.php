@@ -3,6 +3,7 @@
 namespace Fuzor\Tests;
 
 use Fuzor\Config;
+use Fuzor\FacetRange;
 use Fuzor\Index;
 use Fuzor\Exceptions\IOException;
 use Fuzor\Exceptions\QueryException;
@@ -3150,5 +3151,299 @@ class IndexTest extends TestCase
         } finally {
             @unlink($snapPath);
         }
+    }
+
+    // --- Facets: construction ---
+
+    public function testFacetsDisabledByDefault(): void
+    {
+        $index = new Index($this->dbPath);
+        $this->assertFalse($index->facetsEnabled);
+    }
+
+    public function testFacetsEnabledWhenFlagSet(): void
+    {
+        $index = new Index($this->dbPath, facets: true);
+        $this->assertTrue($index->facetsEnabled);
+    }
+
+    public function testFacetsPersistedAfterReopen(): void
+    {
+        (new Index($this->dbPath, facets: true))->close();
+        $index = new Index($this->dbPath);
+        $this->assertTrue($index->facetsEnabled);
+    }
+
+    public function testFacetsNotRestoredWhenNeverEnabled(): void
+    {
+        (new Index($this->dbPath))->close();
+        $index = new Index($this->dbPath);
+        $this->assertFalse($index->facetsEnabled);
+    }
+
+    // --- Facets: insert / delete isolation ---
+
+    public function testFacetFieldNotIndexedAsText(): void
+    {
+        $index = new Index($this->dbPath, facets: true);
+        $index->insert(['id' => 1, 'title' => 'hello', '_facets' => ['color' => 'red']]);
+
+        // 'red' should NOT appear in search results (it's a facet value, not a text token)
+        $result = $index->search('red');
+        $this->assertNotContains(1, $result->ids);
+    }
+
+    public function testInsertSingleDocWithFacets(): void
+    {
+        $index = new Index($this->dbPath, facets: true);
+        $index->insert(['id' => 1, 'title' => 'car', '_facets' => ['color' => 'red']]);
+
+        $result = $index->search('car', facets: ['color']);
+        $this->assertContains(1, $result->ids);
+        $this->assertTrue($result->hasFacets());
+        $this->assertSame(['red' => 1], $result->facetCounts()['color']);
+    }
+
+    public function testDeleteRemovesFacetValues(): void
+    {
+        $index = new Index($this->dbPath, facets: true);
+        $index->insert(['id' => 1, 'title' => 'car', '_facets' => ['color' => 'red']]);
+        $index->delete(1);
+
+        $result = $index->search('car', facets: ['color']);
+        $this->assertNotContains(1, $result->ids);
+        $this->assertSame([], $result->facetCounts());
+    }
+
+    // --- Facets: bulk insert / delete ---
+
+    public function testInsertManyStoresFacets(): void
+    {
+        $index = new Index($this->dbPath, facets: true);
+        $index->insertMany([
+            ['id' => 1, 'title' => 'car', '_facets' => ['color' => 'red']],
+            ['id' => 2, 'title' => 'car', '_facets' => ['color' => 'blue']],
+            ['id' => 3, 'title' => 'car', '_facets' => ['color' => 'red']],
+        ]);
+
+        $result = $index->search('car', facets: ['color']);
+        $this->assertSame(2, $result->facetCount('color', 'red'));
+        $this->assertSame(1, $result->facetCount('color', 'blue'));
+    }
+
+    public function testDeleteManyRemovesFacetValues(): void
+    {
+        $index = new Index($this->dbPath, facets: true);
+        $index->insertMany([
+            ['id' => 1, 'title' => 'car', '_facets' => ['color' => 'red']],
+            ['id' => 2, 'title' => 'car', '_facets' => ['color' => 'blue']],
+        ]);
+        $index->deleteMany([1, 2]);
+
+        $result = $index->search('car', facets: ['color']);
+        $this->assertSame([], $result->facetCounts());
+    }
+
+    // --- Facets: string filter ---
+
+    public function testSearchWithStringSingleValueFilter(): void
+    {
+        $index = new Index($this->dbPath, facets: true);
+        $index->insertMany([
+            ['id' => 1, 'title' => 'car', '_facets' => ['color' => 'red']],
+            ['id' => 2, 'title' => 'car', '_facets' => ['color' => 'blue']],
+        ]);
+
+        $result = $index->search('car', filter: ['color' => 'red']);
+        $this->assertSame([1], $result->ids);
+        $this->assertSame(1, $result->hits);
+    }
+
+    public function testSearchWithStringMultiValueOrFilter(): void
+    {
+        $index = new Index($this->dbPath, facets: true);
+        $index->insertMany([
+            ['id' => 1, 'title' => 'car', '_facets' => ['color' => 'red']],
+            ['id' => 2, 'title' => 'car', '_facets' => ['color' => 'blue']],
+            ['id' => 3, 'title' => 'car', '_facets' => ['color' => 'green']],
+        ]);
+
+        $result = $index->search('car', filter: ['color' => ['red', 'blue']]);
+        $this->assertCount(2, $result->ids);
+        $this->assertContains(1, $result->ids);
+        $this->assertContains(2, $result->ids);
+        $this->assertNotContains(3, $result->ids);
+    }
+
+    // --- Facets: numeric range filter ---
+
+    public function testSearchWithNumericRangeFilter(): void
+    {
+        $index = new Index($this->dbPath, facets: true);
+        $index->insertMany([
+            ['id' => 1, 'title' => 'car', '_facets' => ['price' => 10000]],
+            ['id' => 2, 'title' => 'car', '_facets' => ['price' => 25000]],
+            ['id' => 3, 'title' => 'car', '_facets' => ['price' => 50000]],
+        ]);
+
+        $result = $index->search('car', filter: ['price' => FacetRange::between(10000, 30000)]);
+        $this->assertCount(2, $result->ids);
+        $this->assertContains(1, $result->ids);
+        $this->assertContains(2, $result->ids);
+        $this->assertNotContains(3, $result->ids);
+    }
+
+    // --- Facets: counts ---
+
+    public function testSearchFacetCountsStringFacet(): void
+    {
+        $index = new Index($this->dbPath, facets: true);
+        $index->insertMany([
+            ['id' => 1, 'title' => 'car', '_facets' => ['color' => 'red']],
+            ['id' => 2, 'title' => 'car', '_facets' => ['color' => 'red']],
+            ['id' => 3, 'title' => 'car', '_facets' => ['color' => 'blue']],
+        ]);
+
+        $result = $index->search('car', facets: ['color']);
+        $this->assertSame(2, $result->facetCount('color', 'red'));
+        $this->assertSame(1, $result->facetCount('color', 'blue'));
+        $this->assertNull($result->facetCount('color', 'green'));
+    }
+
+    public function testSearchFacetCountsNumericFacet(): void
+    {
+        $index = new Index($this->dbPath, facets: true);
+        $index->insertMany([
+            ['id' => 1, 'title' => 'car', '_facets' => ['price' => 10000.0]],
+            ['id' => 2, 'title' => 'car', '_facets' => ['price' => 20000.0]],
+            ['id' => 3, 'title' => 'car', '_facets' => ['price' => 30000.0]],
+        ]);
+
+        $result = $index->search('car', facets: ['price']);
+        $this->assertSame(
+            ['price' => ['min' => 10000.0, 'max' => 30000.0, 'count' => 3]],
+            $result->facetCounts(),
+        );
+        $this->assertNull($result->facetCount('price', 'anything'));
+    }
+
+    // --- Facets: disjunctive counts ---
+
+    public function testDisjunctiveFacetCountsShowAllValuesWhenFiltered(): void
+    {
+        $index = new Index($this->dbPath, facets: true);
+        $index->insertMany([
+            ['id' => 1, 'title' => 'car', '_facets' => ['color' => 'red']],
+            ['id' => 2, 'title' => 'car', '_facets' => ['color' => 'blue']],
+            ['id' => 3, 'title' => 'car', '_facets' => ['color' => 'red']],
+        ]);
+
+        // Filter by 'red' but count against the full result set for the 'color' key
+        $result = $index->search('car', filter: ['color' => 'red'], facets: ['color']);
+        // Disjunctive: both 'red' (2) and 'blue' (1) should appear even though filter is active
+        $this->assertSame(2, $result->facetCount('color', 'red'));
+        $this->assertSame(1, $result->facetCount('color', 'blue'));
+    }
+
+    // --- Facets: multi-value per document ---
+
+    public function testMultiValueFacetOnSingleDocument(): void
+    {
+        $index = new Index($this->dbPath, facets: true);
+        $index->insert(['id' => 1, 'title' => 'car', '_facets' => ['color' => ['red', 'blue']]]);
+
+        $result = $index->search('car', facets: ['color']);
+        $this->assertSame(1, $result->facetCount('color', 'red'));
+        $this->assertSame(1, $result->facetCount('color', 'blue'));
+    }
+
+    // --- Facets: boolean search ---
+
+    public function testSearchBooleanWithFilter(): void
+    {
+        $index = new Index($this->dbPath, facets: true);
+        $index->insertMany([
+            ['id' => 1, 'title' => 'car sedan', '_facets' => ['color' => 'red']],
+            ['id' => 2, 'title' => 'car coupe', '_facets' => ['color' => 'blue']],
+        ]);
+
+        $result = $index->searchBoolean('car', filter: ['color' => 'red']);
+        $this->assertSame([1], $result->ids);
+        $this->assertSame(1, $result->hits);
+    }
+
+    public function testSearchBooleanWithFacetCounts(): void
+    {
+        $index = new Index($this->dbPath, facets: true);
+        $index->insertMany([
+            ['id' => 1, 'title' => 'car', '_facets' => ['color' => 'red']],
+            ['id' => 2, 'title' => 'car', '_facets' => ['color' => 'blue']],
+        ]);
+
+        $result = $index->searchBoolean('car', facets: ['color']);
+        $this->assertSame(1, $result->facetCount('color', 'red'));
+        $this->assertSame(1, $result->facetCount('color', 'blue'));
+    }
+
+    // --- Facets: disabled index has no overhead ---
+
+    public function testFacetsDisabledNoCountsReturned(): void
+    {
+        $index = new Index($this->dbPath);
+        $index->insert(['id' => 1, 'title' => 'car']);
+
+        $result = $index->search('car', facets: ['color']);
+        $this->assertFalse($result->hasFacets());
+        $this->assertSame([], $result->facetCounts());
+    }
+
+    // --- Facets: rebuild ---
+
+    public function testRebuildInheritsFacetsFromExistingIndex(): void
+    {
+        (new Index($this->dbPath, facets: true))->close();
+
+        Index::rebuild($this->dbPath, function (Index $idx): void {
+            $idx->insert(['id' => 1, 'title' => 'car', '_facets' => ['color' => 'red']]);
+        });
+
+        $index = new Index($this->dbPath);
+        $this->assertTrue($index->facetsEnabled);
+    }
+
+    public function testRebuildCanEnableFacets(): void
+    {
+        (new Index($this->dbPath))->close();
+
+        Index::rebuild($this->dbPath, function (Index $idx): void {
+            $idx->insert(['id' => 1, 'title' => 'car', '_facets' => ['color' => 'red']]);
+        }, facets: true);
+
+        $index = new Index($this->dbPath);
+        $this->assertTrue($index->facetsEnabled);
+    }
+
+    public function testRebuildCanDisableFacets(): void
+    {
+        (new Index($this->dbPath, facets: true))->close();
+
+        Index::rebuild($this->dbPath, function (Index $idx): void {
+            $idx->insert(['id' => 1, 'title' => 'car']);
+        }, facets: false);
+
+        $index = new Index($this->dbPath);
+        $this->assertFalse($index->facetsEnabled);
+    }
+
+    // --- Facets: clear ---
+
+    public function testClearRemovesFacetValues(): void
+    {
+        $index = new Index($this->dbPath, facets: true);
+        $index->insert(['id' => 1, 'title' => 'car', '_facets' => ['color' => 'red']]);
+        $index->clear();
+
+        $result = $index->search('car', facets: ['color']);
+        $this->assertSame([], $result->facetCounts());
     }
 }

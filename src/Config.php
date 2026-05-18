@@ -29,6 +29,12 @@ final readonly class Config
          * @infection-ignore-all: default value; mutations only affect ranking magnitude, not correctness
          */
         public float $proximityBoost = 1.0,
+        /** Maximum docs fetched per FTS term when a facet filter is active. Higher values improve
+         *  recall under selective filters at the cost of more BM25 scoring work. */
+        public int $filterMaxDocs = 2_000,
+        /** Maximum result-set doc IDs included in the facet count IN() clause.
+         *  Counts are approximate when the result set exceeds this cap. */
+        public int $maxFacetCountDocs = 10_000,
     ) {
     }
 }

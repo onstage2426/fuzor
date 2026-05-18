@@ -7,16 +7,20 @@ namespace Fuzor;
 class SearchResult
 {
     /**
-     * @param list<int>                              $ids       Document IDs in relevance order (paged window).
-     * @param int                                    $hits      Total matching documents across all pages.
-     * @param array<int, float>                      $scores    BM25 scores keyed by doc ID; empty for boolean search.
-     * @param array<int, array<string, mixed>>|null  $documents Stored documents keyed by doc ID; null when disabled.
+     * @param list<int>                              $ids          Document IDs in relevance order (paged window).
+     * @param int                                    $hits         Total matching documents across all pages.
+     * @param array<int, float>                      $scores       BM25 scores keyed by doc ID; empty for boolean.
+     * @param array<int, array<string, mixed>>|null  $documents    Stored documents keyed by doc ID; null when disabled.
+     * @param array<string, mixed> $facetCounts Facet value counts; empty when not requested.
+     *        String facets: array<string, int> (value → count).
+     *        Numeric facets: array{min: float, max: float, count: int}.
      */
     public function __construct(
         public readonly array $ids,
         public readonly int $hits,
         private readonly array $scores = [],
         private readonly ?array $documents = null,
+        private readonly array $facetCounts = [],
     ) {
     }
 
@@ -66,5 +70,39 @@ class SearchResult
     public function documents(): array|null
     {
         return $this->documents;
+    }
+
+    /** True when facet counts were computed for this result. */
+    public function hasFacets(): bool
+    {
+        return $this->facetCounts !== [];
+    }
+
+    /**
+     * All facet counts keyed by facet key name.
+     *
+     * String facets: array<string, int> (value → count, ordered by count desc).
+     * Numeric facets: array{min: float, max: float, count: int}.
+     *
+     * @return array<string, mixed>
+     */
+    public function facetCounts(): array
+    {
+        return $this->facetCounts;
+    }
+
+    /**
+     * Count for a specific string facet value, or null if not present.
+     *
+     * Returns null for numeric facets (use facetCounts()['price']['min'] etc. instead).
+     */
+    public function facetCount(string $key, string $value): ?int
+    {
+        $counts = $this->facetCounts[$key] ?? null;
+        if (!is_array($counts) || isset($counts['min'])) {
+            return null;
+        }
+        $count = $counts[$value] ?? null;
+        return is_numeric($count) ? (int) $count : null;
     }
 }
