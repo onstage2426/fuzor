@@ -18,7 +18,7 @@ Fuzor is a dependency-free full-text search library for PHP. It tokenises your d
 composer require onstage2426/fuzor
 ```
 
-**Requirements:** PHP 8.5+, SQLite 3.37.0+
+**Requirements:** PHP 8.5+, SQLite 3.46.0+
 
 ## Usage
 

@@ -22,7 +22,7 @@ use PDO;
  * doclist insert), and every query mode (BM25 ranked, as-you-type prefix, Levenshtein
  * fuzzy, boolean). One instance maps to one open SQLite file at a time.
  *
- * Requires SQLite 3.37.0+ (for STRICT tables, RETURNING, and CTEs in DML statements).
+ * Requires SQLite 3.46.0+ (for STRICT tables, RETURNING, CTEs in DML, and PRAGMA optimize enhancements).
  */
 class Index
 {
@@ -542,8 +542,13 @@ class Index
         $this->termIdCache   = [];
         $this->wordlistCache = [];
         $this->facetKeyCache = [];
-        /** @infection-ignore-all MethodCallRemoval: SQLite triggers WAL checkpointing automatically on connection close; explicit TRUNCATE is a performance hint */
         if (!$this->readonly) {
+            // Update query-planner statistics for tables whose row counts have changed
+            // since the last ANALYZE run. The 0x10002 mask = check all tables (0x10000)
+            // + run ANALYZE where stale (0x0002). No-ops when statistics are current.
+            /** @infection-ignore-all MethodCallRemoval: optimize updates sqlite_stat1; omitting leaves the query planner without fresh statistics */
+            $this->pdo?->exec('PRAGMA optimize=0x10002');
+            /** @infection-ignore-all MethodCallRemoval: SQLite triggers WAL checkpointing automatically on connection close; explicit TRUNCATE is a performance hint */
             $this->pdo?->exec('PRAGMA wal_checkpoint(TRUNCATE)');
         }
         $this->pdo = null;

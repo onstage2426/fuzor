@@ -3,7 +3,7 @@
 ## Requirements
 
 - PHP 8.5+
-- SQLite 3.37.0+
+- SQLite 3.46.0+
 - Composer
 
 ## Setup
