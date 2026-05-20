@@ -443,6 +443,29 @@ class IndexTest extends TestCase
         $this->assertSame(1, $result->ids[0]);
     }
 
+    public function testMatchCountTierRanksFullMatchAbovePartialMatch(): void
+    {
+        // Corpus: 40 filler docs containing 'common', driving IDF(common) very low (~0.035).
+        // Doc 1 matches only 'rare' with high TF → raw BM25 ≈ 4.5.
+        // Doc 2 matches both 'rare' and 'common' with TF=1 → raw BM25 ≈ 3.1.
+        // Without the match-count tier, doc 1 wins on raw BM25. With the tier,
+        // doc 2 (matchCount=2) must rank above doc 1 (matchCount=1).
+        $index = new Index($this->dbPath);
+        $fillers = array_map(
+            fn(int $i): array => ['id' => $i, 'title' => "common filler{$i}"],
+            range(10, 49),
+        );
+        $index->insertMany($fillers);
+        $index->insertMany([
+            ['id' => 1, 'title' => str_repeat('rare ', 20)], // high TF for 'rare', no 'common'
+            ['id' => 2, 'title' => 'rare common'],            // both terms, low TF
+        ]);
+
+        $result = $index->search('rare common', asYouType: false);
+
+        $this->assertSame(2, $result->ids[0], 'Doc matching both query terms must rank first');
+    }
+
     public function testSearchReturnsEmptyIdsWhenNumOfResultsIsZero(): void
     {
         $index = new Index($this->dbPath);
@@ -2459,6 +2482,50 @@ class IndexTest extends TestCase
         $results = $index->search('fast car');
         // doc 1 should rank above doc 2 (has both terms; doc 2 misses "car").
         $this->assertSame(1, $results->ids[0]);
+    }
+
+    public function testProxWindowSizeDefaultIsZero(): void
+    {
+        $this->assertSame(0, (new Config())->proxWindowSize);
+    }
+
+    public function testProxWindowSizeZeroAppliesProximityToAllCandidates(): void
+    {
+        // Both docs have identical BM25 (same dl, same TF for both terms). With proxWindowSize=0
+        // (unlimited), both receive the proximity pass and the adjacent-terms doc (id=1) wins.
+        $config = new Config(proxWindowSize: 0);
+        $index  = new Index($this->dbPath, config: $config);
+        $index->insertMany([
+            ['id' => 1, 'title' => 'fast car review review review review review review review review review'],
+            ['id' => 2, 'title' => 'fast review review review review review review review review review car'],
+        ]);
+
+        $results = $index->search('fast car');
+
+        $this->assertSame([1, 2], $results->ids);
+    }
+
+    public function testProxWindowSizePositiveCapsBoostedCandidates(): void
+    {
+        // proxWindowSize=1: only the top-1-by-BM25 doc enters the proximity pass.
+        // Doc 1 (dl=2, "fast car") has the highest raw BM25 (shorter doc) → enters the window.
+        // It is penalised: fast at pos 0, car at pos 1, minSpan=1 → score ×0.5.
+        // Doc 2 (dl=11, far terms) is outside the window and retains its full raw BM25.
+        // Doc 2's full score (~0.28) edges past doc 1's penalised score (~0.25) → doc 2 wins.
+        // With proxWindowSize=0 the order reverses: both are penalised, and doc 2's large span
+        // (minSpan=10, ÷11) drops it far below doc 1's mild penalty (×0.5) → doc 1 wins.
+        // This demonstrates that the windowed path produces a different result from unlimited.
+        $config = new Config(proxWindowSize: 1);
+        $index  = new Index($this->dbPath, config: $config);
+        $index->insertMany([
+            ['id' => 1, 'title' => 'fast car'],
+            ['id' => 2, 'title' => 'fast review review review review review review review review review car'],
+        ]);
+
+        $results = $index->search('fast car');
+
+        // Doc 1 is proximity-penalised inside the window; doc 2 escapes it and wins on full BM25.
+        $this->assertSame(2, $results->ids[0]);
     }
 
     // --- insertMany progress callback ---

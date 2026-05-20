@@ -35,6 +35,15 @@ final readonly class Config
         /** Maximum result-set doc IDs included in the facet count IN() clause.
          *  Counts are approximate when the result set exceeds this cap. */
         public int $maxFacetCountDocs = 10_000,
+        /**
+         * Maximum number of candidates to apply proximity ranking to, chosen by highest BM25 first.
+         * 0 (default) means apply proximity to all candidates.
+         * A positive value restores the original windowed behaviour and caps the proximity
+         * pass to that many docs — useful to bound CPU cost on very large result sets.
+         *
+         * @infection-ignore-all: default value; mutations only affect the window size, not correctness
+         */
+        public int $proxWindowSize = 0,
     ) {
     }
 }

@@ -1295,6 +1295,8 @@ class Index
 
         /** @var array<int, float> $docScores */
         $docScores = [];
+        /** @var array<int, int> $docMatchCount  Number of distinct keyword groups that matched each doc. */
+        $docMatchCount = [];
 
         $info           = $this->getInfoValues(['total_documents', 'avg_doc_length']);
         /** @infection-ignore-all DecrementInteger|IncrementInteger|CastInt: fallback 0 is used only on a corrupt/empty DB; all writes keep info consistent, so this path is unreachable in tests */
@@ -1325,11 +1327,18 @@ class Index
             // Column order from FETCH_NUM: 0=term_id, 1=doc_id, 2=hit_count, 3=doc_length
             /** @var array<int, true> $groupTermIds */
             $groupTermIds = [];
+            /** @var array<int, true> $seenThisKeyword  Docs already counted for this keyword group; prevents
+             *  prefix-expanded term IDs from inflating $docMatchCount for the same (keyword, doc) pair. */
+            $seenThisKeyword = [];
             foreach ($result['documents'] as [$termId, $docId, $tf, $dl]) {
                 /** @infection-ignore-all OneZeroFloat: ?? 0.0 is the additive identity; the fallback only applies on first encounter of a docId which always has score 0 before accumulation */
                 $docScores[$docId] = ($docScores[$docId] ?? 0.0)
                     + $idfK1p1 * $tf / ($k1_1mb + $k1b_avgdl * $dl + $tf);
                 $groupTermIds[$termId] = true;
+                if (!isset($seenThisKeyword[$docId])) {
+                    $seenThisKeyword[$docId]  = true;
+                    $docMatchCount[$docId] = ($docMatchCount[$docId] ?? 0) + 1;
+                }
             }
             if ($groupTermIds !== []) {
                 $termGroups[] = array_keys($groupTermIds);
@@ -1337,8 +1346,8 @@ class Index
         }
 
         if (count($termGroups) >= 2 && $this->config->proximityBoost > 0.0) {
-            $proxWindow = max(($offset + $limit) * 5, 200);
-            if (count($docScores) > $proxWindow) {
+            $proxWindow = $this->config->proxWindowSize;
+            if ($proxWindow > 0 && count($docScores) > $proxWindow) {
                 arsort($docScores);
                 $proxSlice = array_slice($docScores, 0, $proxWindow, true);
                 $this->applyProximityBoost($proxSlice, $termGroups);
@@ -1395,10 +1404,23 @@ class Index
             );
         }
 
-        // arsort is C-native and faster than a PHP-level SplMinHeap for the result-set
-        // sizes produced by this engine (maxDocs=500 per term, typical total < 2000).
-        arsort($docScores);
-        $pagedIds = array_slice(array_keys($docScores), $offset, $limit);
+        // Multi-keyword: primary sort is number of matched keyword groups (DESC) so docs covering
+        // more of the query always outrank partial matches regardless of term frequency; secondary
+        // sort is BM25+proximity score (DESC). Single-keyword: all docs tie on match count, so
+        // the C-native arsort on scores alone is used.
+        if (count($keywords) > 1) {
+            $sortedIds = array_keys($docScores);
+            usort(
+                $sortedIds,
+                fn(int $a, int $b): int =>
+                    ($docMatchCount[$b] ?? 0) <=> ($docMatchCount[$a] ?? 0)
+                    ?: $docScores[$b] <=> $docScores[$a]
+            );
+            $pagedIds = array_slice($sortedIds, $offset, $limit);
+        } else {
+            arsort($docScores);
+            $pagedIds = array_slice(array_keys($docScores), $offset, $limit);
+        }
         return new SearchResult(
             ids: $pagedIds,
             hits: $total,
