@@ -1230,7 +1230,8 @@ class Index
             'index_info'       => $indexInfo,
             'tokens'           => $tokens,
             /** @infection-ignore-all Concat|ConcatOperandRemoval: '|' prepend is the OR identity; '|' . $phrase and $phrase . '|' both yield identical postfix because '|' is always the last operator popped */
-            'boolean_postfix'  => BooleanParser::toPostfix('|' . $phrase)[0],
+            'boolean_postfix'  => BooleanParser::toPostfix('|' . $verbose['free_phrase'])[0],
+            'phrase_groups'    => $verbose['phrase_groups'],
         ];
     }
 
@@ -1286,8 +1287,11 @@ class Index
         array $filter = [],
         array $facets = [],
     ): SearchResult {
+        $parsed       = $this->filterQueryTokens($phrase);
         /** @var list<string> $keywords */
-        $keywords = $this->filterQueryTokens($phrase)['filtered'];
+        $keywords     = $parsed['filtered'];
+        /** @var list<list<string>> $phraseGroups */
+        $phraseGroups = $parsed['phrase_groups'];
 
         /** @var array<int, float> $docScores */
         $docScores = [];
@@ -1344,6 +1348,15 @@ class Index
             } else {
                 $this->applyProximityBoost($docScores, $termGroups);
             }
+        }
+
+        // Phrase filter: remove documents that do not contain every quoted phrase as a
+        // contiguous token sequence. Runs after BM25+proximity so positions are only fetched
+        // for the (already-ranked) candidate set, not the entire doclist.
+        if ($phraseGroups !== []) {
+            $lastToken = end($keywords) ?: '';
+            $matchIds  = $this->filterDocsByPhrases(array_keys($docScores), $phraseGroups, $lastToken, $asYouType);
+            $docScores = array_intersect_key($docScores, array_flip($matchIds));
         }
 
         // Phase 1: Load per-key filter doc ID sets and intersect to get the global filter.
@@ -1416,10 +1429,16 @@ class Index
         array $filter = [],
         array $facets = [],
     ): SearchResult {
+        $parsed       = $this->filterQueryTokens($phrase);
+        /** @var list<list<string>> $phraseGroups */
+        $phraseGroups = $parsed['phrase_groups'];
+
         // Prepend "|" so the Shunting-Yard algorithm always has a left-hand operand.
         // OR with an empty set is the identity, so it does not affect the result.
+        // Use free_phrase (quotes stripped, words left in place) so BooleanParser's
+        // space→& replacement does not break quoted phrases.
         /** @infection-ignore-all ConcatOperandRemoval: '|' prefix is the OR identity; removing it or appending instead yields identical postfix because '|' is always the lowest-priority operator */
-        [$postfix, $lastTerm] = BooleanParser::toPostfix('|' . $phrase);
+        [$postfix, $lastTerm] = BooleanParser::toPostfix('|' . $parsed['free_phrase']);
 
         // PHP-side set evaluation: fetch per-term doc IDs (capped at maxDocs) from SQLite,
         // then apply set operations in PHP via C-native array_intersect / array_diff /
@@ -1494,6 +1513,10 @@ class Index
 
         /** @var list<int> $docIds */
         $docIds = $ids(array_pop($stack) ?? null);
+
+        if ($phraseGroups !== []) {
+            $docIds = $this->filterDocsByPhrases($docIds, $phraseGroups, $lastTerm ?? '', $asYouType);
+        }
 
         // Phase 1 + 3: load filter sets and apply global intersection.
         // array_flip($docIds) gives doc_id → position, usable as a set for array_intersect_key.
@@ -2643,7 +2666,134 @@ class Index
     }
 
     /**
+     * Check whether a document contains a phrase as a contiguous token sequence.
+     *
+     * Each phrase slot may expand to several term IDs (e.g. via prefix expansion), so
+     * the check is: does any start position p exist such that for every slot i, at least
+     * one term ID in phrasePosTermIds[i] has a recorded position of p + i in this doc?
+     *
+     * @param array<int, list<int>> $docTermPositions  term_id → sorted position list.
+     * @param list<list<int>>       $phrasePosTermIds  Phrase slot → term IDs accepted at that slot.
+     */
+    private function docMatchesPhrase(array $docTermPositions, array $phrasePosTermIds): bool
+    {
+        $len = count($phrasePosTermIds);
+
+        // Build a position-set per phrase slot for O(1) membership tests.
+        /** @var list<array<int, true>> $posSets */
+        $posSets = [];
+        foreach ($phrasePosTermIds as $termIds) {
+            $set = [];
+            foreach ($termIds as $termId) {
+                foreach ($docTermPositions[$termId] ?? [] as $pos) {
+                    $set[$pos] = true;
+                }
+            }
+            $posSets[] = $set;
+        }
+
+        // Try each anchor position from the first slot; check that slot i has a hit at startPos + i.
+        foreach (array_keys($posSets[0]) as $startPos) {
+            $matched = true;
+            for ($i = 1; $i < $len; $i++) {
+                if (!isset($posSets[$i][$startPos + $i])) {
+                    $matched = false;
+                    break;
+                }
+            }
+            if ($matched) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Return the subset of $docIds in which every phrase group appears as a contiguous sequence.
+     *
+     * Term IDs are resolved via the wordlist (exact match for all slots, prefix for the
+     * last slot when $asYouType and that slot's token equals $lastToken). A phrase whose
+     * first word is absent from the index is skipped entirely — an unindexed phrase should
+     * not suppress results for other keywords in the query.
+     *
+     * @param list<int>          $docIds       Candidate document IDs.
+     * @param list<list<string>> $phraseGroups Stemmed token lists, one per quoted phrase.
+     * @param string             $lastToken    Last token in the full flattened query (for asYouType).
+     * @param bool               $asYouType    Whether prefix expansion applies to $lastToken.
+     * @return list<int>
+     */
+    private function filterDocsByPhrases(
+        array $docIds,
+        array $phraseGroups,
+        string $lastToken,
+        bool $asYouType,
+    ): array {
+        if ($docIds === [] || $phraseGroups === []) {
+            return $docIds;
+        }
+
+        /** @var list<list<list<int>>> $resolvedPhrases  phrase → slot → termIds */
+        $resolvedPhrases = [];
+        $allTermIds      = [];
+
+        foreach ($phraseGroups as $group) {
+            $slots      = [];
+            $skipPhrase = false;
+            $lastSlot   = count($group) - 1;
+
+            foreach ($group as $i => $token) {
+                $isPrefixSlot = $asYouType && $i === $lastSlot && $token === $lastToken;
+                $rows         = $this->getWordlistByKeyword($token, $isPrefixSlot, false);
+                $termIds      = array_column($rows, 'id');
+
+                if ($termIds === []) {
+                    $skipPhrase = true;
+                    break;
+                }
+                $slots[]    = $termIds;
+                $allTermIds = array_merge($allTermIds, $termIds);
+            }
+
+            if (!$skipPhrase) {
+                $resolvedPhrases[] = $slots;
+            }
+        }
+
+        if ($resolvedPhrases === []) {
+            return $docIds;
+        }
+
+        $allTermIds = array_values(array_unique($allTermIds));
+        $positions  = $this->fetchPositionsForDocs($docIds, $allTermIds);
+
+        $passing = [];
+        foreach ($docIds as $docId) {
+            $docTermPositions = $positions[$docId] ?? [];
+            $allMatch         = true;
+
+            foreach ($resolvedPhrases as $phrasePosTermIds) {
+                if (!$this->docMatchesPhrase($docTermPositions, $phrasePosTermIds)) {
+                    $allMatch = false;
+                    break;
+                }
+            }
+
+            if ($allMatch) {
+                $passing[] = $docId;
+            }
+        }
+
+        return $passing;
+    }
+
+    /**
      * Tokenise and filter a raw query phrase.
+     *
+     * Extracts quoted substrings ("foo bar") before tokenising — the phrase words remain
+     * in the flat token stream for BM25/boolean scoring, but are also returned as grouped
+     * token lists in phrase_groups for adjacency filtering. free_phrase is the query with
+     * the enclosing quote characters removed (passed to BooleanParser so its space→& rule
+     * does not break quoted phrases).
      *
      * Used directly by search() (via ['filtered']) and inspectQuery() (full result).
      * Falls back to the unfiltered token list when all tokens would be removed by
@@ -2653,11 +2803,13 @@ class Index
      * not computed — Tokenizer::split() is skipped entirely.
      *
      * @infection-ignore-all FalseValue: default false→true only computes raw_tokens eagerly; correctness unaffected
-     * @return array{raw_tokens: list<string>, filtered: list<string>,
-     *               all_stripped: bool, surviving_raw: list<string>}
+     * @return array{raw_tokens: list<string>, filtered: list<string>, all_stripped: bool,
+     *               surviving_raw: list<string>, phrase_groups: list<list<string>>, free_phrase: string}
      */
     private function filterQueryTokens(string $phrase, bool $verbose = false): array
     {
+        ['free' => $freePhrase, 'groups' => $rawPhraseGroups] = $this->extractQuotedPhrases($phrase);
+
         $survivingRaw = Tokenizer::tokenize($phrase, $this->language);
         $allStripped  = false;
 
@@ -2672,12 +2824,65 @@ class Index
             ? $this->stemmer->stemTokens($survivingRaw)
             : $survivingRaw;
 
+        // Build phrase groups: tokenise each quoted substring, apply stopwords + stemming.
+        // Groups that collapse to empty after stopword filtering are dropped — an all-stopword
+        // phrase should not suppress all results. The >1 guard mirrors the flat-token path.
+        $phraseGroups = [];
+        foreach ($rawPhraseGroups as $rawGroup) {
+            $groupTokens = Tokenizer::tokenize($rawGroup, $this->language);
+            if ($this->stopwords instanceof \Fuzor\Stopwords && count($groupTokens) > 1) {
+                $afterGroupStop = $this->stopwords->filter($groupTokens);
+                if ($afterGroupStop === []) {
+                    continue;
+                }
+                $groupTokens = $afterGroupStop;
+            }
+            if ($groupTokens === []) {
+                continue;
+            }
+            if ($this->stemmer instanceof \Fuzor\Stemmer) {
+                $groupTokens = $this->stemmer->stemTokens($groupTokens);
+            }
+            $phraseGroups[] = $groupTokens;
+        }
+
         return [
             'raw_tokens'    => $verbose ? Tokenizer::split($phrase) : [],
             'filtered'      => $filtered,
             'all_stripped'  => $allStripped,
             'surviving_raw' => $verbose ? $survivingRaw : [],
+            'phrase_groups' => $phraseGroups,
+            'free_phrase'   => $freePhrase,
         ];
+    }
+
+    /**
+     * Strip enclosing double-quotes from a query, leaving phrase words in place.
+     *
+     * The phrase words remain in the returned free string so they still participate in
+     * BM25/boolean scoring. Only matched (closed) quote pairs are extracted; unclosed
+     * quotes are passed through unchanged and will be stripped as punctuation during
+     * tokenisation.
+     *
+     * @param  string $query Raw query string.
+     * @return array{free: string, groups: list<string>}
+     */
+    private function extractQuotedPhrases(string $query): array
+    {
+        $groups = [];
+        $free   = preg_replace_callback(
+            '/"([^"]+)"/',
+            function (array $m) use (&$groups): string {
+                $trimmed = trim($m[1]);
+                if ($trimmed !== '') {
+                    $groups[] = $trimmed;
+                }
+                return ' ' . $m[1] . ' ';
+            },
+            $query,
+        ) ?? $query;
+
+        return ['free' => $free, 'groups' => $groups];
     }
 
     /**

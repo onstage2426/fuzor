@@ -1,6 +1,6 @@
 # Search
 
-Fuzor has two search methods: `search()` for BM25 ranked results and `searchBoolean()` for set-based filtering. Both tokenise the query, apply stopword filtering and stemming if a language is set, and support as-you-type prefix matching.
+Fuzor has two search methods: `search()` for BM25 ranked results and `searchBoolean()` for set-based filtering. Both tokenise the query, apply stopword filtering and stemming if a language is set, and support as-you-type prefix matching and quoted phrase search.
 
 ## Result object
 
@@ -109,9 +109,29 @@ Boolean search also supports `offset` for pagination:
 $page2 = $index->searchBoolean('sedan or coupe', limit: 20, offset: 20);
 ```
 
+## Phrase search
+
+Wrap words in double quotes to require them to appear as a contiguous, ordered sequence. Works in both `search()` and `searchBoolean()`.
+
+```php
+$results = $index->search('"quick brown fox"');
+
+// Mix phrases and free keywords
+$results = $index->search('"quick brown" sedan');
+
+// Multiple phrases — all must match
+$results = $index->search('"quick brown" "fast car"');
+
+// In boolean queries
+$results = $index->searchBoolean('"quick brown" or sedan');
+$results = $index->searchBoolean('"exact phrase" -electric');
+```
+
+Phrase words participate in BM25 scoring normally. `asYouType` applies to the last token even when it is inside a phrase — `"quick brow"` matches `quick` followed immediately by any word starting with `brow`.
+
 ## As-you-type prefix
 
-When `asYouType` is `true` (default), the last query word is matched as a prefix — so `"fast se"` also matches documents containing `"sedan"`. Applies to both `search()` and `searchBoolean()`.
+When `asYouType` is `true` (default), the last query word is matched as a prefix — so `fast se` also matches documents containing `sedan`. Applies to both `search()` and `searchBoolean()`.
 
 ```php
 // Disable for exact keyword queries
