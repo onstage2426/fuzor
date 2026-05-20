@@ -17,12 +17,14 @@ $index = new Index('/path/to/articles.db', config: new Config(
 
 Omitting `config` uses the optimised defaults shown below.
 
-| Property             | Default | Effect                                                                 |
-|----------------------|---------|------------------------------------------------------------------------|
-| `maxDocs`            | `500`   | Max documents fetched per keyword before BM25 scoring                  |
-| `k1`                 | `1.2`   | BM25 term frequency saturation — lower reduces weight of repeated terms|
-| `b`                  | `0.75`  | BM25 length normalisation — `0` disables it, `1` fully normalises     |
-| `fuzzyPrefixLength`  | `3`     | Characters that must match exactly before fuzzy edit distance kicks in |
-| `fuzzyMaxExpansions` | `50`    | Max wordlist candidates evaluated during fuzzy search                  |
-| `fuzzyDistance`      | `2`     | Max Levenshtein edit distance accepted as a fuzzy match                |
-| `proximityBoost`     | `1.0`   | Strength of bonus for multi-term queries where terms appear close together; `0` disables |
+| Property             | Default  | Effect                                                                 |
+|----------------------|----------|------------------------------------------------------------------------|
+| `maxDocs`            | `500`    | Max documents fetched per keyword before BM25 scoring                  |
+| `k1`                 | `1.2`    | BM25 term frequency saturation — lower reduces weight of repeated terms|
+| `b`                  | `0.75`   | BM25 length normalisation — `0` disables it, `1` fully normalises     |
+| `fuzzyPrefixLength`  | `3`      | Characters that must match exactly before fuzzy edit distance kicks in |
+| `fuzzyMaxExpansions` | `50`     | Max wordlist candidates evaluated during fuzzy search                  |
+| `fuzzyDistance`      | `2`      | Max Levenshtein edit distance accepted as a fuzzy match                |
+| `proximityBoost`     | `1.0`    | Strength of bonus for multi-term queries where terms appear close together; `0` disables |
+| `filterMaxDocs`      | `2000`   | Max documents fetched per FTS term when a facet `filter` is active; higher values improve recall at the cost of more scoring work |
+| `maxFacetCountDocs`  | `10000`  | Max result doc IDs included in the facet count query; counts are approximate when the result set exceeds this cap |

@@ -7,6 +7,7 @@
 Fuzor is a dependency-free full-text search library for PHP. It tokenises your documents, stores an inverted index in a single SQLite file, and scores results with Okapi BM25 — no external services required.
 
 - BM25 ranked search with fuzzy and boolean modes
+- Faceted search — filter by attribute values and compute per-value counts
 - Search-as-you-type prefix matching
 - Stopword filtering and Snowball stemming for 62 languages
 - Snippet extraction and result highlighting
@@ -24,27 +25,35 @@ composer require onstage2426/fuzor
 
 ```php
 use Fuzor\Index;
+use Fuzor\FacetRange;
 
 // Create an index and add documents
-$index = new Index('/path/to/articles.db', language: 'en');
+$index = new Index('/path/to/products.db', language: 'en', facets: true);
 $index->insertMany([
-    ['id' => 1, 'title' => 'Fast sedan',     'body' => 'Comfortable city car with great fuel economy.'],
-    ['id' => 2, 'title' => 'Off-road SUV',   'body' => 'Built for adventure. Handles any terrain.'],
-    ['id' => 3, 'title' => 'Electric coupe', 'body' => 'Zero emissions, instant torque, sporty design.'],
+    ['id' => 1, 'title' => 'Fast sedan',     'body' => 'City car with great fuel economy.', '_facets' => ['type' => 'sedan',  'price' => 24900]],
+    ['id' => 2, 'title' => 'Off-road SUV',   'body' => 'Built for adventure and any terrain.', '_facets' => ['type' => 'suv',    'price' => 41500]],
+    ['id' => 3, 'title' => 'Electric coupe', 'body' => 'Zero emissions and instant torque.', '_facets' => ['type' => 'coupe',  'price' => 58000]],
 ]);
 
-// Search
+// BM25 search (with optional fuzzy matching)
 $results = $index->search('economi', fuzzy: true);
+
+// Boolean search
 $results = $index->searchBoolean('sedan or coupe -electric');
+
+// Faceted search — filter by attribute, get counts per value
+$results = $index->search('car', filter: ['type' => ['sedan', 'suv'], 'price' => FacetRange::max(45000)], facets: ['type']);
 ```
 
 ## Documentation
 
-- [Indexing](docs/indexing.md) — bulk loading, upsert, rebuild, snapshots
-- [Search](docs/search.md) — BM25 tuning, fuzzy, boolean, prefix
+- [Indexing](docs/indexing.md) — bulk loading, facet values, upsert, rebuild, snapshots
+- [Search](docs/search.md) — BM25 tuning, fuzzy, boolean, prefix, facet filtering and counts
 - [Language](docs/language.md) — stopwords, stemming, CJK/Thai n-grams
 - [Configuration](docs/configuration.md) — all tuning parameters
+- [Document store](docs/document-store.md) — store and retrieve raw documents
 - [Snippeting](docs/snippeting.md) and [Highlighting](docs/highlighting.md)
+- [Query inspection](docs/inspect-query.md) and [Performance](docs/performance.md)
 
 ## License
 

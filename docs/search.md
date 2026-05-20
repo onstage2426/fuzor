@@ -16,6 +16,9 @@ Both methods return a `SearchResult` object:
 | `hasDocuments()`    | `bool`                         | `true` when the document store is enabled on this result                 |
 | `document(int $id)` | `array\|null`                  | Single hydrated document; `null` when store is off or ID not in result   |
 | `documents()`       | `array<int,array>\|null`       | All hydrated documents keyed by doc ID; `null` when document store is off |
+| `hasFacets()`       | `bool`                         | `true` when facet counts were computed for this result                   |
+| `facetCounts()`     | `array<string,mixed>`          | All facet counts keyed by facet key name; empty array when not requested |
+| `facetCount(string $key, string $value)` | `int\|null` | Count for a specific string facet value; `null` for numeric facets or absent entries |
 
 ```php
 $results = $index->search('city car');
@@ -115,3 +118,121 @@ When `asYouType` is `true` (default), the last query word is matched as a prefix
 $results = $index->search('sedan', asYouType: false);
 $results = $index->searchBoolean('sedan or coupe', asYouType: false);
 ```
+
+## Facet filtering
+
+Pass a `filter` map to restrict results to documents matching specific facet attribute values. Only works when the index was created with `facets: true` — see [indexing.md](indexing.md) for how to supply `_facets` values on documents.
+
+### String facets
+
+Pass a single value or an array of values. An array is treated as OR within that key: the document must match at least one value. Multiple keys are AND: all constraints must be satisfied.
+
+```php
+// Single value
+$results = $index->search('watch', filter: ['brand' => 'Casio']);
+
+// Multiple values — OR within the key
+$results = $index->search('watch', filter: ['brand' => ['Casio', 'Seiko']]);
+
+// Multiple keys — AND between keys
+$results = $index->search('watch', filter: [
+    'brand'    => 'Casio',
+    'category' => 'Watches',
+]);
+```
+
+### Numeric range facets
+
+Use `FacetRange` to filter by a numeric range. Either bound may be `null` (open-ended).
+
+```php
+use Fuzor\FacetRange;
+
+// Price between 50 and 200 (inclusive on both ends)
+$results = $index->search('watch', filter: [
+    'price' => FacetRange::between(50.0, 200.0),
+]);
+
+// Price 100 or above (no upper bound)
+$results = $index->search('watch', filter: [
+    'price' => FacetRange::min(100.0),
+]);
+```
+
+Filters compose with all other options:
+
+```php
+$results = $index->search('gshock', fuzzy: true, limit: 20, filter: [
+    'brand' => 'Casio',
+    'price' => FacetRange::max(300.0),
+]);
+```
+
+`searchBoolean()` accepts the same `filter` parameter:
+
+```php
+$results = $index->searchBoolean('shock resistant', filter: ['brand' => 'Casio']);
+```
+
+## Facet counts
+
+Pass a `facets` list to compute per-value counts across the result set. Only works when the index was created with `facets: true`.
+
+```php
+$results = $index->search('watch', facets: ['brand', 'category', 'price']);
+
+$results->hasFacets();   // true
+$results->facetCounts(); // ['brand' => ['Casio' => 12, 'Seiko' => 8, ...], 'price' => [...], ...]
+```
+
+### String facet counts
+
+For string facets, `facetCounts()['key']` is an `array<string, int>` of value → count pairs, sorted by count descending:
+
+```php
+$results->facetCounts()['brand'];
+// ['Casio' => 12, 'Seiko' => 8, 'Citizen' => 5]
+
+// Convenience accessor for a single value
+$results->facetCount('brand', 'Casio');   // 12
+$results->facetCount('brand', 'Unknown'); // null — value not present in result set
+```
+
+### Numeric facet counts
+
+For numeric facets (int/float values in `_facets`), `facetCounts()['key']` is an aggregate summary:
+
+```php
+$results->facetCounts()['price'];
+// ['min' => 29.99, 'max' => 499.0, 'count' => 20]
+```
+
+`facetCount()` returns `null` for numeric facets — read `facetCounts()['price']['min']` etc. directly.
+
+### Combining facets with filters
+
+`facets` and `filter` are independent and can be used together:
+
+```php
+$results = $index->search('watch', filter: ['brand' => 'Casio'], facets: ['category', 'price']);
+```
+
+### Disjunctive facet counting
+
+In standard faceted navigation, the counts shown for a facet key should reflect how many results switching to another value would yield — not just the count already selected. Fuzor handles this automatically.
+
+When a `filter` is active on a key that is also in the `facets` list, its counts are computed over the result set *without* that key's filter applied. All other facet key counts are computed over the filtered result set.
+
+```php
+$results = $index->search('watch', filter: ['brand' => 'Casio'], facets: ['brand', 'category']);
+
+// Brand counts show all brands available in the unfiltered query result
+$results->facetCounts()['brand'];
+// ['Casio' => 12, 'Seiko' => 8, 'Citizen' => 5]
+
+// Category counts are scoped to the Casio filter
+$results->facetCounts()['category'];
+// ['Watches' => 10, 'Accessories' => 2]
+```
+
+This makes it straightforward to build a faceted navigation UI where users can switch between values in a facet group without losing count context for the other values.

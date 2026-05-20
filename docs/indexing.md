@@ -36,6 +36,12 @@ Pass `store: true` to enable the document store. Raw documents are stored as JSO
 $index = new Index('/path/to/articles.db', store: true);
 ```
 
+Pass `facets: true` to enable the facet index. Facet attribute values are stored in a separate index table and can be used to filter results and compute per-value counts at search time. See [search.md](search.md) for querying and filtering by facets.
+
+```php
+$index = new Index('/path/to/products.db', facets: true);
+```
+
 Pass a `Config` object to tune BM25 and fuzzy behaviour. See [configuration.md](configuration.md) for details.
 
 ```php
@@ -83,6 +89,45 @@ $index->insertMany($docs, progress: function (int $done, int $total): void {
     echo "$done / $total\n";
 });
 ```
+
+### Facet values
+
+When the index was created with `facets: true`, add a `_facets` key to each document to supply attribute values for the facet index. The `_facets` key is never tokenised for full-text — `search()` and `searchBoolean()` will not match against its contents.
+
+```php
+$index->insertMany([
+    [
+        'id'      => 1,
+        'title'   => 'Casio G-Shock GA-2100',
+        'body'    => 'Shock resistant, 200m water resistant.',
+        '_facets' => [
+            'brand'    => 'Casio',
+            'gender'   => ['men', 'unisex'],  // array = multi-value facet
+            'category' => 'Watches',
+            'price'    => 129.99,             // int/float = numeric facet
+        ],
+    ],
+    [
+        'id'      => 2,
+        'title'   => 'Seiko Presage',
+        'body'    => 'Automatic mechanical movement.',
+        '_facets' => [
+            'brand'    => 'Seiko',
+            'gender'   => 'men',
+            'category' => 'Watches',
+            'price'    => 295.00,
+        ],
+    ],
+]);
+```
+
+| Value type | Example | Behaviour |
+|------------|---------|-----------|
+| String | `'brand' => 'Casio'` | Exact-match string facet |
+| Array of strings | `'gender' => ['men', 'unisex']` | Multi-value; contributes one count per value |
+| Integer or float | `'price' => 129.99` | Numeric facet; aggregated as min/max/count at search time |
+
+Documents without a `_facets` key are indexed normally for full-text but contribute nothing to the facet index. On an index created without `facets: true`, the `_facets` key is silently ignored.
 
 ## Updating
 
@@ -237,4 +282,22 @@ Index::rebuild('/path/to/articles.db', callback: fn (Index $new) => $new->insert
 
 // Force the store on
 Index::rebuild('/path/to/articles.db', callback: fn (Index $new) => $new->insertMany($docs), store: true);
+```
+
+### Facets on rebuild
+
+The `facets` argument controls whether the rebuilt index has the facet index enabled:
+
+| Value | Effect |
+|-------|--------|
+| `null` (default) | Inherit from the existing index |
+| `true` | Enable facets in the rebuilt index |
+| `false` | Disable facets in the rebuilt index |
+
+```php
+// Inherit (default)
+Index::rebuild('/path/to/articles.db', callback: fn (Index $new) => $new->insertMany($docs));
+
+// Force facets on
+Index::rebuild('/path/to/articles.db', callback: fn (Index $new) => $new->insertMany($docs), facets: true);
 ```
