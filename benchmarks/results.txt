@@ -1,49 +1,24 @@
-with PHP version 8.5.5, xdebug ❌, opcache ❌
-
-\Fuzor\Benchmarks\FuzorBench
-
-    benchInsertMany.........................I2 - Mo322.723ms (±1.61%)
-    benchInsertSequential...................I2 - Mo3.300s (±35.79%)
-    benchSearch # anarchism.................I4 - Mo1.180μs (±1.52%)
-    benchSearch # space.....................I4 - Mo45.903μs (±2.23%)
-    benchSearch # love......................I4 - Mo249.773μs (±1.31%)
-    benchSearch # war.......................I4 - Mo190.098μs (±3.32%)
-    benchSearch # dragon....................I4 - Mo34.081μs (±6.91%)
-    benchSearch # secret agent..............I4 - Mo242.099μs (±1.59%)
-    benchSearchPrefix # sci.................I4 - Mo112.152μs (±2.28%)
-    benchSearchPrefix # dra.................I4 - Mo414.846μs (±0.36%)
-    benchSearchPrefix # adv.................I4 - Mo368.314μs (±0.67%)
-    benchSearchFuzzy # spase................I4 - Mo199.416μs (±1.89%)
-    benchSearchFuzzy # draggon..............I4 - Mo154.854μs (±5.16%)
-    benchSearchFuzzy # lovve................I4 - Mo479.283μs (±2.99%)
-    benchSearchFuzzy # warroir..............I4 - Mo143.753μs (±0.93%)
-    benchSearchBoolean # space or war.......I4 - Mo61.822μs (±4.06%)
-    benchSearchBoolean # love -romance......I4 - Mo89.230μs (±3.48%)
-    benchSearchBoolean # hero and villain...I4 - Mo285.510μs (±1.15%)
-    benchSearchBoolean # action or adventur.I4 - Mo68.023μs (±5.70%)
-
-Subjects: 6, Assertions: 0, Failures: 0, Errors: 0
 FuzorBench
-+-----------------------+---------------------------------+-----------+---------+----------+
-| subject               | set                             | mean      | rstdev  | mem_peak |
-+-----------------------+---------------------------------+-----------+---------+----------+
-| benchInsertMany       |                                 | 325.512ms | ±1.61%  | 72.967mb |
-| benchInsertSequential |                                 | 4.159s    | ±35.79% | 72.231mb |
-| benchSearch           | anarchism                       | 1.180μs   | ±1.52%  | 4.154mb  |
-| benchSearch           | space                           | 46.460μs  | ±2.23%  | 4.154mb  |
-| benchSearch           | love                            | 250.816μs | ±1.31%  | 4.154mb  |
-| benchSearch           | war                             | 190.496μs | ±3.32%  | 4.154mb  |
-| benchSearch           | dragon                          | 35.128μs  | ±6.91%  | 4.154mb  |
-| benchSearch           | secret agent                    | 243.532μs | ±1.59%  | 4.154mb  |
-| benchSearchPrefix     | sci                             | 113.928μs | ±2.28%  | 4.154mb  |
-| benchSearchPrefix     | dra                             | 414.160μs | ±0.36%  | 4.154mb  |
-| benchSearchPrefix     | adv                             | 369.740μs | ±0.67%  | 4.154mb  |
-| benchSearchFuzzy      | spase                           | 199.280μs | ±1.89%  | 4.154mb  |
-| benchSearchFuzzy      | draggon                         | 158.960μs | ±5.16%  | 4.154mb  |
-| benchSearchFuzzy      | lovve                           | 486.350μs | ±2.99%  | 4.154mb  |
-| benchSearchFuzzy      | warroir                         | 144.490μs | ±0.93%  | 4.154mb  |
-| benchSearchBoolean    | space or war                    | 61.236μs  | ±4.06%  | 4.154mb  |
-| benchSearchBoolean    | love -romance                   | 87.684μs  | ±3.48%  | 4.154mb  |
-| benchSearchBoolean    | hero and villain                | 285.736μs | ±1.15%  | 4.154mb  |
-| benchSearchBoolean    | action or adventure or thriller | 67.580μs  | ±5.70%  | 4.154mb  |
-+-----------------------+---------------------------------+-----------+---------+----------+
++-----------------------+---------------------------------+-----------+--------+-----------+
+| subject               | set                             | mean      | rstdev | mem_peak  |
++-----------------------+---------------------------------+-----------+--------+-----------+
+| benchInsertMany       |                                 | 6.667s    | ±0.42% | 457.277mb |
+| benchInsertSequential |                                 | 833.721ms | ±0.42% | 89.560mb  |
+| benchSearch           | anarchism                       | 65.472μs  | ±0.93% | 4.743mb   |
+| benchSearch           | space                           | 479.652μs | ±0.61% | 4.743mb   |
+| benchSearch           | love                            | 670.784μs | ±1.33% | 4.763mb   |
+| benchSearch           | war                             | 669.104μs | ±0.93% | 4.763mb   |
+| benchSearch           | dragon                          | 299.784μs | ±0.50% | 4.743mb   |
+| benchSearch           | secret agent                    | 6.063ms   | ±0.48% | 5.966mb   |
+| benchSearchPrefix     | sci                             | 976.960μs | ±0.27% | 4.772mb   |
+| benchSearchPrefix     | dra                             | 1.495ms   | ±0.75% | 4.796mb   |
+| benchSearchPrefix     | adv                             | 1.089ms   | ±8.97% | 4.775mb   |
+| benchSearchFuzzy      | spase                           | 1.578ms   | ±0.59% | 4.768mb   |
+| benchSearchFuzzy      | draggon                         | 752.520μs | ±1.81% | 4.743mb   |
+| benchSearchFuzzy      | lovve                           | 1.627ms   | ±0.81% | 4.768mb   |
+| benchSearchFuzzy      | warroir                         | 819.100μs | ±2.44% | 4.743mb   |
+| benchSearchBoolean    | space or war                    | 318.792μs | ±2.28% | 4.842mb   |
+| benchSearchBoolean    | love -romance                   | 321.848μs | ±0.43% | 4.842mb   |
+| benchSearchBoolean    | hero and villain                | 630.636μs | ±0.15% | 4.842mb   |
+| benchSearchBoolean    | action or adventure or thriller | 529.180μs | ±1.86% | 4.884mb   |
++-----------------------+---------------------------------+-----------+--------+-----------+
