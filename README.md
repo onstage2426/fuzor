@@ -28,7 +28,7 @@ use Fuzor\Index;
 use Fuzor\FacetRange;
 
 // Create an index and add documents
-$index = new Index('/path/to/products.db', language: 'en', facets: true);
+$index = new Index('/path/to/products.db', language: 'en');
 $index->insert([
     ['id' => 1, 'title' => 'Fast sedan',     'body' => 'City car with great fuel economy.',    '_facets' => ['type' => 'sedan',  'price' => 24900]],
     ['id' => 2, 'title' => 'Off-road SUV',   'body' => 'Built for adventure and any terrain.', '_facets' => ['type' => 'suv',    'price' => 41500]],

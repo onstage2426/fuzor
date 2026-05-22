@@ -36,11 +36,7 @@ Pass `store: true` to enable the document store. Raw documents are stored as JSO
 $index = new Index('/path/to/articles.db', store: true);
 ```
 
-Pass `facets: true` to enable the facet index. Facet attribute values are stored in a separate index table and can be used to filter results and compute per-value counts at search time. See [search.md](search.md) for querying and filtering by facets.
-
-```php
-$index = new Index('/path/to/products.db', facets: true);
-```
+The facet index is always enabled. Facet attribute values are stored in a separate index table and can be used to filter results and compute per-value counts at search time. See [search.md](search.md) for querying and filtering by facets.
 
 Pass a `Config` object to tune BM25 and fuzzy behaviour. See [configuration.md](configuration.md) for details.
 
@@ -89,7 +85,7 @@ $index->insert($docs, progress: function (int $done, int $total): void {
 
 ### Facet values
 
-When the index was created with `facets: true`, add a `_facets` key to each document to supply attribute values for the facet index. The `_facets` key is never tokenised for full-text — `search()` and `searchBoolean()` will not match against its contents.
+Add a `_facets` key to a document to supply attribute values for the facet index. The `_facets` key is never tokenised for full-text — `search()` and `searchBoolean()` will not match against its contents.
 
 ```php
 $index->insert([
@@ -124,7 +120,7 @@ $index->insert([
 | Array of strings | `'gender' => ['men', 'unisex']` | Multi-value; contributes one count per value |
 | Integer or float | `'price' => 129.99` | Numeric facet; aggregated as min/max/count at search time |
 
-Documents without a `_facets` key are indexed normally for full-text but contribute nothing to the facet index. On an index created without `facets: true`, the `_facets` key is silently ignored.
+Documents without a `_facets` key are indexed normally for full-text but contribute nothing to the facet index.
 
 ## Updating
 
@@ -254,18 +250,8 @@ Index::rebuild('/path/to/articles.db', callback: fn (Index $new) => $new->insert
 
 ### Facets on rebuild
 
-The `facets` argument controls whether the rebuilt index has the facet index enabled:
-
-| Value | Effect |
-|-------|--------|
-| `null` (default) | Inherit from the existing index |
-| `true` | Enable facets in the rebuilt index |
-| `false` | Disable facets in the rebuilt index |
+The rebuilt index always has the facet index enabled. Supply `_facets` values on documents during the rebuild callback to populate it.
 
 ```php
-// Inherit (default)
 Index::rebuild('/path/to/articles.db', callback: fn (Index $new) => $new->insert($docs));
-
-// Force facets on
-Index::rebuild('/path/to/articles.db', callback: fn (Index $new) => $new->insert($docs), facets: true);
 ```

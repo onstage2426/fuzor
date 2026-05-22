@@ -128,10 +128,6 @@ class Index
      *                               the inverted index so search results can be hydrated without
      *                               a separate data layer. Ignored when opening an existing index
      *                               (the stored has_document_store info value takes precedence).
-     * @param  bool        $facets   Enable the facet index; stores _facets values in a separate
-     *                               inverted index for filtered search and aggregation.
-     *                               Ignored when opening an existing index
-     *                               (the stored has_facets info value takes precedence).
      * @throws IOException    If the parent directory does not exist, or readonly is true and the file does not exist.
      * @throws QueryException If $language is set but has no stopword list or stemmer,
      *                        or if both $readonly and $force are true.
@@ -143,7 +139,6 @@ class Index
         ?Config $config = null,
         private readonly bool $readonly = false,
         bool $store = false,
-        bool $facets = false,
     ) {
         $this->config   = $config ?? new Config();
         if ($this->readonly && $force) {
@@ -160,7 +155,7 @@ class Index
         if (file_exists($resolved) && !$force) {
             $this->selectIndex();
         } else {
-            $this->createIndex($force, $language, $store, $facets);
+            $this->createIndex($force, $language, $store);
         }
     }
 
@@ -247,14 +242,13 @@ class Index
      * @param  false|string|null $language BCP 47 tag, null (no language), or false (inherit).
      * @param  ?bool             $store    true/false to force enable/disable; null (default) inherits from existing.
      * @return self               Open index pointing at the rebuilt file.
-     * @throws \RuntimeException  If the rename fails or the parent directory does not exist.
+     * @throws IOException        If the rename fails or the parent directory does not exist.
      */
     public static function rebuild(
         string $path,
         callable $callback,
         false|string|null $language = false,
         ?bool $store = null,
-        ?bool $facets = null,
     ): self {
         $resolved = self::resolvePath($path);
         $existing = file_exists($resolved) ? new self($resolved) : null;
@@ -264,9 +258,6 @@ class Index
         if ($store === null) {
             $store = $existing !== null && $existing->documentStoreEnabled;
         }
-        if ($facets === null) {
-            $facets = $existing !== null && $existing->facetsEnabled;
-        }
         /** @infection-ignore-all MethodCallRemoval: resource cleanup; GC closes the connection if skipped, no observable effect on the rebuild outcome */
         $existing?->close();
 
@@ -274,7 +265,7 @@ class Index
         $tmp = $resolved . '.tmp-' . bin2hex(random_bytes(4));
 
         try {
-            $handle = new self($tmp, language: $language, store: $store, facets: $facets);
+            $handle = new self($tmp, language: $language, store: $store);
             $callback($handle);
             $handle->close();
 
@@ -360,7 +351,6 @@ class Index
         bool $force = false,
         ?string $language = null,
         bool $store = false,
-        bool $facets = false,
     ): static {
         if (!$force && file_exists($this->path)) {
             throw new IOException(
@@ -445,39 +435,37 @@ class Index
             $this->documentStoreEnabled = true;
         }
 
-        if ($facets) {
-            // facet_keys: one row per unique facet field name (~10–100 entries; fully cached in PHP).
-            $pdo->exec(
-                "CREATE TABLE IF NOT EXISTS facet_keys (
-                    id   INTEGER PRIMARY KEY,
-                    name TEXT NOT NULL UNIQUE
-                ) STRICT"
-            );
-            // facet_values: inverted index clustered on (key_id, value, doc_id).
-            // WITHOUT ROWID → range scan on (key_id, value) is a pure B-tree leaf scan, no heap fetch.
-            $pdo->exec(
-                "CREATE TABLE IF NOT EXISTS facet_values (
-                    key_id    INTEGER NOT NULL,
-                    value     TEXT    NOT NULL,
-                    doc_id    INTEGER NOT NULL,
-                    num_value REAL,
-                    PRIMARY KEY (key_id, value, doc_id)
-                ) WITHOUT ROWID, STRICT"
-            );
-            // Covers DELETE-by-doc_id and the GROUP BY count query path.
-            $pdo->exec(
-                "CREATE INDEX IF NOT EXISTS 'main'.'facet_doc_id_index'
-                 ON facet_values (doc_id)"
-            );
-            // Covers numeric range filter queries; partial keeps the B-tree small.
-            $pdo->exec(
-                "CREATE INDEX IF NOT EXISTS 'main'.'facet_numeric_index'
-                 ON facet_values (key_id, num_value, doc_id)
-                 WHERE num_value IS NOT NULL"
-            );
-            $pdo->exec("INSERT INTO info (key, value) VALUES ('has_facets', '1')");
-            $this->facetsEnabled = true;
-        }
+        // facet_keys: one row per unique facet field name (~10–100 entries; fully cached in PHP).
+        $pdo->exec(
+            "CREATE TABLE IF NOT EXISTS facet_keys (
+                id   INTEGER PRIMARY KEY,
+                name TEXT NOT NULL UNIQUE
+            ) STRICT"
+        );
+        // facet_values: inverted index clustered on (key_id, value, doc_id).
+        // WITHOUT ROWID → range scan on (key_id, value) is a pure B-tree leaf scan, no heap fetch.
+        $pdo->exec(
+            "CREATE TABLE IF NOT EXISTS facet_values (
+                key_id    INTEGER NOT NULL,
+                value     TEXT    NOT NULL,
+                doc_id    INTEGER NOT NULL,
+                num_value REAL,
+                PRIMARY KEY (key_id, value, doc_id)
+            ) WITHOUT ROWID, STRICT"
+        );
+        // Covers DELETE-by-doc_id and the GROUP BY count query path.
+        $pdo->exec(
+            "CREATE INDEX IF NOT EXISTS 'main'.'facet_doc_id_index'
+             ON facet_values (doc_id)"
+        );
+        // Covers numeric range filter queries; partial keeps the B-tree small.
+        $pdo->exec(
+            "CREATE INDEX IF NOT EXISTS 'main'.'facet_numeric_index'
+             ON facet_values (key_id, num_value, doc_id)
+             WHERE num_value IS NOT NULL"
+        );
+        $pdo->exec("INSERT INTO info (key, value) VALUES ('has_facets', '1')");
+        $this->facetsEnabled = true;
 
         if ($language !== null) {
             $this->applyLanguage($language);

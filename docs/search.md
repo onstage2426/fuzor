@@ -141,7 +141,7 @@ $results = $index->searchBoolean('sedan or coupe', asYouType: false);
 
 ## Facet filtering
 
-Pass a `filter` map to restrict results to documents matching specific facet attribute values. Only works when the index was created with `facets: true` — see [indexing.md](indexing.md) for how to supply `_facets` values on documents.
+Pass a `filter` map to restrict results to documents matching specific facet attribute values. See [indexing.md](indexing.md) for how to supply `_facets` values on documents.
 
 ### String facets
 
@@ -196,7 +196,7 @@ $results = $index->searchBoolean('shock resistant', filter: ['brand' => 'Casio']
 
 ## Facet counts
 
-Pass a `facets` list to compute per-value counts across the result set. Only works when the index was created with `facets: true`.
+Pass a `facets` list to compute per-value counts across the result set.
 
 ```php
 $results = $index->search('watch', facets: ['brand', 'category', 'price']);
