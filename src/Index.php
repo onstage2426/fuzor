@@ -126,7 +126,8 @@ class Index
      * @param  bool        $readonly Open in read-only mode; all write methods throw IOException.
      * @param  bool        $store    Enable the document store; persists raw documents alongside
      *                               the inverted index so search results can be hydrated without
-     *                               a separate data layer. Ignored when opening an existing index
+     *                               a separate data layer. Defaults to true; pass false to opt out.
+     *                               Ignored when opening an existing index
      *                               (the stored has_document_store info value takes precedence).
      * @throws IOException    If the parent directory does not exist, or readonly is true and the file does not exist.
      * @throws QueryException If $language is set but has no stopword list or stemmer,
@@ -138,7 +139,7 @@ class Index
         bool $force = false,
         ?Config $config = null,
         private readonly bool $readonly = false,
-        bool $store = false,
+        bool $store = true,
     ) {
         $this->config   = $config ?? new Config();
         if ($this->readonly && $force) {
@@ -256,7 +257,7 @@ class Index
             $language = $existing?->language;
         }
         if ($store === null) {
-            $store = $existing !== null && $existing->documentStoreEnabled;
+            $store = $existing !== null ? $existing->documentStoreEnabled : true;
         }
         /** @infection-ignore-all MethodCallRemoval: resource cleanup; GC closes the connection if skipped, no observable effect on the rebuild outcome */
         $existing?->close();
@@ -350,7 +351,7 @@ class Index
     private function createIndex(
         bool $force = false,
         ?string $language = null,
-        bool $store = false,
+        bool $store = true,
     ): static {
         if (!$force && file_exists($this->path)) {
             throw new IOException(
@@ -1029,7 +1030,7 @@ class Index
      * With multiple IDs returns a map of doc_id => document; missing IDs are silently omitted.
      * With no arguments returns an empty array.
      *
-     * Requires the document store to be enabled (store: true at creation time).
+     * Requires the document store to be enabled (enabled by default; pass store: false to opt out).
      *
      * @param  int ...$ids Document IDs to fetch.
      * @return array<string, mixed>|array<int, array<string, mixed>>|null
@@ -1039,7 +1040,7 @@ class Index
     {
         if (!$this->documentStoreEnabled) {
             throw new QueryException(
-                'Document store is not enabled on this index. Pass store: true at construction.'
+                'Document store is not enabled on this index. Pass store: false at construction to opt out.'
             );
         }
         if ($ids === []) {

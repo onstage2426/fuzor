@@ -30,10 +30,11 @@ Pass `readonly: true` to open an existing index in read-only mode. All write met
 $index = new Index('/path/to/articles-read.db', readonly: true);
 ```
 
-Pass `store: true` to enable the document store. Raw documents are stored as JSON inside the same SQLite file, and search results are automatically hydrated — no separate document database needed. See [document-store.md](document-store.md) for details.
+The document store is enabled by default: raw documents are stored as JSON inside the same SQLite file and search results are automatically hydrated. Pass `store: false` to opt out. See [document-store.md](document-store.md) for details.
 
 ```php
-$index = new Index('/path/to/articles.db', store: true);
+// Store off — smaller file, no document retrieval
+$index = new Index('/path/to/articles.db', store: false);
 ```
 
 The facet index is always enabled. Facet attribute values are stored in a separate index table and can be used to filter results and compute per-value counts at search time. See [search.md](search.md) for querying and filtering by facets.
@@ -232,10 +233,10 @@ Index::rebuild('/path/to/articles.db', callback: fn (Index $new) => $new->insert
 
 ### Document store on rebuild
 
-The `store` argument controls whether the rebuilt index has the document store enabled:
+`rebuild()` inherits the store setting from the existing index. Pass `store` to override:
 
-| Value | Effect |
-|-------|--------|
+| `$store` value | Effect |
+|----------------|--------|
 | `null` (default) | Inherit from the existing index |
 | `true` | Enable the store in the rebuilt index |
 | `false` | Disable the store in the rebuilt index |
@@ -244,8 +245,8 @@ The `store` argument controls whether the rebuilt index has the document store e
 // Inherit (default)
 Index::rebuild('/path/to/articles.db', callback: fn (Index $new) => $new->insert($docs));
 
-// Force the store on
-Index::rebuild('/path/to/articles.db', callback: fn (Index $new) => $new->insert($docs), store: true);
+// Force the store off even if the existing index had it on
+Index::rebuild('/path/to/articles.db', callback: fn (Index $new) => $new->insert($docs), store: false);
 ```
 
 ### Facets on rebuild

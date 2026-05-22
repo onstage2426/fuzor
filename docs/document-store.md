@@ -1,15 +1,17 @@
 # Document Store
 
-The document store is an optional feature that persists the raw document array inside the same SQLite file as the inverted index. When enabled, search results are automatically hydrated — `$result->documents()` returns the full document data without any extra query to a separate database.
+The document store persists the raw document array inside the same SQLite file as the inverted index. Search results are automatically hydrated — `$result->documents()` returns the full document data without any extra query to a separate database.
 
-## Enabling
-
-Pass `store: true` at index creation time:
+The store is **enabled by default**. Pass `store: false` to opt out — useful for embedding contexts where disk space is constrained or raw document retrieval is not needed.
 
 ```php
 use Fuzor\Index;
 
-$index = new Index('/path/to/articles.db', store: true);
+// Store on (default)
+$index = new Index('/path/to/articles.db');
+
+// Store off
+$index = new Index('/path/to/articles.db', store: false);
 ```
 
 The setting is persisted in the `info` table of the index file. Opening an existing index restores it automatically — you never need to re-specify it.

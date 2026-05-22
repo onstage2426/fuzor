@@ -2783,29 +2783,23 @@ class IndexTest extends TestCase
 
     // --- Document store: construction ---
 
-    public function testDocumentStoreDisabledByDefault(): void
+    public function testDocumentStoreEnabledByDefault(): void
     {
         $index = new Index($this->dbPath);
-        $this->assertFalse($index->documentStoreEnabled);
-    }
-
-    public function testDocumentStoreEnabledWhenStoreFlagSet(): void
-    {
-        $index = new Index($this->dbPath, store: true);
         $this->assertTrue($index->documentStoreEnabled);
     }
 
     public function testDocumentStorePersistedAfterReopen(): void
     {
-        new Index($this->dbPath, store: true)->close();
+        new Index($this->dbPath)->close();
 
         $index = new Index($this->dbPath);
         $this->assertTrue($index->documentStoreEnabled);
     }
 
-    public function testDocumentStoreNotRestoredWhenNeverEnabled(): void
+    public function testDocumentStorePersistedWhenDisabled(): void
     {
-        new Index($this->dbPath)->close();
+        new Index($this->dbPath, store: false)->close();
 
         $index = new Index($this->dbPath);
         $this->assertFalse($index->documentStoreEnabled);
@@ -2815,7 +2809,7 @@ class IndexTest extends TestCase
 
     public function testGetThrowsWhenStoreNotEnabled(): void
     {
-        $index = new Index($this->dbPath);
+        $index = new Index($this->dbPath, store: false);
         $index->insert([['id' => 1, 'title' => 'sedan']]);
 
         $this->expectException(QueryException::class);
@@ -2824,7 +2818,7 @@ class IndexTest extends TestCase
 
     public function testGetManyThrowsWhenStoreNotEnabled(): void
     {
-        $index = new Index($this->dbPath);
+        $index = new Index($this->dbPath, store: false);
         $index->insert([['id' => 1, 'title' => 'sedan']]);
 
         $this->expectException(QueryException::class);
@@ -2867,7 +2861,7 @@ class IndexTest extends TestCase
 
     public function testInsertDoesNotStoreWhenDisabled(): void
     {
-        $index = new Index($this->dbPath);
+        $index = new Index($this->dbPath, store: false);
         $index->insert([['id' => 1, 'title' => 'sedan']]);
 
         $this->expectException(QueryException::class);
@@ -2998,7 +2992,7 @@ class IndexTest extends TestCase
 
     public function testClearOnStoreDisabledIndexDoesNotThrow(): void
     {
-        $index = new Index($this->dbPath);
+        $index = new Index($this->dbPath, store: false);
         $index->insert([['id' => 1, 'title' => 'sedan']]);
         $index->clear();
 
@@ -3009,7 +3003,7 @@ class IndexTest extends TestCase
 
     public function testHasDocumentsFalseWhenStoreDisabled(): void
     {
-        $index = new Index($this->dbPath);
+        $index = new Index($this->dbPath, store: false);
         $index->insert([['id' => 1, 'title' => 'sedan']]);
 
         $this->assertFalse($index->search('sedan')->hasDocuments());
@@ -3050,7 +3044,7 @@ class IndexTest extends TestCase
 
     public function testDocumentReturnsNullWhenStoreDisabled(): void
     {
-        $index = new Index($this->dbPath);
+        $index = new Index($this->dbPath, store: false);
         $index->insert([['id' => 1, 'title' => 'sedan']]);
 
         $this->assertNull($index->search('sedan')->document(1));
@@ -3058,7 +3052,7 @@ class IndexTest extends TestCase
 
     public function testDocumentsReturnsNullWhenStoreDisabled(): void
     {
-        $index = new Index($this->dbPath);
+        $index = new Index($this->dbPath, store: false);
         $index->insert([['id' => 1, 'title' => 'sedan']]);
 
         $this->assertNull($index->search('sedan')->documents());
@@ -3085,7 +3079,7 @@ class IndexTest extends TestCase
 
     public function testSearchDocumentsIsNullWhenStoreDisabled(): void
     {
-        $index = new Index($this->dbPath);
+        $index = new Index($this->dbPath, store: false);
         $index->insert([['id' => 1, 'title' => 'sedan']]);
 
         $result = $index->search('sedan');
@@ -3135,7 +3129,7 @@ class IndexTest extends TestCase
 
     public function testSearchBooleanDocumentsIsNullWhenStoreDisabled(): void
     {
-        $index = new Index($this->dbPath);
+        $index = new Index($this->dbPath, store: false);
         $index->insert([['id' => 1, 'title' => 'sedan']]);
 
         $result = $index->searchBoolean('sedan');
@@ -3158,18 +3152,18 @@ class IndexTest extends TestCase
 
     public function testRebuildInheritsStoreFromExistingIndex(): void
     {
-        new Index($this->dbPath, store: true)->close();
+        new Index($this->dbPath, store: false)->close();
 
         $rebuilt = Index::rebuild($this->dbPath, function (Index $new): void {
             $new->insert([['id' => 1, 'title' => 'sedan']]);
         });
 
-        $this->assertTrue($rebuilt->documentStoreEnabled);
+        $this->assertFalse($rebuilt->documentStoreEnabled);
     }
 
     public function testRebuildCanEnableStore(): void
     {
-        new Index($this->dbPath)->close();
+        new Index($this->dbPath, store: false)->close();
 
         $rebuilt = Index::rebuild($this->dbPath, function (Index $new): void {
             $new->insert([['id' => 1, 'title' => 'sedan']]);
@@ -3180,7 +3174,7 @@ class IndexTest extends TestCase
 
     public function testRebuildCanDisableStore(): void
     {
-        new Index($this->dbPath, store: true)->close();
+        new Index($this->dbPath)->close();
 
         $rebuilt = Index::rebuild($this->dbPath, function (Index $new): void {
             $new->insert([['id' => 1, 'title' => 'sedan']]);
@@ -3191,7 +3185,7 @@ class IndexTest extends TestCase
 
     public function testRebuildWithStoreStoresDocuments(): void
     {
-        new Index($this->dbPath)->close();
+        new Index($this->dbPath, store: false)->close();
 
         $doc     = ['id' => 1, 'title' => 'sedan'];
         $rebuilt = Index::rebuild($this->dbPath, function (Index $new) use ($doc): void {
