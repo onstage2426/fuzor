@@ -38,7 +38,7 @@ When the store is disabled, `$results->documents()` returns `null` and `$results
 The reserved `_meta` key is stored but never indexed. Use it to attach data you need at retrieval time but do not want to affect search results — permalinks, image URLs, timestamps, and so on. It is recognised by all write methods: `insert`, `update`, `upsert`, and their bulk variants.
 
 ```php
-$index->insert([
+$index->insert([[
     'id'    => 1,
     'title' => 'Fast sedan',
     'body'  => 'Comfortable city car.',
@@ -47,15 +47,15 @@ $index->insert([
         'image'     => 'https://example.com/sedan.jpg',
         'published' => '2026-05-14',
     ],
-]);
+]]);
 
 // _meta is replaced atomically with the rest of the document on update
-$index->update([
+$index->update([[
     'id'    => 1,
     'title' => 'Fast sedan',
     'body'  => 'Comfortable city car.',
     '_meta' => ['permalink' => '/cars/fast-sedan', 'published' => '2026-06-01'],
-]);
+]]);
 ```
 
 `_meta` is returned as-is alongside the rest of the document:
@@ -73,7 +73,7 @@ Retrieve documents directly without a search:
 $doc = $index->get(42);
 
 // Multiple documents — returns map<int, array>; missing IDs are silently omitted
-$docs = $index->getMany([1, 2, 3]);
+$docs = $index->get(1, 2, 3);
 $docs[1]; // ['id' => 1, 'title' => '…', …]
 ```
 
@@ -102,7 +102,7 @@ Documents are stored as JSON (UTF-8) in a `documents` table in the same SQLite f
 ```php
 // Inherit (default) — store stays on if the existing index had it on
 Index::rebuild('/path/to/articles.db', function (Index $new) use ($docs) {
-    $new->insertMany($docs);
+    $new->insert($docs);
 });
 
 // Force the store on even if the existing index had it off
@@ -111,7 +111,7 @@ Index::rebuild('/path/to/articles.db', callback: $fn, store: true);
 
 ## Performance notes
 
-- **Write overhead** — each `insert()` / `upsert()` / `update()` adds one `INSERT INTO documents`. Bulk operations (`insertMany`, `upsertMany`) batch these at 500 rows per statement, which is conservative for large JSON payloads.
+- **Write overhead** — each `insert()` / `upsert()` / `update()` adds one `INSERT INTO documents`. Bulk inserts and upserts batch these at 500 rows per statement, which is conservative for large JSON payloads.
 - **Read overhead** — `documents()` triggers one chunked `SELECT` on the `documents` PK after scoring. For a typical `limit: 100` page this is a single indexed query.
 - **File size** — the `documents` table adds roughly the size of `json_encode($doc)` per document to the SQLite file.
 - **Snapshots** — `snapshotTo()` copies the entire SQLite file including the `documents` table. No extra step needed.

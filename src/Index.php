@@ -557,56 +557,32 @@ class Index
     // --- Public write operations --------------------------------------------
 
     /**
-     * Index a new document and increment the total document count.
+     * Index one or many new documents.
      *
-     * Tokenises all fields via processDocument() and updates the
-     * total_documents counter in the info table.
+     * Pass a list of document arrays (each must contain an 'id' key). A single document is
+     * wrapped in an outer array: [[$doc]]. Uses the two-phase bulk path for any batch size;
+     * a single-element list uses an internal fast path that skips bulk pragma overhead.
      *
-     * @param array<string, mixed> $document Document fields; must contain an 'id' key.
-     * @throws QueryException If the document has no 'id' key or the ID already exists.
+     * @param list<array<string, mixed>>|\Traversable<mixed, array<string, mixed>> $documents
+     *                                    List of document arrays, each with an 'id' key.
+     * @param callable(int $done, int $total): void|null $progress Called after each document is tokenised
+     *                                                              in phase 1; $done starts at 1.
+     * @throws QueryException If any document has no 'id' key, contains duplicate IDs, or any ID already exists.
      */
-    public function insert(array $document): void
+    public function insert(iterable $documents, ?callable $progress = null): void
     {
         $this->assertWritable();
-        if (!array_key_exists('id', $document)) {
-            throw new QueryException("Document must contain an 'id' key.");
-        }
-
-        $this->wrapInTransaction(function () use ($document): void {
-            $id    = $this->extractId($document['id']);
-            $check = $this->stmt('docExistsCheck', 'SELECT 1 FROM doc_lengths WHERE doc_id = :id LIMIT 1');
-            $check->execute([':id' => $id]);
-            if ($check->fetchColumn() !== false) {
-                throw new QueryException("Document {$id} already exists. Use update() to replace it.");
-            }
-            /** @infection-ignore-all MethodCallRemoval: closeCursor is a resource-management call; omitting it leaves the cursor open but does not affect WAL-mode write correctness */
-            $check->closeCursor();
-
-            $length = $this->processDocument($document);
-            $this->adjustStats(1, $length);
-        });
+        $this->insertMany($documents, $progress);
     }
 
     /**
-     * Index multiple documents in a single transaction with one stats update.
-     *
-     * Uses a two-phase bulk load to minimise wordlist B-tree probes: Phase 1
-     * tokenises all documents in PHP and aggregates per-term counts across the
-     * entire batch; Phase 2 upserts the wordlist once per unique term (not once
-     * per document × term) and writes doclist and doc_lengths in bulk.
-     *
-     * Substantially faster than calling insert() in a loop for bulk loads.
-     * Accepts any iterable, including generators, for memory-efficient streaming.
-     *
-     * @param iterable<array<string, mixed>> $documents Documents to index; each must contain an 'id' key.
+     * @param list<array<string, mixed>>|\Traversable<mixed, array<string, mixed>> $documents
+     *                                    Documents to index; each must contain an 'id' key.
      * @param callable(int $done, int $total): void|null $progress Called after each document is tokenised
      *                                                              in phase 1; $done starts at 1.
-     * @throws QueryException If any document is missing an 'id' key, contains duplicate IDs,
-     *                        or any document ID already exists in the index.
      */
-    public function insertMany(iterable $documents, ?callable $progress = null): void
+    private function insertMany(iterable $documents, ?callable $progress = null): void
     {
-        $this->assertWritable();
         /** @infection-ignore-all LogicalNot: iterator_to_array() accepts arrays in PHP 8.1+; converting an array produces the same array */
         if (!is_array($documents)) {
             $documents = iterator_to_array($documents, false);
@@ -614,6 +590,12 @@ class Index
 
         /** @infection-ignore-all ReturnRemoval: empty batch produces no SQL writes; adjustStats(0,0) is a no-op when no tokens are processed */
         if ($documents === []) {
+            return;
+        }
+
+        // Single-element list: use the lightweight single-doc path to avoid bulk pragma overhead.
+        if (count($documents) === 1) {
+            $this->insertOne($documents[0]);
             return;
         }
 
@@ -745,56 +727,51 @@ class Index
         }
     }
 
-    /**
-     * Replace an existing document in the index.
-     *
-     * @param array<string, mixed> $document New document data; must contain an 'id' key.
-     * @throws QueryException If the document has no 'id' key, or the ID does not exist.
-     */
-    public function update(array $document): void
+    /** @param array<string, mixed> $document */
+    private function insertOne(array $document): void
     {
-        $this->assertWritable();
-        $this->replaceOne($document, strict: true);
+        if (!array_key_exists('id', $document)) {
+            throw new QueryException("Document must contain an 'id' key.");
+        }
+        $this->wrapInTransaction(function () use ($document): void {
+            $id    = $this->extractId($document['id']);
+            $check = $this->stmt('docExistsCheck', 'SELECT 1 FROM doc_lengths WHERE doc_id = :id LIMIT 1');
+            $check->execute([':id' => $id]);
+            if ($check->fetchColumn() !== false) {
+                throw new QueryException("Document {$id} already exists. Use update() to replace it.");
+            }
+            /** @infection-ignore-all MethodCallRemoval: closeCursor is a resource-management call; omitting it leaves the cursor open but does not affect WAL-mode write correctness */
+            $check->closeCursor();
+
+            $length = $this->processDocument($document);
+            $this->adjustStats(1, $length);
+        });
     }
 
     /**
-     * Create or replace a document in the index.
+     * Replace one or many existing documents in the index.
      *
-     * If the ID already exists the document is replaced; if not, it is inserted.
+     * All IDs are checked for existence before any writes — missing IDs throw without
+     * modifying the index.
      *
-     * @param array<string, mixed> $document New document data; must contain an 'id' key.
-     * @throws QueryException If the document has no 'id' key.
-     */
-    public function upsert(array $document): void
-    {
-        $this->assertWritable();
-        $this->replaceOne($document, strict: false);
-    }
-
-    /**
-     * Replace multiple existing documents in a single transaction.
-     *
-     * All IDs are checked for existence before any writes. If any are missing the
-     * method throws without modifying the index.
-     *
-     * @param iterable<array<string, mixed>> $documents Documents to replace; each must contain an 'id' key.
+     * @param list<array<string, mixed>>|\Traversable<mixed, array<string, mixed>> $documents
+     *                                    List of document arrays; each must contain an 'id' key.
      * @throws QueryException If any document has no 'id' key, or any ID does not exist.
      */
-    public function updateMany(iterable $documents): void
+    public function update(iterable $documents): void
     {
         $this->assertWritable();
         $this->replaceMany($documents, strict: true);
     }
 
     /**
-     * Create or replace multiple documents in a single transaction.
+     * Create or replace one or many documents in the index.
      *
-     * Non-existent IDs are inserted; existing IDs are replaced.
-     *
-     * @param iterable<array<string, mixed>> $documents Documents to upsert; each must contain an 'id' key.
+     * @param list<array<string, mixed>>|\Traversable<mixed, array<string, mixed>> $documents
+     *                                    List of document arrays; each must contain an 'id' key.
      * @throws QueryException If any document has no 'id' key.
      */
-    public function upsertMany(iterable $documents): void
+    public function upsert(iterable $documents): void
     {
         $this->assertWritable();
         $this->replaceMany($documents, strict: false);
@@ -829,14 +806,14 @@ class Index
     }
 
     /**
-     * Shared implementation for updateMany() and upsertMany().
+     * Shared implementation for the bulk update() and upsert() paths.
      *
      * Uses the same two-phase bulk path as insertMany(): a single bulk-remove pass over all
      * existing documents followed by buildBatchBuffer() + flushBatch() for all incoming documents.
      * This avoids the per-document removeDocumentData() + processDocument() loop that wipes caches
      * and issues individual prepared statements for every row.
      *
-     * @param iterable<array<string, mixed>> $documents
+     * @param list<array<string, mixed>>|\Traversable<mixed, array<string, mixed>> $documents
      * @throws QueryException
      */
     private function replaceMany(iterable $documents, bool $strict): void
@@ -847,6 +824,12 @@ class Index
         }
 
         if ($documents === []) {
+            return;
+        }
+
+        // Single-element list: use the lightweight single-doc path to avoid bulk pragma overhead.
+        if (count($documents) === 1) {
+            $this->replaceOne($documents[0], $strict);
             return;
         }
 
@@ -890,7 +873,7 @@ class Index
                     if ($missing !== []) {
                         throw new QueryException(
                             'Documents do not exist with ids: '
-                                . implode(', ', $missing) . '. Use upsertMany() to create or replace them.'
+                                . implode(', ', $missing) . '. Use upsert() to create or replace them.'
                         );
                     }
                 }
@@ -937,27 +920,15 @@ class Index
     }
 
     /**
-     * Remove a document from the index.
+     * Remove one or more documents from the index.
      *
-     * Decrements num_hits and num_docs on every wordlist term the document
-     * contributed to via a single CTE-based UPDATE, removes all doclist rows
-     * for the document, prunes zero-hit orphan terms, and decrements
-     * total_documents.
+     * Accepts one or many IDs as variadic arguments: delete(1), delete(1, 2, 3), or
+     * delete(...$ids). Non-existent IDs are silently skipped. All deletions happen in
+     * a single transaction with one stats update.
      *
-     * @param int $id ID of the document to remove.
+     * @param int ...$ids Document IDs to remove.
      */
-    public function delete(int $id): void
-    {
-        $this->assertWritable();
-        $this->deleteMany([$id]);
-    }
-
-    /**
-     * Remove multiple documents in a single transaction with one stats update.
-     *
-     * @param list<int> $ids Document IDs to remove; non-existent IDs are silently skipped.
-     */
-    public function deleteMany(array $ids): void
+    public function delete(int ...$ids): void
     {
         $this->assertWritable();
         /** @infection-ignore-all ReturnRemoval: empty $ids produces zero iterations and docDelta=0; adjustStats is not called — identical result */
@@ -970,7 +941,7 @@ class Index
             $lengthDelta = 0;
 
             foreach ($ids as $id) {
-                /** @infection-ignore-all CastInt: $id comes from list<int>; the cast is defensive only */
+                /** @infection-ignore-all CastInt: $id is int from variadic; the cast is defensive only */
                 $length = $this->removeDocumentData((int) $id);
                 if ($length !== null) {
                     $docDelta--;
@@ -1025,24 +996,15 @@ class Index
     }
 
     /**
-     * Return true if a document with the given ID exists in the index.
+     * Check whether one or more documents exist in the index.
      *
-     * @param int $id Document ID to check.
+     * With a single ID returns bool. With multiple IDs returns a map of id => bool.
+     * With no arguments returns an empty array.
+     *
+     * @param  int             ...$ids Document IDs to check.
+     * @return bool|array<int, bool>
      */
-    public function has(int $id): bool
-    {
-        return $this->hasMany([$id])[$id];
-    }
-
-    /**
-     * Return a map of id => bool for each requested ID.
-     *
-     * More efficient than calling has() in a loop — resolves all IDs in one query per chunk.
-     *
-     * @param  list<int>       $ids Document IDs to check.
-     * @return array<int, bool>     Keys are the requested IDs; value is true if present, false if absent.
-     */
-    public function hasMany(array $ids): array
+    public function has(int ...$ids): bool|array
     {
         /** @infection-ignore-all ReturnRemoval: SQLite evaluates IN() as no-match and returns an empty result set; removing the early return produces the same [] */
         if ($ids === []) {
@@ -1061,6 +1023,10 @@ class Index
         }
         $foundSet = array_flip($found);
 
+        if (count($ids) === 1) {
+            return isset($foundSet[$ids[0]]);
+        }
+
         $result = [];
         foreach ($ids as $id) {
             $result[$id] = isset($foundSet[$id]);
@@ -1069,33 +1035,19 @@ class Index
     }
 
     /**
-     * Fetch a stored document by ID, or null if not found.
+     * Fetch one or more stored documents by ID.
+     *
+     * With a single ID returns the document array, or null if not found.
+     * With multiple IDs returns a map of doc_id => document; missing IDs are silently omitted.
+     * With no arguments returns an empty array.
      *
      * Requires the document store to be enabled (store: true at creation time).
      *
-     * @param  int                      $id Document ID to fetch.
-     * @return array<string, mixed>|null    The raw document array, or null if not found.
+     * @param  int ...$ids Document IDs to fetch.
+     * @return array<string, mixed>|array<int, array<string, mixed>>|null
      * @throws QueryException If the document store is not enabled on this index.
      */
-    public function get(int $id): ?array
-    {
-        $result = $this->getMany([$id]);
-        return $result[$id] ?? null;
-    }
-
-    /**
-     * Fetch stored documents by ID in one query per chunk.
-     *
-     * Returns a map keyed by doc_id. IDs absent from the store are silently omitted.
-     * To preserve result order, iterate your ID list and index into the returned map.
-     *
-     * Requires the document store to be enabled (store: true at creation time).
-     *
-     * @param  list<int>                         $ids Document IDs to fetch.
-     * @return array<int, array<string, mixed>>       Map of doc_id => document array.
-     * @throws QueryException If the document store is not enabled on this index.
-     */
-    public function getMany(array $ids): array
+    public function get(int ...$ids): array|null
     {
         if (!$this->documentStoreEnabled) {
             throw new QueryException(
@@ -1105,7 +1057,19 @@ class Index
         if ($ids === []) {
             return [];
         }
+        $map = $this->fetchDocuments(array_values($ids));
+        if (count($ids) === 1) {
+            return $map[$ids[0]] ?? null;
+        }
+        return $map;
+    }
 
+    /**
+     * @param  list<int>                         $ids
+     * @return array<int, array<string, mixed>>
+     */
+    private function fetchDocuments(array $ids): array
+    {
         $result = [];
         foreach (array_chunk($ids, self::CHUNK_1P) as $chunk) {
             $n            = count($chunk);
@@ -1588,7 +1552,7 @@ class Index
         if (!$this->documentStoreEnabled || $ids === []) {
             return $this->documentStoreEnabled ? [] : null;
         }
-        $map    = $this->getMany($ids);
+        $map    = $this->fetchDocuments($ids);
         $result = [];
         foreach ($ids as $id) {
             if (isset($map[$id])) {

@@ -121,7 +121,7 @@ class StopwordsTest extends TestCase
     public function testStopwordsExcludedFromIndex(): void
     {
         $index = new Index($this->dbPath, language: 'en');
-        $index->insert(['id' => 1, 'body' => 'the quick brown fox']);
+        $index->insert([['id' => 1, 'body' => 'the quick brown fox']]);
 
         // 'the' is a stopword — searching for it should return no results
         $this->assertSame([], $index->search('the')->ids);
@@ -134,7 +134,7 @@ class StopwordsTest extends TestCase
     {
         $index = new Index($this->dbPath);
         // no language set — 'the' is indexed normally
-        $index->insert(['id' => 1, 'body' => 'the quick brown fox']);
+        $index->insert([['id' => 1, 'body' => 'the quick brown fox']]);
 
         $this->assertContains(1, $index->search('the')->ids);
     }
@@ -145,7 +145,7 @@ class StopwordsTest extends TestCase
         // A query made up entirely of stopwords must not crash or throw; the fallback
         // in filterQueryTokens re-enables the original tokens when all are stripped.
         $index = new Index($this->dbPath, language: 'en');
-        $index->insert(['id' => 1, 'body' => 'quick brown fox']);
+        $index->insert([['id' => 1, 'body' => 'quick brown fox']]);
 
         $result = $index->search('the and or');
         // 'the', 'and', 'or' are stopwords and were never indexed — no matches expected

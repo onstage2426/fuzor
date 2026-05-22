@@ -29,10 +29,10 @@ use Fuzor\FacetRange;
 
 // Create an index and add documents
 $index = new Index('/path/to/products.db', language: 'en', facets: true);
-$index->insertMany([
-    ['id' => 1, 'title' => 'Fast sedan',     'body' => 'City car with great fuel economy.', '_facets' => ['type' => 'sedan',  'price' => 24900]],
+$index->insert([
+    ['id' => 1, 'title' => 'Fast sedan',     'body' => 'City car with great fuel economy.',    '_facets' => ['type' => 'sedan',  'price' => 24900]],
     ['id' => 2, 'title' => 'Off-road SUV',   'body' => 'Built for adventure and any terrain.', '_facets' => ['type' => 'suv',    'price' => 41500]],
-    ['id' => 3, 'title' => 'Electric coupe', 'body' => 'Zero emissions and instant torque.', '_facets' => ['type' => 'coupe',  'price' => 58000]],
+    ['id' => 3, 'title' => 'Electric coupe', 'body' => 'Zero emissions and instant torque.',   '_facets' => ['type' => 'coupe',  'price' => 58000]],
 ]);
 
 // BM25 search (with optional fuzzy matching)

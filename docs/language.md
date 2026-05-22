@@ -40,7 +40,7 @@ Language cannot be changed on an existing index. Recreate the index from your do
 
 ```php
 $index = new Index($path, force: true, language: 'fr');
-$index->insertMany($yourDocs);
+$index->insert($yourDocs);
 ```
 
 ## Reading the active language

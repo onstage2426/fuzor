@@ -82,7 +82,7 @@ class FuzorBench
         }
         self::loadDocs();
         $idx = new Index(self::SEARCH_DB, force: true, language: 'en');
-        $idx->insertMany(self::$docs);
+        $idx->insert(self::$docs);
         $idx->close();
     }
 
@@ -122,7 +122,7 @@ class FuzorBench
         $path = sys_get_temp_dir() . '/fuzor_bench_im_' . getmypid() . '.db';
         @unlink($path);
         $idx = new Index($path, force: true, language: 'en');
-        $idx->insertMany(self::$docs);
+        $idx->insert(self::$docs);
         $idx->close();
         @unlink($path);
     }
@@ -138,7 +138,7 @@ class FuzorBench
         @unlink($path);
         $idx = new Index($path, force: true, language: 'en');
         foreach (array_slice(self::$docs, 0, 1000) as $doc) {
-            $idx->insert($doc);
+            $idx->insert([$doc]);
         }
         $idx->close();
         @unlink($path);

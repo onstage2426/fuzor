@@ -46,7 +46,7 @@ class IndexTest extends TestCase
     public function testCloseReleasesConnection(): void
     {
         $index = new Index($this->dbPath);
-        $index->insert(['id' => 1, 'title' => 'sedan']);
+        $index->insert([['id' => 1, 'title' => 'sedan']]);
         $index->close();
 
         $reopened = new Index($this->dbPath);
@@ -56,7 +56,7 @@ class IndexTest extends TestCase
     public function testStatsPersistAfterReopen(): void
     {
         $index = new Index($this->dbPath);
-        $index->insertMany([
+        $index->insert([
             ['id' => 1, 'title' => 'sedan'],
             ['id' => 2, 'title' => 'coupe'],
         ]);
@@ -91,7 +91,7 @@ class IndexTest extends TestCase
     public function testCreateWithForceOverwritesExistingFile(): void
     {
         $index = new Index($this->dbPath);
-        $index->insert(['id' => 1, 'title' => 'sedan']);
+        $index->insert([['id' => 1, 'title' => 'sedan']]);
         $index->close();
 
         $fresh = new Index($this->dbPath, force: true);
@@ -165,23 +165,23 @@ class IndexTest extends TestCase
     {
         $index = new Index($this->dbPath);
         $this->expectException(QueryException::class);
-        $index->insert(['title' => 'no id here']);
+        $index->insert([['title' => 'no id here']]);
     }
 
     public function testInsertDuplicateIdThrows(): void
     {
         $index = new Index($this->dbPath);
-        $index->insert(['id' => 1, 'title' => 'sedan']);
+        $index->insert([['id' => 1, 'title' => 'sedan']]);
 
         $this->expectException(QueryException::class);
-        $index->insert(['id' => 1, 'title' => 'duplicate']);
+        $index->insert([['id' => 1, 'title' => 'duplicate']]);
     }
 
     public function testInsertManyWithMissingIdThrows(): void
     {
         $index = new Index($this->dbPath);
         $this->expectException(QueryException::class);
-        $index->insertMany([
+        $index->insert([
             ['id' => 1, 'title' => 'sedan'],
             ['title' => 'no id'],
         ]);
@@ -191,7 +191,7 @@ class IndexTest extends TestCase
     {
         $index = new Index($this->dbPath);
         $this->expectException(QueryException::class);
-        $index->insertMany([
+        $index->insert([
             ['id' => 1, 'title' => 'sedan'],
             ['id' => 1, 'title' => 'duplicate in same batch'],
         ]);
@@ -200,27 +200,27 @@ class IndexTest extends TestCase
     public function testInsertManyWithExistingIdThrows(): void
     {
         $index = new Index($this->dbPath);
-        $index->insert(['id' => 1, 'title' => 'sedan']);
+        $index->insert([['id' => 1, 'title' => 'sedan']]);
 
         $this->expectException(QueryException::class);
         // Require the full structure: prefix, then the conflicting ID, then the suffix.
         // This kills concat-order mutations (ID moved to front/end) and partial-removal
         // mutations (missing ID or missing "Use update()" suffix).
-        $this->expectExceptionMessageMatches('#^Documents already exist with ids: 1\. Use update\(\)#');
-        $index->insertMany([['id' => 1, 'title' => 'already exists']]);
+        $this->expectExceptionMessageMatches('#^Document 1 already exists\. Use update\(\)#');
+        $index->insert([['id' => 1, 'title' => 'already exists']]);
     }
 
     public function testUpdateWithoutIdThrows(): void
     {
         $index = new Index($this->dbPath);
         $this->expectException(QueryException::class);
-        $index->update(['title' => 'no id here']);
+        $index->update([['title' => 'no id here']]);
     }
 
     public function testInsertAndSearchReturnsMatchingId(): void
     {
         $index = new Index($this->dbPath);
-        $index->insert(['id' => 1, 'title' => 'fast sedan', 'body' => 'comfortable city car']);
+        $index->insert([['id' => 1, 'title' => 'fast sedan', 'body' => 'comfortable city car']]);
 
         $result = $index->search('sedan');
         $this->assertContains(1, $result->ids);
@@ -229,11 +229,11 @@ class IndexTest extends TestCase
     public function testMetaFieldIsNotIndexed(): void
     {
         $index = new Index($this->dbPath);
-        $index->insert([
+        $index->insert([[
             'id'    => 1,
             'title' => 'sedan',
             '_meta' => ['permalink' => '/cars/sedan', 'unique' => 'shouldnotbeindexed'],
-        ]);
+        ]]);
 
         $this->assertSame([1], $index->search('sedan')->ids);
         $this->assertSame([], $index->search('shouldnotbeindexed')->ids);
@@ -245,7 +245,7 @@ class IndexTest extends TestCase
         $meta = ['permalink' => '/cars/sedan', 'published' => '2026-05-14'];
         $doc  = ['id' => 1, 'title' => 'sedan', '_meta' => $meta];
         $index = new Index($this->dbPath, store: true);
-        $index->insert($doc);
+        $index->insert([$doc]);
 
         $this->assertSame($doc, $index->search('sedan')->document(1));
     }
@@ -253,7 +253,7 @@ class IndexTest extends TestCase
     public function testSearchReturnsEmptyForNoMatch(): void
     {
         $index = new Index($this->dbPath);
-        $index->insert(['id' => 1, 'title' => 'sedan car']);
+        $index->insert([['id' => 1, 'title' => 'sedan car']]);
 
         $result = $index->search('helicopter');
         $this->assertSame([], $result->ids);
@@ -264,7 +264,7 @@ class IndexTest extends TestCase
     {
         $index = new Index($this->dbPath);
         // Two docs so the term is not universal; smoothed IDF is always > 0 anyway.
-        $index->insertMany([
+        $index->insert([
             ['id' => 1, 'title' => 'sedan car'],
             ['id' => 2, 'title' => 'suv truck'],
         ]);
@@ -277,7 +277,7 @@ class IndexTest extends TestCase
     public function testHasScoresTrueForBm25Search(): void
     {
         $index = new Index($this->dbPath);
-        $index->insert(['id' => 1, 'title' => 'sedan']);
+        $index->insert([['id' => 1, 'title' => 'sedan']]);
 
         $this->assertTrue($index->search('sedan')->hasScores());
     }
@@ -285,7 +285,7 @@ class IndexTest extends TestCase
     public function testHasScoresFalseForBooleanSearch(): void
     {
         $index = new Index($this->dbPath);
-        $index->insert(['id' => 1, 'title' => 'sedan']);
+        $index->insert([['id' => 1, 'title' => 'sedan']]);
 
         $this->assertFalse($index->searchBoolean('sedan')->hasScores());
     }
@@ -293,7 +293,7 @@ class IndexTest extends TestCase
     public function testScoresReturnsFullMap(): void
     {
         $index = new Index($this->dbPath);
-        $index->insertMany([
+        $index->insert([
             ['id' => 1, 'title' => 'sedan car'],
             ['id' => 2, 'title' => 'sedan coupe'],
         ]);
@@ -309,7 +309,7 @@ class IndexTest extends TestCase
     public function testScoresEmptyForBooleanSearch(): void
     {
         $index = new Index($this->dbPath);
-        $index->insert(['id' => 1, 'title' => 'sedan']);
+        $index->insert([['id' => 1, 'title' => 'sedan']]);
 
         $this->assertSame([], $index->searchBoolean('sedan')->scores());
     }
@@ -317,7 +317,7 @@ class IndexTest extends TestCase
     public function testSearchHitsCountsAllMatchingDocs(): void
     {
         $index = new Index($this->dbPath);
-        $index->insertMany([
+        $index->insert([
             ['id' => 1, 'title' => 'sedan'],
             ['id' => 2, 'title' => 'sedan'],
             ['id' => 3, 'title' => 'coupe'],
@@ -330,8 +330,8 @@ class IndexTest extends TestCase
     public function testInsertSharedTermAcrossCallsPreservesTermAfterDelete(): void
     {
         $index = new Index($this->dbPath);
-        $index->insert(['id' => 1, 'title' => 'sedan']); // cache miss: INSERT path, termIdCache seeded
-        $index->insert(['id' => 2, 'title' => 'sedan']); // cache hit: UPDATE path in upsertWordlist()
+        $index->insert([['id' => 1, 'title' => 'sedan']]); // cache miss: INSERT path, termIdCache seeded
+        $index->insert([['id' => 2, 'title' => 'sedan']]); // cache hit: UPDATE path in upsertWordlist()
         $index->delete(1);
 
         // If the cache-hit UPDATE was a no-op, wordlist num_hits for 'sedan' would still be 1
@@ -342,7 +342,7 @@ class IndexTest extends TestCase
     public function testSearchRespectsNumOfResults(): void
     {
         $index = new Index($this->dbPath);
-        $index->insertMany([
+        $index->insert([
             ['id' => 1, 'title' => 'sedan'],
             ['id' => 2, 'title' => 'sedan'],
             ['id' => 3, 'title' => 'sedan'],
@@ -357,7 +357,7 @@ class IndexTest extends TestCase
     {
         // Insert 101 docs so the parameterless call must cap at exactly 100 — not 99 or 101.
         $index = new Index($this->dbPath);
-        $index->insertMany(array_map(fn($i): array => ['id' => $i, 'title' => 'sedan'], range(1, 101)));
+        $index->insert(array_map(fn($i): array => ['id' => $i, 'title' => 'sedan'], range(1, 101)));
 
         $result = $index->search('sedan');
         $this->assertCount(100, $result->ids);
@@ -375,7 +375,7 @@ class IndexTest extends TestCase
     public function testSearchIsCaseInsensitive(): void
     {
         $index = new Index($this->dbPath);
-        $index->insert(['id' => 1, 'title' => 'SEDAN']);
+        $index->insert([['id' => 1, 'title' => 'SEDAN']]);
 
         $this->assertContains(1, $index->search('sedan')->ids);
         $this->assertContains(1, $index->search('SEDAN')->ids);
@@ -384,7 +384,7 @@ class IndexTest extends TestCase
     public function testSearchLowercasesMultibyteQueryViaSearch(): void
     {
         $index = new Index($this->dbPath);
-        $index->insert(['id' => 1, 'title' => 'über']);
+        $index->insert([['id' => 1, 'title' => 'über']]);
 
         // MBString mutation in getWordlistByKeyword replaces mb_strtolower with strtolower.
         // 'Ü' (U+00DC) is two UTF-8 bytes; strtolower leaves it unchanged, so 'ÜBER' stays
@@ -396,7 +396,7 @@ class IndexTest extends TestCase
     public function testSearchIsExactNotFuzzy(): void
     {
         $index = new Index($this->dbPath);
-        $index->insert(['id' => 1, 'title' => 'hello']);
+        $index->insert([['id' => 1, 'title' => 'hello']]);
 
         $this->assertEmpty($index->search('helo', asYouType: false)->ids);
 
@@ -406,7 +406,7 @@ class IndexTest extends TestCase
     public function testSearchOrdersByRelevance(): void
     {
         $index = new Index($this->dbPath);
-        $index->insertMany([
+        $index->insert([
             ['id' => 1, 'title' => 'sedan'],
             ['id' => 2, 'title' => 'sedan sedan sedan'],
         ]);
@@ -420,7 +420,7 @@ class IndexTest extends TestCase
         $index = new Index($this->dbPath);
         // Doc 1: tf=1, dl=1 — very short, high BM25 score per term.
         // Doc 2: tf=3, dl=100 — long doc; DB fetches it first (higher hit_count), but BM25 penalises length.
-        $index->insertMany([
+        $index->insert([
             ['id' => 1, 'title' => 'sedan'],
             ['id' => 2, 'title' => 'sedan sedan sedan ' . str_repeat('filler ', 97)],
         ]);
@@ -432,7 +432,7 @@ class IndexTest extends TestCase
     public function testMultiKeywordSearchAccumulatesScoresAcrossTerms(): void
     {
         $index = new Index($this->dbPath);
-        $index->insertMany([
+        $index->insert([
             ['id' => 1, 'title' => 'car sedan'],           // both terms, dl=2
             ['id' => 2, 'title' => str_repeat('sedan ', 10)],  // sedan only, tf=10, dl=10
         ]);
@@ -455,8 +455,8 @@ class IndexTest extends TestCase
             fn(int $i): array => ['id' => $i, 'title' => "common filler{$i}"],
             range(10, 49),
         );
-        $index->insertMany($fillers);
-        $index->insertMany([
+        $index->insert($fillers);
+        $index->insert([
             ['id' => 1, 'title' => str_repeat('rare ', 20)], // high TF for 'rare', no 'common'
             ['id' => 2, 'title' => 'rare common'],            // both terms, low TF
         ]);
@@ -469,7 +469,7 @@ class IndexTest extends TestCase
     public function testSearchReturnsEmptyIdsWhenNumOfResultsIsZero(): void
     {
         $index = new Index($this->dbPath);
-        $index->insert(['id' => 1, 'title' => 'sedan']);
+        $index->insert([['id' => 1, 'title' => 'sedan']]);
         $result = $index->search('sedan', limit: 0);
         $this->assertSame([], $result->ids);
         $this->assertSame(1, $result->hits);
@@ -480,7 +480,7 @@ class IndexTest extends TestCase
     public function testAsYouTypePrefixMatchesPartialWord(): void
     {
         $index = new Index($this->dbPath);
-        $index->insert(['id' => 1, 'title' => 'Mercedes Benz']);
+        $index->insert([['id' => 1, 'title' => 'Mercedes Benz']]);
 
         $result = $index->search('merc');
         $this->assertContains(1, $result->ids);
@@ -489,7 +489,7 @@ class IndexTest extends TestCase
     public function testAsYouTypeDisabledNoPartialMatch(): void
     {
         $index = new Index($this->dbPath);
-        $index->insert(['id' => 1, 'title' => 'Mercedes Benz']);
+        $index->insert([['id' => 1, 'title' => 'Mercedes Benz']]);
 
         $result = $index->search('merc', asYouType: false);
         $this->assertNotContains(1, $result->ids);
@@ -498,7 +498,7 @@ class IndexTest extends TestCase
     public function testPrefixSearchExpandsAllMatchingTerms(): void
     {
         $index = new Index($this->dbPath);
-        $index->insertMany([
+        $index->insert([
             ['id' => 1, 'title' => 'sedan'],
             ['id' => 2, 'title' => 'suv'],
         ]);
@@ -513,7 +513,7 @@ class IndexTest extends TestCase
     public function testMaxDocsLimitsResultsPerKeyword(): void
     {
         $index = new Index($this->dbPath, config: new \Fuzor\Config(maxDocs: 2));
-        $index->insertMany([
+        $index->insert([
             ['id' => 1, 'title' => 'sedan'],
             ['id' => 2, 'title' => 'sedan'],
             ['id' => 3, 'title' => 'sedan'],
@@ -531,7 +531,7 @@ class IndexTest extends TestCase
     {
         $index = new Index($this->dbPath);
         // Five docs; TF increases with ID so BM25 score increases monotonically with ID.
-        $index->insertMany([
+        $index->insert([
             ['id' => 1, 'title' => 'sedan'],
             ['id' => 2, 'title' => 'sedan sedan'],
             ['id' => 3, 'title' => 'sedan sedan sedan'],
@@ -563,7 +563,7 @@ class IndexTest extends TestCase
         // Docs 1 and 2: high term frequency, long documents → low BM25 (length penalty).
         // DB returns these first (by doc_id). Docs 3 and 4: single occurrence, very
         // short → higher BM25 despite lower hit_count.
-        $index->insertMany([
+        $index->insert([
             ['id' => 1, 'title' => str_repeat('sedan ', 5) . str_repeat('filler ', 195)],
             ['id' => 2, 'title' => str_repeat('sedan ', 3) . str_repeat('filler ', 147)],
             ['id' => 3, 'title' => 'sedan'],
@@ -590,7 +590,7 @@ class IndexTest extends TestCase
         // Original: heapMin = heap.top() = doc2's low score → doc3(mid) > low → replaces doc2.
         // Mutation Identical (L352): heapMin set at heapSize≠2 (step 1, recording doc1's high
         //   score) → doc3(mid) > high? No → doc3 not inserted → result = [doc1, doc2] (wrong).
-        $index->insertMany([
+        $index->insert([
             ['id' => 1, 'title' => 'sedan sedan sedan'],  // tf=3, highest BM25
             ['id' => 2, 'title' => 'sedan'],              // tf=1, lowest BM25
             ['id' => 3, 'title' => 'sedan sedan'],        // tf=2, middle BM25
@@ -616,7 +616,7 @@ class IndexTest extends TestCase
         //     Else branch for doc2: score(doc2)>-INF? Yes → replace doc1 with doc2. heapMin=score(doc2).
         //     doc3: score(doc3)>score(doc2)? Yes → replace. heapMin=score(doc3).
         //     Result: [doc3], not [doc1]. ✗
-        $index->insertMany([
+        $index->insert([
             ['id' => 1, 'title' => 'sedan sedan sedan'],
             ['id' => 2, 'title' => 'sedan'],
             ['id' => 3, 'title' => 'sedan sedan'],
@@ -630,7 +630,7 @@ class IndexTest extends TestCase
     {
         $index = new Index($this->dbPath);
         // tf proportional to id: doc5 scores highest, doc1 lowest.
-        $index->insertMany([
+        $index->insert([
             ['id' => 1, 'title' => 'sedan'],
             ['id' => 2, 'title' => 'sedan sedan'],
             ['id' => 3, 'title' => 'sedan sedan sedan'],
@@ -665,7 +665,7 @@ class IndexTest extends TestCase
     public function testSearchOffsetBeyondTotalReturnsEmptyIds(): void
     {
         $index = new Index($this->dbPath);
-        $index->insert(['id' => 1, 'title' => 'sedan']);
+        $index->insert([['id' => 1, 'title' => 'sedan']]);
 
         $result = $index->search('sedan', limit: 10, offset: 5);
 
@@ -676,7 +676,7 @@ class IndexTest extends TestCase
     public function testSearchBooleanOffsetSkipsTopResults(): void
     {
         $index = new Index($this->dbPath);
-        $index->insertMany([
+        $index->insert([
             ['id' => 1, 'title' => 'sedan'],
             ['id' => 2, 'title' => 'sedan'],
             ['id' => 3, 'title' => 'sedan'],
@@ -697,7 +697,7 @@ class IndexTest extends TestCase
     public function testInsertManyIndexesAllDocuments(): void
     {
         $index = new Index($this->dbPath);
-        $index->insertMany([
+        $index->insert([
             ['id' => 1, 'title' => 'sedan car'],
             ['id' => 2, 'title' => 'suv truck'],
         ]);
@@ -709,7 +709,7 @@ class IndexTest extends TestCase
     public function testInsertManyWithEmptyArrayIsNoop(): void
     {
         $index = new Index($this->dbPath);
-        $index->insertMany([]);
+        $index->insert([]);
 
         $this->assertSame(0, $index->search('anything')->hits);
     }
@@ -719,8 +719,8 @@ class IndexTest extends TestCase
     public function testUpdateReplacesOldContent(): void
     {
         $index = new Index($this->dbPath);
-        $index->insert(['id' => 1, 'title' => 'sedan car']);
-        $index->update(['id' => 1, 'title' => 'suv truck']);
+        $index->insert([['id' => 1, 'title' => 'sedan car']]);
+        $index->update([['id' => 1, 'title' => 'suv truck']]);
 
         $this->assertEmpty($index->search('sedan')->ids);
         $this->assertContains(1, $index->search('suv')->ids);
@@ -729,11 +729,11 @@ class IndexTest extends TestCase
     public function testUpdatePreservesTotalDocumentCount(): void
     {
         $index = new Index($this->dbPath);
-        $index->insertMany([
+        $index->insert([
             ['id' => 1, 'title' => 'sedan'],
             ['id' => 2, 'title' => 'coupe'],
         ]);
-        $index->update(['id' => 1, 'title' => 'suv']);
+        $index->update([['id' => 1, 'title' => 'suv']]);
 
         $this->assertSame(2, $index->search('suv')->hits + $index->search('coupe')->hits);
     }
@@ -741,11 +741,11 @@ class IndexTest extends TestCase
     public function testUpdateExistingDocDoesNotIncrementTotalDocuments(): void
     {
         $index = new Index($this->dbPath);
-        $index->insertMany([
+        $index->insert([
             ['id' => 1, 'title' => 'sedan'],
             ['id' => 2, 'title' => 'coupe'],
         ]);
-        $index->update(['id' => 1, 'title' => 'suv']);
+        $index->update([['id' => 1, 'title' => 'suv']]);
 
         // A mutation that swaps the strict branch would call adjustStats(+1, newLength)
         // instead of adjustStats(0, delta), growing total_documents from 2 to 3.
@@ -758,14 +758,14 @@ class IndexTest extends TestCase
         $index = new Index($this->dbPath);
         $this->expectException(QueryException::class);
         $this->expectExceptionMessageMatches('/does not exist/');
-        $index->update(['id' => 999, 'title' => 'sedan']);
+        $index->update([['id' => 999, 'title' => 'sedan']]);
     }
 
     public function testUpdateChangesAvgDocLength(): void
     {
         $index = new Index($this->dbPath);
-        $index->insert(['id' => 1, 'title' => 'alpha beta gamma delta']);
-        $index->update(['id' => 1, 'title' => 'zeta']);
+        $index->insert([['id' => 1, 'title' => 'alpha beta gamma delta']]);
+        $index->update([['id' => 1, 'title' => 'zeta']]);
         $info = $index->inspectQuery('zeta')['index_info'];
         $this->assertEqualsWithDelta(1.0, (float) $info['avg_doc_length'], 0.01);
     }
@@ -775,7 +775,7 @@ class IndexTest extends TestCase
     public function testUpsertCreatesDocWhenIdNotFound(): void
     {
         $index = new Index($this->dbPath);
-        $index->upsert(['id' => 999, 'title' => 'sedan']);
+        $index->upsert([['id' => 999, 'title' => 'sedan']]);
 
         $this->assertContains(999, $index->search('sedan')->ids);
     }
@@ -783,7 +783,7 @@ class IndexTest extends TestCase
     public function testUpsertNonExistentDocIncrementsCount(): void
     {
         $index = new Index($this->dbPath);
-        $index->upsert(['id' => 1, 'title' => 'sedan']);
+        $index->upsert([['id' => 1, 'title' => 'sedan']]);
         $info = $index->inspectQuery('sedan')['index_info'];
         $this->assertSame('1', $info['total_documents']);
     }
@@ -791,8 +791,8 @@ class IndexTest extends TestCase
     public function testUpsertReplacesOldContent(): void
     {
         $index = new Index($this->dbPath);
-        $index->insert(['id' => 1, 'title' => 'sedan car']);
-        $index->upsert(['id' => 1, 'title' => 'suv truck']);
+        $index->insert([['id' => 1, 'title' => 'sedan car']]);
+        $index->upsert([['id' => 1, 'title' => 'suv truck']]);
 
         $this->assertEmpty($index->search('sedan')->ids);
         $this->assertContains(1, $index->search('suv')->ids);
@@ -801,11 +801,11 @@ class IndexTest extends TestCase
     public function testUpsertExistingDocDoesNotIncrementTotalDocuments(): void
     {
         $index = new Index($this->dbPath);
-        $index->insertMany([
+        $index->insert([
             ['id' => 1, 'title' => 'sedan'],
             ['id' => 2, 'title' => 'coupe'],
         ]);
-        $index->upsert(['id' => 1, 'title' => 'suv']);
+        $index->upsert([['id' => 1, 'title' => 'suv']]);
 
         $info = $index->inspectQuery('suv')['index_info'];
         $this->assertSame('2', $info['total_documents']);
@@ -816,11 +816,11 @@ class IndexTest extends TestCase
     public function testUpdateManyReplacesOldContent(): void
     {
         $index = new Index($this->dbPath);
-        $index->insertMany([
+        $index->insert([
             ['id' => 1, 'title' => 'sedan car'],
             ['id' => 2, 'title' => 'coupe sport'],
         ]);
-        $index->updateMany([
+        $index->update([
             ['id' => 1, 'title' => 'suv truck'],
             ['id' => 2, 'title' => 'hatchback'],
         ]);
@@ -834,12 +834,12 @@ class IndexTest extends TestCase
     public function testUpdateManyPreservesTotalDocumentCount(): void
     {
         $index = new Index($this->dbPath);
-        $index->insertMany([
+        $index->insert([
             ['id' => 1, 'title' => 'sedan'],
             ['id' => 2, 'title' => 'coupe'],
             ['id' => 3, 'title' => 'suv'],
         ]);
-        $index->updateMany([
+        $index->update([
             ['id' => 1, 'title' => 'hatchback'],
             ['id' => 2, 'title' => 'convertible'],
         ]);
@@ -851,11 +851,11 @@ class IndexTest extends TestCase
     public function testUpdateManyExistingDocsDoNotIncrementTotalDocuments(): void
     {
         $index = new Index($this->dbPath);
-        $index->insertMany([
+        $index->insert([
             ['id' => 1, 'title' => 'sedan'],
             ['id' => 2, 'title' => 'coupe'],
         ]);
-        $index->updateMany([
+        $index->update([
             ['id' => 1, 'title' => 'suv'],
             ['id' => 2, 'title' => 'truck'],
         ]);
@@ -867,12 +867,12 @@ class IndexTest extends TestCase
     public function testUpdateManyThrowsIfAnyIdMissing(): void
     {
         $index = new Index($this->dbPath);
-        $index->insert(['id' => 1, 'title' => 'sedan']);
+        $index->insert([['id' => 1, 'title' => 'sedan']]);
 
         $this->expectException(QueryException::class);
         $this->expectExceptionMessageMatches('/do not exist/');
         // id 2 does not exist — must throw before any write
-        $index->updateMany([
+        $index->update([
             ['id' => 1, 'title' => 'suv'],
             ['id' => 2, 'title' => 'coupe'],
         ]);
@@ -881,14 +881,14 @@ class IndexTest extends TestCase
     public function testUpdateManyThrowsListsMissingIds(): void
     {
         $index = new Index($this->dbPath);
-        $index->insert(['id' => 1, 'title' => 'sedan']);
+        $index->insert([['id' => 1, 'title' => 'sedan']]);
 
         $this->expectException(QueryException::class);
         // Prefix must come first, then the missing IDs, then the suffix — kills concat-order mutations.
         $this->expectExceptionMessageMatches(
-            '/^Documents do not exist with ids: .*\b2\b.*\. Use upsertMany\(\)/'
+            '/^Documents do not exist with ids: .*\b2\b.*\. Use upsert\(\)/'
         );
-        $index->updateMany([
+        $index->update([
             ['id' => 1, 'title' => 'suv'],
             ['id' => 2, 'title' => 'coupe'],
             ['id' => 3, 'title' => 'truck'],
@@ -898,10 +898,10 @@ class IndexTest extends TestCase
     public function testUpdateManyIsAtomicOnMissingId(): void
     {
         $index = new Index($this->dbPath);
-        $index->insert(['id' => 1, 'title' => 'sedan']);
+        $index->insert([['id' => 1, 'title' => 'sedan']]);
 
         try {
-            $index->updateMany([
+            $index->update([
                 ['id' => 1, 'title' => 'suv'],
                 ['id' => 99, 'title' => 'ghost'],
             ]);
@@ -916,12 +916,12 @@ class IndexTest extends TestCase
     public function testUpdateManyUpdatesAvgDocLength(): void
     {
         $index = new Index($this->dbPath);
-        $index->insertMany([
+        $index->insert([
             ['id' => 1, 'title' => 'alpha beta gamma delta'],  // 4 tokens
             ['id' => 2, 'title' => 'epsilon zeta'],             // 2 tokens
         ]);
         // Replace both with 1-token docs; new avg = (1+1)/2 = 1.0
-        $index->updateMany([
+        $index->update([
             ['id' => 1, 'title' => 'eta'],
             ['id' => 2, 'title' => 'theta'],
         ]);
@@ -938,7 +938,7 @@ class IndexTest extends TestCase
 
         $this->expectException(QueryException::class);
         $this->expectExceptionMessageMatches("/must contain an 'id' key/");
-        $index->updateMany([['title' => 'sedan']]);
+        $index->update([['title' => 'sedan']]);
     }
 
     // --- upsertMany ---
@@ -946,7 +946,7 @@ class IndexTest extends TestCase
     public function testUpsertManyCreatesDocWhenIdNotFound(): void
     {
         $index = new Index($this->dbPath);
-        $index->upsertMany([
+        $index->upsert([
             ['id' => 1, 'title' => 'sedan'],
             ['id' => 2, 'title' => 'coupe'],
         ]);
@@ -958,8 +958,8 @@ class IndexTest extends TestCase
     public function testUpsertManyMixedExistingAndNewIdsUpdatesCount(): void
     {
         $index = new Index($this->dbPath);
-        $index->insert(['id' => 1, 'title' => 'sedan']);
-        $index->upsertMany([
+        $index->insert([['id' => 1, 'title' => 'sedan']]);
+        $index->upsert([
             ['id' => 1, 'title' => 'suv'],    // existing — no count change
             ['id' => 2, 'title' => 'coupe'],   // new — count +1
         ]);
@@ -973,7 +973,7 @@ class IndexTest extends TestCase
     public function testUpsertManyAllNewDocsAccumulatesAvgDocLength(): void
     {
         $index = new Index($this->dbPath);
-        $index->upsertMany([
+        $index->upsert([
             ['id' => 1, 'title' => 'alpha beta gamma'],  // 3 tokens
             ['id' => 2, 'title' => 'delta epsilon'],       // 2 tokens
             ['id' => 3, 'title' => 'zeta'],                // 1 token
@@ -989,8 +989,8 @@ class IndexTest extends TestCase
     public function testUpsertManyWithEmptyIterableIsNoop(): void
     {
         $index = new Index($this->dbPath);
-        $index->insert(['id' => 1, 'title' => 'sedan']);
-        $index->upsertMany([]);
+        $index->insert([['id' => 1, 'title' => 'sedan']]);
+        $index->upsert([]);
 
         $this->assertContains(1, $index->search('sedan')->ids);
         $info = $index->inspectQuery('sedan')['index_info'];
@@ -1002,7 +1002,7 @@ class IndexTest extends TestCase
     public function testDeleteRemovesDocumentFromResults(): void
     {
         $index = new Index($this->dbPath);
-        $index->insert(['id' => 1, 'title' => 'sedan car']);
+        $index->insert([['id' => 1, 'title' => 'sedan car']]);
         $index->delete(1);
 
         $this->assertEmpty($index->search('sedan')->ids);
@@ -1011,7 +1011,7 @@ class IndexTest extends TestCase
     public function testDeleteDoesNotAffectOtherDocuments(): void
     {
         $index = new Index($this->dbPath);
-        $index->insertMany([
+        $index->insert([
             ['id' => 1, 'title' => 'sedan car'],
             ['id' => 2, 'title' => 'suv truck'],
         ]);
@@ -1023,7 +1023,7 @@ class IndexTest extends TestCase
     public function testDeleteNonexistentDocumentIsNoop(): void
     {
         $index = new Index($this->dbPath);
-        $index->insert(['id' => 1, 'title' => 'sedan']);
+        $index->insert([['id' => 1, 'title' => 'sedan']]);
         $index->delete(999);
 
         $this->assertContains(1, $index->search('sedan')->ids);
@@ -1032,7 +1032,7 @@ class IndexTest extends TestCase
     public function testDeleteDecrementsDocumentCount(): void
     {
         $index = new Index($this->dbPath);
-        $index->insert(['id' => 1, 'title' => 'sedan']);
+        $index->insert([['id' => 1, 'title' => 'sedan']]);
         $index->delete(1);
 
         // NotIdentical / MethodCallRemoval / IncrementInteger mutations on the adjustStats call
@@ -1047,12 +1047,12 @@ class IndexTest extends TestCase
     public function testDeleteManyRemovesAllSpecifiedDocuments(): void
     {
         $index = new Index($this->dbPath);
-        $index->insertMany([
+        $index->insert([
             ['id' => 1, 'title' => 'sedan'],
             ['id' => 2, 'title' => 'coupe'],
             ['id' => 3, 'title' => 'suv'],
         ]);
-        $index->deleteMany([1, 2]);
+        $index->delete(1, 2);
 
         $this->assertEmpty($index->search('sedan')->ids);
         $this->assertEmpty($index->search('coupe')->ids);
@@ -1062,12 +1062,12 @@ class IndexTest extends TestCase
     public function testDeleteManyUpdatesDocumentCount(): void
     {
         $index = new Index($this->dbPath);
-        $index->insertMany([
+        $index->insert([
             ['id' => 1, 'title' => 'sedan'],
             ['id' => 2, 'title' => 'coupe'],
             ['id' => 3, 'title' => 'suv'],
         ]);
-        $index->deleteMany([1, 2]);
+        $index->delete(1, 2);
 
         $info = $index->inspectQuery('suv')['index_info'];
         $this->assertSame('1', $info['total_documents']);
@@ -1076,8 +1076,8 @@ class IndexTest extends TestCase
     public function testDeleteManyOfOnlyOneDocResetsCount(): void
     {
         $index = new Index($this->dbPath);
-        $index->insert(['id' => 1, 'title' => 'sedan']);
-        $index->deleteMany([1]);
+        $index->insert([['id' => 1, 'title' => 'sedan']]);
+        $index->delete(1);
 
         // DecrementInteger mutation on `if ($docDelta !== 0)` changes 0 to -1:
         // the guard then reads `$docDelta !== -1`, which is false when exactly one doc
@@ -1089,13 +1089,13 @@ class IndexTest extends TestCase
     public function testDeleteManyUpdatesAverageDocLength(): void
     {
         $index = new Index($this->dbPath);
-        $index->insertMany([
+        $index->insert([
             ['id' => 1, 'title' => 'alpha beta gamma'],  // 3 tokens
             ['id' => 2, 'title' => 'delta epsilon'],      // 2 tokens
             ['id' => 3, 'title' => 'zeta'],               // 1 token
         ]);
         // avg after insert = (3+2+1)/3 = 2; delete docs 1+2, leaving only doc 3 (len=1)
-        $index->deleteMany([1, 2]);
+        $index->delete(1, 2);
 
         // Assignment/MinusEqual mutations on `$lengthDelta -= $length` use direct assignment
         // instead of accumulation, so the total removed length is wrong (last doc's length
@@ -1107,8 +1107,8 @@ class IndexTest extends TestCase
     public function testDeleteManyWithEmptyArrayIsNoop(): void
     {
         $index = new Index($this->dbPath);
-        $index->insert(['id' => 1, 'title' => 'sedan']);
-        $index->deleteMany([]);
+        $index->insert([['id' => 1, 'title' => 'sedan']]);
+        $index->delete();
 
         $this->assertContains(1, $index->search('sedan')->ids);
     }
@@ -1116,8 +1116,8 @@ class IndexTest extends TestCase
     public function testDeleteManyIgnoresNonexistentIds(): void
     {
         $index = new Index($this->dbPath);
-        $index->insert(['id' => 1, 'title' => 'sedan']);
-        $index->deleteMany([1, 999]);
+        $index->insert([['id' => 1, 'title' => 'sedan']]);
+        $index->delete(1, 999);
 
         $this->assertEmpty($index->search('sedan')->ids);
     }
@@ -1128,11 +1128,11 @@ class IndexTest extends TestCase
         // the state must be consistent (this test ensures the empty-array guard works
         // and that a mixed real/missing batch completes without error).
         $index = new Index($this->dbPath);
-        $index->insertMany([
+        $index->insert([
             ['id' => 1, 'title' => 'sedan'],
             ['id' => 2, 'title' => 'coupe'],
         ]);
-        $index->deleteMany([1, 888, 2]);
+        $index->delete(1, 888, 2);
 
         $this->assertEmpty($index->search('sedan')->ids);
         $this->assertEmpty($index->search('coupe')->ids);
@@ -1143,7 +1143,7 @@ class IndexTest extends TestCase
     public function testClearRemovesAllDocuments(): void
     {
         $index = new Index($this->dbPath);
-        $index->insertMany([
+        $index->insert([
             ['id' => 1, 'title' => 'sedan'],
             ['id' => 2, 'title' => 'coupe'],
             ['id' => 3, 'title' => 'suv'],
@@ -1158,7 +1158,7 @@ class IndexTest extends TestCase
     public function testClearResetsDocumentCount(): void
     {
         $index = new Index($this->dbPath);
-        $index->insertMany([
+        $index->insert([
             ['id' => 1, 'title' => 'sedan'],
             ['id' => 2, 'title' => 'coupe'],
         ]);
@@ -1170,7 +1170,7 @@ class IndexTest extends TestCase
     public function testClearResetsAverageDocLength(): void
     {
         $index = new Index($this->dbPath);
-        $index->insertMany([
+        $index->insert([
             ['id' => 1, 'title' => 'alpha beta gamma'],
             ['id' => 2, 'title' => 'delta epsilon'],
         ]);
@@ -1183,9 +1183,9 @@ class IndexTest extends TestCase
     public function testClearAllowsReinsertionAfterwards(): void
     {
         $index = new Index($this->dbPath);
-        $index->insert(['id' => 1, 'title' => 'sedan']);
+        $index->insert([['id' => 1, 'title' => 'sedan']]);
         $index->clear();
-        $index->insert(['id' => 1, 'title' => 'coupe']);
+        $index->insert([['id' => 1, 'title' => 'coupe']]);
 
         $this->assertEmpty($index->search('sedan')->ids);
         $this->assertContains(1, $index->search('coupe')->ids);
@@ -1211,7 +1211,7 @@ class IndexTest extends TestCase
     public function testCountReflectsInsertedDocuments(): void
     {
         $index = new Index($this->dbPath);
-        $index->insertMany([
+        $index->insert([
             ['id' => 1, 'title' => 'sedan'],
             ['id' => 2, 'title' => 'coupe'],
         ]);
@@ -1221,7 +1221,7 @@ class IndexTest extends TestCase
     public function testCountDecrementsAfterDelete(): void
     {
         $index = new Index($this->dbPath);
-        $index->insert(['id' => 1, 'title' => 'sedan']);
+        $index->insert([['id' => 1, 'title' => 'sedan']]);
         $index->delete(1);
         $this->assertSame(0, $index->count());
     }
@@ -1229,18 +1229,18 @@ class IndexTest extends TestCase
     public function testCountIsStableAfterUpdate(): void
     {
         $index = new Index($this->dbPath);
-        $index->insertMany([
+        $index->insert([
             ['id' => 1, 'title' => 'sedan'],
             ['id' => 2, 'title' => 'coupe'],
         ]);
-        $index->update(['id' => 1, 'title' => 'suv']);
+        $index->update([['id' => 1, 'title' => 'suv']]);
         $this->assertSame(2, $index->count());
     }
 
     public function testCountPersistsAfterReopen(): void
     {
         $index = new Index($this->dbPath);
-        $index->insertMany([
+        $index->insert([
             ['id' => 1, 'title' => 'sedan'],
             ['id' => 2, 'title' => 'coupe'],
         ]);
@@ -1286,7 +1286,7 @@ class IndexTest extends TestCase
         // A write followed by close triggers a WAL checkpoint, which writes pages back to the
         // main DB file and updates its mtime.
         $index = new Index($this->dbPath);
-        $index->insert(['id' => 1, 'title' => 'sedan']);
+        $index->insert([['id' => 1, 'title' => 'sedan']]);
         $index->close();
         clearstatcache();
 
@@ -1298,7 +1298,7 @@ class IndexTest extends TestCase
     public function testHasReturnsTrueForExistingDocument(): void
     {
         $index = new Index($this->dbPath);
-        $index->insert(['id' => 1, 'title' => 'sedan']);
+        $index->insert([['id' => 1, 'title' => 'sedan']]);
 
         $this->assertTrue($index->has(1));
     }
@@ -1313,7 +1313,7 @@ class IndexTest extends TestCase
     public function testHasReturnsFalseAfterDelete(): void
     {
         $index = new Index($this->dbPath);
-        $index->insert(['id' => 1, 'title' => 'sedan']);
+        $index->insert([['id' => 1, 'title' => 'sedan']]);
         $index->delete(1);
 
         $this->assertFalse($index->has(1));
@@ -1322,8 +1322,8 @@ class IndexTest extends TestCase
     public function testHasReturnsTrueAfterUpdate(): void
     {
         $index = new Index($this->dbPath);
-        $index->insert(['id' => 1, 'title' => 'sedan']);
-        $index->update(['id' => 1, 'title' => 'coupe']);
+        $index->insert([['id' => 1, 'title' => 'sedan']]);
+        $index->update([['id' => 1, 'title' => 'coupe']]);
 
         $this->assertTrue($index->has(1));
     }
@@ -1331,7 +1331,7 @@ class IndexTest extends TestCase
     public function testHasReturnsTrueForUpsertedDocument(): void
     {
         $index = new Index($this->dbPath);
-        $index->upsert(['id' => 42, 'title' => 'sedan']);
+        $index->upsert([['id' => 42, 'title' => 'sedan']]);
 
         $this->assertTrue($index->has(42));
     }
@@ -1341,66 +1341,66 @@ class IndexTest extends TestCase
     public function testHasManyReturnsTrueForAllPresentIds(): void
     {
         $index = new Index($this->dbPath);
-        $index->insertMany([
+        $index->insert([
             ['id' => 1, 'title' => 'sedan'],
             ['id' => 2, 'title' => 'coupe'],
             ['id' => 3, 'title' => 'suv'],
         ]);
 
-        $this->assertSame([1 => true, 2 => true, 3 => true], $index->hasMany([1, 2, 3]));
+        $this->assertSame([1 => true, 2 => true, 3 => true], $index->has(1, 2, 3));
     }
 
     public function testHasManyReturnsMixedBooleans(): void
     {
         $index = new Index($this->dbPath);
-        $index->insertMany([
+        $index->insert([
             ['id' => 1, 'title' => 'sedan'],
             ['id' => 3, 'title' => 'suv'],
         ]);
 
         // ID 2 was never inserted — its value must be false, not absent from the map.
-        $this->assertSame([1 => true, 2 => false, 3 => true], $index->hasMany([1, 2, 3]));
+        $this->assertSame([1 => true, 2 => false, 3 => true], $index->has(1, 2, 3));
     }
 
     public function testHasManyReturnsFalseForAllAbsentIds(): void
     {
         $index = new Index($this->dbPath);
-        $index->insert(['id' => 1, 'title' => 'sedan']);
+        $index->insert([['id' => 1, 'title' => 'sedan']]);
 
-        $this->assertSame([99 => false, 100 => false], $index->hasMany([99, 100]));
+        $this->assertSame([99 => false, 100 => false], $index->has(99, 100));
     }
 
     public function testHasManyWithEmptyArrayReturnsEmpty(): void
     {
         $index = new Index($this->dbPath);
-        $index->insert(['id' => 1, 'title' => 'sedan']);
+        $index->insert([['id' => 1, 'title' => 'sedan']]);
 
-        $this->assertSame([], $index->hasMany([]));
+        $this->assertSame([], $index->has());
     }
 
     public function testHasManyPreservesInputOrder(): void
     {
         $index = new Index($this->dbPath);
-        $index->insertMany([
+        $index->insert([
             ['id' => 5, 'title' => 'sedan'],
             ['id' => 1, 'title' => 'coupe'],
             ['id' => 3, 'title' => 'suv'],
         ]);
 
         // Keys must follow the input order [5, 3, 1], not ascending DB order.
-        $this->assertSame([5 => true, 3 => true, 1 => true], $index->hasMany([5, 3, 1]));
+        $this->assertSame([5 => true, 3 => true, 1 => true], $index->has(5, 3, 1));
     }
 
     public function testHasManyReturnsFalseForDeletedId(): void
     {
         $index = new Index($this->dbPath);
-        $index->insertMany([
+        $index->insert([
             ['id' => 1, 'title' => 'sedan'],
             ['id' => 2, 'title' => 'coupe'],
         ]);
         $index->delete(2);
 
-        $this->assertSame([1 => true, 2 => false], $index->hasMany([1, 2]));
+        $this->assertSame([1 => true, 2 => false], $index->has(1, 2));
     }
 
     // --- search (fuzzy) ---
@@ -1408,7 +1408,7 @@ class IndexTest extends TestCase
     public function testSearchFuzzyMatchesTypo(): void
     {
         $index = new Index($this->dbPath);
-        $index->insert(['id' => 1, 'title' => 'Mercedes Benz', 'body' => 'luxury car']);
+        $index->insert([['id' => 1, 'title' => 'Mercedes Benz', 'body' => 'luxury car']]);
 
         $result = $index->search('mercdes', fuzzy: true);
         $this->assertContains(1, $result->ids);
@@ -1417,7 +1417,7 @@ class IndexTest extends TestCase
     public function testSearchFuzzyReturnsDocScores(): void
     {
         $index = new Index($this->dbPath);
-        $index->insert(['id' => 1, 'title' => 'Volkswagen Golf']);
+        $index->insert([['id' => 1, 'title' => 'Volkswagen Golf']]);
 
         $result = $index->search('volksagen', fuzzy: true);
         $this->assertContains(1, $result->ids);
@@ -1428,7 +1428,7 @@ class IndexTest extends TestCase
     public function testSearchFuzzyNoMatchReturnsEmpty(): void
     {
         $index = new Index($this->dbPath);
-        $index->insert(['id' => 1, 'title' => 'sedan']);
+        $index->insert([['id' => 1, 'title' => 'sedan']]);
 
         $result = $index->search('xqzpwk', fuzzy: true);
         $this->assertSame([], $result->ids);
@@ -1438,7 +1438,7 @@ class IndexTest extends TestCase
     public function testFuzzyDistanceOneAcceptsDistanceOneTypo(): void
     {
         $index = new Index($this->dbPath, config: new \Fuzor\Config(fuzzyDistance: 1));
-        $index->insert(['id' => 1, 'title' => 'sedan']);
+        $index->insert([['id' => 1, 'title' => 'sedan']]);
 
         $this->assertContains(1, $index->search('sedaan', fuzzy: true)->ids);
     }
@@ -1446,7 +1446,7 @@ class IndexTest extends TestCase
     public function testFuzzyDistanceOneRejectsDistanceTwoTypo(): void
     {
         $index = new Index($this->dbPath, config: new \Fuzor\Config(fuzzyDistance: 1));
-        $index->insert(['id' => 1, 'title' => 'sedan']);
+        $index->insert([['id' => 1, 'title' => 'sedan']]);
 
         $this->assertNotContains(1, $index->search('seddaan', fuzzy: true)->ids);
     }
@@ -1455,7 +1455,7 @@ class IndexTest extends TestCase
     {
         $index = new Index($this->dbPath, config: new \Fuzor\Config(fuzzyDistance: 2));
         // Query 'drago' (not indexed) is distance=1 from 'dragon' and distance=2 from 'draagon'.
-        $index->insertMany([
+        $index->insert([
             ['id' => 1, 'title' => 'dragon'],   // distance=1 from query
             ['id' => 2, 'title' => 'draagon'],  // distance=2 from query
         ]);
@@ -1471,7 +1471,7 @@ class IndexTest extends TestCase
     public function testSearchFuzzySecondaryOrderByPopularity(): void
     {
         $index = new Index($this->dbPath);
-        $index->insertMany([
+        $index->insert([
             ['id' => 1, 'title' => 'dragon dragon dragon dragon dragon'], // 5 hits — high num_hits
             ['id' => 2, 'title' => 'drage'],                             // 1 hit — low num_hits
         ]);
@@ -1488,7 +1488,7 @@ class IndexTest extends TestCase
     public function testSearchBooleanAnd(): void
     {
         $index = new Index($this->dbPath);
-        $index->insertMany([
+        $index->insert([
             ['id' => 1, 'title' => 'sedan coupe'],
             ['id' => 2, 'title' => 'sedan only'],
             ['id' => 3, 'title' => 'coupe only'],
@@ -1503,7 +1503,7 @@ class IndexTest extends TestCase
     public function testSearchBooleanOr(): void
     {
         $index = new Index($this->dbPath);
-        $index->insertMany([
+        $index->insert([
             ['id' => 1, 'title' => 'sedan car'],
             ['id' => 2, 'title' => 'suv truck'],
             ['id' => 3, 'title' => 'coupe sports'],
@@ -1518,7 +1518,7 @@ class IndexTest extends TestCase
     public function testSearchBooleanNot(): void
     {
         $index = new Index($this->dbPath);
-        $index->insertMany([
+        $index->insert([
             ['id' => 1, 'title' => 'bmw sedan'],
             ['id' => 2, 'title' => 'audi sedan'],
         ]);
@@ -1531,7 +1531,7 @@ class IndexTest extends TestCase
     public function testSearchBooleanNotRespectsAsYouTypePrefix(): void
     {
         $index = new Index($this->dbPath);
-        $index->insertMany([
+        $index->insert([
             ['id' => 1, 'title' => 'mercedes sedan'],
             ['id' => 2, 'title' => 'audi sedan'],
         ]);
@@ -1546,7 +1546,7 @@ class IndexTest extends TestCase
     public function testSearchBooleanDocScoresIsNull(): void
     {
         $index = new Index($this->dbPath);
-        $index->insert(['id' => 1, 'title' => 'sedan']);
+        $index->insert([['id' => 1, 'title' => 'sedan']]);
 
         $result = $index->searchBoolean('sedan');
         // Boolean search never scores; score() always returns null.
@@ -1556,7 +1556,7 @@ class IndexTest extends TestCase
     public function testSearchBooleanAndLastTermPrefixMatches(): void
     {
         $index = new Index($this->dbPath);
-        $index->insertMany([
+        $index->insert([
             ['id' => 1, 'title' => 'bmw sedan'],
             ['id' => 2, 'title' => 'bmw coupe'],
             ['id' => 3, 'title' => 'audi sedan'],
@@ -1571,7 +1571,7 @@ class IndexTest extends TestCase
     public function testSearchBooleanOrLastTermPrefixMatches(): void
     {
         $index = new Index($this->dbPath);
-        $index->insertMany([
+        $index->insert([
             ['id' => 1, 'title' => 'bmw coupe'],
             ['id' => 2, 'title' => 'audi sedan'],
             ['id' => 3, 'title' => 'tesla electric'],
@@ -1586,7 +1586,7 @@ class IndexTest extends TestCase
     public function testSearchBooleanAsYouTypeDisabledNoPartialMatch(): void
     {
         $index = new Index($this->dbPath);
-        $index->insertMany([
+        $index->insert([
             ['id' => 1, 'title' => 'bmw sedan'],
             ['id' => 2, 'title' => 'audi coupe'],
         ]);
@@ -1598,7 +1598,7 @@ class IndexTest extends TestCase
     public function testSearchBooleanOnlyLastTermIsPrefixExpanded(): void
     {
         $index = new Index($this->dbPath);
-        $index->insertMany([
+        $index->insert([
             ['id' => 1, 'title' => 'sedan coupe'],
             ['id' => 2, 'title' => 'sedan hatchback'],
         ]);
@@ -1613,7 +1613,7 @@ class IndexTest extends TestCase
     public function testSearchBooleanSingleTermAsYouTypePrefix(): void
     {
         $index = new Index($this->dbPath);
-        $index->insertMany([
+        $index->insert([
             ['id' => 1, 'title' => 'sedan'],
             ['id' => 2, 'title' => 'coupe'],
         ]);
@@ -1628,7 +1628,7 @@ class IndexTest extends TestCase
     public function testSearchBooleanAndMissingTermReturnsEmpty(): void
     {
         $index = new Index($this->dbPath);
-        $index->insert(['id' => 1, 'title' => 'sedan']);
+        $index->insert([['id' => 1, 'title' => 'sedan']]);
 
         $result = $index->searchBoolean('sedan helicopter');
         $this->assertSame([], $result->ids);
@@ -1637,7 +1637,7 @@ class IndexTest extends TestCase
     public function testSearchBooleanHitsExceedsNumOfResults(): void
     {
         $index = new Index($this->dbPath);
-        $index->insertMany([
+        $index->insert([
             ['id' => 1, 'title' => 'sedan'],
             ['id' => 2, 'title' => 'sedan'],
             ['id' => 3, 'title' => 'sedan'],
@@ -1651,7 +1651,7 @@ class IndexTest extends TestCase
     public function testSearchBooleanMultipleNots(): void
     {
         $index = new Index($this->dbPath);
-        $index->insertMany([
+        $index->insert([
             ['id' => 1, 'title' => 'bmw sedan'],
             ['id' => 2, 'title' => 'audi sedan'],
             ['id' => 3, 'title' => 'tesla sedan'],
@@ -1666,7 +1666,7 @@ class IndexTest extends TestCase
     public function testSearchBooleanNormalizesUnicodeUppercase(): void
     {
         $index = new Index($this->dbPath);
-        $index->insert(['id' => 1, 'title' => 'café']);
+        $index->insert([['id' => 1, 'title' => 'café']]);
         $result = $index->searchBoolean('CAFÉ', asYouType: false);
         $this->assertContains(1, $result->ids);
     }
@@ -1674,7 +1674,7 @@ class IndexTest extends TestCase
     public function testBooleanAndBindsTighterThanOr(): void
     {
         $index = new Index($this->dbPath);
-        $index->insertMany([
+        $index->insert([
             ['id' => 1, 'title' => 'sedan'],          // only sedan
             ['id' => 2, 'title' => 'coupe truck'],     // coupe AND truck
             ['id' => 3, 'title' => 'coupe'],           // only coupe
@@ -1692,7 +1692,7 @@ class IndexTest extends TestCase
     public function testBooleanNotBindsTighterThanAnd(): void
     {
         $index = new Index($this->dbPath);
-        $index->insertMany([
+        $index->insert([
             ['id' => 1, 'title' => 'php laravel'],
             ['id' => 2, 'title' => 'php symfony'],
         ]);
@@ -1709,7 +1709,7 @@ class IndexTest extends TestCase
     public function testBooleanExplicitAndWithParenthesisedOrOnRight(): void
     {
         $index = new Index($this->dbPath);
-        $index->insertMany([
+        $index->insert([
             ['id' => 1, 'title' => 'php laravel'],
             ['id' => 2, 'title' => 'php nodejs'],
             ['id' => 3, 'title' => 'golang'],
@@ -1728,7 +1728,7 @@ class IndexTest extends TestCase
     public function testBooleanAndWithMaterializedOrResultIsIntersection(): void
     {
         $index = new Index($this->dbPath);
-        $index->insertMany([
+        $index->insert([
             ['id' => 1, 'title' => 'php laravel'],
             ['id' => 2, 'title' => 'php nodejs'],
             ['id' => 3, 'title' => 'laravel nodejs'],  // no php
@@ -1749,7 +1749,7 @@ class IndexTest extends TestCase
     public function testBooleanSliceStartsAtIndexZero(): void
     {
         $index = new Index($this->dbPath);
-        $index->insertMany([
+        $index->insert([
             ['id' => 1, 'title' => 'sedan'],
             ['id' => 2, 'title' => 'sedan'],
             ['id' => 3, 'title' => 'sedan'],
@@ -1766,7 +1766,7 @@ class IndexTest extends TestCase
     public function testBooleanSearchLowercasesNonAsciiViaMultibyte(): void
     {
         $index = new Index($this->dbPath);
-        $index->insert(['id' => 1, 'title' => 'naïve']);
+        $index->insert([['id' => 1, 'title' => 'naïve']]);
         // mb_strtolower('NAÏVE') → 'naïve'. strtolower('NAÏVE') → 'naÏve' (Ï stays uppercase).
         // Without mb_, the mutated query 'naÏve' does not match 'naïve' in the wordlist.
         $result = $index->searchBoolean('NAÏVE', asYouType: false);
@@ -1776,7 +1776,7 @@ class IndexTest extends TestCase
     public function testBooleanSearchStripsSpacesAroundParentheses(): void
     {
         $index = new Index($this->dbPath);
-        $index->insertMany([
+        $index->insert([
             ['id' => 1, 'title' => 'café'],
             ['id' => 2, 'title' => 'latté'],
         ]);
@@ -1793,7 +1793,7 @@ class IndexTest extends TestCase
         $index = new Index($this->dbPath);
         // Index the lowercase form; the query must be lowercased with mb_strtolower.
         // 'Ü' (U+00DC) is two bytes in UTF-8; strtolower leaves it unchanged.
-        $index->insert(['id' => 1, 'title' => 'über']);
+        $index->insert([['id' => 1, 'title' => 'über']]);
         $result = $index->searchBoolean('ÜBER', asYouType: false);
         $this->assertContains(1, $result->ids);
     }
@@ -1801,7 +1801,7 @@ class IndexTest extends TestCase
     public function testBooleanGroupNotFollowedByNot(): void
     {
         $index = new Index($this->dbPath);
-        $index->insertMany([
+        $index->insert([
             ['id' => 1, 'title' => 'sedan coupe'],
             ['id' => 2, 'title' => 'sedan electric'],
             ['id' => 3, 'title' => 'coupe electric'],
@@ -1821,7 +1821,7 @@ class IndexTest extends TestCase
     public function testBooleanGroupingConstrainsChainedAnd(): void
     {
         $index = new Index($this->dbPath);
-        $index->insertMany([
+        $index->insert([
             ['id' => 1, 'title' => 'alpha beta delta'],   // all three → should match
             ['id' => 2, 'title' => 'alpha gamma delta'],  // all three → should match
             ['id' => 3, 'title' => 'alpha beta'],          // missing delta → must be excluded
@@ -1916,7 +1916,7 @@ class IndexTest extends TestCase
     public function testInspectQueryFoundTrueForIndexedTerm(): void
     {
         $index = new Index($this->dbPath);
-        $index->insert(['id' => 1, 'body' => 'sedan']);
+        $index->insert([['id' => 1, 'body' => 'sedan']]);
         $result = $index->inspectQuery('sedan', asYouType: false);
         $this->assertTrue($result['tokens'][0]['found']);
         $this->assertGreaterThanOrEqual(1, $result['tokens'][0]['num_docs']);
@@ -1936,7 +1936,7 @@ class IndexTest extends TestCase
     public function testInspectQueryMatchTypeExact(): void
     {
         $index = new Index($this->dbPath);
-        $index->insert(['id' => 1, 'body' => 'sedan']);
+        $index->insert([['id' => 1, 'body' => 'sedan']]);
         $result = $index->inspectQuery('sedan', asYouType: false);
         $this->assertSame('exact', $result['tokens'][0]['match_type']);
     }
@@ -1944,7 +1944,7 @@ class IndexTest extends TestCase
     public function testInspectQueryMatchTypePrefix(): void
     {
         $index = new Index($this->dbPath);
-        $index->insert(['id' => 1, 'body' => 'sedan']);
+        $index->insert([['id' => 1, 'body' => 'sedan']]);
         $result = $index->inspectQuery('sed');
         $this->assertSame('prefix', $result['tokens'][0]['match_type']);
         $terms = array_column($result['tokens'][0]['wordlist_rows'], 'term');
@@ -1954,7 +1954,7 @@ class IndexTest extends TestCase
     public function testInspectQueryMatchTypeFuzzy(): void
     {
         $index = new Index($this->dbPath);
-        $index->insert(['id' => 1, 'body' => 'sedan']);
+        $index->insert([['id' => 1, 'body' => 'sedan']]);
         $result = $index->inspectQuery('sedaan', fuzzy: true, asYouType: false);
         $this->assertSame('fuzzy', $result['tokens'][0]['match_type']);
         $this->assertNotNull($result['tokens'][0]['wordlist_rows'][0]['distance']);
@@ -1963,7 +1963,7 @@ class IndexTest extends TestCase
     public function testInspectQueryMatchTypeNoneWhenNoCandidate(): void
     {
         $index = new Index($this->dbPath);
-        $index->insert(['id' => 1, 'body' => 'sedan']);
+        $index->insert([['id' => 1, 'body' => 'sedan']]);
         $result = $index->inspectQuery('zzznomatch', fuzzy: true, asYouType: false);
         $this->assertSame('none', $result['tokens'][0]['match_type']);
     }
@@ -1971,7 +1971,7 @@ class IndexTest extends TestCase
     public function testInspectQueryPrefixExpandsMultipleTerms(): void
     {
         $index = new Index($this->dbPath);
-        $index->insertMany([
+        $index->insert([
             ['id' => 1, 'body' => 'sedan'],
             ['id' => 2, 'body' => 'sediment'],
         ]);
@@ -1993,7 +1993,7 @@ class IndexTest extends TestCase
     public function testInspectQueryIndexInfoContainsDocumentCount(): void
     {
         $index = new Index($this->dbPath);
-        $index->insert(['id' => 1, 'body' => 'sedan']);
+        $index->insert([['id' => 1, 'body' => 'sedan']]);
         $info = $index->inspectQuery('sedan')['index_info'];
         $this->assertArrayHasKey('total_documents', $info);
         $this->assertArrayHasKey('avg_doc_length', $info);
@@ -2043,7 +2043,7 @@ class IndexTest extends TestCase
     public function testInspectQueryDoesNotChangeDocumentCount(): void
     {
         $index = new Index($this->dbPath);
-        $index->insert(['id' => 1, 'body' => 'sedan']);
+        $index->insert([['id' => 1, 'body' => 'sedan']]);
         $before = $index->inspectQuery('sedan')['index_info']['total_documents'];
         $index->inspectQuery('sedan');
         $this->assertSame($before, $index->inspectQuery('sedan')['index_info']['total_documents']);
@@ -2052,7 +2052,7 @@ class IndexTest extends TestCase
     public function testInspectQueryWarmsWordlistCacheForSearch(): void
     {
         $index = new Index($this->dbPath);
-        $index->insert(['id' => 1, 'body' => 'sedan']);
+        $index->insert([['id' => 1, 'body' => 'sedan']]);
         $index->inspectQuery('sedan', asYouType: false);
         // If cache is warm, search returns the same result without extra DB reads.
         $result = $index->search('sedan');
@@ -2062,7 +2062,7 @@ class IndexTest extends TestCase
     public function testInspectQueryDefaultFuzzyParamIsFalse(): void
     {
         $index = new Index($this->dbPath);
-        $index->insert(['id' => 1, 'title' => 'sedan']);
+        $index->insert([['id' => 1, 'title' => 'sedan']]);
 
         // Mutation FalseValue: default changes to true → 'sedna' fuzzy-matches 'sedan' → 'fuzzy'.
         // Original default false: no fuzzy → no match → 'none'.
@@ -2073,7 +2073,7 @@ class IndexTest extends TestCase
     public function testInspectQueryExactMatchWithFuzzyTrueIsNotFuzzyType(): void
     {
         $index = new Index($this->dbPath);
-        $index->insert(['id' => 1, 'title' => 'sedan']);
+        $index->insert([['id' => 1, 'title' => 'sedan']]);
 
         // When fuzzy=true but an exact wordlist hit is found, rows[0] has no 'distance' key.
         // Mutation L204: $fuzzy || isset($rows[0]['distance']) → true || false = true → 'fuzzy'.
@@ -2085,7 +2085,7 @@ class IndexTest extends TestCase
     public function testInspectQueryWordlistRowsHaveExactKeys(): void
     {
         $index = new Index($this->dbPath);
-        $index->insert(['id' => 1, 'title' => 'sedan']);
+        $index->insert([['id' => 1, 'title' => 'sedan']]);
 
         $rows = $index->inspectQuery('sedan', asYouType: false)['tokens'][0]['wordlist_rows'];
         $this->assertNotEmpty($rows);
@@ -2097,7 +2097,7 @@ class IndexTest extends TestCase
     public function testInspectQueryNumHitsAndNumDocsValues(): void
     {
         $index = new Index($this->dbPath);
-        $index->insert(['id' => 1, 'title' => 'sedan sedan']);
+        $index->insert([['id' => 1, 'title' => 'sedan sedan']]);
 
         $token = $index->inspectQuery('sedan', asYouType: false)['tokens'][0];
         $this->assertSame(2, $token['num_hits']);
@@ -2112,7 +2112,7 @@ class IndexTest extends TestCase
         $index->close();
 
         $rebuilt = Index::rebuild($this->dbPath, function (Index $new): void {
-            $new->insert(['id' => 1, 'title' => 'sedan']);
+            $new->insert([['id' => 1, 'title' => 'sedan']]);
         });
 
         $this->assertInstanceOf(Index::class, $rebuilt);
@@ -2124,7 +2124,7 @@ class IndexTest extends TestCase
         $index->close();
 
         $rebuilt = Index::rebuild($this->dbPath, function (Index $new): void {
-            $new->insert(['id' => 1, 'title' => 'sedan']);
+            $new->insert([['id' => 1, 'title' => 'sedan']]);
         });
 
         $this->assertContains(1, $rebuilt->search('sedan')->ids);
@@ -2133,11 +2133,11 @@ class IndexTest extends TestCase
     public function testRebuildRemovesOldContent(): void
     {
         $index = new Index($this->dbPath);
-        $index->insert(['id' => 1, 'title' => 'old content']);
+        $index->insert([['id' => 1, 'title' => 'old content']]);
         $index->close();
 
         $rebuilt = Index::rebuild($this->dbPath, function (Index $new): void {
-            $new->insert(['id' => 2, 'title' => 'new content']);
+            $new->insert([['id' => 2, 'title' => 'new content']]);
         });
 
         $this->assertEmpty($rebuilt->search('old')->ids);
@@ -2147,12 +2147,12 @@ class IndexTest extends TestCase
     public function testRebuildLeavesOriginalIntactOnCallbackException(): void
     {
         $index = new Index($this->dbPath);
-        $index->insert(['id' => 1, 'title' => 'original']);
+        $index->insert([['id' => 1, 'title' => 'original']]);
         $index->close();
 
         try {
             Index::rebuild($this->dbPath, function (Index $new): void {
-                $new->insert(['id' => 2, 'title' => 'partial']);
+                $new->insert([['id' => 2, 'title' => 'partial']]);
                 throw new \RuntimeException('simulated failure');
             });
         } catch (\RuntimeException) {
@@ -2197,7 +2197,7 @@ class IndexTest extends TestCase
         new Index($this->dbPath, language: 'en')->close();
 
         $rebuilt = Index::rebuild($this->dbPath, function (Index $new): void {
-            $new->insert(['id' => 1, 'title' => 'running']);
+            $new->insert([['id' => 1, 'title' => 'running']]);
         });
 
         $this->assertSame('en', $rebuilt->language);
@@ -2206,7 +2206,7 @@ class IndexTest extends TestCase
     public function testRebuildWorksWhenFileDoesNotExistYet(): void
     {
         $rebuilt = Index::rebuild($this->dbPath, function (Index $new): void {
-            $new->insert(['id' => 1, 'title' => 'sedan']);
+            $new->insert([['id' => 1, 'title' => 'sedan']]);
         });
 
         $this->assertContains(1, $rebuilt->search('sedan')->ids);
@@ -2215,11 +2215,11 @@ class IndexTest extends TestCase
     public function testRebuildCountReflectsNewDocuments(): void
     {
         $index = new Index($this->dbPath);
-        $index->insertMany([['id' => 1, 'title' => 'a'], ['id' => 2, 'title' => 'b']]);
+        $index->insert([['id' => 1, 'title' => 'a'], ['id' => 2, 'title' => 'b']]);
         $index->close();
 
         $rebuilt = Index::rebuild($this->dbPath, function (Index $new): void {
-            $new->insert(['id' => 10, 'title' => 'only one']);
+            $new->insert([['id' => 10, 'title' => 'only one']]);
         });
 
         $this->assertSame(1, $rebuilt->count());
@@ -2230,7 +2230,7 @@ class IndexTest extends TestCase
     public function testZhInsertAndSearchBigram(): void
     {
         $index = new Index($this->dbPath, language: 'zh');
-        $index->insert(['id' => 1, 'body' => '轿车测试']);
+        $index->insert([['id' => 1, 'body' => '轿车测试']]);
 
         $this->assertContains(1, $index->search('轿车')->ids);
     }
@@ -2239,7 +2239,7 @@ class IndexTest extends TestCase
     {
         // Unigrams are emitted at index time for zh so single-character searches work.
         $index = new Index($this->dbPath, language: 'zh');
-        $index->insert(['id' => 1, 'body' => '轿车测试']);
+        $index->insert([['id' => 1, 'body' => '轿车测试']]);
 
         $this->assertContains(1, $index->search('车')->ids);
     }
@@ -2247,7 +2247,7 @@ class IndexTest extends TestCase
     public function testZhDoesNotMatchUnrelatedDocument(): void
     {
         $index = new Index($this->dbPath, language: 'zh');
-        $index->insertMany([
+        $index->insert([
             ['id' => 1, 'body' => '轿车测试'],
             ['id' => 2, 'body' => '飞机起飞'],
         ]);
@@ -2258,7 +2258,7 @@ class IndexTest extends TestCase
     public function testJaInsertAndSearchBigram(): void
     {
         $index = new Index($this->dbPath, language: 'ja');
-        $index->insert(['id' => 1, 'body' => '東京タワー']);
+        $index->insert([['id' => 1, 'body' => '東京タワー']]);
 
         $this->assertContains(1, $index->search('東京')->ids);
     }
@@ -2266,7 +2266,7 @@ class IndexTest extends TestCase
     public function testKoInsertAndSearchBigram(): void
     {
         $index = new Index($this->dbPath, language: 'ko');
-        $index->insert(['id' => 1, 'body' => '서울특별시']);
+        $index->insert([['id' => 1, 'body' => '서울특별시']]);
 
         $this->assertContains(1, $index->search('서울')->ids);
     }
@@ -2274,7 +2274,7 @@ class IndexTest extends TestCase
     public function testThInsertAndSearchTrigram(): void
     {
         $index = new Index($this->dbPath, language: 'th');
-        $index->insert(['id' => 1, 'body' => 'กรุงเทพมหานคร']);
+        $index->insert([['id' => 1, 'body' => 'กรุงเทพมหานคร']]);
 
         // 'กรุงเท' is a trigram within the indexed text
         $this->assertContains(1, $index->search('กรุงเท')->ids);
@@ -2283,7 +2283,7 @@ class IndexTest extends TestCase
     public function testZhBooleanSearch(): void
     {
         $index = new Index($this->dbPath, language: 'zh');
-        $index->insertMany([
+        $index->insert([
             ['id' => 1, 'body' => '轿车测试'],
             ['id' => 2, 'body' => '飞机起飞'],
         ]);
@@ -2308,7 +2308,7 @@ class IndexTest extends TestCase
     {
         // ASCII tokens in a mixed query must not be ngrammed.
         $index = new Index($this->dbPath, language: 'zh');
-        $index->insertMany([
+        $index->insert([
             ['id' => 1, 'body' => 'BMW 轿车'],
             ['id' => 2, 'body' => '轿车'],
         ]);
@@ -2325,7 +2325,7 @@ class IndexTest extends TestCase
     {
         $index = new Index($this->dbPath);
         // "city car" → 2 tokens → 2 position rows
-        $index->insert(['id' => 1, 'title' => 'city car']);
+        $index->insert([['id' => 1, 'title' => 'city car']]);
         $index->close();
 
         $pdo  = new \PDO('sqlite:' . $this->dbPath);
@@ -2338,7 +2338,7 @@ class IndexTest extends TestCase
     public function testStorePositionsRecordsCorrectPositionValues(): void
     {
         $index = new Index($this->dbPath);
-        $index->insert(['id' => 1, 'title' => 'city car review']);
+        $index->insert([['id' => 1, 'title' => 'city car review']]);
 
         $pdo  = new \PDO('sqlite:' . $this->dbPath);
         $stmt = $pdo->query(
@@ -2361,7 +2361,7 @@ class IndexTest extends TestCase
     {
         $index = new Index($this->dbPath);
         // title contributes tokens at 0, 1; body continues from 2, 3
-        $index->insert(['id' => 1, 'title' => 'city car', 'body' => 'fast sedan']);
+        $index->insert([['id' => 1, 'title' => 'city car', 'body' => 'fast sedan']]);
 
         $pdo  = new \PDO('sqlite:' . $this->dbPath);
         $stmt = $pdo->query(
@@ -2383,7 +2383,7 @@ class IndexTest extends TestCase
     public function testStorePositionsDeletedOnDocumentRemoval(): void
     {
         $index = new Index($this->dbPath);
-        $index->insert(['id' => 1, 'title' => 'city car']);
+        $index->insert([['id' => 1, 'title' => 'city car']]);
         $index->delete(1);
         $index->close();
 
@@ -2397,7 +2397,7 @@ class IndexTest extends TestCase
     public function testStorePositionsInsertManyWritesCorrectRows(): void
     {
         $index = new Index($this->dbPath);
-        $index->insertMany([
+        $index->insert([
             ['id' => 1, 'title' => 'city car'],     // 2 tokens
             ['id' => 2, 'title' => 'fast sedan review'], // 3 tokens
         ]);
@@ -2430,7 +2430,7 @@ class IndexTest extends TestCase
     {
         // doc 1: terms adjacent (minSpan = 1), doc 2: terms far apart (minSpan = 10)
         $index = new Index($this->dbPath);
-        $index->insertMany([
+        $index->insert([
             ['id' => 1, 'title' => 'fast car review review review review review review review review review'],
             ['id' => 2, 'title' => 'fast review review review review review review review review review car'],
         ]);
@@ -2445,7 +2445,7 @@ class IndexTest extends TestCase
     {
         $config = new Config(proximityBoost: 0.0);
         $index  = new Index($this->dbPath, config: $config);
-        $index->insertMany([
+        $index->insert([
             ['id' => 1, 'title' => 'fast car review review review review review review review review review'],
             ['id' => 2, 'title' => 'fast review review review review review review review review review car'],
         ]);
@@ -2460,7 +2460,7 @@ class IndexTest extends TestCase
     public function testProximityBoostNoEffectOnSingleKeyword(): void
     {
         $index = new Index($this->dbPath);
-        $index->insertMany([
+        $index->insert([
             ['id' => 1, 'title' => 'fast sedan'],
             ['id' => 2, 'title' => 'fast coupe'],
         ]);
@@ -2474,7 +2474,7 @@ class IndexTest extends TestCase
     {
         // doc 1 has both terms, doc 2 has only "fast" — partial match should not get boosted.
         $index = new Index($this->dbPath);
-        $index->insertMany([
+        $index->insert([
             ['id' => 1, 'title' => 'fast car'],
             ['id' => 2, 'title' => 'fast review'],
         ]);
@@ -2495,7 +2495,7 @@ class IndexTest extends TestCase
         // (unlimited), both receive the proximity pass and the adjacent-terms doc (id=1) wins.
         $config = new Config(proxWindowSize: 0);
         $index  = new Index($this->dbPath, config: $config);
-        $index->insertMany([
+        $index->insert([
             ['id' => 1, 'title' => 'fast car review review review review review review review review review'],
             ['id' => 2, 'title' => 'fast review review review review review review review review review car'],
         ]);
@@ -2517,7 +2517,7 @@ class IndexTest extends TestCase
         // This demonstrates that the windowed path produces a different result from unlimited.
         $config = new Config(proxWindowSize: 1);
         $index  = new Index($this->dbPath, config: $config);
-        $index->insertMany([
+        $index->insert([
             ['id' => 1, 'title' => 'fast car'],
             ['id' => 2, 'title' => 'fast review review review review review review review review review car'],
         ]);
@@ -2540,7 +2540,7 @@ class IndexTest extends TestCase
         ];
 
         $calls = [];
-        $index->insertMany($docs, progress: function (int $done, int $total) use (&$calls): void {
+        $index->insert($docs, progress: function (int $done, int $total) use (&$calls): void {
             $calls[] = [$done, $total];
         });
 
@@ -2553,7 +2553,7 @@ class IndexTest extends TestCase
         $docs   = array_map(fn(int $i): array => ['id' => $i, 'title' => "doc $i"], range(1, 10));
         $totals = [];
 
-        $index->insertMany($docs, progress: function (int $done, int $total) use (&$totals): void {
+        $index->insert($docs, progress: function (int $done, int $total) use (&$totals): void {
             $totals[] = $total;
         });
 
@@ -2563,7 +2563,7 @@ class IndexTest extends TestCase
     public function testInsertManyProgressNullCallbackIsDefault(): void
     {
         $index = new Index($this->dbPath);
-        $index->insertMany([['id' => 1, 'title' => 'sedan']]);
+        $index->insert([['id' => 1, 'title' => 'sedan']]);
         $this->assertContains(1, $index->search('sedan')->ids);
     }
 
@@ -2572,7 +2572,7 @@ class IndexTest extends TestCase
         $index = new Index($this->dbPath);
         $fired = false;
 
-        $index->insertMany([], progress: function () use (&$fired): void {
+        $index->insert([], progress: function () use (&$fired): void {
             $fired = true;
         });
 
@@ -2603,7 +2603,7 @@ class IndexTest extends TestCase
     public function testReadonlySearchWorks(): void
     {
         $write = new Index($this->dbPath);
-        $write->insert(['id' => 1, 'title' => 'electric sedan']);
+        $write->insert([['id' => 1, 'title' => 'electric sedan']]);
         $write->close();
 
         $read = new Index($this->dbPath, readonly: true);
@@ -2614,44 +2614,44 @@ class IndexTest extends TestCase
     {
         new Index($this->dbPath)->close();
         $this->expectException(IOException::class);
-        new Index($this->dbPath, readonly: true)->insert(['id' => 1, 'title' => 'x']);
+        new Index($this->dbPath, readonly: true)->insert([['id' => 1, 'title' => 'x']]);
     }
 
     public function testReadonlyInsertManyThrows(): void
     {
         new Index($this->dbPath)->close();
         $this->expectException(IOException::class);
-        new Index($this->dbPath, readonly: true)->insertMany([['id' => 1, 'title' => 'x']]);
+        new Index($this->dbPath, readonly: true)->insert([['id' => 1, 'title' => 'x']]);
     }
 
     public function testReadonlyUpdateThrows(): void
     {
         $write = new Index($this->dbPath);
-        $write->insert(['id' => 1, 'title' => 'x']);
+        $write->insert([['id' => 1, 'title' => 'x']]);
         $write->close();
         $this->expectException(IOException::class);
-        new Index($this->dbPath, readonly: true)->update(['id' => 1, 'title' => 'y']);
+        new Index($this->dbPath, readonly: true)->update([['id' => 1, 'title' => 'y']]);
     }
 
     public function testReadonlyUpsertThrows(): void
     {
         new Index($this->dbPath)->close();
         $this->expectException(IOException::class);
-        new Index($this->dbPath, readonly: true)->upsert(['id' => 1, 'title' => 'x']);
+        new Index($this->dbPath, readonly: true)->upsert([['id' => 1, 'title' => 'x']]);
     }
 
     public function testReadonlyUpdateManyThrows(): void
     {
         new Index($this->dbPath)->close();
         $this->expectException(IOException::class);
-        new Index($this->dbPath, readonly: true)->updateMany([['id' => 1, 'title' => 'x']]);
+        new Index($this->dbPath, readonly: true)->update([['id' => 1, 'title' => 'x']]);
     }
 
     public function testReadonlyUpsertManyThrows(): void
     {
         new Index($this->dbPath)->close();
         $this->expectException(IOException::class);
-        new Index($this->dbPath, readonly: true)->upsertMany([['id' => 1, 'title' => 'x']]);
+        new Index($this->dbPath, readonly: true)->upsert([['id' => 1, 'title' => 'x']]);
     }
 
     public function testReadonlyDeleteThrows(): void
@@ -2665,7 +2665,7 @@ class IndexTest extends TestCase
     {
         new Index($this->dbPath)->close();
         $this->expectException(IOException::class);
-        new Index($this->dbPath, readonly: true)->deleteMany([1]);
+        new Index($this->dbPath, readonly: true)->delete(1);
     }
 
     public function testReadonlyClearThrows(): void
@@ -2682,7 +2682,7 @@ class IndexTest extends TestCase
         $readPath = sys_get_temp_dir() . '/fuzor_snap_' . uniqid() . '.db';
         try {
             $write = new Index($this->dbPath);
-            $write->insert(['id' => 1, 'title' => 'electric sedan']);
+            $write->insert([['id' => 1, 'title' => 'electric sedan']]);
             $write->snapshotTo($readPath);
             $this->assertFileExists($readPath);
         } finally {
@@ -2695,7 +2695,7 @@ class IndexTest extends TestCase
         $readPath = sys_get_temp_dir() . '/fuzor_snap_' . uniqid() . '.db';
         try {
             $write = new Index($this->dbPath);
-            $write->insertMany([
+            $write->insert([
                 ['id' => 1, 'title' => 'electric sedan'],
                 ['id' => 2, 'title' => 'off-road suv'],
             ]);
@@ -2717,7 +2717,7 @@ class IndexTest extends TestCase
         $readPath = sys_get_temp_dir() . '/fuzor_snap_' . uniqid() . '.db';
         try {
             $write = new Index($this->dbPath);
-            $write->insert(['id' => 1, 'title' => 'sedan']);
+            $write->insert([['id' => 1, 'title' => 'sedan']]);
             $write->snapshotTo($readPath);
 
             $read = new Index($readPath, readonly: true);
@@ -2733,10 +2733,10 @@ class IndexTest extends TestCase
         $readPath = sys_get_temp_dir() . '/fuzor_snap_' . uniqid() . '.db';
         try {
             $write = new Index($this->dbPath);
-            $write->insert(['id' => 1, 'title' => 'first']);
+            $write->insert([['id' => 1, 'title' => 'first']]);
             $write->snapshotTo($readPath);
 
-            $write->insert(['id' => 2, 'title' => 'second']);
+            $write->insert([['id' => 2, 'title' => 'second']]);
             $write->snapshotTo($readPath);
 
             $read = new Index($readPath);
@@ -2755,7 +2755,7 @@ class IndexTest extends TestCase
             file_put_contents($stale, 'leftover');
 
             $write = new Index($this->dbPath);
-            $write->insert(['id' => 1, 'title' => 'sedan']);
+            $write->insert([['id' => 1, 'title' => 'sedan']]);
             $write->snapshotTo($readPath);
 
             $this->assertFileDoesNotExist($stale);
@@ -2770,7 +2770,7 @@ class IndexTest extends TestCase
         $readPath = sys_get_temp_dir() . '/fuzor_snap_' . uniqid() . '.db';
         try {
             $write = new Index($this->dbPath, language: 'en');
-            $write->insert(['id' => 1, 'title' => 'running fast']);
+            $write->insert([['id' => 1, 'title' => 'running fast']]);
             $write->snapshotTo($readPath);
 
             $read = new Index($readPath);
@@ -2816,7 +2816,7 @@ class IndexTest extends TestCase
     public function testGetThrowsWhenStoreNotEnabled(): void
     {
         $index = new Index($this->dbPath);
-        $index->insert(['id' => 1, 'title' => 'sedan']);
+        $index->insert([['id' => 1, 'title' => 'sedan']]);
 
         $this->expectException(QueryException::class);
         $index->get(1);
@@ -2825,10 +2825,10 @@ class IndexTest extends TestCase
     public function testGetManyThrowsWhenStoreNotEnabled(): void
     {
         $index = new Index($this->dbPath);
-        $index->insert(['id' => 1, 'title' => 'sedan']);
+        $index->insert([['id' => 1, 'title' => 'sedan']]);
 
         $this->expectException(QueryException::class);
-        $index->getMany([1]);
+        $index->get(1);
     }
 
     public function testGetReturnsNullForMissingId(): void
@@ -2840,15 +2840,16 @@ class IndexTest extends TestCase
     public function testGetManyEmptyArrayReturnsEmpty(): void
     {
         $index = new Index($this->dbPath, store: true);
-        $this->assertSame([], $index->getMany([]));
+        $this->assertSame([], $index->get());
     }
 
     public function testGetManyOmitsMissingIds(): void
     {
         $index = new Index($this->dbPath, store: true);
-        $index->insert(['id' => 1, 'title' => 'sedan']);
+        $index->insert([['id' => 1, 'title' => 'sedan']]);
 
-        $result = $index->getMany([1, 999]);
+        $result = $index->get(1, 999);
+        $this->assertIsArray($result);
         $this->assertArrayHasKey(1, $result);
         $this->assertArrayNotHasKey(999, $result);
     }
@@ -2859,7 +2860,7 @@ class IndexTest extends TestCase
     {
         $doc   = ['id' => 1, 'title' => 'sedan', 'body' => 'city car'];
         $index = new Index($this->dbPath, store: true);
-        $index->insert($doc);
+        $index->insert([$doc]);
 
         $this->assertSame($doc, $index->get(1));
     }
@@ -2867,7 +2868,7 @@ class IndexTest extends TestCase
     public function testInsertDoesNotStoreWhenDisabled(): void
     {
         $index = new Index($this->dbPath);
-        $index->insert(['id' => 1, 'title' => 'sedan']);
+        $index->insert([['id' => 1, 'title' => 'sedan']]);
 
         $this->expectException(QueryException::class);
         $index->get(1);
@@ -2883,7 +2884,7 @@ class IndexTest extends TestCase
             ['id' => 3, 'title' => 'suv'],
         ];
         $index = new Index($this->dbPath, store: true);
-        $index->insertMany($docs);
+        $index->insert($docs);
 
         $this->assertSame($docs[0], $index->get(1));
         $this->assertSame($docs[1], $index->get(2));
@@ -2895,8 +2896,8 @@ class IndexTest extends TestCase
     public function testUpdateReplacesStoredDocument(): void
     {
         $index = new Index($this->dbPath, store: true);
-        $index->insert(['id' => 1, 'title' => 'old title']);
-        $index->update(['id' => 1, 'title' => 'new title']);
+        $index->insert([['id' => 1, 'title' => 'old title']]);
+        $index->update([['id' => 1, 'title' => 'new title']]);
 
         $this->assertSame(['id' => 1, 'title' => 'new title'], $index->get(1));
     }
@@ -2907,7 +2908,7 @@ class IndexTest extends TestCase
     {
         $doc   = ['id' => 1, 'title' => 'sedan'];
         $index = new Index($this->dbPath, store: true);
-        $index->upsert($doc);
+        $index->upsert([$doc]);
 
         $this->assertSame($doc, $index->get(1));
     }
@@ -2915,8 +2916,8 @@ class IndexTest extends TestCase
     public function testUpsertReplacesStoredDocument(): void
     {
         $index = new Index($this->dbPath, store: true);
-        $index->insert(['id' => 1, 'title' => 'old']);
-        $index->upsert(['id' => 1, 'title' => 'new']);
+        $index->insert([['id' => 1, 'title' => 'old']]);
+        $index->upsert([['id' => 1, 'title' => 'new']]);
 
         $this->assertSame(['id' => 1, 'title' => 'new'], $index->get(1));
     }
@@ -2926,11 +2927,11 @@ class IndexTest extends TestCase
     public function testUpdateManyReplacesStoredDocuments(): void
     {
         $index = new Index($this->dbPath, store: true);
-        $index->insertMany([
+        $index->insert([
             ['id' => 1, 'title' => 'old one'],
             ['id' => 2, 'title' => 'old two'],
         ]);
-        $index->updateMany([
+        $index->update([
             ['id' => 1, 'title' => 'new one'],
             ['id' => 2, 'title' => 'new two'],
         ]);
@@ -2944,8 +2945,8 @@ class IndexTest extends TestCase
     public function testUpsertManyStoresNewAndReplacesExisting(): void
     {
         $index = new Index($this->dbPath, store: true);
-        $index->insert(['id' => 1, 'title' => 'old']);
-        $index->upsertMany([
+        $index->insert([['id' => 1, 'title' => 'old']]);
+        $index->upsert([
             ['id' => 1, 'title' => 'replaced'],
             ['id' => 2, 'title' => 'new'],
         ]);
@@ -2959,7 +2960,7 @@ class IndexTest extends TestCase
     public function testDeleteRemovesDocumentFromStore(): void
     {
         $index = new Index($this->dbPath, store: true);
-        $index->insert(['id' => 1, 'title' => 'sedan']);
+        $index->insert([['id' => 1, 'title' => 'sedan']]);
         $index->delete(1);
 
         $this->assertNull($index->get(1));
@@ -2970,11 +2971,11 @@ class IndexTest extends TestCase
     public function testDeleteManyRemovesDocumentsFromStore(): void
     {
         $index = new Index($this->dbPath, store: true);
-        $index->insertMany([
+        $index->insert([
             ['id' => 1, 'title' => 'sedan'],
             ['id' => 2, 'title' => 'coupe'],
         ]);
-        $index->deleteMany([1, 2]);
+        $index->delete(1, 2);
 
         $this->assertNull($index->get(1));
         $this->assertNull($index->get(2));
@@ -2985,7 +2986,7 @@ class IndexTest extends TestCase
     public function testClearRemovesAllDocumentsFromStore(): void
     {
         $index = new Index($this->dbPath, store: true);
-        $index->insertMany([
+        $index->insert([
             ['id' => 1, 'title' => 'sedan'],
             ['id' => 2, 'title' => 'coupe'],
         ]);
@@ -2998,7 +2999,7 @@ class IndexTest extends TestCase
     public function testClearOnStoreDisabledIndexDoesNotThrow(): void
     {
         $index = new Index($this->dbPath);
-        $index->insert(['id' => 1, 'title' => 'sedan']);
+        $index->insert([['id' => 1, 'title' => 'sedan']]);
         $index->clear();
 
         $this->assertSame(0, $index->count());
@@ -3009,7 +3010,7 @@ class IndexTest extends TestCase
     public function testHasDocumentsFalseWhenStoreDisabled(): void
     {
         $index = new Index($this->dbPath);
-        $index->insert(['id' => 1, 'title' => 'sedan']);
+        $index->insert([['id' => 1, 'title' => 'sedan']]);
 
         $this->assertFalse($index->search('sedan')->hasDocuments());
     }
@@ -3017,7 +3018,7 @@ class IndexTest extends TestCase
     public function testHasDocumentsTrueWhenStoreEnabled(): void
     {
         $index = new Index($this->dbPath, store: true);
-        $index->insert(['id' => 1, 'title' => 'sedan']);
+        $index->insert([['id' => 1, 'title' => 'sedan']]);
 
         $this->assertTrue($index->search('sedan')->hasDocuments());
     }
@@ -3025,7 +3026,7 @@ class IndexTest extends TestCase
     public function testHasDocumentsTrueEvenWhenNoResults(): void
     {
         $index = new Index($this->dbPath, store: true);
-        $index->insert(['id' => 1, 'title' => 'sedan']);
+        $index->insert([['id' => 1, 'title' => 'sedan']]);
 
         $this->assertTrue($index->search('coupe')->hasDocuments());
     }
@@ -3034,7 +3035,7 @@ class IndexTest extends TestCase
     {
         $doc   = ['id' => 1, 'title' => 'sedan'];
         $index = new Index($this->dbPath, store: true);
-        $index->insert($doc);
+        $index->insert([$doc]);
 
         $this->assertSame($doc, $index->search('sedan')->document(1));
     }
@@ -3042,7 +3043,7 @@ class IndexTest extends TestCase
     public function testDocumentReturnsNullForIdNotInResult(): void
     {
         $index = new Index($this->dbPath, store: true);
-        $index->insert(['id' => 1, 'title' => 'sedan']);
+        $index->insert([['id' => 1, 'title' => 'sedan']]);
 
         $this->assertNull($index->search('sedan')->document(99));
     }
@@ -3050,7 +3051,7 @@ class IndexTest extends TestCase
     public function testDocumentReturnsNullWhenStoreDisabled(): void
     {
         $index = new Index($this->dbPath);
-        $index->insert(['id' => 1, 'title' => 'sedan']);
+        $index->insert([['id' => 1, 'title' => 'sedan']]);
 
         $this->assertNull($index->search('sedan')->document(1));
     }
@@ -3058,7 +3059,7 @@ class IndexTest extends TestCase
     public function testDocumentsReturnsNullWhenStoreDisabled(): void
     {
         $index = new Index($this->dbPath);
-        $index->insert(['id' => 1, 'title' => 'sedan']);
+        $index->insert([['id' => 1, 'title' => 'sedan']]);
 
         $this->assertNull($index->search('sedan')->documents());
     }
@@ -3066,7 +3067,7 @@ class IndexTest extends TestCase
     public function testDocumentsReturnsFullMap(): void
     {
         $index = new Index($this->dbPath, store: true);
-        $index->insertMany([
+        $index->insert([
             ['id' => 10, 'title' => 'sedan'],
             ['id' => 20, 'title' => 'sedan coupe'],
         ]);
@@ -3085,7 +3086,7 @@ class IndexTest extends TestCase
     public function testSearchDocumentsIsNullWhenStoreDisabled(): void
     {
         $index = new Index($this->dbPath);
-        $index->insert(['id' => 1, 'title' => 'sedan']);
+        $index->insert([['id' => 1, 'title' => 'sedan']]);
 
         $result = $index->search('sedan');
         $this->assertFalse($result->hasDocuments());
@@ -3095,7 +3096,7 @@ class IndexTest extends TestCase
     public function testSearchDocumentsIsEmptyArrayWhenNoMatch(): void
     {
         $index = new Index($this->dbPath, store: true);
-        $index->insert(['id' => 1, 'title' => 'sedan']);
+        $index->insert([['id' => 1, 'title' => 'sedan']]);
 
         $result = $index->search('coupe');
         $this->assertTrue($result->hasDocuments());
@@ -3107,7 +3108,7 @@ class IndexTest extends TestCase
     {
         $doc   = ['id' => 1, 'title' => 'sedan', 'body' => 'city car'];
         $index = new Index($this->dbPath, store: true);
-        $index->insert($doc);
+        $index->insert([$doc]);
 
         $result = $index->search('sedan');
         $this->assertTrue($result->hasDocuments());
@@ -3117,7 +3118,7 @@ class IndexTest extends TestCase
     public function testSearchDocumentsKeyedByDocId(): void
     {
         $index = new Index($this->dbPath, store: true);
-        $index->insertMany([
+        $index->insert([
             ['id' => 10, 'title' => 'fast sedan'],
             ['id' => 20, 'title' => 'sedan coupe'],
         ]);
@@ -3135,7 +3136,7 @@ class IndexTest extends TestCase
     public function testSearchBooleanDocumentsIsNullWhenStoreDisabled(): void
     {
         $index = new Index($this->dbPath);
-        $index->insert(['id' => 1, 'title' => 'sedan']);
+        $index->insert([['id' => 1, 'title' => 'sedan']]);
 
         $result = $index->searchBoolean('sedan');
         $this->assertFalse($result->hasDocuments());
@@ -3146,7 +3147,7 @@ class IndexTest extends TestCase
     {
         $doc   = ['id' => 1, 'title' => 'sedan', 'body' => 'city car'];
         $index = new Index($this->dbPath, store: true);
-        $index->insert($doc);
+        $index->insert([$doc]);
 
         $result = $index->searchBoolean('sedan');
         $this->assertTrue($result->hasDocuments());
@@ -3160,7 +3161,7 @@ class IndexTest extends TestCase
         new Index($this->dbPath, store: true)->close();
 
         $rebuilt = Index::rebuild($this->dbPath, function (Index $new): void {
-            $new->insert(['id' => 1, 'title' => 'sedan']);
+            $new->insert([['id' => 1, 'title' => 'sedan']]);
         });
 
         $this->assertTrue($rebuilt->documentStoreEnabled);
@@ -3171,7 +3172,7 @@ class IndexTest extends TestCase
         new Index($this->dbPath)->close();
 
         $rebuilt = Index::rebuild($this->dbPath, function (Index $new): void {
-            $new->insert(['id' => 1, 'title' => 'sedan']);
+            $new->insert([['id' => 1, 'title' => 'sedan']]);
         }, store: true);
 
         $this->assertTrue($rebuilt->documentStoreEnabled);
@@ -3182,7 +3183,7 @@ class IndexTest extends TestCase
         new Index($this->dbPath, store: true)->close();
 
         $rebuilt = Index::rebuild($this->dbPath, function (Index $new): void {
-            $new->insert(['id' => 1, 'title' => 'sedan']);
+            $new->insert([['id' => 1, 'title' => 'sedan']]);
         }, store: false);
 
         $this->assertFalse($rebuilt->documentStoreEnabled);
@@ -3194,7 +3195,7 @@ class IndexTest extends TestCase
 
         $doc     = ['id' => 1, 'title' => 'sedan'];
         $rebuilt = Index::rebuild($this->dbPath, function (Index $new) use ($doc): void {
-            $new->insert($doc);
+            $new->insert([$doc]);
         }, store: true);
 
         $this->assertSame($doc, $rebuilt->get(1));
@@ -3208,7 +3209,7 @@ class IndexTest extends TestCase
         try {
             $doc   = ['id' => 1, 'title' => 'sedan'];
             $write = new Index($this->dbPath, store: true);
-            $write->insert($doc);
+            $write->insert([$doc]);
             $write->snapshotTo($snapPath);
 
             $snap = new Index($snapPath);
@@ -3253,7 +3254,7 @@ class IndexTest extends TestCase
     public function testFacetFieldNotIndexedAsText(): void
     {
         $index = new Index($this->dbPath, facets: true);
-        $index->insert(['id' => 1, 'title' => 'hello', '_facets' => ['color' => 'red']]);
+        $index->insert([['id' => 1, 'title' => 'hello', '_facets' => ['color' => 'red']]]);
 
         // 'red' should NOT appear in search results (it's a facet value, not a text token)
         $result = $index->search('red');
@@ -3263,7 +3264,7 @@ class IndexTest extends TestCase
     public function testInsertSingleDocWithFacets(): void
     {
         $index = new Index($this->dbPath, facets: true);
-        $index->insert(['id' => 1, 'title' => 'car', '_facets' => ['color' => 'red']]);
+        $index->insert([['id' => 1, 'title' => 'car', '_facets' => ['color' => 'red']]]);
 
         $result = $index->search('car', facets: ['color']);
         $this->assertContains(1, $result->ids);
@@ -3274,7 +3275,7 @@ class IndexTest extends TestCase
     public function testDeleteRemovesFacetValues(): void
     {
         $index = new Index($this->dbPath, facets: true);
-        $index->insert(['id' => 1, 'title' => 'car', '_facets' => ['color' => 'red']]);
+        $index->insert([['id' => 1, 'title' => 'car', '_facets' => ['color' => 'red']]]);
         $index->delete(1);
 
         $result = $index->search('car', facets: ['color']);
@@ -3287,7 +3288,7 @@ class IndexTest extends TestCase
     public function testInsertManyStoresFacets(): void
     {
         $index = new Index($this->dbPath, facets: true);
-        $index->insertMany([
+        $index->insert([
             ['id' => 1, 'title' => 'car', '_facets' => ['color' => 'red']],
             ['id' => 2, 'title' => 'car', '_facets' => ['color' => 'blue']],
             ['id' => 3, 'title' => 'car', '_facets' => ['color' => 'red']],
@@ -3301,11 +3302,11 @@ class IndexTest extends TestCase
     public function testDeleteManyRemovesFacetValues(): void
     {
         $index = new Index($this->dbPath, facets: true);
-        $index->insertMany([
+        $index->insert([
             ['id' => 1, 'title' => 'car', '_facets' => ['color' => 'red']],
             ['id' => 2, 'title' => 'car', '_facets' => ['color' => 'blue']],
         ]);
-        $index->deleteMany([1, 2]);
+        $index->delete(1, 2);
 
         $result = $index->search('car', facets: ['color']);
         $this->assertSame([], $result->facetCounts());
@@ -3316,7 +3317,7 @@ class IndexTest extends TestCase
     public function testSearchWithStringSingleValueFilter(): void
     {
         $index = new Index($this->dbPath, facets: true);
-        $index->insertMany([
+        $index->insert([
             ['id' => 1, 'title' => 'car', '_facets' => ['color' => 'red']],
             ['id' => 2, 'title' => 'car', '_facets' => ['color' => 'blue']],
         ]);
@@ -3329,7 +3330,7 @@ class IndexTest extends TestCase
     public function testSearchWithStringMultiValueOrFilter(): void
     {
         $index = new Index($this->dbPath, facets: true);
-        $index->insertMany([
+        $index->insert([
             ['id' => 1, 'title' => 'car', '_facets' => ['color' => 'red']],
             ['id' => 2, 'title' => 'car', '_facets' => ['color' => 'blue']],
             ['id' => 3, 'title' => 'car', '_facets' => ['color' => 'green']],
@@ -3347,7 +3348,7 @@ class IndexTest extends TestCase
     public function testSearchWithNumericRangeFilter(): void
     {
         $index = new Index($this->dbPath, facets: true);
-        $index->insertMany([
+        $index->insert([
             ['id' => 1, 'title' => 'car', '_facets' => ['price' => 10000]],
             ['id' => 2, 'title' => 'car', '_facets' => ['price' => 25000]],
             ['id' => 3, 'title' => 'car', '_facets' => ['price' => 50000]],
@@ -3365,7 +3366,7 @@ class IndexTest extends TestCase
     public function testSearchFacetCountsStringFacet(): void
     {
         $index = new Index($this->dbPath, facets: true);
-        $index->insertMany([
+        $index->insert([
             ['id' => 1, 'title' => 'car', '_facets' => ['color' => 'red']],
             ['id' => 2, 'title' => 'car', '_facets' => ['color' => 'red']],
             ['id' => 3, 'title' => 'car', '_facets' => ['color' => 'blue']],
@@ -3380,7 +3381,7 @@ class IndexTest extends TestCase
     public function testSearchFacetCountsNumericFacet(): void
     {
         $index = new Index($this->dbPath, facets: true);
-        $index->insertMany([
+        $index->insert([
             ['id' => 1, 'title' => 'car', '_facets' => ['price' => 10000.0]],
             ['id' => 2, 'title' => 'car', '_facets' => ['price' => 20000.0]],
             ['id' => 3, 'title' => 'car', '_facets' => ['price' => 30000.0]],
@@ -3399,7 +3400,7 @@ class IndexTest extends TestCase
     public function testDisjunctiveFacetCountsShowAllValuesWhenFiltered(): void
     {
         $index = new Index($this->dbPath, facets: true);
-        $index->insertMany([
+        $index->insert([
             ['id' => 1, 'title' => 'car', '_facets' => ['color' => 'red']],
             ['id' => 2, 'title' => 'car', '_facets' => ['color' => 'blue']],
             ['id' => 3, 'title' => 'car', '_facets' => ['color' => 'red']],
@@ -3417,7 +3418,7 @@ class IndexTest extends TestCase
     public function testMultiValueFacetOnSingleDocument(): void
     {
         $index = new Index($this->dbPath, facets: true);
-        $index->insert(['id' => 1, 'title' => 'car', '_facets' => ['color' => ['red', 'blue']]]);
+        $index->insert([['id' => 1, 'title' => 'car', '_facets' => ['color' => ['red', 'blue']]]]);
 
         $result = $index->search('car', facets: ['color']);
         $this->assertSame(1, $result->facetCount('color', 'red'));
@@ -3429,7 +3430,7 @@ class IndexTest extends TestCase
     public function testSearchBooleanWithFilter(): void
     {
         $index = new Index($this->dbPath, facets: true);
-        $index->insertMany([
+        $index->insert([
             ['id' => 1, 'title' => 'car sedan', '_facets' => ['color' => 'red']],
             ['id' => 2, 'title' => 'car coupe', '_facets' => ['color' => 'blue']],
         ]);
@@ -3442,7 +3443,7 @@ class IndexTest extends TestCase
     public function testSearchBooleanWithFacetCounts(): void
     {
         $index = new Index($this->dbPath, facets: true);
-        $index->insertMany([
+        $index->insert([
             ['id' => 1, 'title' => 'car', '_facets' => ['color' => 'red']],
             ['id' => 2, 'title' => 'car', '_facets' => ['color' => 'blue']],
         ]);
@@ -3457,7 +3458,7 @@ class IndexTest extends TestCase
     public function testFacetsDisabledNoCountsReturned(): void
     {
         $index = new Index($this->dbPath);
-        $index->insert(['id' => 1, 'title' => 'car']);
+        $index->insert([['id' => 1, 'title' => 'car']]);
 
         $result = $index->search('car', facets: ['color']);
         $this->assertFalse($result->hasFacets());
@@ -3471,7 +3472,7 @@ class IndexTest extends TestCase
         (new Index($this->dbPath, facets: true))->close();
 
         Index::rebuild($this->dbPath, function (Index $idx): void {
-            $idx->insert(['id' => 1, 'title' => 'car', '_facets' => ['color' => 'red']]);
+            $idx->insert([['id' => 1, 'title' => 'car', '_facets' => ['color' => 'red']]]);
         });
 
         $index = new Index($this->dbPath);
@@ -3483,7 +3484,7 @@ class IndexTest extends TestCase
         (new Index($this->dbPath))->close();
 
         Index::rebuild($this->dbPath, function (Index $idx): void {
-            $idx->insert(['id' => 1, 'title' => 'car', '_facets' => ['color' => 'red']]);
+            $idx->insert([['id' => 1, 'title' => 'car', '_facets' => ['color' => 'red']]]);
         }, facets: true);
 
         $index = new Index($this->dbPath);
@@ -3495,7 +3496,7 @@ class IndexTest extends TestCase
         (new Index($this->dbPath, facets: true))->close();
 
         Index::rebuild($this->dbPath, function (Index $idx): void {
-            $idx->insert(['id' => 1, 'title' => 'car']);
+            $idx->insert([['id' => 1, 'title' => 'car']]);
         }, facets: false);
 
         $index = new Index($this->dbPath);
@@ -3507,7 +3508,7 @@ class IndexTest extends TestCase
     public function testClearRemovesFacetValues(): void
     {
         $index = new Index($this->dbPath, facets: true);
-        $index->insert(['id' => 1, 'title' => 'car', '_facets' => ['color' => 'red']]);
+        $index->insert([['id' => 1, 'title' => 'car', '_facets' => ['color' => 'red']]]);
         $index->clear();
 
         $result = $index->search('car', facets: ['color']);

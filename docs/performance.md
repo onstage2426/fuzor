@@ -20,7 +20,7 @@ use Fuzor\Index;
 $write = new Index('/var/db/products.db', language: 'en');
 
 // Normal mutations
-$write->upsertMany($updatedProducts);
+$write->upsert($updatedProducts);
 $write->delete($removedId);
 
 // Push a snapshot whenever your staleness budget allows —

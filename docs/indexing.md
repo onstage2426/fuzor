@@ -54,38 +54,35 @@ $index = new Index('/path/to/articles.db', config: new Config(maxDocs: 200));
 
 Every document must have a unique integer `id` field; all other fields are indexed as full-text.
 
-### Single insert
+`insert()` always takes a list of document arrays. Wrap a single document in an outer array. A single-element list uses an internal fast path; larger batches use a two-phase bulk load in one transaction — significantly faster than looping.
+
+Throws if any ID already exists. Use `update()` to replace an existing document, or `upsert()` for create-or-replace semantics.
 
 ```php
-$index->insert(['id' => 1, 'title' => 'Fast sedan', 'body' => 'Comfortable city car.']);
-```
+// One document
+$index->insert([
+    ['id' => 1, 'title' => 'Fast sedan', 'body' => 'Comfortable city car.'],
+]);
 
-Throws if the ID already exists. Use `update()` to replace an existing document, or `upsert()` for create-or-replace semantics.
-
-### Bulk insert
-
-Significantly faster than calling `insert()` in a loop — all documents are indexed in a single transaction with one wordlist pass. Accepts any `iterable`, including generators.
-
-```php
-$index->insertMany([
+// Multiple documents
+$index->insert([
     ['id' => 1, 'title' => 'Fast sedan',     'body' => 'Comfortable city car with great fuel economy.'],
     ['id' => 2, 'title' => 'Off-road SUV',   'body' => 'Built for adventure. Handles any terrain.'],
     ['id' => 3, 'title' => 'Electric coupe', 'body' => 'Zero emissions, instant torque, sporty design.'],
 ]);
-```
 
-```php
-$index->insertMany(function () use ($db) {
+// Generator
+$index->insert((function () use ($db) {
     foreach ($db->query('SELECT id, title, body FROM articles') as $row) {
         yield $row;
     }
-}());
+})());
 ```
 
 Pass a `progress` callback to track indexing progress. It is called after each document is tokenised, with the number of documents done and the total:
 
 ```php
-$index->insertMany($docs, progress: function (int $done, int $total): void {
+$index->insert($docs, progress: function (int $done, int $total): void {
     echo "$done / $total\n";
 });
 ```
@@ -95,7 +92,7 @@ $index->insertMany($docs, progress: function (int $done, int $total): void {
 When the index was created with `facets: true`, add a `_facets` key to each document to supply attribute values for the facet index. The `_facets` key is never tokenised for full-text — `search()` and `searchBoolean()` will not match against its contents.
 
 ```php
-$index->insertMany([
+$index->insert([
     [
         'id'      => 1,
         'title'   => 'Casio G-Shock GA-2100',
@@ -131,43 +128,32 @@ Documents without a `_facets` key are indexed normally for full-text but contrib
 
 ## Updating
 
-Replaces an existing document. Old index data is removed and the document is re-indexed in a single transaction. Throws `QueryException` if the ID does not exist — use `upsert()` if you want create-or-replace semantics.
-
-### Single update
+Replaces existing documents. Old index data is removed and each document is re-indexed in a single transaction. All IDs are checked for existence before any writes — the transaction is never partially applied. Throws `QueryException` if any ID does not exist — use `upsert()` for create-or-replace semantics.
 
 ```php
 use Fuzor\Exceptions\QueryException;
 
-$index->update(['id' => 1, 'title' => 'Updated sedan', 'body' => 'New content.']);
-```
+$index->update([
+    ['id' => 1, 'title' => 'Updated sedan', 'body' => 'New content.'],
+]);
 
-### Bulk update
-
-Replaces multiple documents in a single transaction. Throws `QueryException` listing all missing IDs before any writes are made — the transaction is never partially applied.
-
-```php
-$index->updateMany([
-    ['id' => 1, 'title' => 'Updated sedan',   'body' => 'New content.'],
-    ['id' => 2, 'title' => 'Updated SUV',      'body' => 'More new content.'],
+// Bulk — throws QueryException listing all missing IDs upfront
+$index->update([
+    ['id' => 1, 'title' => 'Updated sedan', 'body' => 'New content.'],
+    ['id' => 2, 'title' => 'Updated SUV',   'body' => 'More new content.'],
 ]);
 ```
 
 ## Upserting
 
-Creates the document if the ID does not exist; replaces it if it does.
-
-### Single upsert
+Creates each document if its ID does not exist; replaces it if it does.
 
 ```php
-$index->upsert(['id' => 1, 'title' => 'Fast sedan', 'body' => 'Comfortable city car.']);
-```
+$index->upsert([
+    ['id' => 1, 'title' => 'Fast sedan', 'body' => 'Comfortable city car.'],
+]);
 
-### Bulk upsert
-
-Create-or-replace for a batch of documents in a single transaction.
-
-```php
-$index->upsertMany([
+$index->upsert([
     ['id' => 1, 'title' => 'Fast sedan',   'body' => 'Comfortable city car.'],
     ['id' => 4, 'title' => 'New document', 'body' => 'Did not exist before.'],
 ]);
@@ -175,38 +161,20 @@ $index->upsertMany([
 
 ## Deleting
 
-Removes the document from all index tables and updates the document count. No-op if the ID does not exist.
-
-### Single delete
+Removes one or more documents from all index tables and updates the document count. No-op for IDs that do not exist.
 
 ```php
-$index->delete(1);
-```
-
-### Bulk delete
-
-```php
-$index->deleteMany([1, 2, 3]);
+$index->delete(1);          // single
+$index->delete(1, 2, 3);    // multiple (variadic)
 ```
 
 ## Check existence
 
-Check if a document is present in the index using the document id.
-
-### Single has
-
-Returns `true` if the document is present in the index, `false` otherwise.
+Returns `true`/`false` for a single ID, or a `id => bool` map for multiple IDs.
 
 ```php
-$index->has(1); // true / false
-```
-
-### Bulk has
-
-Returns a map of `id => bool` for every requested ID.
-
-```php
-$index->hasMany([1, 2, 3]);
+$index->has(1);          // bool
+$index->has(1, 2, 3);    // [1 => true, 2 => false, 3 => true]
 ```
 
 ## Document count
@@ -239,7 +207,7 @@ Replaces the entire contents of an index in one atomic operation. The callback r
 
 ```php
 Index::rebuild('/path/to/articles.db', function (Index $new) use ($docs) {
-    $new->insertMany($docs);
+    $new->insert($docs);
 });
 ```
 
@@ -257,13 +225,13 @@ The `language` argument controls which language the rebuilt index uses:
 
 ```php
 // Inherit (default) — tokenisation stays consistent without extra config
-Index::rebuild('/path/to/articles.db', callback: fn (Index $new) => $new->insertMany($docs));
+Index::rebuild('/path/to/articles.db', callback: fn (Index $new) => $new->insert($docs));
 
 // Clear language
-Index::rebuild('/path/to/articles.db', callback: fn (Index $new) => $new->insertMany($docs), language: null);
+Index::rebuild('/path/to/articles.db', callback: fn (Index $new) => $new->insert($docs), language: null);
 
 // Override language
-Index::rebuild('/path/to/articles.db', callback: fn (Index $new) => $new->insertMany($docs), language: 'de');
+Index::rebuild('/path/to/articles.db', callback: fn (Index $new) => $new->insert($docs), language: 'de');
 ```
 
 ### Document store on rebuild
@@ -278,10 +246,10 @@ The `store` argument controls whether the rebuilt index has the document store e
 
 ```php
 // Inherit (default)
-Index::rebuild('/path/to/articles.db', callback: fn (Index $new) => $new->insertMany($docs));
+Index::rebuild('/path/to/articles.db', callback: fn (Index $new) => $new->insert($docs));
 
 // Force the store on
-Index::rebuild('/path/to/articles.db', callback: fn (Index $new) => $new->insertMany($docs), store: true);
+Index::rebuild('/path/to/articles.db', callback: fn (Index $new) => $new->insert($docs), store: true);
 ```
 
 ### Facets on rebuild
@@ -296,8 +264,8 @@ The `facets` argument controls whether the rebuilt index has the facet index ena
 
 ```php
 // Inherit (default)
-Index::rebuild('/path/to/articles.db', callback: fn (Index $new) => $new->insertMany($docs));
+Index::rebuild('/path/to/articles.db', callback: fn (Index $new) => $new->insert($docs));
 
 // Force facets on
-Index::rebuild('/path/to/articles.db', callback: fn (Index $new) => $new->insertMany($docs), facets: true);
+Index::rebuild('/path/to/articles.db', callback: fn (Index $new) => $new->insert($docs), facets: true);
 ```
