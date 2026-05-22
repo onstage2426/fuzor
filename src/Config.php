@@ -21,6 +21,13 @@ final readonly class Config
         /** @infection-ignore-all IncrementInteger: default value; exact distance only affects match breadth, not correctness */
         public int $fuzzyDistance = 2,
         /**
+         * Minimum word length (in Unicode codepoints) before the Levenshtein fallback fires.
+         * Words shorter than this threshold are matched by exact / prefix only.
+         *
+         * @infection-ignore-all: default value; mutations only affect the length gate, not correctness
+         */
+        public int $fuzzyMinWordLength = 5,
+        /**
          * Proximity ranking weight applied to queries with ≥2 terms.
          * Each document's BM25 score is multiplied by 1 / (1 + proximityBoost * minSpan), where
          * minSpan is the smallest token-position window containing one occurrence of every query term.

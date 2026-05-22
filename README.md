@@ -6,7 +6,7 @@
 
 Fuzor is a dependency-free full-text search library for PHP. It tokenises your documents, stores an inverted index in a single SQLite file, and scores results with Okapi BM25 — no external services required.
 
-- BM25 ranked search with fuzzy and boolean modes
+- BM25 ranked search with automatic typo tolerance and boolean modes
 - Faceted search — filter by attribute values and compute per-value counts
 - Search-as-you-type prefix matching
 - Stopword filtering and Snowball stemming for 62 languages
@@ -35,8 +35,8 @@ $index->insert([
     ['id' => 3, 'title' => 'Electric coupe', 'body' => 'Zero emissions and instant torque.',   '_facets' => ['type' => 'coupe',  'price' => 58000]],
 ]);
 
-// BM25 search (with optional fuzzy matching)
-$results = $index->search('economi', fuzzy: true);
+// BM25 search — typo tolerance fires automatically on words ≥ 5 chars
+$results = $index->search('economi');
 
 // Boolean search
 $results = $index->searchBoolean('sedan or coupe -electric');
@@ -48,7 +48,7 @@ $results = $index->search('car', filter: ['type' => ['sedan', 'suv'], 'price' =>
 ## Documentation
 
 - [Indexing](docs/indexing.md) — bulk loading, facet values, upsert, rebuild, snapshots
-- [Search](docs/search.md) — BM25 tuning, fuzzy, boolean, prefix, facet filtering and counts
+- [Search](docs/search.md) — BM25 tuning, typo tolerance, boolean, prefix, facet filtering and counts
 - [Language](docs/language.md) — stopwords, stemming, CJK/Thai n-grams
 - [Configuration](docs/configuration.md) — all tuning parameters
 - [Document store](docs/document-store.md) — store and retrieve raw documents

@@ -198,7 +198,7 @@ class FuzorBench
     }
 
     // -----------------------------------------------------------------------
-    // Search — fuzzy (Levenshtein)
+    // Search — typo tolerance (Levenshtein fallback)
     // -----------------------------------------------------------------------
 
     /** @param array{query: string} $params */
@@ -209,9 +209,9 @@ class FuzorBench
     #[Revs(20)]
     #[Warmup(1)]
     #[ParamProviders('provideFuzzyQueries')]
-    public function benchSearchFuzzy(array $params): void
+    public function benchSearchTypo(array $params): void
     {
-        $this->index->search($params['query'], fuzzy: true);
+        $this->index->search($params['query']);
     }
 
     /** @return iterable<string, array{query: string}> */

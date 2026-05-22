@@ -61,21 +61,24 @@ $page2 = $index->search('city car', limit: 20, offset: 20);
 $totalPages = (int) ceil($page1->hits / 20);
 ```
 
-### Fuzzy matching
+### Typo tolerance
 
-Pass `fuzzy: true` to tolerate typos. Fuzor scans the wordlist for candidates within edit distance and ranks them before scoring.
+Typo tolerance is automatic. When a query word has no exact or prefix match and meets the minimum word length, Fuzor scans the wordlist for candidates within edit distance and ranks them closest-first before BM25 scoring.
 
 ```php
-$results = $index->search('economi', fuzzy: true); // matches 'economy'
+$results = $index->search('economi'); // matches 'economy'
 ```
 
-Fuzzy behaviour is controlled by three `Config` properties — see [configuration.md](configuration.md):
+Typo tolerance is controlled by four `Config` properties — see [configuration.md](configuration.md):
 
-| Config property      | Default | Effect                                          |
-|----------------------|---------|-------------------------------------------------|
-| `fuzzyPrefixLength`  | `3`     | Characters that must match exactly before fuzzy |
-| `fuzzyMaxExpansions` | `50`    | Max wordlist candidates evaluated               |
-| `fuzzyDistance`      | `2`     | Max edit distance accepted                      |
+| Config property      | Default | Effect                                                          |
+|----------------------|---------|-----------------------------------------------------------------|
+| `fuzzyMinWordLength` | `5`     | Minimum word length before the Levenshtein fallback fires       |
+| `fuzzyPrefixLength`  | `3`     | Characters that must match exactly before the fuzzy scan begins |
+| `fuzzyMaxExpansions` | `50`    | Max wordlist candidates evaluated                               |
+| `fuzzyDistance`      | `2`     | Max edit distance accepted                                      |
+
+Words shorter than `fuzzyMinWordLength` use exact/prefix matching only, which avoids false positives on short tokens where edit distance has too little signal.
 
 ### BM25 tuning
 `k1`, `b`, `maxDocs`, and `proximityBoost` are set via `Config` at construction time — see [configuration.md](configuration.md).
@@ -182,7 +185,7 @@ $results = $index->search('watch', filter: [
 Filters compose with all other options:
 
 ```php
-$results = $index->search('gshock', fuzzy: true, limit: 20, filter: [
+$results = $index->search('gshock', limit: 20, filter: [
     'brand' => 'Casio',
     'price' => FacetRange::max(300.0),
 ]);

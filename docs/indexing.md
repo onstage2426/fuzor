@@ -39,7 +39,7 @@ $index = new Index('/path/to/articles.db', store: false);
 
 The facet index is always enabled. Facet attribute values are stored in a separate index table and can be used to filter results and compute per-value counts at search time. See [search.md](search.md) for querying and filtering by facets.
 
-Pass a `Config` object to tune BM25 and fuzzy behaviour. See [configuration.md](configuration.md) for details.
+Pass a `Config` object to tune BM25, typo tolerance, and other search behaviour. See [configuration.md](configuration.md) for details.
 
 ```php
 use Fuzor\Config;

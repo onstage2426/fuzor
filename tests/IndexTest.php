@@ -363,10 +363,6 @@ class IndexTest extends TestCase
         $this->assertCount(100, $result->ids);
         $this->assertSame(101, $result->hits);
 
-        $resultFuzzy = $index->search('sedan', fuzzy: true);
-        $this->assertCount(100, $resultFuzzy->ids);
-        $this->assertSame(101, $resultFuzzy->hits);
-
         $resultBool = $index->searchBoolean('sedan');
         $this->assertCount(100, $resultBool->ids);
         $this->assertSame(101, $resultBool->hits);
@@ -393,14 +389,24 @@ class IndexTest extends TestCase
         $this->assertContains(1, $index->search('ÜBER', asYouType: false)->ids);
     }
 
-    public function testSearchIsExactNotFuzzy(): void
+    public function testShortWordsSkipFuzzyGate(): void
     {
+        // 'helo' is 4 codepoints — below the default fuzzyMinWordLength of 5.
+        // It must not trigger the Levenshtein fallback and must return no results.
         $index = new Index($this->dbPath);
         $index->insert([['id' => 1, 'title' => 'hello']]);
 
         $this->assertEmpty($index->search('helo', asYouType: false)->ids);
+    }
 
-        $this->assertContains(1, $index->search('helo', fuzzy: true)->ids);
+    public function testLongWordTypoFuzzyFires(): void
+    {
+        // 'hellow' is 6 codepoints — above the default fuzzyMinWordLength of 5.
+        // The Levenshtein fallback should fire and match 'hello'.
+        $index = new Index($this->dbPath);
+        $index->insert([['id' => 1, 'title' => 'hello']]);
+
+        $this->assertContains(1, $index->search('hellow', asYouType: false)->ids);
     }
 
     public function testSearchOrdersByRelevance(): void
@@ -1410,7 +1416,7 @@ class IndexTest extends TestCase
         $index = new Index($this->dbPath);
         $index->insert([['id' => 1, 'title' => 'Mercedes Benz', 'body' => 'luxury car']]);
 
-        $result = $index->search('mercdes', fuzzy: true);
+        $result = $index->search('mercdes');
         $this->assertContains(1, $result->ids);
     }
 
@@ -1419,7 +1425,7 @@ class IndexTest extends TestCase
         $index = new Index($this->dbPath);
         $index->insert([['id' => 1, 'title' => 'Volkswagen Golf']]);
 
-        $result = $index->search('volksagen', fuzzy: true);
+        $result = $index->search('volksagen');
         $this->assertContains(1, $result->ids);
         $this->assertNotNull($result->score(1));
         $this->assertGreaterThan(0.0, $result->score(1));
@@ -1430,9 +1436,38 @@ class IndexTest extends TestCase
         $index = new Index($this->dbPath);
         $index->insert([['id' => 1, 'title' => 'sedan']]);
 
-        $result = $index->search('xqzpwk', fuzzy: true);
+        $result = $index->search('xqzpwk');
         $this->assertSame([], $result->ids);
         $this->assertSame(0, $result->hits);
+    }
+
+    public function testFuzzyMinWordLengthGateBlocksShortWords(): void
+    {
+        // Default fuzzyMinWordLength = 5. 'sedn' is 4 codepoints — gate blocks the fallback.
+        $index = new Index($this->dbPath);
+        $index->insert([['id' => 1, 'title' => 'sedan']]);
+
+        $this->assertEmpty($index->search('sedn', asYouType: false)->ids);
+    }
+
+    public function testFuzzyMinWordLengthGateAllowsLongWords(): void
+    {
+        // 'sedaan' is 6 codepoints — above the default gate; Levenshtein fires and matches.
+        $index = new Index($this->dbPath);
+        $index->insert([['id' => 1, 'title' => 'sedan']]);
+
+        $this->assertContains(1, $index->search('sedaan', asYouType: false)->ids);
+    }
+
+    public function testFuzzyMinWordLengthConfigurable(): void
+    {
+        // With minWordLength=3, even 'sedn' (4 chars) triggers the fuzzy fallback.
+        // 'sedn' shares the 'sed' prefix with 'sedan' (required by fuzzyPrefixLength=3)
+        // and is at Levenshtein distance=1 → matched by default fuzzyDistance=2.
+        $index = new Index($this->dbPath, config: new \Fuzor\Config(fuzzyMinWordLength: 3));
+        $index->insert([['id' => 1, 'title' => 'sedan']]);
+
+        $this->assertContains(1, $index->search('sedn', asYouType: false)->ids);
     }
 
     public function testFuzzyDistanceOneAcceptsDistanceOneTypo(): void
@@ -1440,7 +1475,7 @@ class IndexTest extends TestCase
         $index = new Index($this->dbPath, config: new \Fuzor\Config(fuzzyDistance: 1));
         $index->insert([['id' => 1, 'title' => 'sedan']]);
 
-        $this->assertContains(1, $index->search('sedaan', fuzzy: true)->ids);
+        $this->assertContains(1, $index->search('sedaan')->ids);
     }
 
     public function testFuzzyDistanceOneRejectsDistanceTwoTypo(): void
@@ -1448,7 +1483,7 @@ class IndexTest extends TestCase
         $index = new Index($this->dbPath, config: new \Fuzor\Config(fuzzyDistance: 1));
         $index->insert([['id' => 1, 'title' => 'sedan']]);
 
-        $this->assertNotContains(1, $index->search('seddaan', fuzzy: true)->ids);
+        $this->assertNotContains(1, $index->search('seddaan')->ids);
     }
 
     public function testFuzzySearchCloserMatchRanksFirst(): void
@@ -1460,7 +1495,7 @@ class IndexTest extends TestCase
             ['id' => 2, 'title' => 'draagon'],  // distance=2 from query
         ]);
 
-        $result = $index->search('drago', fuzzy: true, asYouType: false);
+        $result = $index->search('drago', asYouType: false);
 
         $this->assertContains(1, $result->ids);
         $this->assertContains(2, $result->ids);
@@ -1479,7 +1514,7 @@ class IndexTest extends TestCase
         // and the fuzzy Levenshtein path kicks in.  Both 'dragon' (d=2) and 'drage' (d=2)
         // are at the same edit distance from 'drako', so the secondary sort by num_hits
         // decides order: DESC → 'dragon' first (5 hits), ASC (mutant) → 'drage' first (1 hit).
-        $result = $index->search('drako', fuzzy: true);
+        $result = $index->search('drako');
         $this->assertSame(1, $result->ids[0]);
     }
 
@@ -1955,7 +1990,7 @@ class IndexTest extends TestCase
     {
         $index = new Index($this->dbPath);
         $index->insert([['id' => 1, 'body' => 'sedan']]);
-        $result = $index->inspectQuery('sedaan', fuzzy: true, asYouType: false);
+        $result = $index->inspectQuery('sedaan', asYouType: false);
         $this->assertSame('fuzzy', $result['tokens'][0]['match_type']);
         $this->assertNotNull($result['tokens'][0]['wordlist_rows'][0]['distance']);
     }
@@ -1964,7 +1999,7 @@ class IndexTest extends TestCase
     {
         $index = new Index($this->dbPath);
         $index->insert([['id' => 1, 'body' => 'sedan']]);
-        $result = $index->inspectQuery('zzznomatch', fuzzy: true, asYouType: false);
+        $result = $index->inspectQuery('zzznomatch', asYouType: false);
         $this->assertSame('none', $result['tokens'][0]['match_type']);
     }
 
@@ -2059,26 +2094,25 @@ class IndexTest extends TestCase
         $this->assertContains(1, $result->ids);
     }
 
-    public function testInspectQueryDefaultFuzzyParamIsFalse(): void
+    public function testInspectQueryShortWordSkipsFuzzy(): void
     {
         $index = new Index($this->dbPath);
         $index->insert([['id' => 1, 'title' => 'sedan']]);
 
-        // Mutation FalseValue: default changes to true → 'sedna' fuzzy-matches 'sedan' → 'fuzzy'.
-        // Original default false: no fuzzy → no match → 'none'.
-        $result = $index->inspectQuery('sedna', asYouType: false);
+        // 'sedn' is 4 codepoints — below fuzzyMinWordLength=5.
+        // Mutation TrueValue: gate removed → fuzzy fires → 'sedn' matches 'sedan' → 'fuzzy'.
+        // Original: gate blocks → no match → 'none'.
+        $result = $index->inspectQuery('sedn', asYouType: false);
         $this->assertSame('none', $result['tokens'][0]['match_type']);
     }
 
-    public function testInspectQueryExactMatchWithFuzzyTrueIsNotFuzzyType(): void
+    public function testInspectQueryExactMatchIsNotFuzzyType(): void
     {
         $index = new Index($this->dbPath);
         $index->insert([['id' => 1, 'title' => 'sedan']]);
 
-        // When fuzzy=true but an exact wordlist hit is found, rows[0] has no 'distance' key.
-        // Mutation L204: $fuzzy || isset($rows[0]['distance']) → true || false = true → 'fuzzy'.
-        // Original:      $fuzzy && isset($rows[0]['distance']) → true && false = false → 'exact'.
-        $result = $index->inspectQuery('sedan', fuzzy: true, asYouType: false);
+        // Exact wordlist hit has no 'distance' key → match_type must be 'exact', not 'fuzzy'.
+        $result = $index->inspectQuery('sedan', asYouType: false);
         $this->assertSame('exact', $result['tokens'][0]['match_type']);
     }
 

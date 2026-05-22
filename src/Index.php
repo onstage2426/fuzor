@@ -1102,8 +1102,6 @@ class Index
      * benefits from warm cache entries.
      *
      * @param  string $phrase Raw query string; processed identically to search().
-     * @param  bool   $fuzzy  When true, wordlist resolution uses Levenshtein matching
-     *                        (same as search($phrase, fuzzy: true)); when false, exact/prefix only.
      * @return array{
      *     raw_tokens:       list<string>,
      *     filtered_tokens:  list<string>,
@@ -1124,7 +1122,7 @@ class Index
      *     boolean_postfix: list<string>,
      * }
      */
-    public function inspectQuery(string $phrase, bool $fuzzy = false, bool $asYouType = true): array
+    public function inspectQuery(string $phrase, bool $asYouType = true): array
     {
         $verbose = $this->filterQueryTokens($phrase, verbose: true);
         /** @var list<string> $filteredTokens */
@@ -1137,11 +1135,11 @@ class Index
 
         foreach ($filteredTokens as $i => $processed) {
             $isLast = $asYouType && ($i === $lastIndex);
-            $rows   = $this->getWordlistByKeyword($processed, $isLast, $fuzzy);
+            $rows   = $this->getWordlistByKeyword($processed, $isLast);
 
             $matchType = match (true) {
                 $rows === []                                                     => 'none',
-                $fuzzy && isset($rows[0]['distance'])                            => 'fuzzy',
+                isset($rows[0]['distance'])                                      => 'fuzzy',
                 /** @infection-ignore-all LogicalAnd: non-last words are always exact matches (wordlist lookup uses isLastWord=false), so term===processed; neither && mutation fires on real data */
                 $isLast && $rows[0]['term'] !== $processed                       => 'prefix',
                 default                                                          => 'exact',
@@ -1219,12 +1217,12 @@ class Index
     /**
      * Run a BM25 ranked full-text search.
      *
-     * When $fuzzy is true, Levenshtein matching is used against the wordlist
+     * Typo tolerance is automatic: words of at least Config::$fuzzyMinWordLength codepoints
+     * fall through to Levenshtein matching when no exact or prefix match is found
      * (respects Config::$fuzzyDistance, $fuzzyPrefixLength, and $fuzzyMaxExpansions).
-     * When false, exact + optional as-you-type prefix matching is used.
+     * Shorter words use exact + optional as-you-type prefix matching only.
      *
      * @param  string                                        $phrase    Raw search phrase; will be tokenised.
-     * @param  bool                                          $fuzzy     When true, use Levenshtein matching.
      * @param  bool                                          $asYouType Last keyword matched as prefix when true.
      * @param  int                                           $limit     Maximum number of document IDs to return.
      * @param  int                                           $offset    Number of top-ranked results to skip.
@@ -1233,7 +1231,6 @@ class Index
      */
     public function search(
         string $phrase,
-        bool $fuzzy = false,
         bool $asYouType = true,
         int $limit = 100,
         int $offset = 0,
@@ -1265,7 +1262,7 @@ class Index
 
         foreach ($keywords as $idx => $term) {
             $isLastKeyword = $asYouType && ($lastIndex === $idx);
-            $result = $this->getDocumentsAndCount($term, false, $isLastKeyword, $fuzzy);
+            $result = $this->getDocumentsAndCount($term, false, $isLastKeyword);
             $df     = $result['numDocs'];
             // Smoothed BM25 IDF: always ≥ 0, avoids negative weights for common terms.
             /** @infection-ignore-all IncrementInteger|Minus|Plus|Division: IDF mutations monotonically shift all per-term scores by the same factor; relative document ordering is preserved for any single-term query */
@@ -2400,25 +2397,24 @@ class Index
      * @param  string $keyword       Term to search for.
      * @param  bool   $noLimit       When true, the $maxDocs cap is not applied.
      * @param  bool   $isLastKeyword Whether this is the final token in the query.
-     * @param  bool   $fuzzy         When true, Levenshtein fuzzy matching is used.
      * @return array{documents: list<array{0: int, 1: int, 2: int, 3: int}>, numDocs: int}
      * @infection-ignore-all FalseValue: default parameter values are never exercised; callers always pass
-     *   all three booleans explicitly
+     *   all booleans explicitly
      */
     private function getDocumentsAndCount(
         string $keyword,
         bool $noLimit = false,
         bool $isLastKeyword = false,
-        bool $fuzzy = false
     ): array {
-        $word = $this->getWordlistByKeyword($keyword, $isLastKeyword, $fuzzy);
+        $word = $this->getWordlistByKeyword($keyword, $isLastKeyword);
         if (!isset($word[0])) {
             /** @infection-ignore-all DecrementInteger,IncrementInteger: numDocs=0 on a no-match path is used by the BM25 scorer; returning -1 or 1 when documents=[] does not affect result membership */
             return ['documents' => [], 'numDocs' => 0];
         }
 
         $limit     = $noLimit ? PHP_INT_MAX : $this->config->maxDocs;
-        $documents = $this->fetchDocsByTermIds($word, $limit, $fuzzy);
+        $isFuzzy   = isset($word[0]['distance']);
+        $documents = $this->fetchDocsByTermIds($word, $limit, $isFuzzy);
 
         /** @infection-ignore-all IncrementInteger,Ternary,CastInt: numDocs feeds BM25 scoring only; for single-term prefix results array_sum equals word[0]['num_docs']; CastInt: array_sum returns int */
         $numDocs = count($word) === 1
@@ -2885,13 +2881,14 @@ class Index
      * When $isLastWord is true, a trailing-wildcard LIKE query is used instead of an
      * exact match, returning up to $fuzzyMaxExpansions candidates ordered by shortest
      * term first, then by num_hits descending.
-     * When $fuzzy is true and no match is found, fuzzySearch() is called as a fallback.
-     *
-     * @param  string                    $keyword    Term to look up.
-     * @param  bool                      $isLastWord Whether this is the final token in the query.
-     * @param  bool                      $fuzzy      When true, fall through to Levenshtein fuzzy search on no match.
+     * When $allowFuzzy is true and no match is found, fuzzySearch() is called as a fallback
+     * provided the keyword meets the Config::$fuzzyMinWordLength threshold.
      * Fuzzy rows additionally carry a `distance` key (int) set by fuzzySearch().
      *
+     * @param  string $keyword    Term to look up.
+     * @param  bool   $isLastWord Whether this is the final token in the query.
+     * @param  bool   $allowFuzzy Whether to fall through to Levenshtein search on no match; set to false
+     *                            for phrase matching where words must be exact user intent.
      * @return list<array{id: int, term: string, num_hits: int, num_docs: int, distance?: int}>
      * @infection-ignore-all FalseValue: default parameter values are never exercised; callers always pass
      *   all booleans explicitly
@@ -2899,18 +2896,16 @@ class Index
     private function getWordlistByKeyword(
         string $keyword,
         bool $isLastWord = false,
-        bool $fuzzy = false
+        bool $allowFuzzy = true,
     ): array {
-        // Cache non-fuzzy lookups by "keyword:isLastWord" key.
-        // Fuzzy results depend on Levenshtein distance which is applied post-fetch, so they
-        // are excluded from caching to avoid stale matches after config changes.
-        if (!$fuzzy) {
-            /** @infection-ignore-all CastInt,Concat,ConcatOperandRemoval: cache key format mutations only affect cache hit/miss rates, not correctness */
-            $cacheKey = "{$keyword}:" . (int) $isLastWord;
-            /** @infection-ignore-all ReturnRemoval: skipping a cache hit only causes a redundant DB query; the same result is returned */
-            if (isset($this->wordlistCache[$cacheKey])) {
-                return $this->wordlistCache[$cacheKey];
-            }
+        // Cache exact/prefix lookups by "keyword:isLastWord" key.
+        // Fuzzy results carry a distance key and are excluded from caching — Levenshtein
+        // distance is applied post-fetch, so cached rows could go stale after config changes.
+        /** @infection-ignore-all CastInt,Concat,ConcatOperandRemoval: cache key format mutations only affect cache hit/miss rates, not correctness */
+        $cacheKey = "{$keyword}:" . (int) $isLastWord;
+        /** @infection-ignore-all ReturnRemoval: skipping a cache hit only causes a redundant DB query; the same result is returned */
+        if (isset($this->wordlistCache[$cacheKey])) {
+            return $this->wordlistCache[$cacheKey];
         }
 
         if ($isLastWord && Tokenizer::ngramSize($this->language) === 0) {
@@ -2934,13 +2929,18 @@ class Index
         /** @var list<array{id: int, term: string, num_hits: int, num_docs: int}> $wordlistRows */
         $wordlistRows = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
-        if ($fuzzy && !isset($wordlistRows[0])) {
+        // Fall through to Levenshtein only when: no exact/prefix match found, fuzzy is allowed
+        // for this call site, and the word meets the minimum length threshold (short words have
+        // too many false-positive fuzzy matches to be useful).
+        if (
+            $allowFuzzy
+            && !isset($wordlistRows[0])
+            && mb_strlen($keyword) >= $this->config->fuzzyMinWordLength
+        ) {
             return $this->fuzzySearch($keyword);
         }
 
-        if (!$fuzzy) {
-            $this->wordlistCache[$cacheKey] = $wordlistRows;
-        }
+        $this->wordlistCache[$cacheKey] = $wordlistRows;
 
         return $wordlistRows;
     }
@@ -2948,18 +2948,16 @@ class Index
     /**
      * Fetch doclist rows for a set of wordlist term IDs, ordered by hit count.
      *
-     * When $fuzzy is true, results are re-sorted by the relevance rank of $words
+     * When $isFuzzy is true, results are re-sorted by the relevance rank of $words
      * (closest Levenshtein match first) after the DB fetch.
      *
      * @param  list<array{id: int, term: string, num_hits: int, num_docs: int, ...}> $words
      *         Wordlist rows from getWordlistByKeyword() or fuzzySearch() (fuzzy rows also carry distance: int).
-     * @param  int  $limit Maximum rows to return.
-     * @param  bool $fuzzy When true, re-sort by fuzzy relevance rank.
+     * @param  int  $limit   Maximum rows to return.
+     * @param  bool $isFuzzy When true, re-sort by fuzzy relevance rank; derived from $words carrying a distance key.
      * @return list<array{0: int, 1: int, 2: int, 3: int}> Rows as [term_id, doc_id, hit_count, doc_length].
-     * @infection-ignore-all FalseValue: default $fuzzy=false is never exercised; callers always pass
-     *   the parameter explicitly
      */
-    private function fetchDocsByTermIds(array $words, int $limit, bool $fuzzy = false): array
+    private function fetchDocsByTermIds(array $words, int $limit, bool $isFuzzy = false): array
     {
         $ids = array_column($words, 'id');
         $n   = count($ids);
@@ -2978,8 +2976,8 @@ class Index
         // 2=hit_count, 3=doc_length.
 
         // Single-term non-fuzzy: simpler SQL (no UNION ALL needed) — cache by stable key.
-        /** @infection-ignore-all LogicalNot: negating !$fuzzy to $fuzzy only switches between the single-term cached stmt and the multi-term/fuzzy paths; all return equivalent doc sets for non-fuzzy calls */
-        if ($n === 1 && !$fuzzy) {
+        /** @infection-ignore-all LogicalNot: negating !$isFuzzy to $isFuzzy only switches between the single-term cached stmt and the multi-term/fuzzy paths; all return equivalent doc sets for non-fuzzy calls */
+        if ($n === 1 && !$isFuzzy) {
             $stmt = $this->stmt(
                 'fetchOneTermDocs',
                 'SELECT sub.term_id, sub.doc_id, sub.hit_count, dl.length AS doc_length
@@ -2996,8 +2994,8 @@ class Index
 
         // Multi-term non-fuzzy: UNION ALL of $n arms. SQL is stable for a given $n,
         // so cache by arity key rather than re-preparing on every call.
-        /** @infection-ignore-all LogicalNot: negating !$fuzzy only switches between UNION ALL and the fuzzy IN()+CASE path; result set membership is equivalent */
-        if (!$fuzzy) {
+        /** @infection-ignore-all LogicalNot: negating !$isFuzzy only switches between UNION ALL and the fuzzy IN()+CASE path; result set membership is equivalent */
+        if (!$isFuzzy) {
             $arms = implode(' UNION ALL ', array_fill(
                 /** @infection-ignore-all DecrementInteger,IncrementInteger: array_fill start index 0 vs ±1 only changes array keys; implode() ignores keys */
                 0,
