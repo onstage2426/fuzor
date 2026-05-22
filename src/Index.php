@@ -1217,9 +1217,9 @@ class Index
     /**
      * Run a BM25 ranked full-text search.
      *
-     * Typo tolerance is automatic: words of at least Config::$fuzzyMinWordLength codepoints
-     * fall through to Levenshtein matching when no exact or prefix match is found
-     * (respects Config::$fuzzyDistance, $fuzzyPrefixLength, and $fuzzyMaxExpansions).
+     * Typo tolerance is automatic: words of at least 5 codepoints fall through to Levenshtein
+     * matching when no exact or prefix match is found; 1 typo allowed for 5–8 codepoints,
+     * 2 for 9+. Respects Config::$fuzzyPrefixLength and $fuzzyMaxExpansions.
      * Shorter words use exact + optional as-you-type prefix matching only.
      *
      * @param  string                                        $phrase    Raw search phrase; will be tokenised.
@@ -2882,7 +2882,7 @@ class Index
      * exact match, returning up to $fuzzyMaxExpansions candidates ordered by shortest
      * term first, then by num_hits descending.
      * When $allowFuzzy is true and no match is found, fuzzySearch() is called as a fallback
-     * provided the keyword meets the Config::$fuzzyMinWordLength threshold.
+     * provided the keyword is at least 5 codepoints long.
      * Fuzzy rows additionally carry a `distance` key (int) set by fuzzySearch().
      *
      * @param  string $keyword    Term to look up.
@@ -3036,8 +3036,12 @@ class Index
      * Find wordlist candidates within Levenshtein edit distance of the keyword.
      *
      * Queries the wordlist for all terms sharing the same prefix
-     * ($fuzzyPrefixLength chars), then filters by $fuzzyDistance and sorts
+     * ($fuzzyPrefixLength chars), then filters by the effective edit distance and sorts
      * by edit distance ascending, then num_hits descending.
+     *
+     * The effective distance scales with word length: 1 for words of 5–8 codepoints,
+     * 2 typos for words of 9+ codepoints. This mirrors the standard typo-tolerance tiers
+     * and avoids false positives on shorter words.
      *
      * @param  string                    $keyword Search term to find fuzzy matches for (must already be lowercased).
      * @return list<array{id: int, term: string, num_hits: int, num_docs: int, distance: int}>
@@ -3046,6 +3050,9 @@ class Index
     {
         /** @infection-ignore-all MBString,CastInt: ASCII fuzzy tests are unaffected by mb_ vs byte strlen; CastInt: mb_strlen returns int already */
         $keywordLength = mb_strlen($keyword);
+        // 5–8 codepoints → 1 typo; 9+ codepoints → configured max (default 2).
+        /** @infection-ignore-all GreaterThan,IncrementInteger: threshold boundary only widens/narrows which tier applies; Levenshtein post-filter corrects the result set */
+        $effectiveDistance = $keywordLength >= 9 ? 2 : 1;
 
         $stmt = $this->stmt(
             'fuzzyWordlistLookup',
@@ -3058,8 +3065,8 @@ class Index
         /** @infection-ignore-all MBString,ConcatOperandRemoval: ASCII fuzzy tests are unaffected by mb_ vs byte substr; removing the prefix still produces correct candidates after Levenshtein filtering (just with more candidates) */
         $stmt->bindValue(':keyword', mb_substr($keyword, 0, $this->config->fuzzyPrefixLength) . '%');
         /** @infection-ignore-all DecrementInteger,IncrementInteger: adjusting the min length boundary by 1 only broadens or narrows the candidate set; Levenshtein filtering corrects the result */
-        $stmt->bindValue(':min', max(1, $keywordLength - $this->config->fuzzyDistance), PDO::PARAM_INT);
-        $stmt->bindValue(':max', $keywordLength + $this->config->fuzzyDistance, PDO::PARAM_INT);
+        $stmt->bindValue(':min', max(1, $keywordLength - $effectiveDistance), PDO::PARAM_INT);
+        $stmt->bindValue(':max', $keywordLength + $effectiveDistance, PDO::PARAM_INT);
         $stmt->bindValue(':maxExpansions', $this->config->fuzzyMaxExpansions, PDO::PARAM_INT);
         $stmt->execute();
 
@@ -3069,7 +3076,7 @@ class Index
         $candidates = $stmt->fetchAll(PDO::FETCH_ASSOC);
         foreach ($candidates as $match) {
             $distance = Levenshtein::distance($match['term'], $keyword);
-            if ($distance <= $this->config->fuzzyDistance) {
+            if ($distance <= $effectiveDistance) {
                 $resultSet[] = [...$match, 'distance' => $distance];
             }
         }

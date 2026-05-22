@@ -69,16 +69,21 @@ Typo tolerance is automatic. When a query word has no exact or prefix match and 
 $results = $index->search('economi'); // matches 'economy'
 ```
 
-Typo tolerance is controlled by four `Config` properties — see [configuration.md](configuration.md):
+The allowed edit distance scales automatically with word length:
+
+| Word length      | Typos allowed |
+|------------------|---------------|
+| < 5 codepoints   | 0 (exact/prefix only) |
+| 5–8 codepoints   | 1 |
+| 9+ codepoints    | 2 |
+
+Typo tolerance is controlled by `Config` properties — see [configuration.md](configuration.md):
 
 | Config property      | Default | Effect                                                          |
 |----------------------|---------|-----------------------------------------------------------------|
 | `fuzzyMinWordLength` | `5`     | Minimum word length before the Levenshtein fallback fires       |
 | `fuzzyPrefixLength`  | `3`     | Characters that must match exactly before the fuzzy scan begins |
 | `fuzzyMaxExpansions` | `50`    | Max wordlist candidates evaluated                               |
-| `fuzzyDistance`      | `2`     | Max edit distance accepted                                      |
-
-Words shorter than `fuzzyMinWordLength` use exact/prefix matching only, which avoids false positives on short tokens where edit distance has too little signal.
 
 ### BM25 tuning
 `k1`, `b`, `maxDocs`, and `proximityBoost` are set via `Config` at construction time — see [configuration.md](configuration.md).

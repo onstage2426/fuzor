@@ -18,8 +18,6 @@ final readonly class Config
         public int $fuzzyPrefixLength = 3,
         /** @infection-ignore-all DecrementInteger,IncrementInteger: default value; exact number only affects how many candidates are evaluated, not correctness */
         public int $fuzzyMaxExpansions = 50,
-        /** @infection-ignore-all IncrementInteger: default value; exact distance only affects match breadth, not correctness */
-        public int $fuzzyDistance = 2,
         /**
          * Minimum word length (in Unicode codepoints) before the Levenshtein fallback fires.
          * Words shorter than this threshold are matched by exact / prefix only.

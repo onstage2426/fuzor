@@ -1463,39 +1463,44 @@ class IndexTest extends TestCase
     {
         // With minWordLength=3, even 'sedn' (4 chars) triggers the fuzzy fallback.
         // 'sedn' shares the 'sed' prefix with 'sedan' (required by fuzzyPrefixLength=3)
-        // and is at Levenshtein distance=1 → matched by default fuzzyDistance=2.
+        // and is at Levenshtein distance=1 → matched by the 5–8 char tier (1 typo allowed).
         $index = new Index($this->dbPath, config: new \Fuzor\Config(fuzzyMinWordLength: 3));
         $index->insert([['id' => 1, 'title' => 'sedan']]);
 
         $this->assertContains(1, $index->search('sedn', asYouType: false)->ids);
     }
 
-    public function testFuzzyDistanceOneAcceptsDistanceOneTypo(): void
+    public function testFuzzyAutoTierShortWordCappedAtOneTypo(): void
     {
-        $index = new Index($this->dbPath, config: new \Fuzor\Config(fuzzyDistance: 1));
-        $index->insert([['id' => 1, 'title' => 'sedan']]);
-
-        $this->assertContains(1, $index->search('sedaan')->ids);
-    }
-
-    public function testFuzzyDistanceOneRejectsDistanceTwoTypo(): void
-    {
-        $index = new Index($this->dbPath, config: new \Fuzor\Config(fuzzyDistance: 1));
+        // 'seddaan' (7 chars) is distance=2 from 'sedan'. Words < 9 codepoints are capped at
+        // 1 typo, so this must NOT match.
+        $index = new Index($this->dbPath);
         $index->insert([['id' => 1, 'title' => 'sedan']]);
 
         $this->assertNotContains(1, $index->search('seddaan')->ids);
     }
 
+    public function testFuzzyAutoTierLongWordAllowsTwoTypos(): void
+    {
+        // 'volkswaagen' (11 chars) is distance=2 from 'volkswagen'. Words ≥ 9 codepoints allow
+        // 2 typos, so this MUST match. 'volkswaagen' starts with 'vol' (prefix ✓).
+        $index = new Index($this->dbPath);
+        $index->insert([['id' => 1, 'title' => 'volkswaagen']]);
+
+        $this->assertContains(1, $index->search('volkswagen')->ids);
+    }
+
     public function testFuzzySearchCloserMatchRanksFirst(): void
     {
-        $index = new Index($this->dbPath, config: new \Fuzor\Config(fuzzyDistance: 2));
-        // Query 'drago' (not indexed) is distance=1 from 'dragon' and distance=2 from 'draagon'.
+        $index = new Index($this->dbPath);
+        // Query 'volkswage' (9 chars) → effective distance=2; 'volkswagen' is d=1, 'volkswaagen' is d=2.
+        // Both share the 'vol' prefix required by fuzzyPrefixLength=3.
         $index->insert([
-            ['id' => 1, 'title' => 'dragon'],   // distance=1 from query
-            ['id' => 2, 'title' => 'draagon'],  // distance=2 from query
+            ['id' => 1, 'title' => 'volkswagen'],   // distance=1 from query
+            ['id' => 2, 'title' => 'volkswaagen'],  // distance=2 from query
         ]);
 
-        $result = $index->search('drago', asYouType: false);
+        $result = $index->search('volkswage', asYouType: false);
 
         $this->assertContains(1, $result->ids);
         $this->assertContains(2, $result->ids);
@@ -1507,13 +1512,13 @@ class IndexTest extends TestCase
     {
         $index = new Index($this->dbPath);
         $index->insert([
-            ['id' => 1, 'title' => 'dragon dragon dragon dragon dragon'], // 5 hits — high num_hits
-            ['id' => 2, 'title' => 'drage'],                             // 1 hit — low num_hits
+            ['id' => 1, 'title' => 'drake drake drake drake drake'], // 5 hits — high num_hits
+            ['id' => 2, 'title' => 'draka'],                        // 1 hit — low num_hits
         ]);
-        // 'drako' is NOT a prefix of 'dragon' or 'drage', so the prefix lookup finds nothing
-        // and the fuzzy Levenshtein path kicks in.  Both 'dragon' (d=2) and 'drage' (d=2)
+        // 'drako' is NOT a prefix of 'drake' or 'draka', so the prefix lookup finds nothing
+        // and the fuzzy Levenshtein path kicks in. Both 'drake' (d=1) and 'draka' (d=1)
         // are at the same edit distance from 'drako', so the secondary sort by num_hits
-        // decides order: DESC → 'dragon' first (5 hits), ASC (mutant) → 'drage' first (1 hit).
+        // decides order: DESC → 'drake' first (5 hits), ASC (mutant) → 'draka' first (1 hit).
         $result = $index->search('drako');
         $this->assertSame(1, $result->ids[0]);
     }
