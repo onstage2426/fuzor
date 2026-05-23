@@ -1372,7 +1372,7 @@ class Index
 
         // Phase 1: Load per-key filter doc ID sets and intersect to get the global filter.
         // Phase 3: Apply it to the score map.
-        $filterSets   = $this->loadFacetKeySets($filter, $this->config->filterMaxDocs);
+        $filterSets   = $this->loadFacetKeySets($filter, $this->config->filterMaxDocs, array_keys($docScores));
         $rawDocScores = $docScores;
         if ($filterSets !== []) {
             $globalFilter = array_reduce(
@@ -1544,7 +1544,7 @@ class Index
 
         // Phase 1 + 3: load filter sets and apply global intersection.
         // array_flip($docIds) gives doc_id → position, usable as a set for array_intersect_key.
-        $filterSets = $this->loadFacetKeySets($filter, $this->config->filterMaxDocs);
+        $filterSets = $this->loadFacetKeySets($filter, $this->config->filterMaxDocs, $docIds);
         $rawDocSet  = array_flip($docIds);
         if ($filterSets !== []) {
             $globalFilter = array_reduce(
@@ -3344,11 +3344,15 @@ class Index
      * Called once at the start of search(); all sets are retained in memory so
      * disjunctive facet counting can reuse them without extra DB round-trips.
      *
+     * When $candidateDocIds is non-empty the query is scoped to that set, so the
+     * result is always correct regardless of corpus size (no LIMIT truncation).
+     *
      * @param  array<string, string|list<string>|FacetRange> $filter
-     * @param  int                                           $filterMaxDocs Cap per key.
+     * @param  int                                           $filterMaxDocs   Fallback cap when no candidates provided.
+     * @param  list<int>                                     $candidateDocIds BM25/boolean candidates to scope query.
      * @return array<string, array<int, true>>               Key name → flipped doc ID set.
      */
-    private function loadFacetKeySets(array $filter, int $filterMaxDocs): array
+    private function loadFacetKeySets(array $filter, int $filterMaxDocs, array $candidateDocIds = []): array
     {
         if ($filter === [] || !$this->facetsEnabled) {
             return [];
@@ -3361,10 +3365,10 @@ class Index
                 continue;
             }
             if ($filterValue instanceof FacetRange) {
-                $sets[$name] = $this->fetchFacetDocIdsByRange($keyId, $filterValue, $filterMaxDocs);
+                $sets[$name] = $this->fetchFacetDocIdsByRange($keyId, $filterValue, $filterMaxDocs, $candidateDocIds);
             } else {
                 $values = is_array($filterValue) ? $filterValue : [$filterValue];
-                $sets[$name] = $this->fetchFacetDocIdsByValues($keyId, $values, $filterMaxDocs);
+                $sets[$name] = $this->fetchFacetDocIdsByValues($keyId, $values, $filterMaxDocs, $candidateDocIds);
             }
         }
         return $sets;
@@ -3373,20 +3377,31 @@ class Index
     /**
      * Fetch doc IDs matching any of the given string values for a facet key.
      *
-     * Uses the clustered (key_id, value, doc_id) PK: the range scan for
-     * (key_id=X, value IN (?)) is a set of contiguous B-tree leaf ranges.
+     * When $candidateDocIds is non-empty the query adds AND doc_id IN (json_each),
+     * so only candidate docs are tested — no LIMIT is needed and recall is exact.
+     * Without candidates the query falls back to a LIMIT cap.
      *
      * @param  list<string>        $values
+     * @param  list<int>           $candidateDocIds
      * @return array<int, true>
      */
-    private function fetchFacetDocIdsByValues(int $keyId, array $values, int $limit): array
+    private function fetchFacetDocIdsByValues(int $keyId, array $values, int $limit, array $candidateDocIds = []): array
     {
-        $n    = count($values);
-        $ph   = $this->placeholders($n);
-        $stmt = $this->prepare(
-            "SELECT doc_id FROM facet_values WHERE key_id = ? AND value IN ({$ph}) LIMIT ?"
-        );
-        $stmt->execute([$keyId, ...$values, $limit]);
+        $n  = count($values);
+        $ph = $this->placeholders($n);
+        if ($candidateDocIds !== []) {
+            $candidateJson = json_encode($candidateDocIds);
+            $stmt = $this->prepare(
+                "SELECT doc_id FROM facet_values WHERE key_id = ? AND value IN ({$ph})"
+                . ' AND doc_id IN (SELECT value FROM json_each(?))'
+            );
+            $stmt->execute([$keyId, ...$values, $candidateJson]);
+        } else {
+            $stmt = $this->prepare(
+                "SELECT doc_id FROM facet_values WHERE key_id = ? AND value IN ({$ph}) LIMIT ?"
+            );
+            $stmt->execute([$keyId, ...$values, $limit]);
+        }
         /** @var list<int> $ids */
         $ids = $stmt->fetchAll(PDO::FETCH_COLUMN);
         return array_fill_keys($ids, true);
@@ -3395,12 +3410,19 @@ class Index
     /**
      * Fetch doc IDs matching a numeric range for a facet key.
      *
-     * Uses facet_numeric_index (key_id, num_value, doc_id) WHERE num_value IS NOT NULL.
+     * When $candidateDocIds is non-empty the query adds AND doc_id IN (json_each)
+     * so only candidate docs are tested — no LIMIT is needed and recall is exact.
+     * Without candidates the query falls back to a LIMIT cap.
      *
+     * @param  list<int>  $candidateDocIds
      * @return array<int, true>
      */
-    private function fetchFacetDocIdsByRange(int $keyId, FacetRange $range, int $limit): array
-    {
+    private function fetchFacetDocIdsByRange(
+        int $keyId,
+        FacetRange $range,
+        int $limit,
+        array $candidateDocIds = [],
+    ): array {
         $conditions = ['key_id = ?', 'num_value IS NOT NULL'];
         $params     = [$keyId];
         if ($range->gte !== null) {
@@ -3419,10 +3441,18 @@ class Index
             $conditions[] = 'num_value < ?';
             $params[] = $range->lt;
         }
-        $params[] = $limit;
-        $stmt = $this->prepare(
-            'SELECT doc_id FROM facet_values WHERE ' . implode(' AND ', $conditions) . ' LIMIT ?'
-        );
+        if ($candidateDocIds !== []) {
+            $conditions[] = 'doc_id IN (SELECT value FROM json_each(?))';
+            $params[] = json_encode($candidateDocIds);
+            $stmt = $this->prepare(
+                'SELECT doc_id FROM facet_values WHERE ' . implode(' AND ', $conditions)
+            );
+        } else {
+            $params[] = $limit;
+            $stmt = $this->prepare(
+                'SELECT doc_id FROM facet_values WHERE ' . implode(' AND ', $conditions) . ' LIMIT ?'
+            );
+        }
         $stmt->execute($params);
         /** @var list<int> $ids */
         $ids = $stmt->fetchAll(PDO::FETCH_COLUMN);
