@@ -37,7 +37,18 @@ The document store is enabled by default: raw documents are stored as JSON insid
 $index = new Index('/path/to/articles.db', store: false);
 ```
 
-The facet index is always enabled. Facet attribute values are stored in a separate index table and can be used to filter results and compute per-value counts at search time. See [search.md](search.md) for querying and filtering by facets.
+The facet index is always enabled. Declare which fields are facet fields at creation time using `facetFields`. Their values are stored in a separate index table and can be used to filter results and compute per-value counts at search time. See [search.md](search.md) for querying and filtering by facets.
+
+By default every field (except `id` and any declared `facetFields`) is tokenised for full-text. Pass `searchableFields` to restrict FTS to an explicit list of fields — any field not in either list is stored but not indexed.
+
+```php
+// Watches index: two facetable fields, two searchable fields,
+// image_url and sku are stored-only automatically.
+$index = new Index('/path/to/watches.db',
+    facetFields:      ['brand', 'price', 'category', 'gender'],
+    searchableFields: ['title', 'body'],
+);
+```
 
 Pass a `Config` object to tune BM25, typo tolerance, and other search behaviour. See [configuration.md](configuration.md) for details.
 
@@ -86,31 +97,31 @@ $index->insert($docs, progress: function (int $done, int $total): void {
 
 ### Facet values
 
-Add a `_facets` key to a document to supply attribute values for the facet index. The `_facets` key is never tokenised for full-text — `search()` and `searchBoolean()` will not match against its contents.
+Fields listed in `facetFields` at creation time are automatically routed to the facet index. They are never tokenised for full-text — `search()` and `searchBoolean()` will not match against their contents — unless the field is also listed in `searchableFields`.
 
 ```php
+$index = new Index('/path/to/watches.db',
+    facetFields: ['brand', 'gender', 'category', 'price'],
+);
+
 $index->insert([
     [
-        'id'      => 1,
-        'title'   => 'Casio G-Shock GA-2100',
-        'body'    => 'Shock resistant, 200m water resistant.',
-        '_facets' => [
-            'brand'    => 'Casio',
-            'gender'   => ['men', 'unisex'],  // array = multi-value facet
-            'category' => 'Watches',
-            'price'    => 129.99,             // int/float = numeric facet
-        ],
+        'id'       => 1,
+        'title'    => 'Casio G-Shock GA-2100',
+        'body'     => 'Shock resistant, 200m water resistant.',
+        'brand'    => 'Casio',
+        'gender'   => ['men', 'unisex'],  // array = multi-value facet
+        'category' => 'Watches',
+        'price'    => 129.99,             // int/float = numeric facet
     ],
     [
-        'id'      => 2,
-        'title'   => 'Seiko Presage',
-        'body'    => 'Automatic mechanical movement.',
-        '_facets' => [
-            'brand'    => 'Seiko',
-            'gender'   => 'men',
-            'category' => 'Watches',
-            'price'    => 295.00,
-        ],
+        'id'       => 2,
+        'title'    => 'Seiko Presage',
+        'body'     => 'Automatic mechanical movement.',
+        'brand'    => 'Seiko',
+        'gender'   => 'men',
+        'category' => 'Watches',
+        'price'    => 295.00,
     ],
 ]);
 ```
@@ -121,7 +132,29 @@ $index->insert([
 | Array of strings | `'gender' => ['men', 'unisex']` | Multi-value; contributes one count per value |
 | Integer or float | `'price' => 129.99` | Numeric facet; aggregated as min/max/count at search time |
 
-Documents without a `_facets` key are indexed normally for full-text but contribute nothing to the facet index.
+Documents that omit a declared facet field are indexed normally for full-text but contribute nothing to the facet index for that field.
+
+### Stored-only fields
+
+A field that is not in `facetFields` and not in `searchableFields` (when `searchableFields` is set) is stored in the document store but never indexed — neither for full-text nor for facets. This is the right place for URLs, image paths, internal SKUs, and timestamps you want to retrieve but not search on.
+
+```php
+$index = new Index('/path/to/watches.db',
+    facetFields:      ['brand', 'price'],
+    searchableFields: ['title', 'body'],
+    // image_url and sku are stored-only automatically
+);
+
+$index->insert([[
+    'id'        => 1,
+    'title'     => 'Casio G-Shock GA-2100',
+    'body'      => 'Shock resistant.',
+    'brand'     => 'Casio',
+    'price'     => 129.99,
+    'image_url' => 'https://example.com/ga2100.jpg',
+    'sku'       => 'GA-2100-1A1ER',
+]]);
+```
 
 ## Updating
 
@@ -249,9 +282,9 @@ Index::rebuild('/path/to/articles.db', callback: fn (Index $new) => $new->insert
 Index::rebuild('/path/to/articles.db', callback: fn (Index $new) => $new->insert($docs), store: false);
 ```
 
-### Facets on rebuild
+### Schema on rebuild
 
-The rebuilt index always has the facet index enabled. Supply `_facets` values on documents during the rebuild callback to populate it.
+`rebuild()` inherits `facetFields` and `searchableFields` from the existing index automatically. Documents inserted inside the callback are routed using the inherited schema — no extra configuration needed.
 
 ```php
 Index::rebuild('/path/to/articles.db', callback: fn (Index $new) => $new->insert($docs));

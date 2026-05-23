@@ -149,7 +149,7 @@ $results = $index->searchBoolean('sedan or coupe', asYouType: false);
 
 ## Facet filtering
 
-Pass a `filter` map to restrict results to documents matching specific facet attribute values. See [indexing.md](indexing.md) for how to supply `_facets` values on documents.
+Pass a `filter` map to restrict results to documents matching specific facet attribute values. See [indexing.md](indexing.md) for how to declare `facetFields` on an index.
 
 ### String facets
 
@@ -228,7 +228,7 @@ $results->facetCount('brand', 'Unknown'); // null — value not present in resul
 
 ### Numeric facet counts
 
-For numeric facets (int/float values in `_facets`), `facetCounts()['key']` is an aggregate summary:
+For numeric facets (int/float field values), `facetCounts()['key']` is an aggregate summary:
 
 ```php
 $results->facetCounts()['price'];

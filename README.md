@@ -27,12 +27,16 @@ composer require onstage2426/fuzor
 use Fuzor\Index;
 use Fuzor\FacetRange;
 
-// Create an index and add documents
-$index = new Index('/path/to/products.db', language: 'en');
+// Create an index — declare facetable fields once at creation time
+$index = new Index('/path/to/products.db',
+    language:    'en',
+    facetFields: ['type', 'price'],
+);
+
 $index->insert([
-    ['id' => 1, 'title' => 'Fast sedan',     'body' => 'City car with great fuel economy.',    '_facets' => ['type' => 'sedan',  'price' => 24900]],
-    ['id' => 2, 'title' => 'Off-road SUV',   'body' => 'Built for adventure and any terrain.', '_facets' => ['type' => 'suv',    'price' => 41500]],
-    ['id' => 3, 'title' => 'Electric coupe', 'body' => 'Zero emissions and instant torque.',   '_facets' => ['type' => 'coupe',  'price' => 58000]],
+    ['id' => 1, 'title' => 'Fast sedan',     'body' => 'City car with great fuel economy.',    'type' => 'sedan',  'price' => 24900],
+    ['id' => 2, 'title' => 'Off-road SUV',   'body' => 'Built for adventure and any terrain.', 'type' => 'suv',    'price' => 41500],
+    ['id' => 3, 'title' => 'Electric coupe', 'body' => 'Zero emissions and instant torque.',   'type' => 'coupe',  'price' => 58000],
 ]);
 
 // BM25 search — typo tolerance fires automatically on words ≥ 5 chars

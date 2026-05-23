@@ -99,6 +99,12 @@ class Index
     /** Whether the facet index is active on this index. */
     public private(set) bool $facetsEnabled = false;
 
+    /** @var list<string> Field names routed to the facet index; not FTS-indexed unless also in searchableFields. */
+    public private(set) array $facetFields = [];
+
+    /** @var list<string>|null null = all non-facet fields are FTS-indexed; non-null = only these fields. */
+    public private(set) ?array $searchableFields = null;
+
     /** @var array<string, int> Maps facet key name → facet_keys.id; populated lazily; cleared on connection change. */
     private array $facetKeyCache = [];
 
@@ -124,11 +130,18 @@ class Index
      * @param  bool        $force    Overwrite any existing file at $path.
      * @param  Config|null $config   Search tuning; null uses all defaults.
      * @param  bool        $readonly Open in read-only mode; all write methods throw IOException.
-     * @param  bool        $store    Enable the document store; persists raw documents alongside
-     *                               the inverted index so search results can be hydrated without
-     *                               a separate data layer. Defaults to true; pass false to opt out.
-     *                               Ignored when opening an existing index
-     *                               (the stored has_document_store info value takes precedence).
+     * @param  bool          $store            Enable the document store; persists raw documents alongside
+     *                                         the inverted index so search results can be hydrated without
+     *                                         a separate data layer. Defaults to true; pass false to opt out.
+     *                                         Ignored when opening an existing index
+     *                                         (the stored has_document_store info value takes precedence).
+     * @param  list<string>  $facetFields      Field names routed to the facet index at creation time.
+     *                                         These fields are not FTS-indexed unless also listed in
+     *                                         $searchableFields. Ignored when opening an existing index.
+     * @param  list<string>|null $searchableFields Whitelist of fields to tokenise for FTS.
+     *                                         null (default) tokenises all fields not in $facetFields.
+     *                                         Pass [] to disable FTS for all fields.
+     *                                         Ignored when opening an existing index.
      * @throws IOException    If the parent directory does not exist, or readonly is true and the file does not exist.
      * @throws QueryException If $language is set but has no stopword list or stemmer,
      *                        or if both $readonly and $force are true.
@@ -140,6 +153,8 @@ class Index
         ?Config $config = null,
         private readonly bool $readonly = false,
         bool $store = true,
+        array $facetFields = [],
+        ?array $searchableFields = null,
     ) {
         $this->config   = $config ?? new Config();
         if ($this->readonly && $force) {
@@ -156,7 +171,7 @@ class Index
         if (file_exists($resolved) && !$force) {
             $this->selectIndex();
         } else {
-            $this->createIndex($force, $language, $store);
+            $this->createIndex($force, $language, $store, $facetFields, $searchableFields);
         }
     }
 
@@ -177,6 +192,21 @@ class Index
      * @return string       Canonical absolute path.
      * @throws IOException If the parent directory does not exist.
      */
+    /** @return list<string> */
+    private static function decodeStringList(string $json): array
+    {
+        $decoded = json_decode($json, true);
+        $result  = [];
+        if (is_array($decoded)) {
+            foreach ($decoded as $v) {
+                if (is_string($v)) {
+                    $result[] = $v;
+                }
+            }
+        }
+        return $result;
+    }
+
     private static function resolvePath(string $path): string
     {
         $dir = realpath(dirname($path));
@@ -259,6 +289,8 @@ class Index
         if ($store === null) {
             $store = $existing !== null ? $existing->documentStoreEnabled : true;
         }
+        $facetFields      = $existing !== null ? $existing->facetFields      : [];
+        $searchableFields = $existing !== null ? $existing->searchableFields : null;
         /** @infection-ignore-all MethodCallRemoval: resource cleanup; GC closes the connection if skipped, no observable effect on the rebuild outcome */
         $existing?->close();
 
@@ -266,7 +298,13 @@ class Index
         $tmp = $resolved . '.tmp-' . bin2hex(random_bytes(4));
 
         try {
-            $handle = new self($tmp, language: $language, store: $store);
+            $handle = new self(
+                $tmp,
+                language:         $language,
+                store:            $store,
+                facetFields:      $facetFields,
+                searchableFields: $searchableFields,
+            );
             $callback($handle);
             $handle->close();
 
@@ -340,18 +378,22 @@ class Index
      * type safety. doclist is WITHOUT ROWID (clustered on term_id, doc_id), replacing
      * the old term_id secondary index with a zero-heap-fetch primary scan.
      *
-     * @param  bool        $force     When true, any existing file is deleted before creation.
-     * @param  string|null $language  BCP 47 language tag persisted in the index (e.g. 'en');
-     *                                null disables stopword filtering and stemming.
+     * @param  bool              $force            When true, any existing file is deleted before creation.
+     * @param  string|null       $language         BCP 47 language tag persisted in the index (e.g. 'en');
+     *                                             null disables stopword filtering and stemming.
+     * @param  list<string>      $facetFields      Field names routed to the facet index.
+     * @param  list<string>|null $searchableFields Whitelist of FTS-indexed fields; null = all non-facet fields.
      * @return static
      * @throws IOException    If the index file already exists and $force is false.
      * @throws QueryException If $language is set but has no stopword list or stemmer.
+     * @infection-ignore-all FalseValue: default $force=false is never exercised; callers always pass force explicitly
      */
-    /** @infection-ignore-all FalseValue: default $force=false is never exercised; callers always pass force explicitly */
     private function createIndex(
         bool $force = false,
         ?string $language = null,
         bool $store = true,
+        array $facetFields = [],
+        ?array $searchableFields = null,
     ): static {
         if (!$force && file_exists($this->path)) {
             throw new IOException(
@@ -468,6 +510,12 @@ class Index
         $pdo->exec("INSERT INTO info (key, value) VALUES ('has_facets', '1')");
         $this->facetsEnabled = true;
 
+        $schemaStmt = $pdo->prepare("INSERT INTO info (key, value) VALUES (?, ?)");
+        $schemaStmt->execute(['facet_fields',      json_encode($facetFields)]);
+        $schemaStmt->execute(['searchable_fields', $searchableFields !== null ? json_encode($searchableFields) : '']);
+        $this->facetFields      = $facetFields;
+        $this->searchableFields = $searchableFields;
+
         if ($language !== null) {
             $this->applyLanguage($language);
         }
@@ -502,7 +550,8 @@ class Index
         assert($this->pdo instanceof \PDO);
         $pdo   = $this->pdo;
         $stmt  = $pdo->query(
-            "SELECT key, value FROM info WHERE key IN ('language', 'has_document_store', 'has_facets')"
+            "SELECT key, value FROM info"
+            . " WHERE key IN ('language', 'has_document_store', 'has_facets', 'facet_fields', 'searchable_fields')"
         );
         $infoRows = [];
         if ($stmt) {
@@ -514,6 +563,9 @@ class Index
         $this->applyLanguage($lang);
         $this->documentStoreEnabled = ($infoRows['has_document_store'] ?? '0') === '1';
         $this->facetsEnabled        = ($infoRows['has_facets']          ?? '0') === '1';
+        $this->facetFields      = self::decodeStringList($infoRows['facet_fields'] ?? '[]');
+        $sfRaw                  = $infoRows['searchable_fields'] ?? '';
+        $this->searchableFields = $sfRaw === '' ? null : self::decodeStringList($sfRaw);
     }
 
     /**
@@ -1723,11 +1775,14 @@ class Index
             if ($key === 'id') {
                 continue;
             }
-            if ($key === '_meta') {
-                continue;
-            }
-            if ($key === '_facets') {
-                continue;
+            if ($this->searchableFields === null) {
+                if (in_array($key, $this->facetFields, true)) {
+                    continue;
+                }
+            } else {
+                if (!in_array($key, $this->searchableFields, true)) {
+                    continue;
+                }
             }
             /** @infection-ignore-all UnwrapTrim: leading/trailing whitespace in field values is uncommon in tests; trimming is a defensive clean-up step */
             $text = trim(strval($col)); // @phpstan-ignore argument.type
@@ -1781,7 +1836,10 @@ class Index
         $this->saveDocLength($documentId, $length);
 
         if ($this->facetsEnabled) {
-            $this->saveFacets($documentId, $row['_facets'] ?? []);
+            $facets = $this->facetFields !== []
+                ? array_intersect_key($row, array_flip($this->facetFields))
+                : [];
+            $this->saveFacets($documentId, $facets);
         }
 
         if ($this->documentStoreEnabled) {
@@ -1905,7 +1963,11 @@ class Index
             $docLengthBuffer[$documentId]   = $length;
             $docPositionBuffer[$documentId] = $termPositions;
             if ($this->facetsEnabled) {
-                $facetBuffer[$documentId] = $this->normalizeFacets($document['_facets'] ?? []);
+                $facetBuffer[$documentId] = $this->normalizeFacets(
+                    $this->facetFields !== []
+                        ? array_intersect_key($document, array_flip($this->facetFields))
+                        : []
+                );
             }
 
             foreach ($termCounts as $term => $hits) {

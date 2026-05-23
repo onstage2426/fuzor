@@ -226,13 +226,14 @@ class IndexTest extends TestCase
         $this->assertContains(1, $result->ids);
     }
 
-    public function testMetaFieldIsNotIndexed(): void
+    public function testStoredOnlyFieldIsNotIndexed(): void
     {
-        $index = new Index($this->dbPath);
+        $index = new Index($this->dbPath, searchableFields: ['title']);
         $index->insert([[
-            'id'    => 1,
-            'title' => 'sedan',
-            '_meta' => ['permalink' => '/cars/sedan', 'unique' => 'shouldnotbeindexed'],
+            'id'        => 1,
+            'title'     => 'sedan',
+            'permalink' => '/cars/sedan',
+            'unique'    => 'shouldnotbeindexed',
         ]]);
 
         $this->assertSame([1], $index->search('sedan')->ids);
@@ -240,11 +241,10 @@ class IndexTest extends TestCase
         $this->assertSame([], $index->search('permalink')->ids);
     }
 
-    public function testMetaFieldIsPreservedInDocumentStore(): void
+    public function testStoredOnlyFieldIsPreservedInDocumentStore(): void
     {
-        $meta = ['permalink' => '/cars/sedan', 'published' => '2026-05-14'];
-        $doc  = ['id' => 1, 'title' => 'sedan', '_meta' => $meta];
-        $index = new Index($this->dbPath, store: true);
+        $doc   = ['id' => 1, 'title' => 'sedan', 'permalink' => '/cars/sedan', 'published' => '2026-05-14'];
+        $index = new Index($this->dbPath, store: true, searchableFields: ['title']);
         $index->insert([$doc]);
 
         $this->assertSame($doc, $index->search('sedan')->document(1));
@@ -3273,8 +3273,8 @@ class IndexTest extends TestCase
 
     public function testFacetFieldNotIndexedAsText(): void
     {
-        $index = new Index($this->dbPath);
-        $index->insert([['id' => 1, 'title' => 'hello', '_facets' => ['color' => 'red']]]);
+        $index = new Index($this->dbPath, facetFields: ['color']);
+        $index->insert([['id' => 1, 'title' => 'hello', 'color' => 'red']]);
 
         // 'red' should NOT appear in search results (it's a facet value, not a text token)
         $result = $index->search('red');
@@ -3283,8 +3283,8 @@ class IndexTest extends TestCase
 
     public function testInsertSingleDocWithFacets(): void
     {
-        $index = new Index($this->dbPath);
-        $index->insert([['id' => 1, 'title' => 'car', '_facets' => ['color' => 'red']]]);
+        $index = new Index($this->dbPath, facetFields: ['color']);
+        $index->insert([['id' => 1, 'title' => 'car', 'color' => 'red']]);
 
         $result = $index->search('car', facets: ['color']);
         $this->assertContains(1, $result->ids);
@@ -3294,8 +3294,8 @@ class IndexTest extends TestCase
 
     public function testDeleteRemovesFacetValues(): void
     {
-        $index = new Index($this->dbPath);
-        $index->insert([['id' => 1, 'title' => 'car', '_facets' => ['color' => 'red']]]);
+        $index = new Index($this->dbPath, facetFields: ['color']);
+        $index->insert([['id' => 1, 'title' => 'car', 'color' => 'red']]);
         $index->delete(1);
 
         $result = $index->search('car', facets: ['color']);
@@ -3307,11 +3307,11 @@ class IndexTest extends TestCase
 
     public function testInsertManyStoresFacets(): void
     {
-        $index = new Index($this->dbPath);
+        $index = new Index($this->dbPath, facetFields: ['color']);
         $index->insert([
-            ['id' => 1, 'title' => 'car', '_facets' => ['color' => 'red']],
-            ['id' => 2, 'title' => 'car', '_facets' => ['color' => 'blue']],
-            ['id' => 3, 'title' => 'car', '_facets' => ['color' => 'red']],
+            ['id' => 1, 'title' => 'car', 'color' => 'red'],
+            ['id' => 2, 'title' => 'car', 'color' => 'blue'],
+            ['id' => 3, 'title' => 'car', 'color' => 'red'],
         ]);
 
         $result = $index->search('car', facets: ['color']);
@@ -3321,10 +3321,10 @@ class IndexTest extends TestCase
 
     public function testDeleteManyRemovesFacetValues(): void
     {
-        $index = new Index($this->dbPath);
+        $index = new Index($this->dbPath, facetFields: ['color']);
         $index->insert([
-            ['id' => 1, 'title' => 'car', '_facets' => ['color' => 'red']],
-            ['id' => 2, 'title' => 'car', '_facets' => ['color' => 'blue']],
+            ['id' => 1, 'title' => 'car', 'color' => 'red'],
+            ['id' => 2, 'title' => 'car', 'color' => 'blue'],
         ]);
         $index->delete(1, 2);
 
@@ -3336,10 +3336,10 @@ class IndexTest extends TestCase
 
     public function testSearchWithStringSingleValueFilter(): void
     {
-        $index = new Index($this->dbPath);
+        $index = new Index($this->dbPath, facetFields: ['color']);
         $index->insert([
-            ['id' => 1, 'title' => 'car', '_facets' => ['color' => 'red']],
-            ['id' => 2, 'title' => 'car', '_facets' => ['color' => 'blue']],
+            ['id' => 1, 'title' => 'car', 'color' => 'red'],
+            ['id' => 2, 'title' => 'car', 'color' => 'blue'],
         ]);
 
         $result = $index->search('car', filter: ['color' => 'red']);
@@ -3349,11 +3349,11 @@ class IndexTest extends TestCase
 
     public function testSearchWithStringMultiValueOrFilter(): void
     {
-        $index = new Index($this->dbPath);
+        $index = new Index($this->dbPath, facetFields: ['color']);
         $index->insert([
-            ['id' => 1, 'title' => 'car', '_facets' => ['color' => 'red']],
-            ['id' => 2, 'title' => 'car', '_facets' => ['color' => 'blue']],
-            ['id' => 3, 'title' => 'car', '_facets' => ['color' => 'green']],
+            ['id' => 1, 'title' => 'car', 'color' => 'red'],
+            ['id' => 2, 'title' => 'car', 'color' => 'blue'],
+            ['id' => 3, 'title' => 'car', 'color' => 'green'],
         ]);
 
         $result = $index->search('car', filter: ['color' => ['red', 'blue']]);
@@ -3367,11 +3367,11 @@ class IndexTest extends TestCase
 
     public function testSearchWithNumericRangeFilter(): void
     {
-        $index = new Index($this->dbPath);
+        $index = new Index($this->dbPath, facetFields: ['price']);
         $index->insert([
-            ['id' => 1, 'title' => 'car', '_facets' => ['price' => 10000]],
-            ['id' => 2, 'title' => 'car', '_facets' => ['price' => 25000]],
-            ['id' => 3, 'title' => 'car', '_facets' => ['price' => 50000]],
+            ['id' => 1, 'title' => 'car', 'price' => 10000],
+            ['id' => 2, 'title' => 'car', 'price' => 25000],
+            ['id' => 3, 'title' => 'car', 'price' => 50000],
         ]);
 
         $result = $index->search('car', filter: ['price' => FacetRange::between(10000, 30000)]);
@@ -3385,11 +3385,11 @@ class IndexTest extends TestCase
 
     public function testSearchFacetCountsStringFacet(): void
     {
-        $index = new Index($this->dbPath);
+        $index = new Index($this->dbPath, facetFields: ['color']);
         $index->insert([
-            ['id' => 1, 'title' => 'car', '_facets' => ['color' => 'red']],
-            ['id' => 2, 'title' => 'car', '_facets' => ['color' => 'red']],
-            ['id' => 3, 'title' => 'car', '_facets' => ['color' => 'blue']],
+            ['id' => 1, 'title' => 'car', 'color' => 'red'],
+            ['id' => 2, 'title' => 'car', 'color' => 'red'],
+            ['id' => 3, 'title' => 'car', 'color' => 'blue'],
         ]);
 
         $result = $index->search('car', facets: ['color']);
@@ -3400,11 +3400,11 @@ class IndexTest extends TestCase
 
     public function testSearchFacetCountsNumericFacet(): void
     {
-        $index = new Index($this->dbPath);
+        $index = new Index($this->dbPath, facetFields: ['price']);
         $index->insert([
-            ['id' => 1, 'title' => 'car', '_facets' => ['price' => 10000.0]],
-            ['id' => 2, 'title' => 'car', '_facets' => ['price' => 20000.0]],
-            ['id' => 3, 'title' => 'car', '_facets' => ['price' => 30000.0]],
+            ['id' => 1, 'title' => 'car', 'price' => 10000.0],
+            ['id' => 2, 'title' => 'car', 'price' => 20000.0],
+            ['id' => 3, 'title' => 'car', 'price' => 30000.0],
         ]);
 
         $result = $index->search('car', facets: ['price']);
@@ -3419,11 +3419,11 @@ class IndexTest extends TestCase
 
     public function testDisjunctiveFacetCountsShowAllValuesWhenFiltered(): void
     {
-        $index = new Index($this->dbPath);
+        $index = new Index($this->dbPath, facetFields: ['color']);
         $index->insert([
-            ['id' => 1, 'title' => 'car', '_facets' => ['color' => 'red']],
-            ['id' => 2, 'title' => 'car', '_facets' => ['color' => 'blue']],
-            ['id' => 3, 'title' => 'car', '_facets' => ['color' => 'red']],
+            ['id' => 1, 'title' => 'car', 'color' => 'red'],
+            ['id' => 2, 'title' => 'car', 'color' => 'blue'],
+            ['id' => 3, 'title' => 'car', 'color' => 'red'],
         ]);
 
         // Filter by 'red' but count against the full result set for the 'color' key
@@ -3437,8 +3437,8 @@ class IndexTest extends TestCase
 
     public function testMultiValueFacetOnSingleDocument(): void
     {
-        $index = new Index($this->dbPath);
-        $index->insert([['id' => 1, 'title' => 'car', '_facets' => ['color' => ['red', 'blue']]]]);
+        $index = new Index($this->dbPath, facetFields: ['color']);
+        $index->insert([['id' => 1, 'title' => 'car', 'color' => ['red', 'blue']]]);
 
         $result = $index->search('car', facets: ['color']);
         $this->assertSame(1, $result->facetCount('color', 'red'));
@@ -3449,10 +3449,10 @@ class IndexTest extends TestCase
 
     public function testSearchBooleanWithFilter(): void
     {
-        $index = new Index($this->dbPath);
+        $index = new Index($this->dbPath, facetFields: ['color']);
         $index->insert([
-            ['id' => 1, 'title' => 'car sedan', '_facets' => ['color' => 'red']],
-            ['id' => 2, 'title' => 'car coupe', '_facets' => ['color' => 'blue']],
+            ['id' => 1, 'title' => 'car sedan', 'color' => 'red'],
+            ['id' => 2, 'title' => 'car coupe', 'color' => 'blue'],
         ]);
 
         $result = $index->searchBoolean('car', filter: ['color' => 'red']);
@@ -3462,10 +3462,10 @@ class IndexTest extends TestCase
 
     public function testSearchBooleanWithFacetCounts(): void
     {
-        $index = new Index($this->dbPath);
+        $index = new Index($this->dbPath, facetFields: ['color']);
         $index->insert([
-            ['id' => 1, 'title' => 'car', '_facets' => ['color' => 'red']],
-            ['id' => 2, 'title' => 'car', '_facets' => ['color' => 'blue']],
+            ['id' => 1, 'title' => 'car', 'color' => 'red'],
+            ['id' => 2, 'title' => 'car', 'color' => 'blue'],
         ]);
 
         $result = $index->searchBoolean('car', facets: ['color']);
@@ -3485,26 +3485,115 @@ class IndexTest extends TestCase
         $this->assertSame([], $result->facetCounts());
     }
 
+    // --- facetFields / searchableFields schema persistence ---
+
+    public function testFacetFieldsPersistedAcrossReopen(): void
+    {
+        (new Index($this->dbPath, facetFields: ['color', 'brand']))->close();
+
+        $index = new Index($this->dbPath);
+        $this->assertSame(['color', 'brand'], $index->facetFields);
+    }
+
+    public function testSearchableFieldsPersistedAcrossReopen(): void
+    {
+        (new Index($this->dbPath, searchableFields: ['title', 'description']))->close();
+
+        $index = new Index($this->dbPath);
+        $this->assertSame(['title', 'description'], $index->searchableFields);
+    }
+
+    public function testNullSearchableFieldsRoundTrips(): void
+    {
+        (new Index($this->dbPath))->close();
+
+        $index = new Index($this->dbPath);
+        $this->assertNull($index->searchableFields);
+    }
+
+    public function testEmptySearchableFieldsMeansNothingTokenized(): void
+    {
+        $index = new Index($this->dbPath, searchableFields: []);
+        $index->insert([['id' => 1, 'title' => 'car']]);
+
+        $this->assertSame([], $index->search('car')->ids);
+    }
+
+    public function testFacetFieldNotReturnedByFts(): void
+    {
+        $index = new Index($this->dbPath, facetFields: ['color']);
+        $index->insert([['id' => 1, 'title' => 'car', 'color' => 'scarlet']]);
+
+        $this->assertSame([], $index->search('scarlet')->ids);
+        $this->assertSame([1], $index->search('car')->ids);
+    }
+
+    public function testSearchableFieldsRestrictsTokenization(): void
+    {
+        $index = new Index($this->dbPath, searchableFields: ['title']);
+        $index->insert([['id' => 1, 'title' => 'car', 'sku' => 'ABC-123']]);
+
+        $this->assertSame([1], $index->search('car')->ids);
+        $this->assertSame([], $index->search('ABC')->ids);
+    }
+
+    public function testFieldInBothFacetAndSearchableIsIndexedAndFaceted(): void
+    {
+        $index = new Index($this->dbPath, facetFields: ['brand'], searchableFields: ['title', 'brand']);
+        $index->insert([['id' => 1, 'title' => 'watch', 'brand' => 'Casio']]);
+
+        // brand is searchable
+        $this->assertSame([1], $index->search('casio')->ids);
+        // brand is also faceted
+        $result = $index->search('casio', facets: ['brand']);
+        $this->assertSame(1, $result->facetCount('brand', 'Casio'));
+    }
+
+    public function testRebuildInheritsFacetAndSearchableFields(): void
+    {
+        (new Index($this->dbPath, facetFields: ['color'], searchableFields: ['title']))->close();
+
+        Index::rebuild($this->dbPath, function (Index $idx): void {
+            $idx->insert([['id' => 1, 'title' => 'car', 'color' => 'red']]);
+        });
+
+        $index = new Index($this->dbPath);
+        $this->assertSame(['color'], $index->facetFields);
+        $this->assertSame(['title'], $index->searchableFields);
+    }
+
+    public function testStoredOnlyFieldAppearsInDocumentStore(): void
+    {
+        $doc   = ['id' => 1, 'title' => 'car', 'image_url' => 'https://example.com/car.jpg'];
+        $index = new Index($this->dbPath, store: true, searchableFields: ['title']);
+        $index->insert([$doc]);
+
+        // image_url is stored but not indexed
+        $this->assertSame([], $index->search('example')->ids);
+        $this->assertSame($doc, $index->get(1));
+    }
+
     // --- Facets: rebuild ---
 
     public function testRebuildPreservesFacets(): void
     {
-        (new Index($this->dbPath))->close();
+        (new Index($this->dbPath, facetFields: ['color']))->close();
 
         Index::rebuild($this->dbPath, function (Index $idx): void {
-            $idx->insert([['id' => 1, 'title' => 'car', '_facets' => ['color' => 'red']]]);
+            $idx->insert([['id' => 1, 'title' => 'car', 'color' => 'red']]);
         });
 
         $index = new Index($this->dbPath);
         $this->assertTrue($index->facetsEnabled);
+        $this->assertSame(['color'], $index->facetFields);
     }
 
     // --- Facets: clear ---
 
     public function testClearRemovesFacetValues(): void
     {
-        $index = new Index($this->dbPath);
-        $index->insert([['id' => 1, 'title' => 'car', '_facets' => ['color' => 'red']]]);
+        $index = new Index($this->dbPath, facetFields: ['color']);
+        $index->insert([['id' => 1, 'title' => 'car', 'color' => 'red']]);
         $index->clear();
 
         $result = $index->search('car', facets: ['color']);
