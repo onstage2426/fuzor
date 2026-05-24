@@ -1126,12 +1126,12 @@ class Index
                 "SELECT doc_id, data FROM documents WHERE doc_id IN ({$placeholders})"
             );
             $stmt->execute($chunk);
-            /** @var list<array{doc_id: int, data: string}> $rows */
-            $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
-            foreach ($rows as $row) {
+            /** @var list<array{0: int, 1: string}> $rows */
+            $rows = $stmt->fetchAll(PDO::FETCH_NUM);
+            foreach ($rows as [$docId, $data]) {
                 /** @var array<string, mixed> $decoded */
-                $decoded = json_decode($row['data'], true, 512, JSON_THROW_ON_ERROR);
-                $result[(int) $row['doc_id']] = $decoded;
+                $decoded = json_decode($data, true, 512, JSON_THROW_ON_ERROR);
+                $result[$docId] = $decoded;
             }
         }
         return $result;
@@ -1314,34 +1314,39 @@ class Index
         $k1             = $this->config->k1;
         $b              = $this->config->b;
         $lastIndex      = count($keywords) - 1;
+        // These two BM25 denominator constants do not depend on per-keyword IDF; hoist
+        // them outside the loop to avoid recomputing on every keyword iteration.
+        /** @infection-ignore-all Multiplication: k1_1mb is a pre-loop constant; mutating it uniformly shifts all docs' denominators, preserving relative BM25 ranking for any single-term query */
+        $k1_1mb    = $k1 * (1.0 - $b);   // k1 * (1 - b)    — denominator constant
+        /** @infection-ignore-all Multiplication|Division: k1b_avgdl is the length-normalisation scale; mutations change score magnitudes but preserve relative ordering for uniform-term-frequency distributions */
+        $k1b_avgdl = $k1 * $b / $avgdl;  // k1 * b / avgdl  — length-norm scale
 
         /** @var list<list<int>> $termGroups  keyword_index → matched term IDs, for proximity ranking */
         $termGroups = [];
 
         foreach ($keywords as $idx => $term) {
             $isLastKeyword = $asYouType && ($lastIndex === $idx);
-            $result = $this->getDocumentsAndCount($term, false, $isLastKeyword);
-            $df     = $result['numDocs'];
+            $word = $this->getWordlistByKeyword($term, $isLastKeyword);
+            if (!isset($word[0])) {
+                continue;
+            }
+            /** @infection-ignore-all IncrementInteger,Ternary,CastInt: numDocs feeds BM25 scoring only; for single-term prefix results array_sum equals word[0]['num_docs']; CastInt: array_sum returns int */
+            $df = count($word) === 1 ? $word[0]['num_docs'] : (int) array_sum(array_column($word, 'num_docs'));
             // Smoothed BM25 IDF: always ≥ 0, avoids negative weights for common terms.
             /** @infection-ignore-all IncrementInteger|Minus|Plus|Division: IDF mutations monotonically shift all per-term scores by the same factor; relative document ordering is preserved for any single-term query */
-            $idf    = log(1 + ($totalDocuments - $df + 0.5) / ($df + 0.5));
-            // Precompute per-keyword BM25 invariants outside the per-document inner loop.
+            $idf     = log(1 + ($totalDocuments - $df + 0.5) / ($df + 0.5));
             /** @infection-ignore-all DecrementInteger|IncrementInteger|Plus|Multiplication: idfK1p1 is a per-term scalar; mutating k1+1 uniformly rescales every doc's contribution for that term, preserving relative ranking */
-            $idfK1p1   = $idf * ($k1 + 1);   // idf * (k1 + 1)  — numerator constant
-            /** @infection-ignore-all Multiplication: k1_1mb is a per-term constant; mutating it uniformly shifts all docs' denominators, preserving relative BM25 ranking for any single-term query */
-            $k1_1mb    = $k1 * (1.0 - $b);   // k1 * (1 - b)    — denominator constant
-            /** @infection-ignore-all Multiplication|Division: k1b_avgdl is the length-normalisation scale; mutations change score magnitudes but preserve relative ordering for uniform-term-frequency distributions */
-            $k1b_avgdl = $k1 * $b / $avgdl;  // k1 * b / avgdl  — length-norm scale
-            // Column order from FETCH_NUM: 0=term_id, 1=doc_id, 2=hit_count, 3=doc_length
+            $idfK1p1 = $idf * ($k1 + 1);
+            // BM25 score computed in SQLite C; PHP receives (term_id, doc_id, score).
+            $docs = $this->fetchDocsByTermIds($word, $this->config->maxDocs, isset($word[0]['distance']), $idfK1p1, $k1_1mb, $k1b_avgdl);
             /** @var array<int, true> $groupTermIds */
-            $groupTermIds = [];
+            $groupTermIds    = [];
             /** @var array<int, true> $seenThisKeyword  Docs already counted for this keyword group; prevents
              *  prefix-expanded term IDs from inflating $docMatchCount for the same (keyword, doc) pair. */
             $seenThisKeyword = [];
-            foreach ($result['documents'] as [$termId, $docId, $tf, $dl]) {
+            foreach ($docs as [$termId, $docId, $score]) {
                 /** @infection-ignore-all OneZeroFloat: ?? 0.0 is the additive identity; the fallback only applies on first encounter of a docId which always has score 0 before accumulation */
-                $docScores[$docId] = ($docScores[$docId] ?? 0.0)
-                    + $idfK1p1 * $tf / ($k1_1mb + $k1b_avgdl * $dl + $tf);
+                $docScores[$docId] = ($docScores[$docId] ?? 0.0) + $score;
                 $groupTermIds[$termId] = true;
                 if (!isset($seenThisKeyword[$docId])) {
                     $seenThisKeyword[$docId]  = true;
@@ -1354,16 +1359,25 @@ class Index
         }
 
         if (count($termGroups) >= 2 && $this->config->proximityBoost > 0.0) {
+            // Only proximity-boost docs that matched all keyword groups; partial-match docs
+            // are skipped inside applyProximityBoost anyway — pre-filtering avoids fetching
+            // their positions and shrinks the positions IN() clause significantly.
+            $numKeywords = count($keywords);
+            $boostSet    = array_filter(
+                $docScores,
+                fn($id): bool => ($docMatchCount[$id] ?? 0) >= $numKeywords,
+                ARRAY_FILTER_USE_KEY,
+            );
             $proxWindow = $this->config->proxWindowSize;
-            if ($proxWindow > 0 && count($docScores) > $proxWindow) {
-                arsort($docScores);
-                $proxSlice = array_slice($docScores, 0, $proxWindow, true);
-                $this->applyProximityBoost($proxSlice, $termGroups);
-                foreach ($proxSlice as $id => $s) {
+            if ($proxWindow > 0 && count($boostSet) > $proxWindow) {
+                arsort($boostSet);
+                $boostSet = array_slice($boostSet, 0, $proxWindow, true);
+            }
+            if ($boostSet !== []) {
+                $this->applyProximityBoost($boostSet, $termGroups);
+                foreach ($boostSet as $id => $s) {
                     $docScores[$id] = $s;
                 }
-            } else {
-                $this->applyProximityBoost($docScores, $termGroups);
             }
         }
 
@@ -1412,13 +1426,16 @@ class Index
         // sort is BM25+proximity score (DESC). Single-keyword: all docs tie on match count, so
         // the C-native arsort on scores alone is used.
         if (count($keywords) > 1) {
+            // Build parallel sort-key arrays so array_multisort (C-native) can sort without
+            // per-comparison PHP closure call overhead.
             $sortedIds = array_keys($docScores);
-            usort(
-                $sortedIds,
-                fn(int $a, int $b): int =>
-                    ($docMatchCount[$b] ?? 0) <=> ($docMatchCount[$a] ?? 0)
-                    ?: $docScores[$b] <=> $docScores[$a]
-            );
+            $mc = [];
+            $sc = [];
+            foreach ($sortedIds as $id) {
+                $mc[] = $docMatchCount[$id] ?? 0;
+                $sc[] = $docScores[$id];
+            }
+            array_multisort($mc, SORT_DESC, SORT_NUMERIC, $sc, SORT_DESC, SORT_NUMERIC, $sortedIds);
             $pagedIds = array_slice($sortedIds, $offset, $limit);
         } else {
             arsort($docScores);
@@ -2497,42 +2514,6 @@ class Index
     // --- Private read helpers -----------------------------------------------
 
     /**
-     * Fetch documents and their count for a keyword in a single wordlist lookup.
-     *
-     * Combines wordlist lookup and document fetch into one call, avoiding a
-     * duplicate getWordlistByKeyword() round-trip.
-     *
-     * @param  string $keyword       Term to search for.
-     * @param  bool   $noLimit       When true, the $maxDocs cap is not applied.
-     * @param  bool   $isLastKeyword Whether this is the final token in the query.
-     * @return array{documents: list<array{0: int, 1: int, 2: int, 3: int}>, numDocs: int}
-     * @infection-ignore-all FalseValue: default parameter values are never exercised; callers always pass
-     *   all booleans explicitly
-     */
-    private function getDocumentsAndCount(
-        string $keyword,
-        bool $noLimit = false,
-        bool $isLastKeyword = false,
-    ): array {
-        $word = $this->getWordlistByKeyword($keyword, $isLastKeyword);
-        if (!isset($word[0])) {
-            /** @infection-ignore-all DecrementInteger,IncrementInteger: numDocs=0 on a no-match path is used by the BM25 scorer; returning -1 or 1 when documents=[] does not affect result membership */
-            return ['documents' => [], 'numDocs' => 0];
-        }
-
-        $limit     = $noLimit ? PHP_INT_MAX : $this->config->maxDocs;
-        $isFuzzy   = isset($word[0]['distance']);
-        $documents = $this->fetchDocsByTermIds($word, $limit, $isFuzzy);
-
-        /** @infection-ignore-all IncrementInteger,Ternary,CastInt: numDocs feeds BM25 scoring only; for single-term prefix results array_sum equals word[0]['num_docs']; CastInt: array_sum returns int */
-        $numDocs = count($word) === 1
-            ? $word[0]['num_docs']
-            : array_sum(array_column($word, 'num_docs'));
-
-        return ['documents' => $documents, 'numDocs' => $numDocs];
-    }
-
-    /**
      * Resolve the wordlist IDs for a keyword, used by the boolean evaluator.
      *
      * Pipes the keyword through the same Tokenizer::tokenize → stem pipeline as the BM25
@@ -3065,43 +3046,45 @@ class Index
      * @param  bool $isFuzzy When true, re-sort by fuzzy relevance rank; derived from $words carrying a distance key.
      * @return list<array{0: int, 1: int, 2: int, 3: int}> Rows as [term_id, doc_id, hit_count, doc_length].
      */
-    private function fetchDocsByTermIds(array $words, int $limit, bool $isFuzzy = false): array
-    {
+    private function fetchDocsByTermIds(
+        array $words,
+        int $limit,
+        bool $isFuzzy,
+        float $idfK1p1,
+        float $k1_1mb,
+        float $k1b_avgdl,
+    ): array {
         $ids = array_column($words, 'id');
         $n   = count($ids);
 
-        // All paths use a subquery to apply LIMIT before the doc_lengths JOIN, bounding
-        // the join to exactly $limit rows regardless of how many rows exist per term.
+        // All paths apply LIMIT inside a subquery before the doc_lengths JOIN, bounding
+        // the join to exactly $limit rows. The BM25 score is computed in SQLite C so PHP
+        // receives (term_id, doc_id, score) and avoids per-row float arithmetic.
+        // Column order (FETCH_NUM): 0=term_id, 1=doc_id, 2=score.
         //
-        // Non-fuzzy multi-term paths use UNION ALL of per-term SELECTs rather than
-        // IN (...).  With the doclist_term_hitcount index on (term_id, hit_count DESC),
-        // each arm is already in hit_count DESC order; SQLite can MERGE the sorted
-        // streams without a temp-B-tree sort pass, and LIMIT stops the scan early.
-        // IN (...) with ORDER BY cannot use this merge and always requires a temp-B-tree.
-        //
-        // All paths use FETCH_NUM: integer-indexed rows avoid per-field string hash lookups
-        // in the caller's BM25 scoring loop. Column order: 0=term_id, 1=doc_id,
-        // 2=hit_count, 3=doc_length.
+        // Non-fuzzy multi-term paths use UNION ALL of per-term SELECTs. With the
+        // doclist_term_hitcount index on (term_id, hit_count DESC) each arm is already
+        // sorted; SQLite merges streams without a temp B-tree and LIMIT stops early.
 
-        // Single-term non-fuzzy: simpler SQL (no UNION ALL needed) — cache by stable key.
+        // Single-term non-fuzzy: stable SQL shape — cache by stable key.
         /** @infection-ignore-all LogicalNot: negating !$isFuzzy to $isFuzzy only switches between the single-term cached stmt and the multi-term/fuzzy paths; all return equivalent doc sets for non-fuzzy calls */
         if ($n === 1 && !$isFuzzy) {
             $stmt = $this->stmt(
                 'fetchOneTermDocs',
-                'SELECT sub.term_id, sub.doc_id, sub.hit_count, dl.length AS doc_length
+                'SELECT sub.term_id, sub.doc_id,
+                        ? * sub.hit_count / (? + ? * dl.length + sub.hit_count) AS score
                   FROM (SELECT term_id, doc_id, hit_count FROM doclist
                         WHERE term_id = ? ORDER BY hit_count DESC LIMIT ?) sub
                   JOIN doc_lengths dl ON dl.doc_id = sub.doc_id'
             );
-            $stmt->execute([$ids[0], $limit]);
-            /** @var list<array{0: int, 1: int, 2: int, 3: int}> $rows */
+            $stmt->execute([$idfK1p1, $k1_1mb, $k1b_avgdl, $ids[0], $limit]);
+            /** @var list<array{0: int, 1: int, 2: float}> $rows */
             $rows = $stmt->fetchAll(PDO::FETCH_NUM);
             /** @infection-ignore-all ReturnRemoval: falling through to the UNION ALL path for n=1 returns the same doc set */
             return $rows;
         }
 
-        // Multi-term non-fuzzy: UNION ALL of $n arms. SQL is stable for a given $n,
-        // so cache by arity key rather than re-preparing on every call.
+        // Multi-term non-fuzzy: UNION ALL of $n arms, SQL stable for a given $n — cache by arity.
         /** @infection-ignore-all LogicalNot: negating !$isFuzzy only switches between UNION ALL and the fuzzy IN()+CASE path; result set membership is equivalent */
         if (!$isFuzzy) {
             $arms = implode(' UNION ALL ', array_fill(
@@ -3112,30 +3095,32 @@ class Index
             ));
             $stmt = $this->stmt(
                 "fetchNTermDocs:{$n}",
-                "SELECT sub.term_id, sub.doc_id, sub.hit_count, dl.length AS doc_length
+                "SELECT sub.term_id, sub.doc_id,
+                        ? * sub.hit_count / (? + ? * dl.length + sub.hit_count) AS score
                   FROM ({$arms} ORDER BY hit_count DESC LIMIT ?) sub
                   JOIN doc_lengths dl ON dl.doc_id = sub.doc_id"
             );
-            $stmt->execute([...$ids, $limit]);
-            /** @var list<array{0: int, 1: int, 2: int, 3: int}> $rows */
+            $stmt->execute([$idfK1p1, $k1_1mb, $k1b_avgdl, ...$ids, $limit]);
+            /** @var list<array{0: int, 1: int, 2: float}> $rows */
             $rows = $stmt->fetchAll(PDO::FETCH_NUM);
             /** @infection-ignore-all ReturnRemoval: falling through to the fuzzy path returns the same doc set via an IN()+CASE query */
             return $rows;
         }
 
-        // Fuzzy: ORDER BY a CASE expression that encodes the fuzzy relevance rank (closest match first).
-        // Uses IN() since the CASE sort mixes two orderings that the index cannot satisfy.
+        // Fuzzy: CASE expression encodes fuzzy relevance rank (closest match first).
+        // Uses IN() since the CASE sort cannot use the index-merge strategy.
         $placeholders = $this->placeholders($n);
         $cases        = implode(' ', array_map(fn(int $i): string => "WHEN ? THEN {$i}", range(0, $n - 1)));
         $stmt         = $this->prepare(
-            "SELECT sub.term_id, sub.doc_id, sub.hit_count, dl.length AS doc_length
+            "SELECT sub.term_id, sub.doc_id,
+                    ? * sub.hit_count / (? + ? * dl.length + sub.hit_count) AS score
               FROM (SELECT term_id, doc_id, hit_count FROM doclist
                     WHERE term_id IN ({$placeholders})
                     ORDER BY CASE term_id {$cases} END ASC, hit_count DESC LIMIT ?) sub
               JOIN doc_lengths dl ON dl.doc_id = sub.doc_id"
         );
-        $stmt->execute([...$ids, ...$ids, $limit]);
-        /** @var list<array{0: int, 1: int, 2: int, 3: int}> $rows */
+        $stmt->execute([$idfK1p1, $k1_1mb, $k1b_avgdl, ...$ids, ...$ids, $limit]);
+        /** @var list<array{0: int, 1: int, 2: float}> $rows */
         $rows = $stmt->fetchAll(PDO::FETCH_NUM);
         return $rows;
     }
@@ -3885,16 +3870,21 @@ class Index
         assert($this->pdo instanceof \PDO);
         if (!$this->readonly) {
             $this->pdo->exec('
-                PRAGMA journal_mode  = WAL;
-                PRAGMA synchronous   = NORMAL;
+                PRAGMA journal_mode        = WAL;
+                PRAGMA synchronous         = NORMAL;
+                PRAGMA cache_size          = -65536;
+                PRAGMA temp_store          = MEMORY;
+                PRAGMA mmap_size           = 536870912;
+                PRAGMA case_sensitive_like = ON;
+            ');
+        } else {
+            $this->pdo->exec('
+                PRAGMA cache_size          = -65536;
+                PRAGMA temp_store          = MEMORY;
+                PRAGMA mmap_size           = 536870912;
+                PRAGMA case_sensitive_like = ON;
             ');
         }
-        $this->pdo->exec('
-            PRAGMA cache_size         = -65536;
-            PRAGMA temp_store         = MEMORY;
-            PRAGMA mmap_size          = 536870912;
-            PRAGMA case_sensitive_like = ON;
-        ');
     }
 
     /**
