@@ -1286,6 +1286,7 @@ class Index
      * @param  int                                           $offset    Number of top-ranked results to skip.
      * @param  array<string, string|list<string>|FacetRange> $filter   Facet filters; keyed by facet key name.
      * @param  list<string>                                  $facets    Facet key names to compute counts for.
+     * @param  list<string>                                  $sort      Sort specs, e.g. ['price:asc', 'name:desc']. Fields must be declared facetFields. Docs missing a field sort last. BM25 score is the tiebreaker.
      */
     public function search(
         string $phrase,
@@ -1294,8 +1295,10 @@ class Index
         int $offset = 0,
         array $filter = [],
         array $facets = [],
+        array $sort = [],
     ): SearchResult {
-        $parsed       = $this->filterQueryTokens($phrase);
+        $sortSpecs     = $this->parseSortSpec($sort);
+        $parsed        = $this->filterQueryTokens($phrase);
         /** @var list<string> $keywords */
         $keywords     = $parsed['filtered'];
         /** @var list<list<string>> $phraseGroups */
@@ -1421,12 +1424,13 @@ class Index
             );
         }
 
-        // Multi-keyword: primary sort is number of matched keyword groups (DESC) so docs covering
-        // more of the query always outrank partial matches regardless of term frequency; secondary
-        // sort is BM25+proximity score (DESC). Single-keyword: all docs tie on match count, so
-        // the C-native arsort on scores alone is used.
-        if (count($keywords) > 1) {
-            // Build parallel sort-key arrays so array_multisort (C-native) can sort without
+        if ($sortSpecs !== []) {
+            // Custom field sort: primary keys are the declared sort fields, BM25 score is the
+            // tiebreaker, doc ID is the final deterministic key.
+            $pagedIds = $this->applySortedPagination(array_keys($docScores), $sortSpecs, $docScores, $offset, $limit);
+        } elseif (count($keywords) > 1) {
+            // Multi-keyword relevance sort: primary = matched keyword groups (DESC),
+            // secondary = BM25+proximity score (DESC). C-native array_multisort avoids
             // per-comparison PHP closure call overhead.
             $sortedIds = array_keys($docScores);
             $mc = [];
@@ -1438,6 +1442,7 @@ class Index
             array_multisort($mc, SORT_DESC, SORT_NUMERIC, $sc, SORT_DESC, SORT_NUMERIC, $sortedIds);
             $pagedIds = array_slice($sortedIds, $offset, $limit);
         } else {
+            // Single-keyword: all docs tie on match count; C-native arsort on scores alone.
             arsort($docScores);
             $pagedIds = array_slice(array_keys($docScores), $offset, $limit);
         }
@@ -1462,6 +1467,7 @@ class Index
      * @param  int                                           $offset    Number of results to skip (for pagination).
      * @param  array<string, string|list<string>|FacetRange> $filter   Facet filters; keyed by facet key name.
      * @param  list<string>                                  $facets    Facet key names to compute counts for.
+     * @param  list<string>                                  $sort      Sort specs, e.g. ['price:asc']. Fields must be declared facetFields. Docs missing a field sort last. Doc ID is the tiebreaker (no BM25 scores in boolean mode).
      */
     public function searchBoolean(
         string $phrase,
@@ -1470,7 +1476,9 @@ class Index
         int $offset = 0,
         array $filter = [],
         array $facets = [],
+        array $sort = [],
     ): SearchResult {
+        $sortSpecs = $this->parseSortSpec($sort);
         $parsed       = $this->filterQueryTokens($phrase);
         /** @var list<list<string>> $phraseGroups */
         $phraseGroups = $parsed['phrase_groups'];
@@ -1579,8 +1587,13 @@ class Index
             $this->config->maxFacetCountDocs,
         );
 
-        $total  = count($docIds);
-        $docIds = array_slice($docIds, $offset, $limit);
+        $total = count($docIds);
+
+        if ($sortSpecs !== [] && $total > 0 && $limit > 0) {
+            $docIds = $this->applySortedPagination($docIds, $sortSpecs, [], $offset, $limit);
+        } else {
+            $docIds = array_slice($docIds, $offset, $limit);
+        }
 
         return new SearchResult(
             ids: $docIds,
@@ -3377,6 +3390,136 @@ class Index
             $result = $result === null ? $set : array_intersect_key($result, $set);
         }
         return $result ?? [];
+    }
+
+    /**
+     * Parse a list of 'field:asc' / 'field:desc' sort strings into structured specs.
+     *
+     * @param  list<string> $sort
+     * @return list<array{field: string, asc: bool}>
+     * @throws \InvalidArgumentException on malformed input
+     */
+    private function parseSortSpec(array $sort): array
+    {
+        if ($sort === []) {
+            return [];
+        }
+        $specs = [];
+        foreach ($sort as $s) {
+            if (!preg_match('/^(.+):(asc|desc)$/i', (string) $s, $m)) {
+                throw new \InvalidArgumentException(
+                    "Invalid sort spec '{$s}': expected 'field:asc' or 'field:desc'."
+                );
+            }
+            $specs[] = ['field' => $m[1], 'asc' => strtolower($m[2]) === 'asc'];
+        }
+        return $specs;
+    }
+
+    /**
+     * Fetch sort column values for a single facet field keyed by doc ID.
+     *
+     * Returns float for numeric facets, string for string facets, null for docs that have
+     * no value for this field. Uses a fixed json_each-based statement (always cached as
+     * 'fetchSortValues') so no per-call prepare overhead regardless of candidate count.
+     *
+     * @param  list<int> $docIds
+     * @param  int|null  $keyId   null = unknown field; all docs return null
+     * @return array<int, float|string|null>
+     */
+    private function fetchSortValues(array $docIds, ?int $keyId): array
+    {
+        $result = array_fill_keys($docIds, null);
+        if ($keyId === null) {
+            return $result;
+        }
+        $stmt = $this->stmt(
+            'fetchSortValues',
+            'SELECT doc_id, num_value, value
+               FROM facet_values
+              WHERE key_id = ? AND doc_id IN (SELECT value FROM json_each(?))'
+        );
+        $stmt->execute([$keyId, json_encode($docIds)]);
+        foreach ($stmt->fetchAll(PDO::FETCH_NUM) as [$docId, $numValue, $strValue]) {
+            $result[(int) $docId] = $numValue !== null ? (float) $numValue : $strValue;
+        }
+        return $result;
+    }
+
+    /**
+     * Sort $docIds by the given sort specs and paginate.
+     *
+     * Sort fields are primary; $scores (BM25) is the tiebreaker when provided; doc ID is the
+     * final deterministic tiebreaker. Docs missing a sort field value are sorted last in both
+     * ASC and DESC directions.
+     *
+     * @param  list<int>                             $docIds
+     * @param  list<array{field: string, asc: bool}> $specs
+     * @param  array<int, float>                     $scores  BM25 scores; empty array for boolean path
+     * @param  int                                   $offset
+     * @param  int                                   $limit
+     * @return list<int>
+     */
+    private function applySortedPagination(
+        array $docIds,
+        array $specs,
+        array $scores,
+        int $offset,
+        int $limit,
+    ): array {
+        if ($docIds === []) {
+            return [];
+        }
+
+        $nSpecs  = count($specs);
+        $columns = [];
+
+        foreach ($specs as ['field' => $field, 'asc' => $asc]) {
+            $keyId  = $this->lookupFacetKeyId($field);
+            $values = $this->fetchSortValues($docIds, $keyId);
+
+            // Detect numeric column: any non-null float value means the whole field is numeric.
+            $isNumeric = false;
+            foreach ($values as $v) {
+                if ($v !== null) {
+                    $isNumeric = is_float($v);
+                    break;
+                }
+            }
+
+            // Apply null-last sentinels so docs without a value sort after all real values
+            // regardless of sort direction.
+            $col = [];
+            foreach ($docIds as $id) {
+                $v = $values[$id];
+                if ($v === null) {
+                    $col[$id] = $asc
+                        ? ($isNumeric ? PHP_FLOAT_MAX  : "\xFF\xFF")
+                        : ($isNumeric ? -PHP_FLOAT_MAX : '');
+                } else {
+                    $col[$id] = $v;
+                }
+            }
+            $columns[] = ['col' => $col, 'asc' => $asc];
+        }
+
+        usort($docIds, function (int $a, int $b) use ($columns, $nSpecs, $scores): int {
+            for ($j = 0; $j < $nSpecs; $j++) {
+                $cmp = $columns[$j]['col'][$a] <=> $columns[$j]['col'][$b];
+                if ($cmp !== 0) {
+                    return $columns[$j]['asc'] ? $cmp : -$cmp;
+                }
+            }
+            // BM25 tiebreaker (descending); absent on boolean path.
+            $sc = ($scores[$b] ?? 0.0) <=> ($scores[$a] ?? 0.0);
+            if ($sc !== 0) {
+                return $sc;
+            }
+            // Doc ID: stable deterministic final tiebreaker.
+            return $a <=> $b;
+        });
+
+        return array_slice($docIds, $offset, $limit);
     }
 
     /**

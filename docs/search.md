@@ -264,3 +264,51 @@ $results->facetCounts()['category'];
 ```
 
 This makes it straightforward to build a faceted navigation UI where users can switch between values in a facet group without losing count context for the other values.
+
+## Custom sort
+
+By default results are ordered by relevance (BM25 score for `search()`, arbitrary stable order for `searchBoolean()`). Pass a `sort` list to override this with one or more field values instead.
+
+Fields used for sorting must be declared as `facetFields` at index creation — the values are read from the facet index.
+
+```php
+// Cheapest first
+$results = $index->search('watch', sort: ['price:asc']);
+
+// Most expensive first
+$results = $index->search('watch', sort: ['price:desc']);
+
+// Multiple keys — left-to-right priority
+$results = $index->search('watch', sort: ['brand:asc', 'price:asc']);
+```
+
+Each spec is a `'field:asc'` or `'field:desc'` string (case-insensitive direction). An invalid format throws `\InvalidArgumentException`.
+
+### Tiebreaker
+
+When two documents share the same sort value, BM25 score is used as a tiebreaker in `search()`. Boolean search has no scores, so ties are broken by document ID ascending.
+
+### Null-last
+
+Documents that do not have a value for the sort field always appear last, regardless of direction.
+
+```php
+// Docs with no 'price' field sort after all priced docs
+$results = $index->search('watch', sort: ['price:asc']);
+```
+
+### Combining sort with filter and facets
+
+`sort`, `filter`, and `facets` compose freely:
+
+```php
+$results = $index->search('watch', filter: ['brand' => 'Casio'], facets: ['category'], sort: ['price:asc']);
+```
+
+`sort` affects the order of `$ids` and pagination; it does not change `$hits` or facet counts.
+
+`searchBoolean()` accepts the same `sort` parameter:
+
+```php
+$results = $index->searchBoolean('sedan or coupe', sort: ['price:asc']);
+```

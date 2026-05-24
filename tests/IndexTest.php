@@ -3599,4 +3599,220 @@ class IndexTest extends TestCase
         $result = $index->search('car', facets: ['color']);
         $this->assertSame([], $result->facetCounts());
     }
+
+    // --- Sort ---
+
+    public function testSortByNumericFacetAsc(): void
+    {
+        $index = new Index($this->dbPath, facetFields: ['price']);
+        $index->insert([
+            ['id' => 1, 'title' => 'product', 'price' => 30],
+            ['id' => 2, 'title' => 'product', 'price' => 10],
+            ['id' => 3, 'title' => 'product', 'price' => 20],
+        ]);
+        $this->assertSame([2, 3, 1], $index->search('product', sort: ['price:asc'])->ids);
+    }
+
+    public function testSortByNumericFacetDesc(): void
+    {
+        $index = new Index($this->dbPath, facetFields: ['price']);
+        $index->insert([
+            ['id' => 1, 'title' => 'product', 'price' => 30],
+            ['id' => 2, 'title' => 'product', 'price' => 10],
+            ['id' => 3, 'title' => 'product', 'price' => 20],
+        ]);
+        $this->assertSame([1, 3, 2], $index->search('product', sort: ['price:desc'])->ids);
+    }
+
+    public function testSortByStringFacetAsc(): void
+    {
+        $index = new Index($this->dbPath, facetFields: ['brand']);
+        $index->insert([
+            ['id' => 1, 'title' => 'product', 'brand' => 'Nike'],
+            ['id' => 2, 'title' => 'product', 'brand' => 'Adidas'],
+            ['id' => 3, 'title' => 'product', 'brand' => 'Puma'],
+        ]);
+        $this->assertSame([2, 1, 3], $index->search('product', sort: ['brand:asc'])->ids);
+    }
+
+    public function testSortByStringFacetDesc(): void
+    {
+        $index = new Index($this->dbPath, facetFields: ['brand']);
+        $index->insert([
+            ['id' => 1, 'title' => 'product', 'brand' => 'Nike'],
+            ['id' => 2, 'title' => 'product', 'brand' => 'Adidas'],
+            ['id' => 3, 'title' => 'product', 'brand' => 'Puma'],
+        ]);
+        $this->assertSame([3, 1, 2], $index->search('product', sort: ['brand:desc'])->ids);
+    }
+
+    public function testSortDirectionCaseInsensitive(): void
+    {
+        $index = new Index($this->dbPath, facetFields: ['price']);
+        $index->insert([
+            ['id' => 1, 'title' => 'product', 'price' => 30],
+            ['id' => 2, 'title' => 'product', 'price' => 10],
+        ]);
+        $this->assertSame([2, 1], $index->search('product', sort: ['price:ASC'])->ids);
+    }
+
+    public function testSortNullsLastAsc(): void
+    {
+        $index = new Index($this->dbPath, facetFields: ['price']);
+        $index->insert([
+            ['id' => 1, 'title' => 'product', 'price' => 10],
+            ['id' => 2, 'title' => 'product'],
+            ['id' => 3, 'title' => 'product', 'price' => 5],
+        ]);
+        $this->assertSame([3, 1, 2], $index->search('product', sort: ['price:asc'])->ids);
+    }
+
+    public function testSortNullsLastDesc(): void
+    {
+        $index = new Index($this->dbPath, facetFields: ['price']);
+        $index->insert([
+            ['id' => 1, 'title' => 'product', 'price' => 10],
+            ['id' => 2, 'title' => 'product'],
+            ['id' => 3, 'title' => 'product', 'price' => 5],
+        ]);
+        $this->assertSame([1, 3, 2], $index->search('product', sort: ['price:desc'])->ids);
+    }
+
+    public function testSortMultiKey(): void
+    {
+        $index = new Index($this->dbPath, facetFields: ['category', 'price']);
+        $index->insert([
+            ['id' => 1, 'title' => 'product', 'category' => 'b', 'price' => 20],
+            ['id' => 2, 'title' => 'product', 'category' => 'a', 'price' => 30],
+            ['id' => 3, 'title' => 'product', 'category' => 'a', 'price' => 10],
+            ['id' => 4, 'title' => 'product', 'category' => 'b', 'price' => 5],
+        ]);
+        $result = $index->search('product', sort: ['category:asc', 'price:asc']);
+        $this->assertSame([3, 2, 4, 1], $result->ids);
+    }
+
+    public function testSortWithFacetFilter(): void
+    {
+        $index = new Index($this->dbPath, facetFields: ['category', 'price']);
+        $index->insert([
+            ['id' => 1, 'title' => 'product', 'category' => 'a', 'price' => 20],
+            ['id' => 2, 'title' => 'product', 'category' => 'b', 'price' => 10],
+            ['id' => 3, 'title' => 'product', 'category' => 'a', 'price' => 5],
+        ]);
+        $result = $index->search('product', filter: ['category' => 'a'], sort: ['price:asc']);
+        $this->assertSame([3, 1], $result->ids);
+        $this->assertSame(2, $result->hits);
+    }
+
+    public function testSortDoesNotAffectHitsCount(): void
+    {
+        $index = new Index($this->dbPath, facetFields: ['price']);
+        $index->insert([
+            ['id' => 1, 'title' => 'product', 'price' => 30],
+            ['id' => 2, 'title' => 'product', 'price' => 10],
+            ['id' => 3, 'title' => 'product', 'price' => 20],
+        ]);
+        $this->assertSame(
+            $index->search('product')->hits,
+            $index->search('product', sort: ['price:asc'])->hits,
+        );
+    }
+
+    public function testSortDoesNotAffectFacetCounts(): void
+    {
+        $index = new Index($this->dbPath, facetFields: ['price', 'color']);
+        $index->insert([
+            ['id' => 1, 'title' => 'product', 'price' => 30, 'color' => 'red'],
+            ['id' => 2, 'title' => 'product', 'price' => 10, 'color' => 'blue'],
+            ['id' => 3, 'title' => 'product', 'price' => 20, 'color' => 'red'],
+        ]);
+        $this->assertSame(
+            $index->search('product', facets: ['color'])->facetCounts(),
+            $index->search('product', facets: ['color'], sort: ['price:asc'])->facetCounts(),
+        );
+    }
+
+    public function testSortWithPagination(): void
+    {
+        $index = new Index($this->dbPath, facetFields: ['price']);
+        $index->insert([
+            ['id' => 1, 'title' => 'product', 'price' => 40],
+            ['id' => 2, 'title' => 'product', 'price' => 10],
+            ['id' => 3, 'title' => 'product', 'price' => 30],
+            ['id' => 4, 'title' => 'product', 'price' => 20],
+        ]);
+        $page1 = $index->search('product', limit: 2, offset: 0, sort: ['price:asc']);
+        $page2 = $index->search('product', limit: 2, offset: 2, sort: ['price:asc']);
+        $this->assertSame([2, 4], $page1->ids);
+        $this->assertSame([3, 1], $page2->ids);
+    }
+
+    public function testSortUnknownFieldAllNull(): void
+    {
+        // Field not in facetFields → no facet_values rows → all docs treated as null.
+        // Falls through to doc_id as final tiebreaker.
+        $index = new Index($this->dbPath, facetFields: ['price']);
+        $index->insert([
+            ['id' => 1, 'title' => 'product', 'price' => 10],
+            ['id' => 2, 'title' => 'product', 'price' => 20],
+            ['id' => 3, 'title' => 'product', 'price' => 30],
+        ]);
+        $sorted   = $index->search('product', sort: ['weight:asc']);
+        $unsorted = $index->search('product', sort: ['weight:desc']);
+        // Both produce the same IDs (all null → doc_id tiebreaker either way)
+        $this->assertSame($sorted->ids, $unsorted->ids);
+    }
+
+    public function testSortOnBooleanSearch(): void
+    {
+        $index = new Index($this->dbPath, facetFields: ['price']);
+        $index->insert([
+            ['id' => 1, 'title' => 'product', 'price' => 30],
+            ['id' => 2, 'title' => 'product', 'price' => 10],
+            ['id' => 3, 'title' => 'product', 'price' => 20],
+        ]);
+        $this->assertSame([2, 3, 1], $index->searchBoolean('product', sort: ['price:asc'])->ids);
+    }
+
+    public function testSortBooleanNullsLast(): void
+    {
+        $index = new Index($this->dbPath, facetFields: ['price']);
+        $index->insert([
+            ['id' => 1, 'title' => 'product', 'price' => 10],
+            ['id' => 2, 'title' => 'product'],
+            ['id' => 3, 'title' => 'product', 'price' => 5],
+        ]);
+        $this->assertSame([3, 1, 2], $index->searchBoolean('product', sort: ['price:asc'])->ids);
+    }
+
+    public function testSortInvalidSpecThrowsOnSearch(): void
+    {
+        $index = new Index($this->dbPath, facetFields: ['price']);
+        $index->insert([['id' => 1, 'title' => 'product', 'price' => 10]]);
+        $this->expectException(\InvalidArgumentException::class);
+        $index->search('product', sort: ['price_asc']);
+    }
+
+    public function testSortInvalidDirectionThrows(): void
+    {
+        $index = new Index($this->dbPath, facetFields: ['price']);
+        $index->insert([['id' => 1, 'title' => 'product', 'price' => 10]]);
+        $this->expectException(\InvalidArgumentException::class);
+        $index->search('product', sort: ['price:up']);
+    }
+
+    public function testSortInvalidSpecThrowsOnBoolean(): void
+    {
+        $index = new Index($this->dbPath, facetFields: ['price']);
+        $index->insert([['id' => 1, 'title' => 'product', 'price' => 10]]);
+        $this->expectException(\InvalidArgumentException::class);
+        $index->searchBoolean('product', sort: ['price:up']);
+    }
+
+    public function testEmptySortIsNoop(): void
+    {
+        $index = new Index($this->dbPath, facetFields: ['price']);
+        $index->insert([['id' => 1, 'title' => 'product', 'price' => 10]]);
+        $this->assertContains(1, $index->search('product', sort: [])->ids);
+    }
 }
