@@ -38,8 +38,6 @@ class Index
     /** Max rows per chunk when each row uses 4 bind variables (facet_values bulk INSERT). */
     private const int CHUNK_4P = 8_191;
 
-    /** Max rows per chunk for document store bulk-INSERT (2 params/row, capped conservatively for large BLOBs). */
-    private const int CHUNK_DOCS = 500;
 
     /**
      * When N (result-set size) is at or below this threshold, facet counts are fetched
@@ -107,6 +105,12 @@ class Index
 
     /** @var array<string, int> Maps facet key name → facet_keys.id; populated lazily; cleared on connection change. */
     private array $facetKeyCache = [];
+
+    /** @var array<string, int> Pre-computed isset-lookup set derived from facetFields (array_flip); rebuilt whenever facetFields is assigned. */
+    private array $facetFieldSet = [];
+
+    /** @var array<string, int>|null Pre-computed isset-lookup set derived from searchableFields (array_flip); null means all non-facet fields. */
+    private ?array $searchableFieldSet = null;
 
     /** Active stopword filter; null when no language is set or language has no stopword list. */
     private ?Stopwords $stopwords = null;
@@ -513,8 +517,10 @@ class Index
         $schemaStmt = $pdo->prepare("INSERT INTO info (key, value) VALUES (?, ?)");
         $schemaStmt->execute(['facet_fields',      json_encode($facetFields)]);
         $schemaStmt->execute(['searchable_fields', $searchableFields !== null ? json_encode($searchableFields) : '']);
-        $this->facetFields      = $facetFields;
-        $this->searchableFields = $searchableFields;
+        $this->facetFields        = $facetFields;
+        $this->searchableFields   = $searchableFields;
+        $this->facetFieldSet      = array_flip($facetFields);
+        $this->searchableFieldSet = $searchableFields !== null ? array_flip($searchableFields) : null;
 
         if ($language !== null) {
             $this->applyLanguage($language);
@@ -563,9 +569,11 @@ class Index
         $this->applyLanguage($lang);
         $this->documentStoreEnabled = ($infoRows['has_document_store'] ?? '0') === '1';
         $this->facetsEnabled        = ($infoRows['has_facets']          ?? '0') === '1';
-        $this->facetFields      = self::decodeStringList($infoRows['facet_fields'] ?? '[]');
-        $sfRaw                  = $infoRows['searchable_fields'] ?? '';
-        $this->searchableFields = $sfRaw === '' ? null : self::decodeStringList($sfRaw);
+        $this->facetFields        = self::decodeStringList($infoRows['facet_fields'] ?? '[]');
+        $sfRaw                    = $infoRows['searchable_fields'] ?? '';
+        $this->searchableFields   = $sfRaw === '' ? null : self::decodeStringList($sfRaw);
+        $this->facetFieldSet      = array_flip($this->facetFields);
+        $this->searchableFieldSet = $this->searchableFields !== null ? array_flip($this->searchableFields) : null;
     }
 
     /**
@@ -725,9 +733,8 @@ class Index
                  'docTermBuffer'     => $docTermBuffer,
                  'docLengthBuffer'   => $docLengthBuffer,
                  'docPositionBuffer' => $docPositionBuffer,
-                 'facetBuffer'       => $facetBuffer] = $this->buildBatchBuffer($documents, $progress);
-
-                $rawDocuments = $this->buildRawDocuments($documents);
+                 'facetBuffer'       => $facetBuffer,
+                 'rawDocuments'      => $rawDocuments] = $this->buildBatchBuffer($documents, $progress);
 
                 $totalLength = $this->flushBatch(
                     $wordHits,
@@ -931,9 +938,8 @@ class Index
                  'docTermBuffer'     => $docTermBuffer,
                  'docLengthBuffer'   => $docLengthBuffer,
                  'docPositionBuffer' => $docPositionBuffer,
-                 'facetBuffer'       => $facetBuffer] = $this->buildBatchBuffer($documents);
-
-                $rawDocuments = $this->buildRawDocuments($documents);
+                 'facetBuffer'       => $facetBuffer,
+                 'rawDocuments'      => $rawDocuments] = $this->buildBatchBuffer($documents);
 
                 $totalNewLength = $this->flushBatch(
                     $wordHits,
@@ -1375,12 +1381,7 @@ class Index
         $filterSets   = $this->loadFacetKeySets($filter, $this->config->filterMaxDocs, array_keys($docScores));
         $rawDocScores = $docScores;
         if ($filterSets !== []) {
-            $globalFilter = array_reduce(
-                $filterSets,
-                /** @param array<int, true>|null $carry */
-                fn(?array $carry, array $set): array => $carry === null ? $set : array_intersect_key($carry, $set),
-                null,
-            ) ?? [];
+            $globalFilter = $this->intersectFilterSets($filterSets);
             $docScores = array_intersect_key($docScores, $globalFilter);
         }
 
@@ -1547,12 +1548,7 @@ class Index
         $filterSets = $this->loadFacetKeySets($filter, $this->config->filterMaxDocs, $docIds);
         $rawDocSet  = array_flip($docIds);
         if ($filterSets !== []) {
-            $globalFilter = array_reduce(
-                $filterSets,
-                /** @param array<int, true>|null $carry */
-                fn(?array $carry, array $set): array => $carry === null ? $set : array_intersect_key($carry, $set),
-                null,
-            ) ?? [];
+            $globalFilter = $this->intersectFilterSets($filterSets);
             $docIds = array_keys(array_intersect_key($rawDocSet, $globalFilter));
         }
 
@@ -1600,17 +1596,6 @@ class Index
         return $result;
     }
 
-    /**
-     * Convert an infix boolean expression to postfix (Reverse Polish) notation.
-     *
-     * Uses the Shunting-Yard algorithm. Operator precedence: ~ (3) > & (2) > | (1).
-     * Shunting-Yard preserves the relative order of operands, so the last word token
-     * appended to $postfix during the loop is always the last word in the original
-     * expression — returned as $lastTerm so callers need no backward scan.
-     *
-     * @param  string $expression Infix expression containing operators |, &, ~, (, ).
-     * @return array{list<string>, ?string} [postfix tokens, last word token or null]
-     */
     // --- Private write helpers ----------------------------------------------
 
     /**
@@ -1771,38 +1756,61 @@ class Index
         $termPositions = [];
         $length        = 0;
         $position      = 0;
-        foreach ($fields as $key => $col) {
-            if ($key === 'id') {
-                continue;
+        if ($this->searchableFieldSet !== null) {
+            // When searchableFields is declared, iterate ONLY those keys — avoids scanning every
+            // document field when most are non-searchable (e.g. 1 searchable out of 16 total).
+            foreach ($this->searchableFieldSet as $key => $_) {
+                $this->indexFieldColumn($fields[$key] ?? null, $termCounts, $termPositions, $length, $position);
             }
-            if ($this->searchableFields === null) {
-                if (in_array($key, $this->facetFields, true)) {
+        } else {
+            // searchableFields is null → all non-facet fields are searchable; iterate full doc.
+            foreach ($fields as $key => $col) {
+                if ($key === 'id' || isset($this->facetFieldSet[$key])) {
                     continue;
                 }
-            } else {
-                if (!in_array($key, $this->searchableFields, true)) {
-                    continue;
-                }
-            }
-            /** @infection-ignore-all UnwrapTrim: leading/trailing whitespace in field values is uncommon in tests; trimming is a defensive clean-up step */
-            $text = trim(strval($col)); // @phpstan-ignore argument.type
-            if ($text !== '') {
-                $tokens = Tokenizer::tokenize($text, $this->language);
-                if ($this->stopwords instanceof \Fuzor\Stopwords) {
-                    $tokens = $this->stopwords->filter($tokens);
-                }
-                /** @infection-ignore-all Assignment: changing += to = only matters for multi-field docs where the same term appears in both fields; single-field tests are unaffected */
-                $length += count($tokens);
-                if ($this->stemmer instanceof \Fuzor\Stemmer) {
-                    $tokens = $this->stemmer->stemTokens($tokens);
-                }
-                foreach ($tokens as $token) {
-                    $termCounts[$token]      = ($termCounts[$token] ?? 0) + 1;
-                    $termPositions[$token][] = $position++;
-                }
+                $this->indexFieldColumn($col, $termCounts, $termPositions, $length, $position);
             }
         }
         return ['termCounts' => $termCounts, 'termPositions' => $termPositions, 'length' => $length];
+    }
+
+    /**
+     * Tokenise one document field value and accumulate into the shared term/position maps.
+     *
+     * Null and empty/whitespace-only values are silently skipped. Both branches of
+     * tokenizeDocumentFields() delegate here so the tokenisation pipeline is defined once.
+     *
+     * @param array<string, int>       $termCounts    mutated in-place
+     * @param array<string, list<int>> $termPositions mutated in-place
+     */
+    private function indexFieldColumn(
+        mixed $col,
+        array &$termCounts,
+        array &$termPositions,
+        int &$length,
+        int &$position,
+    ): void {
+        if ($col === null) {
+            return;
+        }
+        /** @infection-ignore-all UnwrapTrim: leading/trailing whitespace in field values is uncommon in tests; trimming is a defensive clean-up step */
+        $text = trim(strval($col)); // @phpstan-ignore argument.type
+        if ($text === '') {
+            return;
+        }
+        $tokens = Tokenizer::tokenize($text, $this->language);
+        if ($this->stopwords instanceof \Fuzor\Stopwords) {
+            $tokens = $this->stopwords->filter($tokens);
+        }
+        /** @infection-ignore-all Assignment: changing += to = only matters for multi-field docs where the same term appears in both fields; single-field tests are unaffected */
+        $length += count($tokens);
+        if ($this->stemmer instanceof \Fuzor\Stemmer) {
+            $tokens = $this->stemmer->stemTokens($tokens);
+        }
+        foreach ($tokens as $token) {
+            $termCounts[$token]      = ($termCounts[$token] ?? 0) + 1;
+            $termPositions[$token][] = $position++;
+        }
     }
 
     /**
@@ -1835,11 +1843,8 @@ class Index
         }
         $this->saveDocLength($documentId, $length);
 
-        if ($this->facetsEnabled) {
-            $facets = $this->facetFields !== []
-                ? array_intersect_key($row, array_flip($this->facetFields))
-                : [];
-            $this->saveFacets($documentId, $facets);
+        if ($this->facetsEnabled && $this->facetFieldSet !== []) {
+            $this->saveFacets($documentId, array_intersect_key($row, $this->facetFieldSet));
         }
 
         if ($this->documentStoreEnabled) {
@@ -1914,6 +1919,39 @@ class Index
     }
 
     /**
+     * Accumulate one document's facet fields into the shared name→value→docId→numValue buffer.
+     *
+     * Called once per document in buildBatchBuffer. Avoids the 311K intermediate
+     * {name, value, numValue} PHP array allocations of the old per-doc normalizeFacets approach.
+     *
+     * @param array<string, mixed>                                   $extracted    array_intersect_key result
+     * @param array<string, array<int|string, array<int, float|null>>>   $facetBuffer  mutated in-place
+     * @param-out array<string, array<int|string, array<int, float|null>>> $facetBuffer
+     */
+    private function accumulateFacets(array $extracted, int $documentId, array &$facetBuffer): void
+    {
+        foreach ($extracted as $name => $rawValue) {
+            if (is_array($rawValue)) {
+                foreach ($rawValue as $v) {
+                    if (is_int($v) || is_float($v)) {
+                        $strVal = (string) $v;
+                        $facetBuffer[$name][$strVal][$documentId] = (float) $v;
+                    } elseif (is_string($v) && $v !== '') {
+                        $strVal = $v;
+                        $facetBuffer[$name][$strVal][$documentId] = null;
+                    }
+                }
+            } elseif (is_int($rawValue) || is_float($rawValue)) {
+                $strVal = (string) $rawValue;
+                $facetBuffer[$name][$strVal][$documentId] = (float) $rawValue;
+            } elseif (is_string($rawValue) && $rawValue !== '') {
+                $strVal = $rawValue;
+                $facetBuffer[$name][$strVal][$documentId] = null;
+            }
+        }
+    }
+
+    /**
      * Phase 1 of the two-phase bulk load: tokenise all documents and accumulate
      * per-term and per-document statistics in PHP memory without touching the DB.
      *
@@ -1932,7 +1970,8 @@ class Index
      *     docTermBuffer:     array<int, array<string, int>>,
      *     docLengthBuffer:   array<int, int>,
      *     docPositionBuffer: array<int, array<string, list<int>>>,
-     *     facetBuffer:       array<int, list<array{name: string, value: string, numValue: float|null}>>
+     *     facetBuffer:       array<string, array<int|string, array<int, float|null>>>,
+     *     rawDocuments:      array<int, array<string, mixed>>
      * }
      */
     private function buildBatchBuffer(array $documents, ?callable $progress = null): array
@@ -1947,11 +1986,17 @@ class Index
         $docLengthBuffer   = [];
         /** @var array<int, array<string, list<int>>> $docPositionBuffer */
         $docPositionBuffer = [];
-        /** @var array<int, list<array{name: string, value: string, numValue: float|null}>> $facetBuffer */
+        /** @var array<string, array<int|string, array<int, float|null>>> $facetBuffer  name → value → docId → numValue */
         $facetBuffer       = [];
+        /** @var array<int, array<string, mixed>> $rawDocuments Raw document arrays for the document store; empty when store is disabled. */
+        $rawDocuments      = [];
 
         $total = count($documents);
         $done  = 0;
+
+        // Pre-compute the facet field lookup map once for the whole batch (not per-document).
+        $facetFieldFlipped = $this->facetFieldSet;
+        $hasFacetFields    = $this->facetsEnabled && $facetFieldFlipped !== [];
 
         foreach ($documents as $document) {
             $documentId = $this->extractId($document['id']);
@@ -1962,12 +2007,16 @@ class Index
             $docTermBuffer[$documentId]     = $termCounts;
             $docLengthBuffer[$documentId]   = $length;
             $docPositionBuffer[$documentId] = $termPositions;
-            if ($this->facetsEnabled) {
-                $facetBuffer[$documentId] = $this->normalizeFacets(
-                    $this->facetFields !== []
-                        ? array_intersect_key($document, array_flip($this->facetFields))
-                        : []
+            if ($hasFacetFields) {
+                $this->accumulateFacets(
+                    array_intersect_key($document, $facetFieldFlipped),
+                    $documentId,
+                    $facetBuffer,
                 );
+            }
+
+            if ($this->documentStoreEnabled) {
+                $rawDocuments[$documentId] = $document;
             }
 
             foreach ($termCounts as $term => $hits) {
@@ -1995,26 +2044,8 @@ class Index
             'docLengthBuffer'   => $docLengthBuffer,
             'docPositionBuffer' => $docPositionBuffer,
             'facetBuffer'       => $facetBuffer,
+            'rawDocuments'      => $rawDocuments,
         ];
-    }
-
-    /**
-     * Build the doc_id → raw document map passed to flushBatch() for the document store.
-     * Returns an empty array when the store is not enabled.
-     *
-     * @param  array<array<string, mixed>> $documents
-     * @return array<int, array<string, mixed>>
-     */
-    private function buildRawDocuments(array $documents): array
-    {
-        if (!$this->documentStoreEnabled) {
-            return [];
-        }
-        $result = [];
-        foreach ($documents as $doc) {
-            $result[$this->extractId($doc['id'])] = $doc;
-        }
-        return $result;
     }
 
     /**
@@ -2031,8 +2062,8 @@ class Index
      * @param  array<int, array<string, int>>       $docTermBuffer
      * @param  array<int, int>                      $docLengthBuffer
      * @param  array<int, array<string, list<int>>> $docPositionBuffer
-     * @param  array<int, array<string, mixed>>     $rawDocuments  doc_id → document array (store path only)
-     * @param  array<int, list<array{name: string, value: string, numValue: float|null}>> $facetBuffer
+     * @param  array<int, array<string, mixed>>     $rawDocuments  doc_id → raw document array (store path only)
+     * @param  array<string, array<int|string, array<int, float|null>>> $facetBuffer  name → value → docId → numValue
      * @return int Total token count across all documents (for adjustStats).
      */
     private function flushBatch(
@@ -2050,36 +2081,12 @@ class Index
         // Step 1: upsert all unique terms; get back term text → wordlist ID mapping.
         $termIdMap = $this->batchUpsertWordlist($wordHits, $wordDocs);
 
-        // Step 2: invert both docTermBuffer and docPositionBuffer in a single pass.
-        // doclist is WITHOUT ROWID with PK (term_id, doc_id): inserting in PK order turns
-        // random leaf-page seeks into sequential B-tree appends.
-        // Both buffers share the same (docId, term) key space — every term in docTermBuffer
-        // is guaranteed to appear in docPositionBuffer for the same docId — so one outer loop
-        // and one inner loop cover both inversions without a second full traversal.
-        $termDocMap    = [];
-        $termDocPosMap = [];
-        foreach ($docTermBuffer as $docId => $termCounts) {
-            $termPositions = $docPositionBuffer[$docId];
-            foreach ($termCounts as $term => $hits) {
-                $termId = $termIdMap[$term];
-                $termDocMap[$termId][$docId]    = $hits;
-                $termDocPosMap[$termId][$docId] = $termPositions[$term];
-            }
-        }
+        // Step 2: invert both docTermBuffer and docPositionBuffer, then insert doclist.
+        [$termDocMap, $termDocPosMap] = $this->invertTermBuffers($docTermBuffer, $docPositionBuffer, $termIdMap);
         $this->bulkInsertDoclistRows($termDocMap);
 
-        // Step 3: bulk-insert all doc_lengths rows.
-        // No ON CONFLICT needed: callers guarantee no pre-existing doc_ids
-        // (insertMany verifies; replaceMany pre-deletes via bulkRemoveDocuments).
-        $this->bulkChunkInsert(
-            $pdo,
-            $docLengthBuffer,
-            self::CHUNK_2P,
-            'docLengthChunk',
-            'INSERT INTO doc_lengths (doc_id, length) VALUES ',
-            '(?,?)',
-            fn(int $docId, int $length): array => [$docId, $length],
-        );
+        // Step 3: bulk-insert doc_lengths.
+        $this->bulkInsertDocLengthRows($docLengthBuffer);
 
         // Step 4: bulk-insert positions in (term_id, doc_id, position) PK order.
         if ($termDocPosMap !== []) {
@@ -2088,16 +2095,7 @@ class Index
 
         // Step 5: bulk-insert documents into the document store.
         if ($this->documentStoreEnabled && $rawDocuments !== []) {
-            $this->bulkChunkInsert(
-                $pdo,
-                $rawDocuments,
-                self::CHUNK_DOCS,
-                'documentsChunk',
-                'INSERT INTO documents (doc_id, data) VALUES ',
-                '(?,?)',
-                fn(int $docId, array $doc): array =>
-                    [$docId, json_encode($doc, JSON_THROW_ON_ERROR)],
-            );
+            $this->bulkInsertDocumentRows($rawDocuments);
         }
 
         // Step 6: bulk-insert facet values sorted by (key_id, value, doc_id) for
@@ -2110,10 +2108,7 @@ class Index
     }
 
     /**
-     * Bulk-insert doclist rows in clustered PK order (term_id, doc_id).
-     *
-     * Specialized inline variant of the former generic bulkInsertTermDocRows — avoids callable
-     * dispatch, outer array wrapping, and array_push spread overhead on every row.
+     * Bulk-insert doclist rows in clustered (term_id, doc_id) PK order.
      *
      * @param array<int, array<int, int>> $termDocMap  term_id → doc_id → hit_count (unsorted; sorted here)
      */
@@ -2154,10 +2149,7 @@ class Index
     }
 
     /**
-     * Bulk-insert positions rows in clustered PK order (term_id, doc_id, position).
-     *
-     * Specialized inline variant — eliminates the array_map + inner closure that were called
-     * a lot in the generic path, building params directly with $params[] assignments.
+     * Bulk-insert positions rows in clustered (term_id, doc_id, position) PK order.
      *
      * @param array<int, array<int, list<int>>> $termDocPosMap  term_id → doc_id → position list (unsorted; sorted here)
      */
@@ -2200,37 +2192,91 @@ class Index
     }
 
     /**
-     * Bulk-INSERT items in chunks, caching prepared statements keyed by chunk size.
+     * Invert doc→term buffers into term→doc maps for sorted B-tree insertion.
      *
-     * @template TKey of array-key
-     * @template TValue
-     * @param array<TKey, TValue> $items        Items to insert; iterated in key-preserving chunk order.
-     * @param positive-int $chunkSize           Max rows per statement (use the CHUNK_XP constant for the col count).
-     * @param string $cachePrefix              bulkStmtCache key prefix (e.g. 'docLengthChunk').
-     * @param string $insertPrefix             SQL through "VALUES " — table and column names vary per caller.
-     * @param string $rowTpl                   Placeholder template for one row (e.g. "(?,?)").
-     * @param callable(TKey, TValue): list<mixed> $bindRow  Returns flat params for one row.
+     * Both buffers share the same (docId, term) key space so one pass covers both inversions.
+     *
+     * @param array<int, array<string, int>>         $docTermBuffer      docId → term → hit_count
+     * @param array<int, array<string, list<int>>>   $docPositionBuffer  docId → term → position list
+     * @param array<string, int>                     $termIdMap          term text → wordlist ID
+     * @return array{0: array<int, array<int, int>>, 1: array<int, array<int, list<int>>>}
      */
-    private function bulkChunkInsert(
-        \PDO $pdo,
-        array $items,
-        int $chunkSize,
-        string $cachePrefix,
-        string $insertPrefix,
-        string $rowTpl,
-        callable $bindRow,
-    ): void {
-        foreach (array_chunk($items, $chunkSize, true) as $chunk) {
-            $n      = count($chunk);
-            $params = [];
-            foreach ($chunk as $k => $v) {
-                array_push($params, ...$bindRow($k, $v));
+    private function invertTermBuffers(array $docTermBuffer, array $docPositionBuffer, array $termIdMap): array
+    {
+        $termDocMap    = [];
+        $termDocPosMap = [];
+        foreach ($docTermBuffer as $docId => $termCounts) {
+            $termPositions = $docPositionBuffer[$docId];
+            foreach ($termCounts as $term => $hits) {
+                $termId = $termIdMap[$term];
+                $termDocMap[$termId][$docId]    = $hits;
+                $termDocPosMap[$termId][$docId] = $termPositions[$term];
             }
-            /** @infection-ignore-all AssignCoalesce: removing ??= only disables statement caching; correctness is unaffected */
-            ($this->bulkStmtCache["{$cachePrefix}:{$n}"] ??= $pdo->prepare(
-                $insertPrefix
-                    /** @infection-ignore-all DecrementInteger,IncrementInteger: array_fill start index 0 vs ±1 only changes array keys; implode() ignores keys */
-                    . implode(',', array_fill(0, $n, $rowTpl))
+        }
+        return [$termDocMap, $termDocPosMap];
+    }
+
+    /**
+     * Bulk-insert doc_lengths rows in chunks of CHUNK_2P (2 params/row).
+     *
+     * @param array<int, int> $docLengthBuffer  docId → token count
+     */
+    private function bulkInsertDocLengthRows(array $docLengthBuffer): void
+    {
+        $pdo      = $this->pdo;
+        assert($pdo instanceof \PDO);
+        $rowCount = 0;
+        $params   = [];
+        foreach ($docLengthBuffer as $docId => $length) {
+            $params[] = $docId;
+            $params[] = $length;
+            if (++$rowCount === self::CHUNK_2P) {
+                ($this->bulkStmtCache['docLengthChunk:' . self::CHUNK_2P] ??= $pdo->prepare(
+                    'INSERT INTO doc_lengths (doc_id, length) VALUES '
+                    . implode(',', array_fill(0, self::CHUNK_2P, '(?,?)'))
+                ))->execute($params);
+                $params   = [];
+                $rowCount = 0;
+            }
+        }
+        if ($rowCount > 0) {
+            ($this->bulkStmtCache["docLengthChunk:{$rowCount}"] ??= $pdo->prepare(
+                'INSERT INTO doc_lengths (doc_id, length) VALUES '
+                . implode(',', array_fill(0, $rowCount, '(?,?)'))
+            ))->execute($params);
+        }
+    }
+
+    /**
+     * Bulk-insert document store rows, JSON-encoding each document inline.
+     *
+     * Uses CHUNK_2P (max 2-param rows) to minimise execute() round-trips.
+     * JSON encoding is done inline per-row to avoid holding all encoded strings in memory at once.
+     *
+     * @param array<int, array<string, mixed>> $rawDocuments  docId → raw document array
+     */
+    private function bulkInsertDocumentRows(array $rawDocuments): void
+    {
+        $pdo      = $this->pdo;
+        assert($pdo instanceof \PDO);
+        $rowCount = 0;
+        $params   = [];
+        foreach ($rawDocuments as $docId => $doc) {
+            $params[] = $docId;
+            $params[] = json_encode($doc, JSON_THROW_ON_ERROR);
+            if (++$rowCount === self::CHUNK_2P) {
+                ($this->bulkStmtCache['documentsChunk:' . self::CHUNK_2P] ??= $pdo->prepare(
+                    'INSERT INTO documents (doc_id, data) VALUES '
+                    . implode(',', array_fill(0, self::CHUNK_2P, '(?,?)'))
+                ))->execute($params);
+                $params   = [];
+                $rowCount = 0;
+            }
+        }
+        if ($rowCount > 0) {
+            ($this->bulkStmtCache["documentsChunk:{$rowCount}"] ??= $pdo->prepare(
+                'INSERT INTO documents (doc_id, data) VALUES '
+                . implode(',', array_fill(0, $rowCount, '(?,?)'))
             ))->execute($params);
         }
     }
@@ -2341,7 +2387,7 @@ class Index
      * a variable-shape prepared statement outweighs the savings.
      *
      * @param int             $documentId Document ID.
-     * @param array<int, int> $termIds    term_id → hit_count map from upsertWordlist().
+     * @param array<int, int> $termIds  term_id → hit_count map from upsertWordlist().
      */
     private function saveDoclist(int $documentId, array $termIds): void
     {
@@ -2365,8 +2411,8 @@ class Index
     /**
      * Persist term positions for a single document (single-insert path).
      *
-     * @param int                       $documentId Document ID.
-     * @param array<int, list<int>>     $termIdPositions term_id → ordered position list.
+     * @param int                   $documentId      Document ID.
+     * @param array<int, list<int>> $termIdPositions term_id → ordered position list.
      */
     private function savePositions(int $documentId, array $termIdPositions): void
     {
@@ -3258,23 +3304,21 @@ class Index
     /**
      * Bulk-upsert facet keys and insert facet_values rows in (key_id, value, doc_id) PK order.
      *
-     * Mirrors the bulkInsertDoclistRows pattern: sort by the clustered PK before chunking
-     * so WITHOUT ROWID B-tree inserts are sequential rather than random.
+     * Receives a pre-organized name→value→docId→numValue map built by buildBatchBuffer(),
+     * which avoids the 311K intermediate row-array allocations of the old per-doc approach.
      *
-     * @param array<int, list<array{name: string, value: string, numValue: float|null}>> $facetBuffer doc_id → rows
+     * @param array<string, array<int|string, array<int, float|null>>> $facetBuffer  name → value → docId → numValue
      */
     private function bulkFlushFacets(array $facetBuffer): void
     {
         $pdo = $this->pdo;
         assert($pdo instanceof \PDO);
 
-        // 1. Resolve all facet key names that are not yet in the cache.
+        // 1. Resolve any facet key names not yet in the cache (only fires on first batch).
         $newNames = [];
-        foreach ($facetBuffer as $rows) {
-            foreach ($rows as $row) {
-                if (!isset($this->facetKeyCache[$row['name']])) {
-                    $newNames[$row['name']] = true;
-                }
+        foreach (array_keys($facetBuffer) as $name) {
+            if (!isset($this->facetKeyCache[$name])) {
+                $newNames[$name] = true;
             }
         }
         if ($newNames !== []) {
@@ -3295,15 +3339,12 @@ class Index
             }
         }
 
-        // 2. Build a nested map (key_id → value → doc_id → num_value) and sort each level
-        //    so rows are inserted in clustered PK order (key_id, value, doc_id).
-        /** @var array<int, array<string, array<int, float|null>>> $kvdMap */
+        // 2. Remap outer keys from field names to integer key_ids (7 iterations for ecom-like indexes).
+        //    Previously required 311K iterations to build this map from per-doc rows.
+        /** @var array<int, array<int|string, array<int, float|null>>> $kvdMap */
         $kvdMap = [];
-        foreach ($facetBuffer as $docId => $rows) {
-            foreach ($rows as $row) {
-                $keyId = $this->facetKeyCache[$row['name']];
-                $kvdMap[$keyId][$row['value']][$docId] = $row['numValue'];
-            }
+        foreach ($facetBuffer as $name => $valueMap) {
+            $kvdMap[$this->facetKeyCache[$name]] = $valueMap;
         }
         ksort($kvdMap);
 
@@ -3336,6 +3377,21 @@ class Index
                 . implode(',', array_fill(0, $rowCount, '(?,?,?,?)'))
             ))->execute($params);
         }
+    }
+
+    /**
+     * Intersect all sets in $filterSets; returns [] when $filterSets is empty.
+     *
+     * @param  array<string, array<int, true>> $filterSets
+     * @return array<int, true>
+     */
+    private function intersectFilterSets(array $filterSets): array
+    {
+        $result = null;
+        foreach ($filterSets as $set) {
+            $result = $result === null ? $set : array_intersect_key($result, $set);
+        }
+        return $result ?? [];
     }
 
     /**
@@ -3506,12 +3562,7 @@ class Index
             if ($otherSets === []) {
                 $countSet = $rawDocScores;
             } else {
-                $countBase = array_reduce(
-                    $otherSets,
-                    fn(?array $carry, array $set): array =>
-                        $carry === null ? $set : array_intersect_key($carry, $set),
-                    null,
-                ) ?? [];
+                $countBase = $this->intersectFilterSets($otherSets);
                 $countSet = array_intersect_key($rawDocScores, $countBase);
             }
             $docIds = array_keys($countSet);
