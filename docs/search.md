@@ -86,7 +86,22 @@ Typo tolerance is controlled by `Config` properties — see [configuration.md](c
 | `fuzzyMaxExpansions` | `50`    | Max wordlist candidates evaluated                               |
 
 ### BM25 tuning
-`k1`, `b`, `maxDocs`, and `proximityBoost` are set via `Config` at construction time — see [configuration.md](configuration.md).
+`k1`, `b`, `maxDocs`, `proximityBoost`, and `fieldBoosts` are set via `Config` at construction time — see [configuration.md](configuration.md).
+
+### Field boosting
+
+Pass `fieldBoosts` in `Config` to weight matches in specific fields more heavily. A term found in `title` (boost 5.0) outscores the same term repeated several times in `body` (boost 1.0):
+
+```php
+$index = new Index('/path/to/articles.db', config: new Config(
+    fieldBoosts: ['title' => 5.0, 'body' => 1.0],
+));
+
+$results = $index->search('turbo');
+// Documents where "turbo" appears in the title rank above those where it only appears in the body.
+```
+
+See [configuration.md](configuration.md#field-boosting) for details and performance notes.
 
 ## Boolean search
 

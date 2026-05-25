@@ -106,6 +106,12 @@ class Index
     /** @var array<string, int> Maps facet key name → facet_keys.id; populated lazily; cleared on connection change. */
     private array $facetKeyCache = [];
 
+    /** @var array<string, int> Maps searchable field name → field_names.id; populated lazily; cleared on connection change. */
+    private array $fieldNameCache = [];
+
+    /** Whether this index has the field_hits table (false for indexes created before field boost support). */
+    private bool $hasFieldHits = false;
+
     /** @var array<string, int> Pre-computed isset-lookup set derived from facetFields (array_flip); rebuilt whenever facetFields is assigned. */
     private array $facetFieldSet = [];
 
@@ -514,6 +520,30 @@ class Index
         $pdo->exec("INSERT INTO info (key, value) VALUES ('has_facets', '1')");
         $this->facetsEnabled = true;
 
+        // field_names: one row per searchable field name (~2–10 entries; fully cached in PHP).
+        $pdo->exec(
+            "CREATE TABLE IF NOT EXISTS field_names (
+                id   INTEGER PRIMARY KEY,
+                name TEXT NOT NULL UNIQUE
+            ) STRICT"
+        );
+        // field_hits: per-field term hit counts for field boost re-scoring.
+        // WITHOUT ROWID clusters on composite PK (term_id, doc_id, field_id);
+        // sorted bulk insertion yields sequential B-tree appends identical to doclist.
+        $pdo->exec(
+            "CREATE TABLE IF NOT EXISTS field_hits (
+                term_id   INTEGER NOT NULL,
+                doc_id    INTEGER NOT NULL,
+                field_id  INTEGER NOT NULL,
+                hit_count INTEGER NOT NULL,
+                PRIMARY KEY (term_id, doc_id, field_id)
+            ) WITHOUT ROWID, STRICT"
+        );
+        /** @infection-ignore-all MethodCallRemoval: field_hits_doc_id is a performance index; DELETE-by-doc_id still works via full scan */
+        $pdo->exec("CREATE INDEX IF NOT EXISTS 'main'.'field_hits_doc_id' ON field_hits (doc_id);");
+        $this->hasFieldHits   = true;
+        $this->fieldNameCache = [];
+
         $schemaStmt = $pdo->prepare("INSERT INTO info (key, value) VALUES (?, ?)");
         $schemaStmt->execute(['facet_fields',      json_encode($facetFields)]);
         $schemaStmt->execute(['searchable_fields', $searchableFields !== null ? json_encode($searchableFields) : '']);
@@ -550,6 +580,7 @@ class Index
         $this->termIdCache   = [];
         $this->wordlistCache = [];
         $this->facetKeyCache = [];
+        $this->fieldNameCache = [];
         /** @infection-ignore-all MethodCallRemoval: applyPragmas sets WAL/cache/case_sensitive_like; all terms are stored/queried in lowercase so LIKE correctness is unaffected without it */
         $this->applyPragmas();
 
@@ -574,6 +605,9 @@ class Index
         $this->searchableFields   = $sfRaw === '' ? null : self::decodeStringList($sfRaw);
         $this->facetFieldSet      = array_flip($this->facetFields);
         $this->searchableFieldSet = $this->searchableFields !== null ? array_flip($this->searchableFields) : null;
+
+        $probe = $pdo->query("SELECT 1 FROM sqlite_master WHERE type='table' AND name='field_hits'");
+        $this->hasFieldHits = $probe !== false && $probe->fetchColumn() !== false;
     }
 
     /**
@@ -585,12 +619,13 @@ class Index
      */
     public function close(): void
     {
-        $this->stmtCache     = [];
-        $this->bulkStmtCache = [];
-        $this->infoCache     = null;
-        $this->termIdCache   = [];
-        $this->wordlistCache = [];
-        $this->facetKeyCache = [];
+        $this->stmtCache      = [];
+        $this->bulkStmtCache  = [];
+        $this->infoCache      = null;
+        $this->termIdCache    = [];
+        $this->wordlistCache  = [];
+        $this->facetKeyCache  = [];
+        $this->fieldNameCache = [];
         if (!$this->readonly) {
             // Update query-planner statistics for tables whose row counts have changed
             // since the last ANALYZE run. The 0x10002 mask = check all tables (0x10000)
@@ -701,6 +736,7 @@ class Index
                 DROP INDEX IF EXISTS positions_doc_id;
                 DROP INDEX IF EXISTS facet_doc_id_index;
                 DROP INDEX IF EXISTS facet_numeric_index;
+                DROP INDEX IF EXISTS field_hits_doc_id;
             ');
         }
         /** @infection-ignore-all UnwrapFinally: removing the try-finally wrapper only affects exception safety of the pragma restore; on the success path the behaviour is identical */
@@ -734,7 +770,8 @@ class Index
                  'docLengthBuffer'   => $docLengthBuffer,
                  'docPositionBuffer' => $docPositionBuffer,
                  'facetBuffer'       => $facetBuffer,
-                 'rawDocuments'      => $rawDocuments] = $this->buildBatchBuffer($documents, $progress);
+                 'rawDocuments'      => $rawDocuments,
+                 'fieldTermBuffer'   => $fieldTermBuffer] = $this->buildBatchBuffer($documents, $progress);
 
                 $totalLength = $this->flushBatch(
                     $wordHits,
@@ -743,7 +780,8 @@ class Index
                     $docLengthBuffer,
                     $docPositionBuffer,
                     $rawDocuments,
-                    $facetBuffer
+                    $facetBuffer,
+                    $fieldTermBuffer,
                 );
 
                 $this->adjustStats(count($documents), $totalLength);
@@ -765,6 +803,10 @@ class Index
                         CREATE INDEX IF NOT EXISTS facet_numeric_index ON facet_values (key_id, num_value, doc_id)
                             WHERE num_value IS NOT NULL;
                     ');
+                }
+                if ($this->hasFieldHits) {
+                    /** @infection-ignore-all MethodCallRemoval: rebuilding field_hits_doc_id is a performance step; correctness is unaffected */
+                    $pdo->exec('CREATE INDEX IF NOT EXISTS field_hits_doc_id ON field_hits (doc_id);');
                 }
             }
             /** @infection-ignore-all MethodCallRemoval: restoring pragmas after bulk load is a performance step; the next connection will re-apply from applyPragmas() */
@@ -939,7 +981,8 @@ class Index
                  'docLengthBuffer'   => $docLengthBuffer,
                  'docPositionBuffer' => $docPositionBuffer,
                  'facetBuffer'       => $facetBuffer,
-                 'rawDocuments'      => $rawDocuments] = $this->buildBatchBuffer($documents);
+                 'rawDocuments'      => $rawDocuments,
+                 'fieldTermBuffer'   => $fieldTermBuffer] = $this->buildBatchBuffer($documents);
 
                 $totalNewLength = $this->flushBatch(
                     $wordHits,
@@ -949,6 +992,7 @@ class Index
                     $docPositionBuffer,
                     $rawDocuments,
                     $facetBuffer,
+                    $fieldTermBuffer,
                 );
 
                 // 5. Update stats: only truly new documents change the document count.
@@ -1026,6 +1070,9 @@ class Index
             if ($this->facetsEnabled) {
                 $pdo->exec('DELETE FROM facet_values');
             }
+            if ($this->hasFieldHits) {
+                $pdo->exec('DELETE FROM field_hits');
+            }
 
             $this->stmt(
                 'statsWrite',
@@ -1036,10 +1083,11 @@ class Index
             )->execute([':n' => '0', ':avg' => '0']);
         });
 
-        $this->infoCache     = ['total_documents' => '0', 'avg_doc_length' => '0'];
-        $this->termIdCache   = [];
-        $this->wordlistCache = [];
-        $this->facetKeyCache = [];
+        $this->infoCache      = ['total_documents' => '0', 'avg_doc_length' => '0'];
+        $this->termIdCache    = [];
+        $this->wordlistCache  = [];
+        $this->facetKeyCache  = [];
+        $this->fieldNameCache = [];
     }
 
     /**
@@ -1286,7 +1334,7 @@ class Index
      * @param  int                                           $offset    Number of top-ranked results to skip.
      * @param  array<string, string|list<string>|FacetRange> $filter   Facet filters; keyed by facet key name.
      * @param  list<string>                                  $facets    Facet key names to compute counts for.
-     * @param  list<string>                                  $sort      Sort specs, e.g. ['price:asc', 'name:desc']. Fields must be declared facetFields. Docs missing a field sort last. BM25 score is the tiebreaker.
+     * @param  list<string>                                  $sort      Sort specs, e.g. ['price:asc', 'name:desc'].
      */
     public function search(
         string $phrase,
@@ -1308,6 +1356,19 @@ class Index
         $docScores = [];
         /** @var array<int, int> $docMatchCount  Number of distinct keyword groups that matched each doc. */
         $docMatchCount = [];
+
+        $fieldBoosts    = $this->config->fieldBoosts;
+        $useFieldBoosts = $fieldBoosts !== [];
+        if ($useFieldBoosts && !$this->hasFieldHits) {
+            throw new QueryException(
+                'fieldBoosts requires an index built with field boost support. '
+                . 'Rebuild the index to enable field boosting.'
+            );
+        }
+        /** @var array<int, float> $termIdfMap  termId → idfK1p1; populated when $useFieldBoosts for post-loop re-scoring. */
+        $termIdfMap = [];
+        /** @var array<int, array<int, true>> $docContribTermIds  docId → set<termId>; populated when $useFieldBoosts. */
+        $docContribTermIds = [];
 
         $info           = $this->getInfoValues(['total_documents', 'avg_doc_length']);
         /** @infection-ignore-all DecrementInteger|IncrementInteger|CastInt: fallback 0 is used only on a corrupt/empty DB; all writes keep info consistent, so this path is unreachable in tests */
@@ -1341,7 +1402,14 @@ class Index
             /** @infection-ignore-all DecrementInteger|IncrementInteger|Plus|Multiplication: idfK1p1 is a per-term scalar; mutating k1+1 uniformly rescales every doc's contribution for that term, preserving relative ranking */
             $idfK1p1 = $idf * ($k1 + 1);
             // BM25 score computed in SQLite C; PHP receives (term_id, doc_id, score).
-            $docs = $this->fetchDocsByTermIds($word, $this->config->maxDocs, isset($word[0]['distance']), $idfK1p1, $k1_1mb, $k1b_avgdl);
+            $docs = $this->fetchDocsByTermIds(
+                $word,
+                $this->config->maxDocs,
+                isset($word[0]['distance']),
+                $idfK1p1,
+                $k1_1mb,
+                $k1b_avgdl,
+            );
             /** @var array<int, true> $groupTermIds */
             $groupTermIds    = [];
             /** @var array<int, true> $seenThisKeyword  Docs already counted for this keyword group; prevents
@@ -1355,9 +1423,47 @@ class Index
                     $seenThisKeyword[$docId]  = true;
                     $docMatchCount[$docId] = ($docMatchCount[$docId] ?? 0) + 1;
                 }
+                if ($useFieldBoosts) {
+                    $termIdfMap[$termId]               ??= $idfK1p1;
+                    $docContribTermIds[$docId][$termId]  = true;
+                }
             }
             if ($groupTermIds !== []) {
                 $termGroups[] = array_keys($groupTermIds);
+            }
+        }
+
+        // Field boost re-scoring: replace uniform BM25 scores with field-weighted BM25.
+        // Only executes when fieldBoosts is non-empty; the normal path is completely untouched.
+        // Runs before proximity boost so proximity applies on top of the re-scored values.
+        if ($useFieldBoosts && $docScores !== []) {
+            $fieldIdBoostMap = [];
+            foreach ($fieldBoosts as $name => $boost) {
+                $fid = $this->lookupFieldNameId($name);
+                if ($fid !== null) {
+                    $fieldIdBoostMap[$fid] = (float) $boost;
+                }
+            }
+            if ($fieldIdBoostMap !== []) {
+                $fieldHitRows = $this->fetchFieldHitsForDocs(array_keys($termIdfMap), array_keys($docScores));
+                $docLengths   = $this->fetchDocLengthsForDocs(array_keys($docScores));
+                $newScores    = [];
+                foreach ($docScores as $docId => $_) {
+                    $docLen   = (float) max(1, $docLengths[$docId] ?? 1);
+                    $newScore = 0.0;
+                    foreach ($docContribTermIds[$docId] ?? [] as $termId => $_) {
+                        $idfK1p1val = $termIdfMap[$termId] ?? 0.0;
+                        $weighted   = 0.0;
+                        foreach ($fieldHitRows[$termId][$docId] ?? [] as $fieldId => $hits) {
+                            $weighted += ($fieldIdBoostMap[$fieldId] ?? 1.0) * $hits;
+                        }
+                        if ($weighted > 0.0) {
+                            $newScore += $idfK1p1val * $weighted / ($k1_1mb + $k1b_avgdl * $docLen + $weighted);
+                        }
+                    }
+                    $newScores[$docId] = $newScore;
+                }
+                $docScores = $newScores;
             }
         }
 
@@ -1467,7 +1573,7 @@ class Index
      * @param  int                                           $offset    Number of results to skip (for pagination).
      * @param  array<string, string|list<string>|FacetRange> $filter   Facet filters; keyed by facet key name.
      * @param  list<string>                                  $facets    Facet key names to compute counts for.
-     * @param  list<string>                                  $sort      Sort specs, e.g. ['price:asc']. Fields must be declared facetFields. Docs missing a field sort last. Doc ID is the tiebreaker (no BM25 scores in boolean mode).
+     * @param  list<string>                                  $sort      Sort specs, e.g. ['price:asc', 'name:desc'].
      */
     public function searchBoolean(
         string $phrase,
@@ -1678,6 +1784,9 @@ class Index
             if ($this->facetsEnabled) {
                 $this->prepare("DELETE FROM facet_values WHERE doc_id IN ({$placeholders})")->execute($chunk);
             }
+            if ($this->hasFieldHits) {
+                $this->prepare("DELETE FROM field_hits WHERE doc_id IN ({$placeholders})")->execute($chunk);
+            }
 
             // Prune orphan terms scoped to the affected set; avoids a full wordlist table scan.
             if ($affectedTermIds !== []) {
@@ -1745,6 +1854,12 @@ class Index
                 ->execute([':documentId' => $documentId]);
         }
 
+        // 4c. Remove field_hits rows for this document.
+        if ($this->hasFieldHits) {
+            $this->stmt('fieldHitsDeleteByDoc', 'DELETE FROM field_hits WHERE doc_id = :documentId')
+                ->execute([':documentId' => $documentId]);
+        }
+
         // 5. Remove doc_lengths and return the old token count (null if the document was not found).
         $delStmt = $this->stmt(
             'docLengthsDelete',
@@ -1776,12 +1891,15 @@ class Index
      * Shared by processDocument() and buildBatchBuffer().
      *
      * @param  array<string, mixed> $fields Document fields; 'id' is skipped.
-     * @return array{termCounts: array<string, int>, termPositions: array<string, list<int>>, length: int}
+     * @return array{termCounts: array<string, int>, fieldTermCounts: array<string, array<string, int>>,
+     *               termPositions: array<string, list<int>>, length: int}
      */
     private function tokenizeDocumentFields(array $fields): array
     {
         /** @var array<string, int> $termCounts */
         $termCounts = [];
+        /** @var array<string, array<string, int>> $fieldTermCounts  fieldName → term → hitCount */
+        $fieldTermCounts = [];
         /** @var array<string, list<int>> $termPositions */
         $termPositions = [];
         $length        = 0;
@@ -1790,7 +1908,15 @@ class Index
             // When searchableFields is declared, iterate ONLY those keys — avoids scanning every
             // document field when most are non-searchable (e.g. 1 searchable out of 16 total).
             foreach ($this->searchableFieldSet as $key => $_) {
-                $this->indexFieldColumn($fields[$key] ?? null, $termCounts, $termPositions, $length, $position);
+                $this->indexFieldColumn(
+                    $fields[$key] ?? null,
+                    $key,
+                    $termCounts,
+                    $fieldTermCounts,
+                    $termPositions,
+                    $length,
+                    $position
+                );
             }
         } else {
             // searchableFields is null → all non-facet fields are searchable; iterate full doc.
@@ -1798,10 +1924,23 @@ class Index
                 if ($key === 'id' || isset($this->facetFieldSet[$key])) {
                     continue;
                 }
-                $this->indexFieldColumn($col, $termCounts, $termPositions, $length, $position);
+                $this->indexFieldColumn(
+                    $col,
+                    $key,
+                    $termCounts,
+                    $fieldTermCounts,
+                    $termPositions,
+                    $length,
+                    $position
+                );
             }
         }
-        return ['termCounts' => $termCounts, 'termPositions' => $termPositions, 'length' => $length];
+        return [
+            'termCounts'      => $termCounts,
+            'fieldTermCounts' => $fieldTermCounts,
+            'termPositions'   => $termPositions,
+            'length'          => $length,
+        ];
     }
 
     /**
@@ -1810,12 +1949,15 @@ class Index
      * Null and empty/whitespace-only values are silently skipped. Both branches of
      * tokenizeDocumentFields() delegate here so the tokenisation pipeline is defined once.
      *
-     * @param array<string, int>       $termCounts    mutated in-place
-     * @param array<string, list<int>> $termPositions mutated in-place
+     * @param array<string, int>                 $termCounts      mutated in-place
+     * @param array<string, array<string, int>>  $fieldTermCounts mutated in-place (no-op when !$this->hasFieldHits)
+     * @param array<string, list<int>>           $termPositions   mutated in-place
      */
     private function indexFieldColumn(
         mixed $col,
+        string $fieldName,
         array &$termCounts,
+        array &$fieldTermCounts,
         array &$termPositions,
         int &$length,
         int &$position,
@@ -1837,9 +1979,13 @@ class Index
         if ($this->stemmer instanceof \Fuzor\Stemmer) {
             $tokens = $this->stemmer->stemTokens($tokens);
         }
+        $trackFields = $this->hasFieldHits;
         foreach ($tokens as $token) {
             $termCounts[$token]      = ($termCounts[$token] ?? 0) + 1;
             $termPositions[$token][] = $position++;
+            if ($trackFields) {
+                $fieldTermCounts[$fieldName][$token] = ($fieldTermCounts[$fieldName][$token] ?? 0) + 1;
+            }
         }
     }
 
@@ -1856,11 +2002,16 @@ class Index
     {
         $documentId = $this->extractId($row['id']);
 
-        ['termCounts' => $termCounts, 'termPositions' => $termPositions, 'length' => $length]
-            = $this->tokenizeDocumentFields($row);
+        ['termCounts'      => $termCounts,
+         'fieldTermCounts' => $fieldTermCounts,
+         'termPositions'   => $termPositions,
+         'length'          => $length] = $this->tokenizeDocumentFields($row);
 
         $termIds = $this->upsertWordlist($termCounts);
         $this->saveDoclist($documentId, $termIds);
+        if ($this->hasFieldHits && $fieldTermCounts !== []) {
+            $this->saveFieldHits($documentId, $fieldTermCounts);
+        }
         if ($termPositions !== []) {
             $termIdPositions = [];
             foreach ($termPositions as $term => $positions) {
@@ -2001,7 +2152,8 @@ class Index
      *     docLengthBuffer:   array<int, int>,
      *     docPositionBuffer: array<int, array<string, list<int>>>,
      *     facetBuffer:       array<string, array<int|string, array<int, float|null>>>,
-     *     rawDocuments:      array<int, array<string, mixed>>
+     *     rawDocuments:      array<int, array<string, mixed>>,
+     *     fieldTermBuffer:   array<int, array<string, array<string, int>>>
      * }
      */
     private function buildBatchBuffer(array $documents, ?callable $progress = null): array
@@ -2020,6 +2172,8 @@ class Index
         $facetBuffer       = [];
         /** @var array<int, array<string, mixed>> $rawDocuments Raw document arrays for the document store; empty when store is disabled. */
         $rawDocuments      = [];
+        /** @var array<int, array<string, array<string, int>>> $fieldTermBuffer  docId → fieldName → term → hitCount; only populated when $hasFieldHits */
+        $fieldTermBuffer   = [];
 
         $total = count($documents);
         $done  = 0;
@@ -2031,12 +2185,17 @@ class Index
         foreach ($documents as $document) {
             $documentId = $this->extractId($document['id']);
 
-            ['termCounts' => $termCounts, 'termPositions' => $termPositions, 'length' => $length]
-                = $this->tokenizeDocumentFields($document);
+            ['termCounts'      => $termCounts,
+             'fieldTermCounts' => $fieldTermCounts,
+             'termPositions'   => $termPositions,
+             'length'          => $length] = $this->tokenizeDocumentFields($document);
 
             $docTermBuffer[$documentId]     = $termCounts;
             $docLengthBuffer[$documentId]   = $length;
             $docPositionBuffer[$documentId] = $termPositions;
+            if ($this->hasFieldHits && $fieldTermCounts !== []) {
+                $fieldTermBuffer[$documentId] = $fieldTermCounts;
+            }
             if ($hasFacetFields) {
                 $this->accumulateFacets(
                     array_intersect_key($document, $facetFieldFlipped),
@@ -2075,6 +2234,7 @@ class Index
             'docPositionBuffer' => $docPositionBuffer,
             'facetBuffer'       => $facetBuffer,
             'rawDocuments'      => $rawDocuments,
+            'fieldTermBuffer'   => $fieldTermBuffer,
         ];
     }
 
@@ -2094,6 +2254,7 @@ class Index
      * @param  array<int, array<string, list<int>>> $docPositionBuffer
      * @param  array<int, array<string, mixed>>     $rawDocuments  doc_id → raw document array (store path only)
      * @param  array<string, array<int|string, array<int, float|null>>> $facetBuffer  name → value → docId → numValue
+     * @param  array<int, array<string, array<string, int>>> $fieldTermBuffer  docId → fieldName → term → hitCount
      * @return int Total token count across all documents (for adjustStats).
      */
     private function flushBatch(
@@ -2104,6 +2265,7 @@ class Index
         array $docPositionBuffer = [],
         array $rawDocuments = [],
         array $facetBuffer = [],
+        array $fieldTermBuffer = [],
     ): int {
         $pdo = $this->pdo;
         assert($pdo instanceof \PDO);
@@ -2114,6 +2276,12 @@ class Index
         // Step 2: invert both docTermBuffer and docPositionBuffer, then insert doclist.
         [$termDocMap, $termDocPosMap] = $this->invertTermBuffers($docTermBuffer, $docPositionBuffer, $termIdMap);
         $this->bulkInsertDoclistRows($termDocMap);
+
+        // Step 2b: invert fieldTermBuffer and bulk-insert per-field hit counts.
+        if ($this->hasFieldHits && $fieldTermBuffer !== []) {
+            $termDocFieldMap = $this->invertFieldBuffer($fieldTermBuffer, $termIdMap);
+            $this->bulkInsertFieldHitRows($termDocFieldMap);
+        }
 
         // Step 3: bulk-insert doc_lengths.
         $this->bulkInsertDocLengthRows($docLengthBuffer);
@@ -2436,6 +2604,211 @@ class Index
         foreach ($termIds as $termId => $hits) {
             $stmt->execute([$termId, $documentId, $hits]);
         }
+    }
+
+    /**
+     * Write per-field term hit counts for a single document (single-insert path).
+     *
+     * @param int                               $documentId      Document ID.
+     * @param array<string, array<string, int>> $fieldTermCounts fieldName → term → hitCount
+     */
+    private function saveFieldHits(int $documentId, array $fieldTermCounts): void
+    {
+        if ($fieldTermCounts === []) {
+            return;
+        }
+        $stmt = $this->stmt(
+            'saveFieldHitRow',
+            'INSERT INTO field_hits (term_id, doc_id, field_id, hit_count) VALUES (?,?,?,?)'
+        );
+        foreach ($fieldTermCounts as $fieldName => $termCounts) {
+            $fieldId = $this->resolveFieldNameId($fieldName);
+            foreach ($termCounts as $term => $hits) {
+                $termId = $this->termIdCache[$term] ?? null;
+                if ($termId === null) {
+                    continue;
+                }
+                $stmt->execute([$termId, $documentId, $fieldId, $hits]);
+            }
+        }
+    }
+
+    /**
+     * Invert docId → fieldName → term → hitCount into termId → docId → fieldId → hitCount,
+     * sorted in composite PK order for sequential B-tree appends into field_hits.
+     *
+     * @param array<int, array<string, array<string, int>>> $fieldTermBuffer  docId → fieldName → term → hitCount
+     * @param array<string, int>                            $termIdMap        term text → wordlist ID
+     * @return array<int, array<int, array<int, int>>>                        termId → docId → fieldId → hitCount
+     */
+    private function invertFieldBuffer(array $fieldTermBuffer, array $termIdMap): array
+    {
+        $termDocFieldMap = [];
+        foreach ($fieldTermBuffer as $docId => $fieldTermCounts) {
+            foreach ($fieldTermCounts as $fieldName => $termCounts) {
+                $fieldId = $this->resolveFieldNameId($fieldName);
+                foreach ($termCounts as $term => $hits) {
+                    $termId = $termIdMap[$term] ?? null;
+                    if ($termId === null) {
+                        continue;
+                    }
+                    $termDocFieldMap[$termId][$docId][$fieldId] = $hits;
+                }
+            }
+        }
+        return $termDocFieldMap;
+    }
+
+    /**
+     * Bulk-insert field_hits rows in clustered (term_id, doc_id, field_id) PK order.
+     *
+     * @param array<int, array<int, array<int, int>>> $termDocFieldMap  termId → docId → fieldId → hitCount
+     */
+    private function bulkInsertFieldHitRows(array $termDocFieldMap): void
+    {
+        $pdo = $this->pdo;
+        assert($pdo instanceof \PDO);
+        /** @infection-ignore-all FunctionCallRemoval: ksort orders INSERTs by term_id PK for B-tree performance; omitting only degrades write speed */
+        ksort($termDocFieldMap);
+        $rowCount = 0;
+        $params   = [];
+        foreach ($termDocFieldMap as $termId => $docs) {
+            /** @infection-ignore-all FunctionCallRemoval: ksort orders by doc_id for clustered PK order; omitting only degrades write speed */
+            ksort($docs);
+            foreach ($docs as $docId => $fields) {
+                /** @infection-ignore-all FunctionCallRemoval: ksort orders by field_id for clustered PK order; omitting only degrades write speed */
+                ksort($fields);
+                foreach ($fields as $fieldId => $hits) {
+                    $params[] = $termId;
+                    $params[] = $docId;
+                    $params[] = $fieldId;
+                    $params[] = $hits;
+                    if (++$rowCount === self::CHUNK_4P) {
+                        /** @infection-ignore-all AssignCoalesce: removing ??= only disables statement caching; correctness is unaffected */
+                        ($this->bulkStmtCache['fieldHitsChunk:' . self::CHUNK_4P] ??= $pdo->prepare(
+                            'INSERT INTO field_hits (term_id, doc_id, field_id, hit_count) VALUES '
+                            . implode(',', array_fill(0, self::CHUNK_4P, '(?,?,?,?)'))
+                        ))->execute($params);
+                        $params   = [];
+                        $rowCount = 0;
+                    }
+                }
+            }
+        }
+        /** @infection-ignore-all GreaterThan: changing > 0 to >= 0 only matters when rowCount=0 (no partial chunk); tests always produce at least one row so this branch is always true regardless */
+        if ($rowCount > 0) {
+            /** @infection-ignore-all AssignCoalesce: removing ??= only disables statement caching; correctness is unaffected */
+            ($this->bulkStmtCache["fieldHitsChunk:{$rowCount}"] ??= $pdo->prepare(
+                'INSERT INTO field_hits (term_id, doc_id, field_id, hit_count) VALUES '
+                . implode(',', array_fill(0, $rowCount, '(?,?,?,?)'))
+            ))->execute($params);
+        }
+    }
+
+    /**
+     * Resolve a field name to its field_names.id, inserting if absent.
+     * Populates $fieldNameCache so subsequent calls for the same name are cache-only.
+     */
+    private function resolveFieldNameId(string $name): int
+    {
+        if (isset($this->fieldNameCache[$name])) {
+            return $this->fieldNameCache[$name];
+        }
+        $stmt = $this->stmt(
+            'resolveFieldNameId',
+            'INSERT INTO field_names (name) VALUES (?)
+             ON CONFLICT(name) DO UPDATE SET name = excluded.name
+             RETURNING id'
+        );
+        $stmt->execute([$name]);
+        /** @var array{id: int}|false $row */
+        $row = $stmt->fetch(PDO::FETCH_ASSOC);
+        $stmt->closeCursor();
+        assert($row !== false);
+        $id = (int) $row['id'];
+        $this->fieldNameCache[$name] = $id;
+        return $id;
+    }
+
+    /**
+     * Look up a field name's id without inserting. Returns null if the name has never been indexed.
+     * Used on the read path where write access may not be available.
+     */
+    private function lookupFieldNameId(string $name): ?int
+    {
+        if (isset($this->fieldNameCache[$name])) {
+            return $this->fieldNameCache[$name];
+        }
+        $stmt = $this->stmt('lookupFieldNameId', 'SELECT id FROM field_names WHERE name = ?');
+        $stmt->execute([$name]);
+        $id = $stmt->fetchColumn();
+        $stmt->closeCursor();
+        if ($id === false) {
+            return null;
+        }
+        $this->fieldNameCache[$name] = (int) $id;
+        return (int) $id;
+    }
+
+    /**
+     * Fetch per-field hit counts for a set of (term_id, doc_id) pairs.
+     *
+     * Used by the field boost re-scoring path in search(). Volume is bounded by
+     * numTerms × maxDocs × avgFields, typically a few thousand rows.
+     *
+     * @param  list<int>  $termIds
+     * @param  list<int>  $docIds
+     * @return array<int, array<int, array<int, int>>>  termId → docId → fieldId → hitCount
+     */
+    private function fetchFieldHitsForDocs(array $termIds, array $docIds): array
+    {
+        if ($termIds === [] || $docIds === []) {
+            return [];
+        }
+        $result      = [];
+        $tCount      = count($termIds);
+        $tPh         = $this->placeholders($tCount);
+        $maxDocChunk = max(1, self::CHUNK_1P - $tCount);
+        foreach (array_chunk($docIds, $maxDocChunk) as $docChunk) {
+            $dPh  = $this->placeholders(count($docChunk));
+            $stmt = $this->prepare(
+                "SELECT term_id, doc_id, field_id, hit_count
+                 FROM field_hits
+                 WHERE term_id IN ({$tPh}) AND doc_id IN ({$dPh})"
+            );
+            $stmt->execute([...$termIds, ...$docChunk]);
+            /** @var list<array{0: int, 1: int, 2: int, 3: int}> $rows */
+            $rows = $stmt->fetchAll(PDO::FETCH_NUM);
+            foreach ($rows as [$termId, $docId, $fieldId, $hits]) {
+                $result[$termId][$docId][$fieldId] = $hits;
+            }
+        }
+        return $result;
+    }
+
+    /**
+     * Fetch document lengths for a set of doc IDs. Used by field boost re-scoring.
+     *
+     * @param  list<int>       $docIds
+     * @return array<int, int>  docId → token length
+     */
+    private function fetchDocLengthsForDocs(array $docIds): array
+    {
+        if ($docIds === []) {
+            return [];
+        }
+        $result = [];
+        foreach (array_chunk($docIds, self::CHUNK_1P) as $chunk) {
+            $ph   = $this->placeholders(count($chunk));
+            $stmt = $this->prepare("SELECT doc_id, length FROM doc_lengths WHERE doc_id IN ({$ph})");
+            $stmt->execute($chunk);
+            /** @var list<array{0: int, 1: int}> $rows */
+            $rows = $stmt->fetchAll(PDO::FETCH_NUM);
+            foreach ($rows as [$docId, $length]) {
+                $result[$docId] = $length;
+            }
+        }
+        return $result;
     }
 
     /**

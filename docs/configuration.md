@@ -28,3 +28,40 @@ Omitting `config` uses the optimised defaults shown below.
 | `proximityBoost`     | `1.0`    | Strength of bonus for multi-term queries where terms appear close together; `0` disables |
 | `filterMaxDocs`      | `2000`   | Max documents fetched per FTS term when a facet `filter` is active; higher values improve recall at the cost of more scoring work |
 | `maxFacetCountDocs`  | `10000`  | Max result doc IDs included in the facet count query; counts are approximate when the result set exceeds this cap |
+| `fieldBoosts`        | `[]`     | Per-field BM25 multipliers — see [Field boosting](#field-boosting) below |
+
+## Field boosting
+
+By default Fuzor treats all fields equally: a term hit in `title` counts the same as one in `body`. Field boosting lets you weight fields so that a match in a more important field outranks a match in a less important field.
+
+```php
+$index = new Index('/path/to/articles.db', config: new Config(
+    fieldBoosts: ['title' => 5.0, 'body' => 1.0],
+));
+```
+
+When `fieldBoosts` is set, term frequency is computed as:
+
+```
+weighted_tf = Σ boost(field) × hit_count(field)
+```
+
+This weighted TF replaces the raw `hit_count` in the BM25 formula. A term found once in `title` (boost 5.0) produces a weighted TF of 5, while three hits in `body` (boost 1.0) produce a weighted TF of 3 — so the title match scores higher.
+
+Fields omitted from the map fall back to a multiplier of `1.0`. Fields that do not appear in any document are simply ignored.
+
+### Indexes built before field boost support
+
+Field boost support requires per-field hit counts to be stored at index time (`field_hits` table). All indexes created with the current version include this automatically.
+
+Calling `search()` with a non-empty `fieldBoosts` on an older index (one built before this feature was added) throws `QueryException`. Rebuild the index to enable field boosting:
+
+```php
+Index::rebuild('/path/to/articles.db', function (Index $new) use ($docs) {
+    $new->insert($docs);
+});
+```
+
+### Performance
+
+The uniform BM25 path is completely unaffected when `fieldBoosts` is empty (the default). When boosts are configured, a second query fetches field hit counts for the bounded candidate set after the initial BM25 pass — the main `doclist` LIMIT query is unchanged.

@@ -49,6 +49,18 @@ final readonly class Config
          * @infection-ignore-all: default value; mutations only affect the window size, not correctness
          */
         public int $proxWindowSize = 0,
+        /**
+         * Per-field BM25 boost multipliers. Map field name → float multiplier.
+         * Empty (default) uses the standard uniform BM25 path with zero overhead.
+         * When set, term frequency is weighted as Σ boost(field) × field_hit_count before
+         * the BM25 formula, so a title match outscores a body match when title has a higher boost.
+         * Only effective on indexes built with field boost support (field_hits table present);
+         * calling search() with boosts on an older index throws QueryException.
+         *
+         * @var array<string, float>
+         * @infection-ignore-all: default value; mutations only affect field weight magnitude, not correctness
+         */
+        public array $fieldBoosts = [],
     ) {
     }
 }

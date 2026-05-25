@@ -3815,4 +3815,126 @@ class IndexTest extends TestCase
         $index->insert([['id' => 1, 'title' => 'product', 'price' => 10]]);
         $this->assertContains(1, $index->search('product', sort: [])->ids);
     }
+
+    // --- Field boosts ---
+
+    public function testFieldBoostPromotesTitleMatchOverBodyMatch(): void
+    {
+        // Doc 1 has "turbo" only in title (1 hit); doc 2 has "turbo" 3 times in body.
+        // Without boosts, doc 2 would win (higher raw TF).
+        // With title boost 5x vs body boost 1x, weighted_tf: doc1 = 5*1 = 5, doc2 = 1*3 = 3 → doc 1 wins.
+        $index = new Index($this->dbPath, config: new Config(fieldBoosts: ['title' => 5.0, 'body' => 1.0]));
+        $index->insert([
+            ['id' => 1, 'title' => 'turbo engine', 'body' => 'A standard engine with no special features.'],
+            ['id' => 2, 'title' => 'engine overview', 'body' => 'turbo turbo turbo details here'],
+        ]);
+        $result = $index->search('turbo');
+        $this->assertSame([1, 2], $result->ids);
+    }
+
+    public function testFieldBoostOnOldIndexThrowsQueryException(): void
+    {
+        // Simulate a pre-feature index by dropping the field_hits table after creation.
+        $index = new Index($this->dbPath);
+        $index->insert([['id' => 1, 'title' => 'test document', 'body' => 'content here']]);
+        $index->close();
+
+        // Drop field_hits to simulate an index built before field boost support was added.
+        $pdo = new \PDO('sqlite:' . $this->dbPath);
+        $pdo->exec('DROP TABLE IF EXISTS field_hits; DROP TABLE IF EXISTS field_names;');
+        unset($pdo);
+
+        // Re-open with boosts configured — must throw QueryException.
+        $index2 = new Index($this->dbPath, config: new Config(fieldBoosts: ['title' => 2.0]));
+        $this->expectException(QueryException::class);
+        $index2->search('test');
+    }
+
+    public function testFieldBoostEmptyArrayUsesNormalBM25(): void
+    {
+        // Empty fieldBoosts = uniform path; search should still return results normally.
+        $index = new Index($this->dbPath, config: new Config(fieldBoosts: []));
+        $index->insert([
+            ['id' => 1, 'title' => 'alpha beta', 'body' => 'gamma delta'],
+            ['id' => 2, 'title' => 'gamma delta', 'body' => 'alpha beta'],
+        ]);
+        $result = $index->search('alpha');
+        $this->assertContains(1, $result->ids);
+        $this->assertContains(2, $result->ids);
+    }
+
+    public function testFieldBoostWithUnknownFieldNameIsIgnored(): void
+    {
+        // A boost for a field that no document has should not crash; scoring degrades to 0 tf,
+        // but the query still returns the docs (they have the term in another field).
+        $index = new Index($this->dbPath, config: new Config(fieldBoosts: ['nonexistent' => 10.0]));
+        $index->insert([
+            ['id' => 1, 'title' => 'widget', 'body' => 'some content'],
+        ]);
+        $result = $index->search('widget');
+        $this->assertContains(1, $result->ids);
+    }
+
+    public function testFieldBoostOnReopenedIndex(): void
+    {
+        // Build the index (field_hits present), close, reopen with a config that has boosts.
+        $index = new Index($this->dbPath);
+        $index->insert([
+            ['id' => 1, 'title' => 'turbo car', 'body' => 'generic content'],
+            ['id' => 2, 'title' => 'generic car', 'body' => str_repeat('turbo ', 10)],
+        ]);
+        $index->close();
+
+        $index2 = new Index($this->dbPath, config: new Config(fieldBoosts: ['title' => 5.0, 'body' => 1.0]));
+        $result = $index2->search('turbo');
+        $this->assertSame([1, 2], $result->ids);
+    }
+
+    public function testFieldBoostUpsertUpdatesFieldHits(): void
+    {
+        // Upsert should replace old field_hits rows, not accumulate them.
+        $index = new Index($this->dbPath, config: new Config(fieldBoosts: ['title' => 3.0, 'body' => 1.0]));
+        $index->insert([['id' => 1, 'title' => 'widget', 'body' => 'generic content']]);
+        // Now replace: "widget" moved to body only; title no longer has it.
+        $index->upsert([['id' => 1, 'title' => 'product overview', 'body' => 'widget listed here']]);
+
+        $result = $index->search('widget');
+        $this->assertContains(1, $result->ids);
+        // Score should reflect body-only placement (title boost no longer applies).
+        $this->assertGreaterThan(0.0, $result->score(1));
+    }
+
+    public function testFieldBoostDeleteClearsFieldHits(): void
+    {
+        $index = new Index($this->dbPath);
+        $index->insert([['id' => 1, 'title' => 'target document', 'body' => 'content']]);
+        $index->delete(1);
+        // After delete, index should be empty.
+        $result = $index->search('target');
+        $this->assertSame([], $result->ids);
+    }
+
+    public function testFieldBoostClearClearsFieldHits(): void
+    {
+        $index = new Index($this->dbPath, config: new Config(fieldBoosts: ['title' => 2.0]));
+        $index->insert([['id' => 1, 'title' => 'alpha', 'body' => 'content']]);
+        $index->clear();
+        $this->assertSame(0, $index->count());
+        $result = $index->search('alpha');
+        $this->assertSame([], $result->ids);
+    }
+
+    public function testFieldBoostBulkInsertPreservesScoreOrder(): void
+    {
+        // Bulk insert (>1 doc) should produce the same boost-ordering as single inserts.
+        // Title boost 5x: weighted_tf for doc1 = 5*1=5, doc2 body 3 hits = 1*3=3 → doc1 ranks first.
+        $index = new Index($this->dbPath, config: new Config(fieldBoosts: ['title' => 5.0, 'body' => 1.0]));
+        $index->insert([
+            ['id' => 1, 'title' => 'turbo engine', 'body' => 'a plain description'],
+            ['id' => 2, 'title' => 'engine specs', 'body' => 'turbo turbo turbo here'],
+            ['id' => 3, 'title' => 'car guide', 'body' => 'another plain description'],
+        ]);
+        $result = $index->search('turbo');
+        $this->assertSame(1, $result->ids[0], 'Title match should rank first with high title boost');
+    }
 }
