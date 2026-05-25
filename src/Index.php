@@ -202,6 +202,15 @@ class Index
      * @return string       Canonical absolute path.
      * @throws IOException If the parent directory does not exist.
      */
+    private static function resolvePath(string $path): string
+    {
+        $dir = realpath(dirname($path));
+        if ($dir === false) {
+            throw new IOException("Directory does not exist: " . dirname($path));
+        }
+        return $dir . DIRECTORY_SEPARATOR . basename($path);
+    }
+
     /** @return list<string> */
     private static function decodeStringList(string $json): array
     {
@@ -215,15 +224,6 @@ class Index
             }
         }
         return $result;
-    }
-
-    private static function resolvePath(string $path): string
-    {
-        $dir = realpath(dirname($path));
-        if ($dir === false) {
-            throw new IOException("Directory does not exist: " . dirname($path));
-        }
-        return $dir . DIRECTORY_SEPARATOR . basename($path);
     }
 
     /**
@@ -391,6 +391,7 @@ class Index
      * @param  bool              $force            When true, any existing file is deleted before creation.
      * @param  string|null       $language         BCP 47 language tag persisted in the index (e.g. 'en');
      *                                             null disables stopword filtering and stemming.
+     * @param  bool              $store            Whether to create the document store.
      * @param  list<string>      $facetFields      Field names routed to the facet index.
      * @param  list<string>|null $searchableFields Whitelist of FTS-indexed fields; null = all non-facet fields.
      * @return static
@@ -413,13 +414,8 @@ class Index
         $this->flushIndex();
 
         $pdo = new PDO('sqlite:' . $this->path);
-        $this->pdo           = $pdo;
-        $this->stmtCache     = [];
-        $this->bulkStmtCache = [];
-        $this->infoCache     = null;
-        $this->termIdCache   = [];
-        $this->wordlistCache = [];
-        $this->facetKeyCache = [];
+        $this->pdo = $pdo;
+        $this->resetConnectionCaches();
         // page_size must be set before any data is written; ignored on existing files.
         // 16 384 bytes (4× default) reduces B-tree depth for multi-GB doclist tables.
         /** @infection-ignore-all MethodCallRemoval: page_size pragma affects only on-disk structure, not query correctness */
@@ -541,8 +537,7 @@ class Index
         );
         /** @infection-ignore-all MethodCallRemoval: field_hits_doc_id is a performance index; DELETE-by-doc_id still works via full scan */
         $pdo->exec("CREATE INDEX IF NOT EXISTS 'main'.'field_hits_doc_id' ON field_hits (doc_id);");
-        $this->hasFieldHits   = true;
-        $this->fieldNameCache = [];
+        $this->hasFieldHits = true;
 
         $schemaStmt = $pdo->prepare("INSERT INTO info (key, value) VALUES (?, ?)");
         $schemaStmt->execute(['facet_fields',      json_encode($facetFields)]);
@@ -573,14 +568,8 @@ class Index
         $dsn                 = $this->readonly
             ? 'sqlite:file://' . $encodedPath . '?mode=ro'
             : 'sqlite:' . $this->path;
-        $this->pdo           = new PDO($dsn);
-        $this->stmtCache     = [];
-        $this->bulkStmtCache = [];
-        $this->infoCache     = null;
-        $this->termIdCache   = [];
-        $this->wordlistCache = [];
-        $this->facetKeyCache = [];
-        $this->fieldNameCache = [];
+        $this->pdo = new PDO($dsn);
+        $this->resetConnectionCaches();
         /** @infection-ignore-all MethodCallRemoval: applyPragmas sets WAL/cache/case_sensitive_like; all terms are stored/queried in lowercase so LIKE correctness is unaffected without it */
         $this->applyPragmas();
 
@@ -619,13 +608,7 @@ class Index
      */
     public function close(): void
     {
-        $this->stmtCache      = [];
-        $this->bulkStmtCache  = [];
-        $this->infoCache      = null;
-        $this->termIdCache    = [];
-        $this->wordlistCache  = [];
-        $this->facetKeyCache  = [];
-        $this->fieldNameCache = [];
+        $this->resetConnectionCaches();
         if (!$this->readonly) {
             // Update query-planner statistics for tables whose row counts have changed
             // since the last ANALYZE run. The 0x10002 mask = check all tables (0x10000)
@@ -636,6 +619,18 @@ class Index
             $this->pdo?->exec('PRAGMA wal_checkpoint(TRUNCATE)');
         }
         $this->pdo = null;
+    }
+
+    /** Reset all per-connection caches; called on every connection open or close. */
+    private function resetConnectionCaches(): void
+    {
+        $this->stmtCache      = [];
+        $this->bulkStmtCache  = [];
+        $this->infoCache      = null;
+        $this->termIdCache    = [];
+        $this->wordlistCache  = [];
+        $this->facetKeyCache  = [];
+        $this->fieldNameCache = [];
     }
 
     // --- Public write operations --------------------------------------------
@@ -1049,8 +1044,8 @@ class Index
     /**
      * Remove all documents from the index in a single transaction.
      *
-     * Faster than deleteMany() over every ID: four unconditional DELETEs replace
-     * per-document bookkeeping. Stats and all caches are reset in-place.
+     * Faster than deleting each ID individually: unconditional DELETEs across all
+     * index tables replace per-document bookkeeping. Stats and caches are reset in-place.
      */
     public function clear(): void
     {
