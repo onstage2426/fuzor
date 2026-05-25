@@ -5,6 +5,7 @@ namespace Fuzor\Tests;
 use Fuzor\Config;
 use Fuzor\FacetRange;
 use Fuzor\Index;
+use Fuzor\SchemaConfig;
 use Fuzor\Exceptions\IOException;
 use Fuzor\Exceptions\QueryException;
 use PHPUnit\Framework\TestCase;
@@ -85,7 +86,7 @@ class IndexTest extends TestCase
         // proves it: without the early throw the code would reach resolvePath() and produce
         // an IOException instead of QueryException.
         $this->expectException(QueryException::class);
-        new Index('/nonexistent/dir/index.db', language: 'xx');
+        new Index('/nonexistent/dir/index.db', schema: new SchemaConfig(language: 'xx'));
     }
 
     public function testCreateWithForceOverwritesExistingFile(): void
@@ -228,7 +229,7 @@ class IndexTest extends TestCase
 
     public function testStoredOnlyFieldIsNotIndexed(): void
     {
-        $index = new Index($this->dbPath, searchableFields: ['title']);
+        $index = new Index($this->dbPath, schema: new SchemaConfig(searchableFields: ['title']));
         $index->insert([[
             'id'        => 1,
             'title'     => 'sedan',
@@ -244,7 +245,7 @@ class IndexTest extends TestCase
     public function testStoredOnlyFieldIsPreservedInDocumentStore(): void
     {
         $doc   = ['id' => 1, 'title' => 'sedan', 'permalink' => '/cars/sedan', 'published' => '2026-05-14'];
-        $index = new Index($this->dbPath, store: true, searchableFields: ['title']);
+        $index = new Index($this->dbPath, schema: new SchemaConfig(store: true, searchableFields: ['title']));
         $index->insert([$doc]);
 
         $this->assertSame($doc, $index->search('sedan')->document(1));
@@ -1899,21 +1900,21 @@ class IndexTest extends TestCase
 
     public function testInspectQueryStopwordsActiveWhenLanguageSet(): void
     {
-        $index = new Index($this->dbPath, language: 'en');
+        $index = new Index($this->dbPath, schema: new SchemaConfig(language: 'en'));
         $result = $index->inspectQuery('hello world');
         $this->assertTrue($result['stopwords_active']);
     }
 
     public function testInspectQueryStemmerActiveWhenLanguageSet(): void
     {
-        $index = new Index($this->dbPath, language: 'en');
+        $index = new Index($this->dbPath, schema: new SchemaConfig(language: 'en'));
         $result = $index->inspectQuery('hello world');
         $this->assertTrue($result['stemmer_active']);
     }
 
     public function testInspectQueryFilteredTokensDropsStopwords(): void
     {
-        $index = new Index($this->dbPath, language: 'en');
+        $index = new Index($this->dbPath, schema: new SchemaConfig(language: 'en'));
         $result = $index->inspectQuery('the quick');
         $this->assertNotContains('the', $result['filtered_tokens']);
         $this->assertContains('the', $result['raw_tokens']);
@@ -1923,7 +1924,7 @@ class IndexTest extends TestCase
     {
         // Single-token all-stopword query: filterQueryTokens only strips when count > 1,
         // so use two stopwords to trigger the all-stripped fallback.
-        $index = new Index($this->dbPath, language: 'en');
+        $index = new Index($this->dbPath, schema: new SchemaConfig(language: 'en'));
         $result = $index->inspectQuery('the and');
         $this->assertTrue($result['all_stripped']);
         // Fallback fires — filtered_tokens equals raw_tokens.
@@ -1939,7 +1940,7 @@ class IndexTest extends TestCase
 
     public function testInspectQueryStemmerApplied(): void
     {
-        $index = new Index($this->dbPath, language: 'en');
+        $index = new Index($this->dbPath, schema: new SchemaConfig(language: 'en'));
         $result = $index->inspectQuery('running');
         // 'running' stems to 'run' in English Snowball
         $this->assertSame('run', $result['filtered_tokens'][0]);
@@ -1947,7 +1948,7 @@ class IndexTest extends TestCase
 
     public function testInspectQueryRawToProcessedMapping(): void
     {
-        $index = new Index($this->dbPath, language: 'en');
+        $index = new Index($this->dbPath, schema: new SchemaConfig(language: 'en'));
         $result = $index->inspectQuery('running');
         $this->assertSame('running', $result['tokens'][0]['raw']);
         $this->assertSame('run', $result['tokens'][0]['processed']);
@@ -2233,7 +2234,7 @@ class IndexTest extends TestCase
 
     public function testRebuildPreservesLanguageFromExistingIndex(): void
     {
-        new Index($this->dbPath, language: 'en')->close();
+        new Index($this->dbPath, schema: new SchemaConfig(language: 'en'))->close();
 
         $rebuilt = Index::rebuild($this->dbPath, function (Index $new): void {
             $new->insert([['id' => 1, 'title' => 'running']]);
@@ -2268,7 +2269,7 @@ class IndexTest extends TestCase
 
     public function testZhInsertAndSearchBigram(): void
     {
-        $index = new Index($this->dbPath, language: 'zh');
+        $index = new Index($this->dbPath, schema: new SchemaConfig(language: 'zh'));
         $index->insert([['id' => 1, 'body' => '轿车测试']]);
 
         $this->assertContains(1, $index->search('轿车')->ids);
@@ -2277,7 +2278,7 @@ class IndexTest extends TestCase
     public function testZhSingleCharSearch(): void
     {
         // Unigrams are emitted at index time for zh so single-character searches work.
-        $index = new Index($this->dbPath, language: 'zh');
+        $index = new Index($this->dbPath, schema: new SchemaConfig(language: 'zh'));
         $index->insert([['id' => 1, 'body' => '轿车测试']]);
 
         $this->assertContains(1, $index->search('车')->ids);
@@ -2285,7 +2286,7 @@ class IndexTest extends TestCase
 
     public function testZhDoesNotMatchUnrelatedDocument(): void
     {
-        $index = new Index($this->dbPath, language: 'zh');
+        $index = new Index($this->dbPath, schema: new SchemaConfig(language: 'zh'));
         $index->insert([
             ['id' => 1, 'body' => '轿车测试'],
             ['id' => 2, 'body' => '飞机起飞'],
@@ -2296,7 +2297,7 @@ class IndexTest extends TestCase
 
     public function testJaInsertAndSearchBigram(): void
     {
-        $index = new Index($this->dbPath, language: 'ja');
+        $index = new Index($this->dbPath, schema: new SchemaConfig(language: 'ja'));
         $index->insert([['id' => 1, 'body' => '東京タワー']]);
 
         $this->assertContains(1, $index->search('東京')->ids);
@@ -2304,7 +2305,7 @@ class IndexTest extends TestCase
 
     public function testKoInsertAndSearchBigram(): void
     {
-        $index = new Index($this->dbPath, language: 'ko');
+        $index = new Index($this->dbPath, schema: new SchemaConfig(language: 'ko'));
         $index->insert([['id' => 1, 'body' => '서울특별시']]);
 
         $this->assertContains(1, $index->search('서울')->ids);
@@ -2312,7 +2313,7 @@ class IndexTest extends TestCase
 
     public function testThInsertAndSearchTrigram(): void
     {
-        $index = new Index($this->dbPath, language: 'th');
+        $index = new Index($this->dbPath, schema: new SchemaConfig(language: 'th'));
         $index->insert([['id' => 1, 'body' => 'กรุงเทพมหานคร']]);
 
         // 'กรุงเท' is a trigram within the indexed text
@@ -2321,7 +2322,7 @@ class IndexTest extends TestCase
 
     public function testZhBooleanSearch(): void
     {
-        $index = new Index($this->dbPath, language: 'zh');
+        $index = new Index($this->dbPath, schema: new SchemaConfig(language: 'zh'));
         $index->insert([
             ['id' => 1, 'body' => '轿车测试'],
             ['id' => 2, 'body' => '飞机起飞'],
@@ -2335,7 +2336,7 @@ class IndexTest extends TestCase
     public function testZhQueryTokensAreNgrammed(): void
     {
         // inspectQuery must show bigrams in filtered_tokens, not the raw full string.
-        $index  = new Index($this->dbPath, language: 'zh');
+        $index  = new Index($this->dbPath, schema: new SchemaConfig(language: 'zh'));
         $result = $index->inspectQuery('轿车');
 
         $this->assertContains('轿车', $result['filtered_tokens']);
@@ -2346,7 +2347,7 @@ class IndexTest extends TestCase
     public function testZhMixedQueryAsciiTokenPassthrough(): void
     {
         // ASCII tokens in a mixed query must not be ngrammed.
-        $index = new Index($this->dbPath, language: 'zh');
+        $index = new Index($this->dbPath, schema: new SchemaConfig(language: 'zh'));
         $index->insert([
             ['id' => 1, 'body' => 'BMW 轿车'],
             ['id' => 2, 'body' => '轿车'],
@@ -2808,7 +2809,7 @@ class IndexTest extends TestCase
     {
         $readPath = sys_get_temp_dir() . '/fuzor_snap_' . uniqid() . '.db';
         try {
-            $write = new Index($this->dbPath, language: 'en');
+            $write = new Index($this->dbPath, schema: new SchemaConfig(language: 'en'));
             $write->insert([['id' => 1, 'title' => 'running fast']]);
             $write->snapshotTo($readPath);
 
@@ -2838,7 +2839,7 @@ class IndexTest extends TestCase
 
     public function testDocumentStorePersistedWhenDisabled(): void
     {
-        new Index($this->dbPath, store: false)->close();
+        new Index($this->dbPath, schema: new SchemaConfig(store: false))->close();
 
         $index = new Index($this->dbPath);
         $this->assertFalse($index->documentStoreEnabled);
@@ -2848,7 +2849,7 @@ class IndexTest extends TestCase
 
     public function testGetThrowsWhenStoreNotEnabled(): void
     {
-        $index = new Index($this->dbPath, store: false);
+        $index = new Index($this->dbPath, schema: new SchemaConfig(store: false));
         $index->insert([['id' => 1, 'title' => 'sedan']]);
 
         $this->expectException(QueryException::class);
@@ -2857,7 +2858,7 @@ class IndexTest extends TestCase
 
     public function testGetManyThrowsWhenStoreNotEnabled(): void
     {
-        $index = new Index($this->dbPath, store: false);
+        $index = new Index($this->dbPath, schema: new SchemaConfig(store: false));
         $index->insert([['id' => 1, 'title' => 'sedan']]);
 
         $this->expectException(QueryException::class);
@@ -2866,19 +2867,19 @@ class IndexTest extends TestCase
 
     public function testGetReturnsNullForMissingId(): void
     {
-        $index = new Index($this->dbPath, store: true);
+        $index = new Index($this->dbPath, schema: new SchemaConfig(store: true));
         $this->assertNull($index->get(999));
     }
 
     public function testGetManyEmptyArrayReturnsEmpty(): void
     {
-        $index = new Index($this->dbPath, store: true);
+        $index = new Index($this->dbPath, schema: new SchemaConfig(store: true));
         $this->assertSame([], $index->get());
     }
 
     public function testGetManyOmitsMissingIds(): void
     {
-        $index = new Index($this->dbPath, store: true);
+        $index = new Index($this->dbPath, schema: new SchemaConfig(store: true));
         $index->insert([['id' => 1, 'title' => 'sedan']]);
 
         $result = $index->get(1, 999);
@@ -2892,7 +2893,7 @@ class IndexTest extends TestCase
     public function testInsertStoresDocument(): void
     {
         $doc   = ['id' => 1, 'title' => 'sedan', 'body' => 'city car'];
-        $index = new Index($this->dbPath, store: true);
+        $index = new Index($this->dbPath, schema: new SchemaConfig(store: true));
         $index->insert([$doc]);
 
         $this->assertSame($doc, $index->get(1));
@@ -2900,7 +2901,7 @@ class IndexTest extends TestCase
 
     public function testInsertDoesNotStoreWhenDisabled(): void
     {
-        $index = new Index($this->dbPath, store: false);
+        $index = new Index($this->dbPath, schema: new SchemaConfig(store: false));
         $index->insert([['id' => 1, 'title' => 'sedan']]);
 
         $this->expectException(QueryException::class);
@@ -2916,7 +2917,7 @@ class IndexTest extends TestCase
             ['id' => 2, 'title' => 'coupe'],
             ['id' => 3, 'title' => 'suv'],
         ];
-        $index = new Index($this->dbPath, store: true);
+        $index = new Index($this->dbPath, schema: new SchemaConfig(store: true));
         $index->insert($docs);
 
         $this->assertSame($docs[0], $index->get(1));
@@ -2928,7 +2929,7 @@ class IndexTest extends TestCase
 
     public function testUpdateReplacesStoredDocument(): void
     {
-        $index = new Index($this->dbPath, store: true);
+        $index = new Index($this->dbPath, schema: new SchemaConfig(store: true));
         $index->insert([['id' => 1, 'title' => 'old title']]);
         $index->update([['id' => 1, 'title' => 'new title']]);
 
@@ -2940,7 +2941,7 @@ class IndexTest extends TestCase
     public function testUpsertStoresNewDocument(): void
     {
         $doc   = ['id' => 1, 'title' => 'sedan'];
-        $index = new Index($this->dbPath, store: true);
+        $index = new Index($this->dbPath, schema: new SchemaConfig(store: true));
         $index->upsert([$doc]);
 
         $this->assertSame($doc, $index->get(1));
@@ -2948,7 +2949,7 @@ class IndexTest extends TestCase
 
     public function testUpsertReplacesStoredDocument(): void
     {
-        $index = new Index($this->dbPath, store: true);
+        $index = new Index($this->dbPath, schema: new SchemaConfig(store: true));
         $index->insert([['id' => 1, 'title' => 'old']]);
         $index->upsert([['id' => 1, 'title' => 'new']]);
 
@@ -2959,7 +2960,7 @@ class IndexTest extends TestCase
 
     public function testUpdateManyReplacesStoredDocuments(): void
     {
-        $index = new Index($this->dbPath, store: true);
+        $index = new Index($this->dbPath, schema: new SchemaConfig(store: true));
         $index->insert([
             ['id' => 1, 'title' => 'old one'],
             ['id' => 2, 'title' => 'old two'],
@@ -2977,7 +2978,7 @@ class IndexTest extends TestCase
 
     public function testUpsertManyStoresNewAndReplacesExisting(): void
     {
-        $index = new Index($this->dbPath, store: true);
+        $index = new Index($this->dbPath, schema: new SchemaConfig(store: true));
         $index->insert([['id' => 1, 'title' => 'old']]);
         $index->upsert([
             ['id' => 1, 'title' => 'replaced'],
@@ -2992,7 +2993,7 @@ class IndexTest extends TestCase
 
     public function testDeleteRemovesDocumentFromStore(): void
     {
-        $index = new Index($this->dbPath, store: true);
+        $index = new Index($this->dbPath, schema: new SchemaConfig(store: true));
         $index->insert([['id' => 1, 'title' => 'sedan']]);
         $index->delete(1);
 
@@ -3003,7 +3004,7 @@ class IndexTest extends TestCase
 
     public function testDeleteManyRemovesDocumentsFromStore(): void
     {
-        $index = new Index($this->dbPath, store: true);
+        $index = new Index($this->dbPath, schema: new SchemaConfig(store: true));
         $index->insert([
             ['id' => 1, 'title' => 'sedan'],
             ['id' => 2, 'title' => 'coupe'],
@@ -3018,7 +3019,7 @@ class IndexTest extends TestCase
 
     public function testClearRemovesAllDocumentsFromStore(): void
     {
-        $index = new Index($this->dbPath, store: true);
+        $index = new Index($this->dbPath, schema: new SchemaConfig(store: true));
         $index->insert([
             ['id' => 1, 'title' => 'sedan'],
             ['id' => 2, 'title' => 'coupe'],
@@ -3031,7 +3032,7 @@ class IndexTest extends TestCase
 
     public function testClearOnStoreDisabledIndexDoesNotThrow(): void
     {
-        $index = new Index($this->dbPath, store: false);
+        $index = new Index($this->dbPath, schema: new SchemaConfig(store: false));
         $index->insert([['id' => 1, 'title' => 'sedan']]);
         $index->clear();
 
@@ -3042,7 +3043,7 @@ class IndexTest extends TestCase
 
     public function testHasDocumentsFalseWhenStoreDisabled(): void
     {
-        $index = new Index($this->dbPath, store: false);
+        $index = new Index($this->dbPath, schema: new SchemaConfig(store: false));
         $index->insert([['id' => 1, 'title' => 'sedan']]);
 
         $this->assertFalse($index->search('sedan')->hasDocuments());
@@ -3050,7 +3051,7 @@ class IndexTest extends TestCase
 
     public function testHasDocumentsTrueWhenStoreEnabled(): void
     {
-        $index = new Index($this->dbPath, store: true);
+        $index = new Index($this->dbPath, schema: new SchemaConfig(store: true));
         $index->insert([['id' => 1, 'title' => 'sedan']]);
 
         $this->assertTrue($index->search('sedan')->hasDocuments());
@@ -3058,7 +3059,7 @@ class IndexTest extends TestCase
 
     public function testHasDocumentsTrueEvenWhenNoResults(): void
     {
-        $index = new Index($this->dbPath, store: true);
+        $index = new Index($this->dbPath, schema: new SchemaConfig(store: true));
         $index->insert([['id' => 1, 'title' => 'sedan']]);
 
         $this->assertTrue($index->search('coupe')->hasDocuments());
@@ -3067,7 +3068,7 @@ class IndexTest extends TestCase
     public function testDocumentReturnsDocForIdInResult(): void
     {
         $doc   = ['id' => 1, 'title' => 'sedan'];
-        $index = new Index($this->dbPath, store: true);
+        $index = new Index($this->dbPath, schema: new SchemaConfig(store: true));
         $index->insert([$doc]);
 
         $this->assertSame($doc, $index->search('sedan')->document(1));
@@ -3075,7 +3076,7 @@ class IndexTest extends TestCase
 
     public function testDocumentReturnsNullForIdNotInResult(): void
     {
-        $index = new Index($this->dbPath, store: true);
+        $index = new Index($this->dbPath, schema: new SchemaConfig(store: true));
         $index->insert([['id' => 1, 'title' => 'sedan']]);
 
         $this->assertNull($index->search('sedan')->document(99));
@@ -3083,7 +3084,7 @@ class IndexTest extends TestCase
 
     public function testDocumentReturnsNullWhenStoreDisabled(): void
     {
-        $index = new Index($this->dbPath, store: false);
+        $index = new Index($this->dbPath, schema: new SchemaConfig(store: false));
         $index->insert([['id' => 1, 'title' => 'sedan']]);
 
         $this->assertNull($index->search('sedan')->document(1));
@@ -3091,7 +3092,7 @@ class IndexTest extends TestCase
 
     public function testDocumentsReturnsNullWhenStoreDisabled(): void
     {
-        $index = new Index($this->dbPath, store: false);
+        $index = new Index($this->dbPath, schema: new SchemaConfig(store: false));
         $index->insert([['id' => 1, 'title' => 'sedan']]);
 
         $this->assertNull($index->search('sedan')->documents());
@@ -3099,7 +3100,7 @@ class IndexTest extends TestCase
 
     public function testDocumentsReturnsFullMap(): void
     {
-        $index = new Index($this->dbPath, store: true);
+        $index = new Index($this->dbPath, schema: new SchemaConfig(store: true));
         $index->insert([
             ['id' => 10, 'title' => 'sedan'],
             ['id' => 20, 'title' => 'sedan coupe'],
@@ -3118,7 +3119,7 @@ class IndexTest extends TestCase
 
     public function testSearchDocumentsIsNullWhenStoreDisabled(): void
     {
-        $index = new Index($this->dbPath, store: false);
+        $index = new Index($this->dbPath, schema: new SchemaConfig(store: false));
         $index->insert([['id' => 1, 'title' => 'sedan']]);
 
         $result = $index->search('sedan');
@@ -3128,7 +3129,7 @@ class IndexTest extends TestCase
 
     public function testSearchDocumentsIsEmptyArrayWhenNoMatch(): void
     {
-        $index = new Index($this->dbPath, store: true);
+        $index = new Index($this->dbPath, schema: new SchemaConfig(store: true));
         $index->insert([['id' => 1, 'title' => 'sedan']]);
 
         $result = $index->search('coupe');
@@ -3140,7 +3141,7 @@ class IndexTest extends TestCase
     public function testSearchHydratesDocuments(): void
     {
         $doc   = ['id' => 1, 'title' => 'sedan', 'body' => 'city car'];
-        $index = new Index($this->dbPath, store: true);
+        $index = new Index($this->dbPath, schema: new SchemaConfig(store: true));
         $index->insert([$doc]);
 
         $result = $index->search('sedan');
@@ -3150,7 +3151,7 @@ class IndexTest extends TestCase
 
     public function testSearchDocumentsKeyedByDocId(): void
     {
-        $index = new Index($this->dbPath, store: true);
+        $index = new Index($this->dbPath, schema: new SchemaConfig(store: true));
         $index->insert([
             ['id' => 10, 'title' => 'fast sedan'],
             ['id' => 20, 'title' => 'sedan coupe'],
@@ -3168,7 +3169,7 @@ class IndexTest extends TestCase
 
     public function testSearchBooleanDocumentsIsNullWhenStoreDisabled(): void
     {
-        $index = new Index($this->dbPath, store: false);
+        $index = new Index($this->dbPath, schema: new SchemaConfig(store: false));
         $index->insert([['id' => 1, 'title' => 'sedan']]);
 
         $result = $index->searchBoolean('sedan');
@@ -3179,7 +3180,7 @@ class IndexTest extends TestCase
     public function testSearchBooleanHydratesDocuments(): void
     {
         $doc   = ['id' => 1, 'title' => 'sedan', 'body' => 'city car'];
-        $index = new Index($this->dbPath, store: true);
+        $index = new Index($this->dbPath, schema: new SchemaConfig(store: true));
         $index->insert([$doc]);
 
         $result = $index->searchBoolean('sedan');
@@ -3191,7 +3192,7 @@ class IndexTest extends TestCase
 
     public function testRebuildInheritsStoreFromExistingIndex(): void
     {
-        new Index($this->dbPath, store: false)->close();
+        new Index($this->dbPath, schema: new SchemaConfig(store: false))->close();
 
         $rebuilt = Index::rebuild($this->dbPath, function (Index $new): void {
             $new->insert([['id' => 1, 'title' => 'sedan']]);
@@ -3202,11 +3203,11 @@ class IndexTest extends TestCase
 
     public function testRebuildCanEnableStore(): void
     {
-        new Index($this->dbPath, store: false)->close();
+        new Index($this->dbPath, schema: new SchemaConfig(store: false))->close();
 
         $rebuilt = Index::rebuild($this->dbPath, function (Index $new): void {
             $new->insert([['id' => 1, 'title' => 'sedan']]);
-        }, store: true);
+        }, schema: new SchemaConfig(store: true));
 
         $this->assertTrue($rebuilt->documentStoreEnabled);
     }
@@ -3217,19 +3218,19 @@ class IndexTest extends TestCase
 
         $rebuilt = Index::rebuild($this->dbPath, function (Index $new): void {
             $new->insert([['id' => 1, 'title' => 'sedan']]);
-        }, store: false);
+        }, schema: new SchemaConfig(store: false));
 
         $this->assertFalse($rebuilt->documentStoreEnabled);
     }
 
     public function testRebuildWithStoreStoresDocuments(): void
     {
-        new Index($this->dbPath, store: false)->close();
+        new Index($this->dbPath, schema: new SchemaConfig(store: false))->close();
 
         $doc     = ['id' => 1, 'title' => 'sedan'];
         $rebuilt = Index::rebuild($this->dbPath, function (Index $new) use ($doc): void {
             $new->insert([$doc]);
-        }, store: true);
+        }, schema: new SchemaConfig(store: true));
 
         $this->assertSame($doc, $rebuilt->get(1));
     }
@@ -3241,7 +3242,7 @@ class IndexTest extends TestCase
         $snapPath = sys_get_temp_dir() . '/fuzor_snap_' . uniqid() . '.db';
         try {
             $doc   = ['id' => 1, 'title' => 'sedan'];
-            $write = new Index($this->dbPath, store: true);
+            $write = new Index($this->dbPath, schema: new SchemaConfig(store: true));
             $write->insert([$doc]);
             $write->snapshotTo($snapPath);
 
@@ -3273,7 +3274,7 @@ class IndexTest extends TestCase
 
     public function testFacetFieldNotIndexedAsText(): void
     {
-        $index = new Index($this->dbPath, facetFields: ['color']);
+        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['color']));
         $index->insert([['id' => 1, 'title' => 'hello', 'color' => 'red']]);
 
         // 'red' should NOT appear in search results (it's a facet value, not a text token)
@@ -3283,7 +3284,7 @@ class IndexTest extends TestCase
 
     public function testInsertSingleDocWithFacets(): void
     {
-        $index = new Index($this->dbPath, facetFields: ['color']);
+        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['color']));
         $index->insert([['id' => 1, 'title' => 'car', 'color' => 'red']]);
 
         $result = $index->search('car', facets: ['color']);
@@ -3294,7 +3295,7 @@ class IndexTest extends TestCase
 
     public function testDeleteRemovesFacetValues(): void
     {
-        $index = new Index($this->dbPath, facetFields: ['color']);
+        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['color']));
         $index->insert([['id' => 1, 'title' => 'car', 'color' => 'red']]);
         $index->delete(1);
 
@@ -3307,7 +3308,7 @@ class IndexTest extends TestCase
 
     public function testInsertManyStoresFacets(): void
     {
-        $index = new Index($this->dbPath, facetFields: ['color']);
+        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['color']));
         $index->insert([
             ['id' => 1, 'title' => 'car', 'color' => 'red'],
             ['id' => 2, 'title' => 'car', 'color' => 'blue'],
@@ -3321,7 +3322,7 @@ class IndexTest extends TestCase
 
     public function testDeleteManyRemovesFacetValues(): void
     {
-        $index = new Index($this->dbPath, facetFields: ['color']);
+        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['color']));
         $index->insert([
             ['id' => 1, 'title' => 'car', 'color' => 'red'],
             ['id' => 2, 'title' => 'car', 'color' => 'blue'],
@@ -3336,7 +3337,7 @@ class IndexTest extends TestCase
 
     public function testSearchWithStringSingleValueFilter(): void
     {
-        $index = new Index($this->dbPath, facetFields: ['color']);
+        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['color']));
         $index->insert([
             ['id' => 1, 'title' => 'car', 'color' => 'red'],
             ['id' => 2, 'title' => 'car', 'color' => 'blue'],
@@ -3349,7 +3350,7 @@ class IndexTest extends TestCase
 
     public function testSearchWithStringMultiValueOrFilter(): void
     {
-        $index = new Index($this->dbPath, facetFields: ['color']);
+        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['color']));
         $index->insert([
             ['id' => 1, 'title' => 'car', 'color' => 'red'],
             ['id' => 2, 'title' => 'car', 'color' => 'blue'],
@@ -3367,7 +3368,7 @@ class IndexTest extends TestCase
 
     public function testSearchWithNumericRangeFilter(): void
     {
-        $index = new Index($this->dbPath, facetFields: ['price']);
+        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['price']));
         $index->insert([
             ['id' => 1, 'title' => 'car', 'price' => 10000],
             ['id' => 2, 'title' => 'car', 'price' => 25000],
@@ -3385,7 +3386,7 @@ class IndexTest extends TestCase
 
     public function testSearchFacetCountsStringFacet(): void
     {
-        $index = new Index($this->dbPath, facetFields: ['color']);
+        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['color']));
         $index->insert([
             ['id' => 1, 'title' => 'car', 'color' => 'red'],
             ['id' => 2, 'title' => 'car', 'color' => 'red'],
@@ -3400,7 +3401,7 @@ class IndexTest extends TestCase
 
     public function testSearchFacetCountsNumericFacet(): void
     {
-        $index = new Index($this->dbPath, facetFields: ['price']);
+        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['price']));
         $index->insert([
             ['id' => 1, 'title' => 'car', 'price' => 10000.0],
             ['id' => 2, 'title' => 'car', 'price' => 20000.0],
@@ -3419,7 +3420,7 @@ class IndexTest extends TestCase
 
     public function testDisjunctiveFacetCountsShowAllValuesWhenFiltered(): void
     {
-        $index = new Index($this->dbPath, facetFields: ['color']);
+        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['color']));
         $index->insert([
             ['id' => 1, 'title' => 'car', 'color' => 'red'],
             ['id' => 2, 'title' => 'car', 'color' => 'blue'],
@@ -3437,7 +3438,7 @@ class IndexTest extends TestCase
 
     public function testMultiValueFacetOnSingleDocument(): void
     {
-        $index = new Index($this->dbPath, facetFields: ['color']);
+        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['color']));
         $index->insert([['id' => 1, 'title' => 'car', 'color' => ['red', 'blue']]]);
 
         $result = $index->search('car', facets: ['color']);
@@ -3449,7 +3450,7 @@ class IndexTest extends TestCase
 
     public function testSearchBooleanWithFilter(): void
     {
-        $index = new Index($this->dbPath, facetFields: ['color']);
+        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['color']));
         $index->insert([
             ['id' => 1, 'title' => 'car sedan', 'color' => 'red'],
             ['id' => 2, 'title' => 'car coupe', 'color' => 'blue'],
@@ -3462,7 +3463,7 @@ class IndexTest extends TestCase
 
     public function testSearchBooleanWithFacetCounts(): void
     {
-        $index = new Index($this->dbPath, facetFields: ['color']);
+        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['color']));
         $index->insert([
             ['id' => 1, 'title' => 'car', 'color' => 'red'],
             ['id' => 2, 'title' => 'car', 'color' => 'blue'],
@@ -3489,7 +3490,7 @@ class IndexTest extends TestCase
 
     public function testFacetFieldsPersistedAcrossReopen(): void
     {
-        (new Index($this->dbPath, facetFields: ['color', 'brand']))->close();
+        (new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['color', 'brand'])))->close();
 
         $index = new Index($this->dbPath);
         $this->assertSame(['color', 'brand'], $index->facetFields);
@@ -3497,7 +3498,7 @@ class IndexTest extends TestCase
 
     public function testSearchableFieldsPersistedAcrossReopen(): void
     {
-        (new Index($this->dbPath, searchableFields: ['title', 'description']))->close();
+        (new Index($this->dbPath, schema: new SchemaConfig(searchableFields: ['title', 'description'])))->close();
 
         $index = new Index($this->dbPath);
         $this->assertSame(['title', 'description'], $index->searchableFields);
@@ -3513,7 +3514,7 @@ class IndexTest extends TestCase
 
     public function testEmptySearchableFieldsMeansNothingTokenized(): void
     {
-        $index = new Index($this->dbPath, searchableFields: []);
+        $index = new Index($this->dbPath, schema: new SchemaConfig(searchableFields: []));
         $index->insert([['id' => 1, 'title' => 'car']]);
 
         $this->assertSame([], $index->search('car')->ids);
@@ -3521,7 +3522,7 @@ class IndexTest extends TestCase
 
     public function testFacetFieldNotReturnedByFts(): void
     {
-        $index = new Index($this->dbPath, facetFields: ['color']);
+        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['color']));
         $index->insert([['id' => 1, 'title' => 'car', 'color' => 'scarlet']]);
 
         $this->assertSame([], $index->search('scarlet')->ids);
@@ -3530,7 +3531,7 @@ class IndexTest extends TestCase
 
     public function testSearchableFieldsRestrictsTokenization(): void
     {
-        $index = new Index($this->dbPath, searchableFields: ['title']);
+        $index = new Index($this->dbPath, schema: new SchemaConfig(searchableFields: ['title']));
         $index->insert([['id' => 1, 'title' => 'car', 'sku' => 'ABC-123']]);
 
         $this->assertSame([1], $index->search('car')->ids);
@@ -3539,7 +3540,8 @@ class IndexTest extends TestCase
 
     public function testFieldInBothFacetAndSearchableIsIndexedAndFaceted(): void
     {
-        $index = new Index($this->dbPath, facetFields: ['brand'], searchableFields: ['title', 'brand']);
+        $schema = new SchemaConfig(facetFields: ['brand'], searchableFields: ['title', 'brand']);
+        $index  = new Index($this->dbPath, schema: $schema);
         $index->insert([['id' => 1, 'title' => 'watch', 'brand' => 'Casio']]);
 
         // brand is searchable
@@ -3551,7 +3553,7 @@ class IndexTest extends TestCase
 
     public function testRebuildInheritsFacetAndSearchableFields(): void
     {
-        (new Index($this->dbPath, facetFields: ['color'], searchableFields: ['title']))->close();
+        (new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['color'], searchableFields: ['title'])))->close(); // phpcs:ignore
 
         Index::rebuild($this->dbPath, function (Index $idx): void {
             $idx->insert([['id' => 1, 'title' => 'car', 'color' => 'red']]);
@@ -3565,7 +3567,7 @@ class IndexTest extends TestCase
     public function testStoredOnlyFieldAppearsInDocumentStore(): void
     {
         $doc   = ['id' => 1, 'title' => 'car', 'image_url' => 'https://example.com/car.jpg'];
-        $index = new Index($this->dbPath, store: true, searchableFields: ['title']);
+        $index = new Index($this->dbPath, schema: new SchemaConfig(store: true, searchableFields: ['title']));
         $index->insert([$doc]);
 
         // image_url is stored but not indexed
@@ -3577,7 +3579,7 @@ class IndexTest extends TestCase
 
     public function testRebuildPreservesFacets(): void
     {
-        (new Index($this->dbPath, facetFields: ['color']))->close();
+        (new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['color'])))->close();
 
         Index::rebuild($this->dbPath, function (Index $idx): void {
             $idx->insert([['id' => 1, 'title' => 'car', 'color' => 'red']]);
@@ -3592,7 +3594,7 @@ class IndexTest extends TestCase
 
     public function testClearRemovesFacetValues(): void
     {
-        $index = new Index($this->dbPath, facetFields: ['color']);
+        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['color']));
         $index->insert([['id' => 1, 'title' => 'car', 'color' => 'red']]);
         $index->clear();
 
@@ -3604,7 +3606,7 @@ class IndexTest extends TestCase
 
     public function testSortByNumericFacetAsc(): void
     {
-        $index = new Index($this->dbPath, facetFields: ['price']);
+        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['price']));
         $index->insert([
             ['id' => 1, 'title' => 'product', 'price' => 30],
             ['id' => 2, 'title' => 'product', 'price' => 10],
@@ -3615,7 +3617,7 @@ class IndexTest extends TestCase
 
     public function testSortByNumericFacetDesc(): void
     {
-        $index = new Index($this->dbPath, facetFields: ['price']);
+        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['price']));
         $index->insert([
             ['id' => 1, 'title' => 'product', 'price' => 30],
             ['id' => 2, 'title' => 'product', 'price' => 10],
@@ -3626,7 +3628,7 @@ class IndexTest extends TestCase
 
     public function testSortByStringFacetAsc(): void
     {
-        $index = new Index($this->dbPath, facetFields: ['brand']);
+        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['brand']));
         $index->insert([
             ['id' => 1, 'title' => 'product', 'brand' => 'Nike'],
             ['id' => 2, 'title' => 'product', 'brand' => 'Adidas'],
@@ -3637,7 +3639,7 @@ class IndexTest extends TestCase
 
     public function testSortByStringFacetDesc(): void
     {
-        $index = new Index($this->dbPath, facetFields: ['brand']);
+        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['brand']));
         $index->insert([
             ['id' => 1, 'title' => 'product', 'brand' => 'Nike'],
             ['id' => 2, 'title' => 'product', 'brand' => 'Adidas'],
@@ -3648,7 +3650,7 @@ class IndexTest extends TestCase
 
     public function testSortDirectionCaseInsensitive(): void
     {
-        $index = new Index($this->dbPath, facetFields: ['price']);
+        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['price']));
         $index->insert([
             ['id' => 1, 'title' => 'product', 'price' => 30],
             ['id' => 2, 'title' => 'product', 'price' => 10],
@@ -3658,7 +3660,7 @@ class IndexTest extends TestCase
 
     public function testSortNullsLastAsc(): void
     {
-        $index = new Index($this->dbPath, facetFields: ['price']);
+        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['price']));
         $index->insert([
             ['id' => 1, 'title' => 'product', 'price' => 10],
             ['id' => 2, 'title' => 'product'],
@@ -3669,7 +3671,7 @@ class IndexTest extends TestCase
 
     public function testSortNullsLastDesc(): void
     {
-        $index = new Index($this->dbPath, facetFields: ['price']);
+        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['price']));
         $index->insert([
             ['id' => 1, 'title' => 'product', 'price' => 10],
             ['id' => 2, 'title' => 'product'],
@@ -3680,7 +3682,7 @@ class IndexTest extends TestCase
 
     public function testSortMultiKey(): void
     {
-        $index = new Index($this->dbPath, facetFields: ['category', 'price']);
+        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['category', 'price']));
         $index->insert([
             ['id' => 1, 'title' => 'product', 'category' => 'b', 'price' => 20],
             ['id' => 2, 'title' => 'product', 'category' => 'a', 'price' => 30],
@@ -3693,7 +3695,7 @@ class IndexTest extends TestCase
 
     public function testSortWithFacetFilter(): void
     {
-        $index = new Index($this->dbPath, facetFields: ['category', 'price']);
+        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['category', 'price']));
         $index->insert([
             ['id' => 1, 'title' => 'product', 'category' => 'a', 'price' => 20],
             ['id' => 2, 'title' => 'product', 'category' => 'b', 'price' => 10],
@@ -3706,7 +3708,7 @@ class IndexTest extends TestCase
 
     public function testSortDoesNotAffectHitsCount(): void
     {
-        $index = new Index($this->dbPath, facetFields: ['price']);
+        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['price']));
         $index->insert([
             ['id' => 1, 'title' => 'product', 'price' => 30],
             ['id' => 2, 'title' => 'product', 'price' => 10],
@@ -3720,7 +3722,7 @@ class IndexTest extends TestCase
 
     public function testSortDoesNotAffectFacetCounts(): void
     {
-        $index = new Index($this->dbPath, facetFields: ['price', 'color']);
+        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['price', 'color']));
         $index->insert([
             ['id' => 1, 'title' => 'product', 'price' => 30, 'color' => 'red'],
             ['id' => 2, 'title' => 'product', 'price' => 10, 'color' => 'blue'],
@@ -3734,7 +3736,7 @@ class IndexTest extends TestCase
 
     public function testSortWithPagination(): void
     {
-        $index = new Index($this->dbPath, facetFields: ['price']);
+        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['price']));
         $index->insert([
             ['id' => 1, 'title' => 'product', 'price' => 40],
             ['id' => 2, 'title' => 'product', 'price' => 10],
@@ -3751,7 +3753,7 @@ class IndexTest extends TestCase
     {
         // Field not in facetFields → no facet_values rows → all docs treated as null.
         // Falls through to doc_id as final tiebreaker.
-        $index = new Index($this->dbPath, facetFields: ['price']);
+        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['price']));
         $index->insert([
             ['id' => 1, 'title' => 'product', 'price' => 10],
             ['id' => 2, 'title' => 'product', 'price' => 20],
@@ -3765,7 +3767,7 @@ class IndexTest extends TestCase
 
     public function testSortOnBooleanSearch(): void
     {
-        $index = new Index($this->dbPath, facetFields: ['price']);
+        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['price']));
         $index->insert([
             ['id' => 1, 'title' => 'product', 'price' => 30],
             ['id' => 2, 'title' => 'product', 'price' => 10],
@@ -3776,7 +3778,7 @@ class IndexTest extends TestCase
 
     public function testSortBooleanNullsLast(): void
     {
-        $index = new Index($this->dbPath, facetFields: ['price']);
+        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['price']));
         $index->insert([
             ['id' => 1, 'title' => 'product', 'price' => 10],
             ['id' => 2, 'title' => 'product'],
@@ -3787,7 +3789,7 @@ class IndexTest extends TestCase
 
     public function testSortInvalidSpecThrowsOnSearch(): void
     {
-        $index = new Index($this->dbPath, facetFields: ['price']);
+        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['price']));
         $index->insert([['id' => 1, 'title' => 'product', 'price' => 10]]);
         $this->expectException(\InvalidArgumentException::class);
         $index->search('product', sort: ['price_asc']);
@@ -3795,7 +3797,7 @@ class IndexTest extends TestCase
 
     public function testSortInvalidDirectionThrows(): void
     {
-        $index = new Index($this->dbPath, facetFields: ['price']);
+        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['price']));
         $index->insert([['id' => 1, 'title' => 'product', 'price' => 10]]);
         $this->expectException(\InvalidArgumentException::class);
         $index->search('product', sort: ['price:up']);
@@ -3803,7 +3805,7 @@ class IndexTest extends TestCase
 
     public function testSortInvalidSpecThrowsOnBoolean(): void
     {
-        $index = new Index($this->dbPath, facetFields: ['price']);
+        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['price']));
         $index->insert([['id' => 1, 'title' => 'product', 'price' => 10]]);
         $this->expectException(\InvalidArgumentException::class);
         $index->searchBoolean('product', sort: ['price:up']);
@@ -3811,7 +3813,7 @@ class IndexTest extends TestCase
 
     public function testEmptySortIsNoop(): void
     {
-        $index = new Index($this->dbPath, facetFields: ['price']);
+        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['price']));
         $index->insert([['id' => 1, 'title' => 'product', 'price' => 10]]);
         $this->assertContains(1, $index->search('product', sort: [])->ids);
     }

@@ -137,48 +137,29 @@ class Index
      * and the stored language is restored automatically — $language is ignored.
      * If the file does not exist, or $force is true, a new index is created.
      *
-     * @param  string      $path     Absolute or relative path to the SQLite index file.
-     * @param  string|null $language BCP 47 language tag persisted at creation time (e.g. 'en').
-     *                               Ignored when opening an existing index.
-     * @param  bool        $force    Overwrite any existing file at $path.
-     * @param  Config|null $config   Search tuning; null uses all defaults.
-     * @param  bool        $readonly Open in read-only mode; all write methods throw IOException.
-     * @param  bool          $store            Enable the document store; persists raw documents alongside
-     *                                         the inverted index so search results can be hydrated without
-     *                                         a separate data layer. Defaults to true; pass false to opt out.
-     *                                         Ignored when opening an existing index
-     *                                         (the stored has_document_store info value takes precedence).
-     * @param  list<string>  $facetFields      Field names routed to the facet index at creation time.
-     *                                         These fields are not FTS-indexed unless also listed in
-     *                                         $searchableFields. Ignored when opening an existing index.
-     * @param  list<string>|null $searchableFields Whitelist of fields to tokenise for FTS.
-     *                                         null (default) tokenises all fields not in $facetFields.
-     *                                         Pass [] to disable FTS for all fields.
-     *                                         Ignored when opening an existing index.
-     * @param  bool              $stripHtml        Strip HTML tags from field values before tokenisation.
-     *                                         Useful when documents contain HTML markup that should not
-     *                                         pollute the FTS index. Ignored when opening an existing index.
+     * @param  string           $path     Absolute or relative path to the SQLite index file.
+     * @param  bool             $force    Overwrite any existing file at $path.
+     * @param  Config|null      $config   Search tuning; null uses all defaults.
+     * @param  bool             $readonly Open in read-only mode; all write methods throw IOException.
+     * @param  SchemaConfig|null $schema   Schema persisted at creation time; ignored when opening an existing index.
      * @throws IOException    If the parent directory does not exist, or readonly is true and the file does not exist.
-     * @throws QueryException If $language is set but has no stopword list or stemmer,
+     * @throws QueryException If $schema->language is set but has no stopword list or stemmer,
      *                        or if both $readonly and $force are true.
      */
     public function __construct(
         string $path,
-        ?string $language = null,
         bool $force = false,
         ?Config $config = null,
         private readonly bool $readonly = false,
-        bool $store = true,
-        array $facetFields = [],
-        ?array $searchableFields = null,
-        bool $stripHtml = false,
+        ?SchemaConfig $schema = null,
     ) {
+        $schema         = $schema ?? new SchemaConfig();
         $this->config   = $config ?? new Config();
         if ($this->readonly && $force) {
             throw new QueryException("Cannot force-create a readonly index.");
         }
-        if ($language !== null && !Language::supports($language)) {
-            throw new QueryException("No stopword list or stemmer for language: '{$language}'");
+        if ($schema->language !== null && !Language::supports($schema->language)) {
+            throw new QueryException("No stopword list or stemmer for language: '{$schema->language}'");
         }
         $resolved   = self::resolvePath($path);
         $this->path = $resolved;
@@ -188,7 +169,7 @@ class Index
         if (file_exists($resolved) && !$force) {
             $this->selectIndex();
         } else {
-            $this->createIndex($force, $language, $store, $facetFields, $searchableFields, $stripHtml);
+            $this->createIndex($force, $schema);
         }
     }
 
@@ -280,35 +261,31 @@ class Index
      * The callback receives a fresh, empty Index to populate. If the callback throws,
      * the temporary file is removed and the original index is left untouched.
      *
-     * Language resolution order:
-     *  - Pass a BCP 47 string to use that language regardless of what the existing index has.
-     *  - Pass null to explicitly build with no language (overrides the existing index).
-     *  - Omit the parameter (default false) to inherit the language from the existing index.
+     * Pass a SchemaConfig to override the schema; omit it (null) to inherit the existing
+     * index's schema. When no existing index is present, null uses SchemaConfig defaults.
      *
      * @param  string            $path     Absolute or relative path to the index file to rebuild.
      * @param  callable          $callback fn(Index $new): void — populate the new index here.
-     * @param  false|string|null $language BCP 47 tag, null (no language), or false (inherit).
-     * @param  ?bool             $store    true/false to force enable/disable; null (default) inherits from existing.
+     * @param  SchemaConfig|null $schema   Schema for the new index; null inherits from the existing index.
      * @return self               Open index pointing at the rebuilt file.
      * @throws IOException        If the rename fails or the parent directory does not exist.
      */
     public static function rebuild(
         string $path,
         callable $callback,
-        false|string|null $language = false,
-        ?bool $store = null,
+        ?SchemaConfig $schema = null,
     ): self {
         $resolved = self::resolvePath($path);
         $existing = file_exists($resolved) ? new self($resolved) : null;
-        if ($language === false) {
-            $language = $existing?->language;
+        if ($schema === null && $existing !== null) {
+            $schema = new SchemaConfig(
+                language:         $existing->language,
+                store:            $existing->documentStoreEnabled,
+                facetFields:      $existing->facetFields,
+                searchableFields: $existing->searchableFields,
+                stripHtml:        $existing->stripHtml,
+            );
         }
-        if ($store === null) {
-            $store = $existing !== null ? $existing->documentStoreEnabled : true;
-        }
-        $facetFields      = $existing !== null ? $existing->facetFields      : [];
-        $searchableFields = $existing !== null ? $existing->searchableFields : null;
-        $stripHtml        = $existing !== null ? $existing->stripHtml        : false;
         /** @infection-ignore-all MethodCallRemoval: resource cleanup; GC closes the connection if skipped, no observable effect on the rebuild outcome */
         $existing?->close();
 
@@ -316,14 +293,7 @@ class Index
         $tmp = $resolved . '.tmp-' . bin2hex(random_bytes(4));
 
         try {
-            $handle = new self(
-                $tmp,
-                language:         $language,
-                store:            $store,
-                facetFields:      $facetFields,
-                searchableFields: $searchableFields,
-                stripHtml:        $stripHtml,
-            );
+            $handle = new self($tmp, schema: $schema);
             $callback($handle);
             $handle->close();
 
@@ -397,26 +367,20 @@ class Index
      * type safety. doclist is WITHOUT ROWID (clustered on term_id, doc_id), replacing
      * the old term_id secondary index with a zero-heap-fetch primary scan.
      *
-     * @param  bool              $force            When true, any existing file is deleted before creation.
-     * @param  string|null       $language         BCP 47 language tag persisted in the index (e.g. 'en');
-     *                                             null disables stopword filtering and stemming.
-     * @param  bool              $store            Whether to create the document store.
-     * @param  list<string>      $facetFields      Field names routed to the facet index.
-     * @param  list<string>|null $searchableFields Whitelist of FTS-indexed fields; null = all non-facet fields.
-     * @param  bool              $stripHtml        Strip HTML tags from field values before tokenisation.
+     * @param  bool         $force  When true, any existing file is deleted before creation.
+     * @param  SchemaConfig $schema Schema options persisted at creation time.
      * @return static
      * @throws IOException    If the index file already exists and $force is false.
-     * @throws QueryException If $language is set but has no stopword list or stemmer.
+     * @throws QueryException If schema->language is set but has no stopword list or stemmer.
      * @infection-ignore-all FalseValue: default $force=false is never exercised; callers always pass force explicitly
      */
-    private function createIndex(
-        bool $force = false,
-        ?string $language = null,
-        bool $store = true,
-        array $facetFields = [],
-        ?array $searchableFields = null,
-        bool $stripHtml = false,
-    ): static {
+    private function createIndex(bool $force, SchemaConfig $schema): static
+    {
+        $language         = $schema->language;
+        $store            = $schema->store;
+        $facetFields      = $schema->facetFields;
+        $searchableFields = $schema->searchableFields;
+        $stripHtml        = $schema->stripHtml;
         if (!$force && file_exists($this->path)) {
             throw new IOException(
                 "Index already exists: {$this->path}. Pass force: true to overwrite."

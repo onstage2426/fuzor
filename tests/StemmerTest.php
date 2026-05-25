@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Fuzor\Tests;
 
 use Fuzor\Index;
+use Fuzor\SchemaConfig;
 use Fuzor\Stemmer;
 use PHPUnit\Framework\TestCase;
 
@@ -94,7 +95,7 @@ class StemmerTest extends TestCase
     public function testStemmedFormMatchesSurfaceFormAtQuery(): void
     {
         // Index "running"; search "run" (the stem) — with asYouType off so it's exact.
-        $index = new Index($this->dbPath, language: 'en');
+        $index = new Index($this->dbPath, schema: new SchemaConfig(language: 'en'));
         $index->insert([['id' => 1, 'body' => 'running quickly']]);
 
         $this->assertContains(1, $index->search('run', asYouType: false)->ids);
@@ -102,7 +103,7 @@ class StemmerTest extends TestCase
 
     public function testDifferentSurfaceFormsMatchSameStem(): void
     {
-        $index = new Index($this->dbPath, language: 'en');
+        $index = new Index($this->dbPath, schema: new SchemaConfig(language: 'en'));
         $index->insert([['id' => 1, 'body' => 'connection to the server']]);
 
         // Both "connect" and "connections" stem to "connect"
@@ -122,7 +123,7 @@ class StemmerTest extends TestCase
 
     public function testBooleanSearchAppliesStemming(): void
     {
-        $index = new Index($this->dbPath, language: 'en');
+        $index = new Index($this->dbPath, schema: new SchemaConfig(language: 'en'));
         $index->insert([['id' => 1, 'body' => 'connections to the network']]);
         $index->insert([['id' => 2, 'body' => 'network errors only']]);
 
@@ -144,7 +145,7 @@ class StemmerTest extends TestCase
 
     public function testInsertManyWithStemming(): void
     {
-        $index = new Index($this->dbPath, language: 'en');
+        $index = new Index($this->dbPath, schema: new SchemaConfig(language: 'en'));
         $index->insert([
             ['id' => 1, 'body' => 'connections are important'],
             ['id' => 2, 'body' => 'running fast'],

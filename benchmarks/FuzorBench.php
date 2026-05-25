@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Fuzor\Benchmarks;
 
 use Fuzor\Index;
+use Fuzor\SchemaConfig;
 use PhpBench\Attributes\AfterMethods;
 use PhpBench\Attributes\BeforeMethods;
 use PhpBench\Attributes\Groups;
@@ -81,7 +82,7 @@ class FuzorBench
             return;
         }
         self::loadDocs();
-        $idx = new Index(self::SEARCH_DB, force: true, language: 'en');
+        $idx = new Index(self::SEARCH_DB, force: true, schema: new SchemaConfig(language: 'en'));
         $idx->insert(self::$docs);
         $idx->close();
     }
@@ -121,7 +122,7 @@ class FuzorBench
     {
         $path = sys_get_temp_dir() . '/fuzor_bench_im_' . getmypid() . '.db';
         @unlink($path);
-        $idx = new Index($path, force: true, language: 'en');
+        $idx = new Index($path, force: true, schema: new SchemaConfig(language: 'en'));
         $idx->insert(self::$docs);
         $idx->close();
         @unlink($path);
@@ -136,7 +137,7 @@ class FuzorBench
     {
         $path = sys_get_temp_dir() . '/fuzor_bench_is_' . getmypid() . '.db';
         @unlink($path);
-        $idx = new Index($path, force: true, language: 'en');
+        $idx = new Index($path, force: true, schema: new SchemaConfig(language: 'en'));
         foreach (array_slice(self::$docs, 0, 1000) as $doc) {
             $idx->insert([$doc]);
         }

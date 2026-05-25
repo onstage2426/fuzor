@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Fuzor\Tests;
 
 use Fuzor\Index;
+use Fuzor\SchemaConfig;
 use Fuzor\Exceptions\QueryException;
 use Fuzor\Stopwords;
 use PHPUnit\Framework\TestCase;
@@ -99,13 +100,13 @@ class StopwordsTest extends TestCase
 
     public function testLanguageAtCreationIsReadBack(): void
     {
-        $index = new Index($this->dbPath, language: 'en');
+        $index = new Index($this->dbPath, schema: new SchemaConfig(language: 'en'));
         $this->assertSame('en', $index->language);
     }
 
     public function testLanguageIsRestoredOnOpen(): void
     {
-        $index = new Index($this->dbPath, language: 'en');
+        $index = new Index($this->dbPath, schema: new SchemaConfig(language: 'en'));
         $index->close();
 
         $reopened = new Index($this->dbPath);
@@ -115,12 +116,12 @@ class StopwordsTest extends TestCase
     public function testUnknownLanguageAtCreationThrows(): void
     {
         $this->expectException(QueryException::class);
-        new Index($this->dbPath, language: 'xx');
+        new Index($this->dbPath, schema: new SchemaConfig(language: 'xx'));
     }
 
     public function testStopwordsExcludedFromIndex(): void
     {
-        $index = new Index($this->dbPath, language: 'en');
+        $index = new Index($this->dbPath, schema: new SchemaConfig(language: 'en'));
         $index->insert([['id' => 1, 'body' => 'the quick brown fox']]);
 
         // 'the' is a stopword — searching for it should return no results
@@ -144,7 +145,7 @@ class StopwordsTest extends TestCase
         // With language='en', stopwords are filtered from both inserts and queries.
         // A query made up entirely of stopwords must not crash or throw; the fallback
         // in filterQueryTokens re-enables the original tokens when all are stripped.
-        $index = new Index($this->dbPath, language: 'en');
+        $index = new Index($this->dbPath, schema: new SchemaConfig(language: 'en'));
         $index->insert([['id' => 1, 'body' => 'quick brown fox']]);
 
         $result = $index->search('the and or');
