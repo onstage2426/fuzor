@@ -50,6 +50,12 @@ $index = new Index('/path/to/watches.db',
 );
 ```
 
+Pass `stripHtml: true` when documents contain HTML markup. Each field value is passed through `strip_tags()` before tokenisation so tag names, attributes, and entity-like fragments never enter the FTS index. The raw HTML is still stored unchanged in the document store. Ignored when opening an existing index.
+
+```php
+$index = new Index('/path/to/articles.db', stripHtml: true);
+```
+
 Pass a `Config` object to tune BM25, typo tolerance, and other search behaviour. See [configuration.md](configuration.md) for details.
 
 ```php
@@ -284,7 +290,7 @@ Index::rebuild('/path/to/articles.db', callback: fn (Index $new) => $new->insert
 
 ### Schema on rebuild
 
-`rebuild()` inherits `facetFields` and `searchableFields` from the existing index automatically. Documents inserted inside the callback are routed using the inherited schema — no extra configuration needed.
+`rebuild()` inherits `facetFields`, `searchableFields`, and `stripHtml` from the existing index automatically. Documents inserted inside the callback are routed using the inherited schema — no extra configuration needed.
 
 ```php
 Index::rebuild('/path/to/articles.db', callback: fn (Index $new) => $new->insert($docs));

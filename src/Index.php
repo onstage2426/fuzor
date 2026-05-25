@@ -103,6 +103,9 @@ class Index
     /** @var list<string>|null null = all non-facet fields are FTS-indexed; non-null = only these fields. */
     public private(set) ?array $searchableFields = null;
 
+    /** When true, strip_tags() is applied to each field value before tokenisation. */
+    public private(set) bool $stripHtml = false;
+
     /** @var array<string, int> Maps facet key name → facet_keys.id; populated lazily; cleared on connection change. */
     private array $facetKeyCache = [];
 
@@ -152,6 +155,9 @@ class Index
      *                                         null (default) tokenises all fields not in $facetFields.
      *                                         Pass [] to disable FTS for all fields.
      *                                         Ignored when opening an existing index.
+     * @param  bool              $stripHtml        Strip HTML tags from field values before tokenisation.
+     *                                         Useful when documents contain HTML markup that should not
+     *                                         pollute the FTS index. Ignored when opening an existing index.
      * @throws IOException    If the parent directory does not exist, or readonly is true and the file does not exist.
      * @throws QueryException If $language is set but has no stopword list or stemmer,
      *                        or if both $readonly and $force are true.
@@ -165,6 +171,7 @@ class Index
         bool $store = true,
         array $facetFields = [],
         ?array $searchableFields = null,
+        bool $stripHtml = false,
     ) {
         $this->config   = $config ?? new Config();
         if ($this->readonly && $force) {
@@ -181,7 +188,7 @@ class Index
         if (file_exists($resolved) && !$force) {
             $this->selectIndex();
         } else {
-            $this->createIndex($force, $language, $store, $facetFields, $searchableFields);
+            $this->createIndex($force, $language, $store, $facetFields, $searchableFields, $stripHtml);
         }
     }
 
@@ -301,6 +308,7 @@ class Index
         }
         $facetFields      = $existing !== null ? $existing->facetFields      : [];
         $searchableFields = $existing !== null ? $existing->searchableFields : null;
+        $stripHtml        = $existing !== null ? $existing->stripHtml        : false;
         /** @infection-ignore-all MethodCallRemoval: resource cleanup; GC closes the connection if skipped, no observable effect on the rebuild outcome */
         $existing?->close();
 
@@ -314,6 +322,7 @@ class Index
                 store:            $store,
                 facetFields:      $facetFields,
                 searchableFields: $searchableFields,
+                stripHtml:        $stripHtml,
             );
             $callback($handle);
             $handle->close();
@@ -394,6 +403,7 @@ class Index
      * @param  bool              $store            Whether to create the document store.
      * @param  list<string>      $facetFields      Field names routed to the facet index.
      * @param  list<string>|null $searchableFields Whitelist of FTS-indexed fields; null = all non-facet fields.
+     * @param  bool              $stripHtml        Strip HTML tags from field values before tokenisation.
      * @return static
      * @throws IOException    If the index file already exists and $force is false.
      * @throws QueryException If $language is set but has no stopword list or stemmer.
@@ -405,6 +415,7 @@ class Index
         bool $store = true,
         array $facetFields = [],
         ?array $searchableFields = null,
+        bool $stripHtml = false,
     ): static {
         if (!$force && file_exists($this->path)) {
             throw new IOException(
@@ -542,10 +553,12 @@ class Index
         $schemaStmt = $pdo->prepare("INSERT INTO info (key, value) VALUES (?, ?)");
         $schemaStmt->execute(['facet_fields',      json_encode($facetFields)]);
         $schemaStmt->execute(['searchable_fields', $searchableFields !== null ? json_encode($searchableFields) : '']);
+        $schemaStmt->execute(['strip_html',        $stripHtml ? '1' : '0']);
         $this->facetFields        = $facetFields;
         $this->searchableFields   = $searchableFields;
         $this->facetFieldSet      = array_flip($facetFields);
         $this->searchableFieldSet = $searchableFields !== null ? array_flip($searchableFields) : null;
+        $this->stripHtml          = $stripHtml;
 
         if ($language !== null) {
             $this->applyLanguage($language);
@@ -577,7 +590,8 @@ class Index
         $pdo   = $this->pdo;
         $stmt  = $pdo->query(
             "SELECT key, value FROM info"
-            . " WHERE key IN ('language', 'has_document_store', 'has_facets', 'facet_fields', 'searchable_fields')"
+            . " WHERE key IN ('language', 'has_document_store', 'has_facets', 'facet_fields', 'searchable_fields',"
+            . " 'strip_html')"
         );
         $infoRows = [];
         if ($stmt) {
@@ -594,6 +608,7 @@ class Index
         $this->searchableFields   = $sfRaw === '' ? null : self::decodeStringList($sfRaw);
         $this->facetFieldSet      = array_flip($this->facetFields);
         $this->searchableFieldSet = $this->searchableFields !== null ? array_flip($this->searchableFields) : null;
+        $this->stripHtml          = ($infoRows['strip_html'] ?? '0') === '1';
 
         $probe = $pdo->query("SELECT 1 FROM sqlite_master WHERE type='table' AND name='field_hits'");
         $this->hasFieldHits = $probe !== false && $probe->fetchColumn() !== false;
@@ -1964,6 +1979,12 @@ class Index
         $text = trim(strval($col)); // @phpstan-ignore argument.type
         if ($text === '') {
             return;
+        }
+        if ($this->stripHtml) {
+            $text = strip_tags($text);
+            if ($text === '') {
+                return;
+            }
         }
         $tokens = Tokenizer::tokenize($text, $this->language);
         if ($this->stopwords instanceof \Fuzor\Stopwords) {
