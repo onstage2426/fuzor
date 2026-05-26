@@ -235,6 +235,28 @@ Returns the total number of indexed documents. Reads from the cached `info` tabl
 $index->count(); // int
 ```
 
+## Streaming all documents
+
+Iterates over every document in the store in ascending `id` order. Returns a generator that yields `doc_id => document` pairs one at a time. Requires the document store to be enabled.
+
+```php
+foreach ($index->stream() as $id => $doc) {
+    echo $id . ': ' . $doc['title'] . "\n";
+}
+```
+
+`$batchSize` controls how many rows are fetched from SQLite per round-trip (default `100`). Increase it when throughput matters more than memory:
+
+```php
+foreach ($index->stream(batchSize: 500) as $id => $doc) {
+    // ...
+}
+```
+
+The cursor uses `WHERE doc_id > :last LIMIT :n` against the clustered primary key, so each fetch is O(1) regardless of how deep into the dataset you are.
+
+Throws `QueryException` if the document store is not enabled. Throws `\InvalidArgumentException` if `$batchSize` is less than 1.
+
 ## Last modified
 
 Returns a Unix timestamp reflecting the most recent write to the index. Reads the main database file's mtime — updated on each WAL checkpoint — no database connection required. Returns `0` if the file does not exist.

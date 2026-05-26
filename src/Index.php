@@ -330,7 +330,7 @@ class Index
                 $callback($handle);
             } elseif ($existing !== null) {
                 // Always true here (validated above); the elseif narrows $existing to non-null.
-                $handle->insert($existing->streamAllDocuments());
+                $handle->insert($existing->stream(500));
             }
             $handle->close();
 
@@ -1317,6 +1317,46 @@ class Index
         return $result;
     }
 
+    /**
+     * Stream all documents from the store in ascending doc_id order.
+     *
+     * Yields doc_id => document pairs one at a time. $batchSize controls how many rows
+     * are fetched from SQLite per round-trip via a keyset cursor (WHERE doc_id > :last),
+     * so each fetch is O(1) against the clustered PK regardless of position in the dataset.
+     *
+     * @param  int $batchSize Rows fetched per SQL round-trip (default 100).
+     * @return \Generator<int, array<string, mixed>>
+     * @throws QueryException            If the document store is not enabled.
+     * @throws \InvalidArgumentException If $batchSize < 1.
+     */
+    public function stream(int $batchSize = 100): \Generator
+    {
+        if (!$this->documentStoreEnabled) {
+            throw new QueryException(
+                'Document store is not enabled on this index. Pass store: false at construction to opt out.'
+            );
+        }
+        if ($batchSize < 1) {
+            throw new \InvalidArgumentException('batchSize must be >= 1.');
+        }
+        $lastId = 0;
+        do {
+            $stmt = $this->stmt(
+                'streamCursor',
+                'SELECT doc_id, data FROM documents WHERE doc_id > ? ORDER BY doc_id LIMIT ?'
+            );
+            $stmt->execute([$lastId, $batchSize]);
+            /** @var list<array{0: int, 1: string}> $rows */
+            $rows = $stmt->fetchAll(PDO::FETCH_NUM);
+            foreach ($rows as [$docId, $data]) {
+                /** @var array<string, mixed> $doc */
+                $doc    = json_decode((string) $data, true, 512, JSON_THROW_ON_ERROR);
+                $lastId = (int) $docId;
+                yield (int) $docId => $doc;
+            }
+        } while (count($rows) === $batchSize);
+    }
+
     // --- Public API: info & factories ----------------------------------------
 
     /**
@@ -1941,25 +1981,6 @@ class Index
             }
         }
         return $result;
-    }
-
-    /**
-     * Yield every document from the store in doc_id order.
-     *
-     * Used by the no-callback path of rebuild() to stream the existing document store
-     * into a fresh index without loading all rows into memory at once.
-     *
-     * @return \Generator<int, array<string, mixed>>
-     */
-    private function streamAllDocuments(): \Generator
-    {
-        $stmt = $this->stmt('streamAllDocs', 'SELECT data FROM documents ORDER BY doc_id');
-        $stmt->execute();
-        while (($data = $stmt->fetchColumn()) !== false) {
-            /** @var array<string, mixed> $doc */
-            $doc = json_decode((string) $data, true, 512, JSON_THROW_ON_ERROR);
-            yield $doc;
-        }
     }
 
     // --- Private write helpers ----------------------------------------------
