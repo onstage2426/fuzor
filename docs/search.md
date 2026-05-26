@@ -103,6 +103,69 @@ $results = $index->search('turbo');
 
 See [configuration.md](configuration.md#field-boosting) for details and performance notes.
 
+## Synonyms
+
+Synonyms are configured on the index and applied at query time — no reindexing required. When a query token matches a synonym source, its target terms are looked up alongside the original and their matching documents participate in the same BM25 group. Works in both `search()` and `searchBoolean()`.
+
+### Equivalences
+
+An equivalence group makes every term in the group expand to all the others. Searching any one finds documents containing any other.
+
+```php
+$index->setSynonyms(equivalences: [
+    ['car', 'automobile', 'vehicle'],
+    ['couch', 'sofa', 'settee'],
+]);
+
+$index->search('automobile'); // also returns documents containing 'car' or 'vehicle'
+```
+
+### One-way synonyms
+
+A one-way synonym expands a source term to its targets, but not the reverse.
+
+```php
+$index->setSynonyms(oneWay: [
+    'phone' => ['smartphone', 'mobile'],
+    'tv'    => ['television'],
+]);
+
+$index->search('phone');      // also returns 'smartphone' and 'mobile' documents
+$index->search('smartphone'); // does NOT return 'phone' documents
+```
+
+### Combining both types
+
+```php
+$index->setSynonyms(
+    equivalences: [
+        ['car', 'automobile', 'vehicle'],
+    ],
+    oneWay: [
+        'phone' => ['smartphone', 'mobile'],
+    ],
+);
+```
+
+`setSynonyms()` always replaces the full synonym configuration. Calling it again discards all previously configured synonyms.
+
+### Reading and clearing
+
+```php
+$index->getSynonyms();   // array<string, list<string>> — flat source → targets map (normalized forms)
+$index->clearSynonyms(); // removes all synonyms
+```
+
+### Normalization
+
+Terms are lowercased and stemmed (when the index has a language set) before storage, so synonym lookups stay consistent with how query tokens and indexed terms are processed. You do not need to pass pre-stemmed forms — `'automobiles'` on an English index is stored as the same stem as `'automobile'`.
+
+Multi-word terms (e.g. `'mobile phone'`) are silently skipped. Only single-word synonyms are supported.
+
+### Phrase search
+
+Synonyms are not applied inside quoted phrases — `"automobile wash"` matches those exact words only.
+
 ## Boolean search
 
 Set-based: no BM25 scoring, `score()` always returns `null`. Useful for filtering rather than ranking.

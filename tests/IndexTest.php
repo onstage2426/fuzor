@@ -3939,4 +3939,280 @@ class IndexTest extends TestCase
         $result = $index->search('turbo');
         $this->assertSame(1, $result->ids[0], 'Title match should rank first with high title boost');
     }
+
+    // --- Synonyms: API management ---
+
+    public function testGetSynonymsEmptyOnFreshIndex(): void
+    {
+        $index = new Index($this->dbPath);
+        $this->assertSame([], $index->getSynonyms());
+    }
+
+    public function testSetEquivalencesStoresBothDirections(): void
+    {
+        $index = new Index($this->dbPath);
+        $index->setSynonyms(equivalences: [['car', 'automobile']]);
+        $synonyms = $index->getSynonyms();
+        $this->assertContains('automobile', $synonyms['car']);
+        $this->assertContains('car', $synonyms['automobile']);
+    }
+
+    public function testSetOneWayStoresOnlySourceToTarget(): void
+    {
+        $index = new Index($this->dbPath);
+        $index->setSynonyms(oneWay: ['phone' => ['smartphone', 'mobile']]);
+        $synonyms = $index->getSynonyms();
+        $this->assertContains('smartphone', $synonyms['phone']);
+        $this->assertContains('mobile', $synonyms['phone']);
+        $this->assertArrayNotHasKey('smartphone', $synonyms);
+        $this->assertArrayNotHasKey('mobile', $synonyms);
+    }
+
+    public function testSetSynonymsReplacesExisting(): void
+    {
+        $index = new Index($this->dbPath);
+        $index->setSynonyms(equivalences: [['car', 'automobile']]);
+        $index->setSynonyms(equivalences: [['sedan', 'coupe']]);
+        $synonyms = $index->getSynonyms();
+        $this->assertArrayNotHasKey('car', $synonyms);
+        $this->assertArrayHasKey('sedan', $synonyms);
+    }
+
+    public function testClearSynonymsEmptiesAll(): void
+    {
+        $index = new Index($this->dbPath);
+        $index->setSynonyms(equivalences: [['car', 'automobile']]);
+        $index->clearSynonyms();
+        $this->assertSame([], $index->getSynonyms());
+    }
+
+    public function testSetSynonymsNormalizesCase(): void
+    {
+        $index = new Index($this->dbPath);
+        $index->setSynonyms(equivalences: [['CAR', 'Automobile']]);
+        $synonyms = $index->getSynonyms();
+        $this->assertArrayHasKey('car', $synonyms);
+        $this->assertContains('automobile', $synonyms['car']);
+    }
+
+    public function testSetSynonymsSkipsMultiWordTerms(): void
+    {
+        $index = new Index($this->dbPath);
+        $index->setSynonyms(oneWay: ['mobile phone' => ['smartphone']]);
+        $this->assertSame([], $index->getSynonyms());
+    }
+
+    public function testSetSynonymsSkipsMultiWordTargets(): void
+    {
+        $index = new Index($this->dbPath);
+        $index->setSynonyms(oneWay: ['phone' => ['mobile device', 'smartphone']]);
+        $synonyms = $index->getSynonyms();
+        $this->assertArrayHasKey('phone', $synonyms);
+        $this->assertNotContains('mobile device', $synonyms['phone']);
+        $this->assertContains('smartphone', $synonyms['phone']);
+    }
+
+    // --- Synonyms: search expansion ---
+
+    public function testEquivalenceSynonymExpandsSearchForOriginalTerm(): void
+    {
+        $index = new Index($this->dbPath);
+        $index->insert([
+            ['id' => 1, 'title' => 'automobile show'],
+            ['id' => 2, 'title' => 'bike race'],
+        ]);
+        $index->setSynonyms(equivalences: [['car', 'automobile']]);
+        $this->assertContains(1, $index->search('car')->ids);
+    }
+
+    public function testEquivalenceSynonymExpandsSearchForOtherTerm(): void
+    {
+        $index = new Index($this->dbPath);
+        $index->insert([
+            ['id' => 1, 'title' => 'car show'],
+            ['id' => 2, 'title' => 'bike race'],
+        ]);
+        $index->setSynonyms(equivalences: [['car', 'automobile']]);
+        $this->assertContains(1, $index->search('automobile')->ids);
+    }
+
+    public function testOneWaySynonymExpandsSearch(): void
+    {
+        $index = new Index($this->dbPath);
+        $index->insert([
+            ['id' => 1, 'title' => 'smartphone review'],
+            ['id' => 2, 'title' => 'laptop review'],
+        ]);
+        $index->setSynonyms(oneWay: ['phone' => ['smartphone']]);
+        $this->assertContains(1, $index->search('phone')->ids);
+        $this->assertNotContains(2, $index->search('phone')->ids);
+    }
+
+    public function testOneWaySynonymDoesNotExpandReverse(): void
+    {
+        $index = new Index($this->dbPath);
+        $index->insert([
+            ['id' => 1, 'title' => 'phone review'],
+            ['id' => 2, 'title' => 'laptop review'],
+        ]);
+        $index->setSynonyms(oneWay: ['phone' => ['smartphone']]);
+        $this->assertNotContains(1, $index->search('smartphone')->ids);
+    }
+
+    public function testSynonymMatchProducesNonZeroScore(): void
+    {
+        $index = new Index($this->dbPath);
+        $index->insert([['id' => 1, 'title' => 'automobile']]);
+        $index->setSynonyms(oneWay: ['car' => ['automobile']]);
+        $result = $index->search('car');
+        $this->assertContains(1, $result->ids);
+        $this->assertGreaterThan(0.0, $result->score(1));
+    }
+
+    public function testMultipleSynonymTargetsAllExpand(): void
+    {
+        $index = new Index($this->dbPath);
+        $index->insert([
+            ['id' => 1, 'title' => 'smartphone model'],
+            ['id' => 2, 'title' => 'mobile model'],
+            ['id' => 3, 'title' => 'laptop model'],
+        ]);
+        $index->setSynonyms(oneWay: ['phone' => ['smartphone', 'mobile']]);
+        $ids = $index->search('phone')->ids;
+        $this->assertContains(1, $ids);
+        $this->assertContains(2, $ids);
+        $this->assertNotContains(3, $ids);
+    }
+
+    public function testNoSynonymExpansionWithoutSynonymsSet(): void
+    {
+        $index = new Index($this->dbPath);
+        $index->insert([
+            ['id' => 1, 'title' => 'automobile'],
+            ['id' => 2, 'title' => 'car'],
+        ]);
+        $ids = $index->search('car', asYouType: false)->ids;
+        $this->assertContains(2, $ids);
+        $this->assertNotContains(1, $ids);
+    }
+
+    // --- Synonyms: boolean search expansion ---
+
+    public function testSynonymExpandsBooleanSearch(): void
+    {
+        $index = new Index($this->dbPath);
+        $index->insert([
+            ['id' => 1, 'title' => 'automobile show'],
+            ['id' => 2, 'title' => 'bike race'],
+        ]);
+        $index->setSynonyms(equivalences: [['car', 'automobile']]);
+        $this->assertContains(1, $index->searchBoolean('car')->ids);
+    }
+
+    public function testOneWaySynonymInBooleanDoesNotExpandReverse(): void
+    {
+        $index = new Index($this->dbPath);
+        $index->insert([
+            ['id' => 1, 'title' => 'phone review'],
+        ]);
+        $index->setSynonyms(oneWay: ['phone' => ['smartphone']]);
+        $this->assertNotContains(1, $index->searchBoolean('smartphone')->ids);
+    }
+
+    // --- Synonyms: phrase exclusion ---
+
+    public function testSynonymNotAppliedInsideQuotedPhrase(): void
+    {
+        $index = new Index($this->dbPath);
+        $index->insert([
+            ['id' => 1, 'title' => 'automobile show'],
+            ['id' => 2, 'title' => 'car show'],
+        ]);
+        $index->setSynonyms(equivalences: [['car', 'automobile']]);
+        $result = $index->search('"automobile"');
+        $this->assertContains(1, $result->ids);
+        $this->assertNotContains(2, $result->ids);
+    }
+
+    // --- Synonyms: persistence ---
+
+    public function testSynonymsPersistAfterReopenAndSearch(): void
+    {
+        $index = new Index($this->dbPath);
+        $index->insert([['id' => 1, 'title' => 'automobile']]);
+        $index->setSynonyms(equivalences: [['car', 'automobile']]);
+        $index->close();
+
+        $index = new Index($this->dbPath);
+        $this->assertContains(1, $index->search('car')->ids);
+    }
+
+    // --- Synonyms: stemmer normalization ---
+
+    public function testSetSynonymsNormalizesWithStemmer(): void
+    {
+        $index = new Index($this->dbPath, schema: new SchemaConfig(language: 'en'));
+        $index->insert([['id' => 1, 'title' => 'sedan']]);
+        // 'cars' stems to 'car'; synonym target 'sedan' is unchanged.
+        // Searching 'car' should find the sedan doc via synonym.
+        $index->setSynonyms(oneWay: ['cars' => ['sedan']]);
+        $this->assertContains(1, $index->search('car', asYouType: false)->ids);
+    }
+
+    // --- Synonyms: rebuild ---
+
+    public function testRebuildPreservesSynonymsMap(): void
+    {
+        $index = new Index($this->dbPath);
+        $index->setSynonyms(equivalences: [['car', 'automobile']]);
+        $index->close();
+
+        $rebuilt = Index::rebuild($this->dbPath, function (Index $new): void {
+            $new->insert([['id' => 1, 'title' => 'car']]);
+        });
+
+        $synonyms = $rebuilt->getSynonyms();
+        $this->assertArrayHasKey('car', $synonyms);
+        $this->assertContains('automobile', $synonyms['car']);
+    }
+
+    public function testRebuildPreservedSynonymsWorkInSearch(): void
+    {
+        $index = new Index($this->dbPath);
+        $index->setSynonyms(equivalences: [['car', 'automobile']]);
+        $index->close();
+
+        $rebuilt = Index::rebuild($this->dbPath, function (Index $new): void {
+            $new->insert([['id' => 1, 'title' => 'automobile']]);
+        });
+
+        $this->assertContains(1, $rebuilt->search('car')->ids);
+    }
+
+    public function testRebuildCallbackCanClearSynonyms(): void
+    {
+        $index = new Index($this->dbPath);
+        $index->setSynonyms(equivalences: [['car', 'automobile']]);
+        $index->close();
+
+        $rebuilt = Index::rebuild($this->dbPath, function (Index $new): void {
+            $new->clearSynonyms();
+            $new->insert([['id' => 1, 'title' => 'automobile']]);
+        });
+
+        $this->assertSame([], $rebuilt->getSynonyms());
+        $this->assertNotContains(1, $rebuilt->search('car')->ids);
+    }
+
+    public function testRebuildWithNoExistingSynonymsIsOk(): void
+    {
+        new Index($this->dbPath)->close();
+
+        $rebuilt = Index::rebuild($this->dbPath, function (Index $new): void {
+            $new->insert([['id' => 1, 'title' => 'sedan']]);
+        });
+
+        $this->assertSame([], $rebuilt->getSynonyms());
+        $this->assertContains(1, $rebuilt->search('sedan')->ids);
+    }
 }

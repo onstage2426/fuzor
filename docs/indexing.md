@@ -283,6 +283,31 @@ Throws `\InvalidArgumentException` if the callback is omitted and the existing i
 
 Internally, `rebuild` writes to a temporary file alongside the target, then renames it over the original — a POSIX-atomic operation on the same filesystem.
 
+### Synonyms and rebuild
+
+Synonyms are copied from the existing index into the rebuilt one automatically. They are seeded before the callback runs, so the callback can inspect, extend, or replace them:
+
+```php
+Index::rebuild('/path/to/articles.db', function (Index $new) use ($docs) {
+    $new->insert($docs);
+    // Synonyms from the old index are already present; add more if needed.
+    $new->setSynonyms(equivalences: [['car', 'automobile', 'vehicle']]);
+});
+```
+
+If you rebuild with a different language, the copied synonyms are stored as stems from the old language and will no longer match anything. Clear and reconfigure them inside the callback:
+
+```php
+Index::rebuild('/path/to/articles.db',
+    function (Index $new) use ($docs) {
+        $new->clearSynonyms();
+        $new->setSynonyms(equivalences: [['auto', 'automobil', 'fahrzeug']]);
+        $new->insert($docs);
+    },
+    schema: new SchemaConfig(language: 'de'),
+);
+```
+
 ### Overriding the schema
 
 `rebuild()` inherits the full schema from the existing index by default. Pass a `SchemaConfig` to use different settings in the rebuilt index. The object is used as-is — not merged with the existing index — so include every setting you want to keep. See [Schema](#schema) for the full parameter reference.

@@ -127,6 +127,9 @@ class Index
     /** Active stemmer; null when no language is set or language has no stemmer. */
     private ?Stemmer $stemmer = null;
 
+    /** @var array<string, list<string>>|null Normalized source → list<target>; null = not loaded. Cleared on connection change. */
+    private ?array $synonymCache = null;
+
 
     // --- Constructor --------------------------------------------------------
 
@@ -304,6 +307,9 @@ class Index
             );
         }
 
+        // Read synonyms before the callback path closes the existing index.
+        $existingSynonyms = $existing?->getSynonyms() ?? [];
+
         // In the callback path the existing index is no longer needed; null it so
         // finally{} below is a no-op and phpstan can narrow $existing in the else arm.
         if ($callback !== null) {
@@ -317,6 +323,9 @@ class Index
 
         try {
             $handle = new self($tmp, schema: $schema);
+            if ($existingSynonyms !== []) {
+                $handle->setSynonyms(oneWay: $existingSynonyms);
+            }
             if ($callback !== null) {
                 $callback($handle);
             } elseif ($existing !== null) {
@@ -544,6 +553,15 @@ class Index
         $pdo->exec("CREATE INDEX IF NOT EXISTS 'main'.'field_hits_doc_id' ON field_hits (doc_id);");
         $this->hasFieldHits = true;
 
+        // WITHOUT ROWID clusters on (source, target); single-SELECT synonym lookup is a pure B-tree scan.
+        $pdo->exec(
+            "CREATE TABLE IF NOT EXISTS synonyms (
+                source TEXT NOT NULL,
+                target TEXT NOT NULL,
+                PRIMARY KEY (source, target)
+            ) WITHOUT ROWID, STRICT"
+        );
+
         $schemaStmt = $pdo->prepare("INSERT INTO info (key, value) VALUES (?, ?)");
         $schemaStmt->execute(['facet_fields',      json_encode($facetFields)]);
         $schemaStmt->execute(['searchable_fields', $searchableFields !== null ? json_encode($searchableFields) : '']);
@@ -640,6 +658,7 @@ class Index
         $this->wordlistCache  = [];
         $this->facetKeyCache  = [];
         $this->fieldNameCache = [];
+        $this->synonymCache   = null;
     }
 
     // --- Public write operations --------------------------------------------
@@ -1094,6 +1113,115 @@ class Index
         $this->fieldNameCache = [];
     }
 
+    // --- Synonym management -------------------------------------------------
+
+    /**
+     * Replace the full synonym configuration for this index.
+     *
+     * All terms are normalized (lowercased, stemmed if a language is set) before
+     * storage, so synonyms remain consistent with indexed tokens regardless of how
+     * the caller spells them.  Multi-word terms and terms that reduce to an empty
+     * string after normalization are silently skipped.
+     *
+     * Equivalences are stored as bidirectional pairs: every term in the group
+     * expands to all the others.  One-way entries are directional: only the
+     * source term expands to its targets, not the reverse.
+     *
+     * Replaces every existing synonym in a single transaction; calling with both
+     * parameters empty is equivalent to clearSynonyms().
+     *
+     * @param list<list<string>>          $equivalences Groups where each term finds all others.
+     * @param array<string, list<string>> $oneWay       Source → list of targets (one direction only).
+     */
+    public function setSynonyms(array $equivalences = [], array $oneWay = []): void
+    {
+        $this->assertWritable();
+
+        /** @var list<array{string, string}> $pairs */
+        $pairs = [];
+
+        foreach ($equivalences as $group) {
+            foreach ($group as $a) {
+                $normA = $this->normalizeSynonymTerm($a);
+                if ($normA === '') {
+                    continue;
+                }
+                foreach ($group as $b) {
+                    if ($b === $a) {
+                        continue;
+                    }
+                    $normB = $this->normalizeSynonymTerm($b);
+                    if ($normB === '' || $normA === $normB) {
+                        continue;
+                    }
+                    $pairs[] = [$normA, $normB];
+                }
+            }
+        }
+
+        foreach ($oneWay as $source => $targets) {
+            $normSource = $this->normalizeSynonymTerm((string) $source);
+            if ($normSource === '') {
+                continue;
+            }
+            foreach ($targets as $target) {
+                $normTarget = $this->normalizeSynonymTerm($target);
+                if ($normTarget === '' || $normSource === $normTarget) {
+                    continue;
+                }
+                $pairs[] = [$normSource, $normTarget];
+            }
+        }
+
+        // Deduplicate before hitting the DB.
+        $seen  = [];
+        $dedup = [];
+        foreach ($pairs as $pair) {
+            $key = $pair[0] . "\0" . $pair[1];
+            if (!isset($seen[$key])) {
+                $seen[$key] = true;
+                $dedup[]    = $pair;
+            }
+        }
+
+        $this->wrapInTransaction(function () use ($dedup): void {
+            $pdo = $this->pdo;
+            assert($pdo instanceof \PDO);
+            $pdo->exec('DELETE FROM synonyms');
+            foreach (array_chunk($dedup, self::CHUNK_2P) as $chunk) {
+                $placeholders = implode(',', array_fill(0, count($chunk), '(?,?)'));
+                $stmt = $this->prepare("INSERT INTO synonyms (source, target) VALUES {$placeholders}");
+                $stmt->execute(array_merge(...array_map(fn($p) => [$p[0], $p[1]], $chunk)));
+            }
+        });
+
+        $this->synonymCache = null;
+    }
+
+    /**
+     * Return all configured synonyms as a flat source → targets map.
+     *
+     * Keys and values are in their normalized (stemmed) form — the same form used
+     * for lookup at query time.  Equivalences appear as entries in both directions.
+     *
+     * @return array<string, list<string>>
+     */
+    public function getSynonyms(): array
+    {
+        $this->loadSynonymCache();
+        return $this->synonymCache ?? [];
+    }
+
+    /** Remove all synonym mappings from this index. */
+    public function clearSynonyms(): void
+    {
+        $this->assertWritable();
+        $pdo = $this->pdo;
+        assert($pdo instanceof \PDO);
+        $pdo->exec('DELETE FROM synonyms');
+        $this->synonymCache = [];
+    }
+
     /**
      * Check whether one or more documents exist in the index.
      *
@@ -1395,6 +1523,12 @@ class Index
         foreach ($keywords as $idx => $term) {
             $isLastKeyword = $asYouType && ($lastIndex === $idx);
             $word = $this->getWordlistByKeyword($term, $isLastKeyword);
+            foreach ($this->synonymsFor($term) as $synTerm) {
+                $synRows = $this->getWordlistByKeyword($synTerm, false, false);
+                if ($synRows !== []) {
+                    array_push($word, ...$synRows);
+                }
+            }
             if (!isset($word[0])) {
                 continue;
             }
@@ -2951,6 +3085,11 @@ class Index
             foreach ($this->getWordlistByKeyword($token, $isLastKeyword && $i === $last) as $row) {
                 $ids[] = $row['id'];
             }
+            foreach ($this->synonymsFor($token) as $synTerm) {
+                foreach ($this->getWordlistByKeyword($synTerm, false, false) as $row) {
+                    $ids[] = $row['id'];
+                }
+            }
         }
         /** @infection-ignore-all UnwrapArrayUnique,UnwrapArrayValues: CJK/Thai boolean path is not covered by ASCII-only tests; both wrappers enforce the list<int> contract */
         return array_values(array_unique($ids));
@@ -4432,6 +4571,64 @@ class Index
                 PRAGMA case_sensitive_like = ON;
             ');
         }
+    }
+
+    /**
+     * Normalize a user-supplied synonym term to its stored form.
+     *
+     * Lowercases, splits on whitespace/punctuation, and (if the index has a stemmer)
+     * stems the result.  Returns the single normalized token, or an empty string when
+     * the input is blank or reduces to more than one token (multi-word terms are not
+     * supported as synonym sources or targets and are silently skipped by the caller).
+     */
+    private function normalizeSynonymTerm(string $term): string
+    {
+        $tokens = Tokenizer::split(mb_strtolower(trim($term)));
+        if (count($tokens) !== 1) {
+            return '';
+        }
+        if ($this->stemmer instanceof Stemmer) {
+            $tokens = $this->stemmer->stemTokens($tokens);
+        }
+        return $tokens[0] ?? '';
+    }
+
+    /**
+     * Load the full synonym map from the database into $synonymCache.
+     *
+     * One query; result is kept in memory for the life of the connection.
+     * No-op after the first call.
+     */
+    private function loadSynonymCache(): void
+    {
+        if ($this->synonymCache !== null) {
+            return;
+        }
+        $pdo = $this->pdo;
+        assert($pdo instanceof \PDO);
+        $stmt = $pdo->query('SELECT source, target FROM synonyms');
+        $this->synonymCache = [];
+        if ($stmt === false) {
+            return;
+        }
+        /** @var list<array{source: string, target: string}> $rows */
+        $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+        foreach ($rows as $row) {
+            $this->synonymCache[$row['source']][] = $row['target'];
+        }
+    }
+
+    /**
+     * Return the list of synonym targets for a normalized query token.
+     *
+     * Triggers a lazy cache load on first call per connection.
+     *
+     * @return list<string>
+     */
+    private function synonymsFor(string $term): array
+    {
+        $this->loadSynonymCache();
+        return $this->synonymCache[$term] ?? [];
     }
 
     /**
