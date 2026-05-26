@@ -51,7 +51,7 @@ class FuzorBench
     // Shared helpers
     // -----------------------------------------------------------------------
 
-    private const MOVIES_URL   = 'https://raw.githubusercontent.com/onstage2426/fuzor/refs/heads/assets/movies.json';
+    private const MOVIES_URL   = 'https://raw.githubusercontent.com/onstage2426/fuzor/refs/heads/assets/datasets/movies.json';
     private const MOVIES_CACHE = '/tmp/fuzor_phpbench_movies.json';
 
     private static function loadDocs(): void
