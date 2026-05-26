@@ -3410,7 +3410,7 @@ class Index
      *         Wordlist rows from getWordlistByKeyword() or fuzzySearch() (fuzzy rows also carry distance: int).
      * @param  int  $limit   Maximum rows to return.
      * @param  bool $isFuzzy When true, re-sort by fuzzy relevance rank; derived from $words carrying a distance key.
-     * @return list<array{0: int, 1: int, 2: int, 3: int}> Rows as [term_id, doc_id, hit_count, doc_length].
+     * @return list<array{0: int, 1: int, 2: float}> Rows as [term_id, doc_id, bm25_score].
      */
     private function fetchDocsByTermIds(
         array $words,
@@ -3793,8 +3793,10 @@ class Index
               WHERE key_id = ? AND doc_id IN (SELECT value FROM json_each(?))'
         );
         $stmt->execute([$keyId, json_encode($docIds)]);
-        foreach ($stmt->fetchAll(PDO::FETCH_NUM) as [$docId, $numValue, $strValue]) {
-            $result[(int) $docId] = $numValue !== null ? (float) $numValue : $strValue;
+        /** @var list<array{0: int, 1: float|null, 2: string|null}> $sortRows */
+        $sortRows = $stmt->fetchAll(PDO::FETCH_NUM);
+        foreach ($sortRows as [$docId, $numValue, $strValue]) {
+            $result[$docId] = $numValue !== null ? $numValue : $strValue;
         }
         return $result;
     }
