@@ -1467,6 +1467,8 @@ class Index
      * @param  array<string, string|list<string>|FacetRange> $filter   Facet filters; keyed by facet key name.
      * @param  list<string>                                  $facets    Facet key names to compute counts for.
      * @param  list<string>                                  $sort      Sort specs, e.g. ['price:asc', 'name:desc'].
+     * @param  string|null                                   $distinct      Facet field to collapse on (null = off).
+     * @param  int                                           $distinctCount Max results per distinct value (default 1).
      */
     public function search(
         string $phrase,
@@ -1476,6 +1478,8 @@ class Index
         array $filter = [],
         array $facets = [],
         array $sort = [],
+        ?string $distinct = null,
+        int $distinctCount = 1,
     ): SearchResult {
         $sortSpecs     = $this->parseSortSpec($sort);
         $parsed        = $this->filterQueryTokens($phrase);
@@ -1658,7 +1662,51 @@ class Index
         $total = count($docScores);
 
         /** @infection-ignore-all DecrementInteger: $total is count(); -1 is impossible, so the guard fires identically for any realistic input */
-        if ($total === 0 || $limit === 0) {
+        if ($total === 0) {
+            return new SearchResult(
+                ids: [],
+                hits: 0,
+                scores: $docScores,
+                documents: $this->hydrateIds([]),
+                facetCounts: $facetCounts,
+            );
+        }
+
+        if ($distinct !== null && $this->facetsEnabled) {
+            $keyId = $this->lookupFacetKeyId($distinct);
+            if ($sortSpecs !== []) {
+                $sortedIds = $this->sortDocIdsBySpecs(array_keys($docScores), $sortSpecs, $docScores);
+            } elseif (count($keywords) > 1) {
+                $sortedIds = array_keys($docScores);
+                $mc = [];
+                $sc = [];
+                foreach ($sortedIds as $id) {
+                    $mc[] = $docMatchCount[$id] ?? 0;
+                    $sc[] = $docScores[$id];
+                }
+                array_multisort($mc, SORT_DESC, SORT_NUMERIC, $sc, SORT_DESC, SORT_NUMERIC, $sortedIds);
+            } else {
+                arsort($docScores);
+                $sortedIds = array_keys($docScores);
+            }
+            $valueMap = $this->fetchSortValues($sortedIds, $keyId);
+            [$pagedIds, $distinctHits] = $this->applyDistinctPagination(
+                $sortedIds,
+                $valueMap,
+                $distinctCount,
+                $offset,
+                $limit,
+            );
+            return new SearchResult(
+                ids: $pagedIds,
+                hits: $distinctHits,
+                scores: $docScores,
+                documents: $this->hydrateIds($pagedIds),
+                facetCounts: $facetCounts,
+            );
+        }
+
+        if ($limit === 0) {
             return new SearchResult(
                 ids: [],
                 hits: $total,
@@ -1712,6 +1760,8 @@ class Index
      * @param  array<string, string|list<string>|FacetRange> $filter   Facet filters; keyed by facet key name.
      * @param  list<string>                                  $facets    Facet key names to compute counts for.
      * @param  list<string>                                  $sort      Sort specs, e.g. ['price:asc', 'name:desc'].
+     * @param  string|null                                   $distinct      Facet field to collapse on (null = off).
+     * @param  int                                           $distinctCount Max results per distinct value (default 1).
      */
     public function searchBoolean(
         string $phrase,
@@ -1721,6 +1771,8 @@ class Index
         array $filter = [],
         array $facets = [],
         array $sort = [],
+        ?string $distinct = null,
+        int $distinctCount = 1,
     ): SearchResult {
         $sortSpecs = $this->parseSortSpec($sort);
         $parsed       = $this->filterQueryTokens($phrase);
@@ -1832,6 +1884,27 @@ class Index
         );
 
         $total = count($docIds);
+
+        if ($distinct !== null && $this->facetsEnabled) {
+            $keyId     = $this->lookupFacetKeyId($distinct);
+            $sortedIds = $sortSpecs !== [] && $total > 0
+                ? $this->sortDocIdsBySpecs($docIds, $sortSpecs, [])
+                : $docIds;
+            $valueMap = $this->fetchSortValues($sortedIds, $keyId);
+            [$pagedIds, $distinctHits] = $this->applyDistinctPagination(
+                $sortedIds,
+                $valueMap,
+                $distinctCount,
+                $offset,
+                $limit,
+            );
+            return new SearchResult(
+                ids: $pagedIds,
+                hits: $distinctHits,
+                documents: $this->hydrateIds($pagedIds),
+                facetCounts: $facetCounts,
+            );
+        }
 
         if ($sortSpecs !== [] && $total > 0 && $limit > 0) {
             $docIds = $this->applySortedPagination($docIds, $sortSpecs, [], $offset, $limit);
@@ -3990,7 +4063,7 @@ class Index
     }
 
     /**
-     * Sort $docIds by the given sort specs and paginate.
+     * Sort $docIds by the given sort specs and return the full sorted list without pagination.
      *
      * Sort fields are primary; $scores (BM25) is the tiebreaker when provided; doc ID is the
      * final deterministic tiebreaker. Docs missing a sort field value are sorted last in both
@@ -3999,17 +4072,10 @@ class Index
      * @param  list<int>                             $docIds
      * @param  list<array{field: string, asc: bool}> $specs
      * @param  array<int, float>                     $scores  BM25 scores; empty array for boolean path
-     * @param  int                                   $offset
-     * @param  int                                   $limit
      * @return list<int>
      */
-    private function applySortedPagination(
-        array $docIds,
-        array $specs,
-        array $scores,
-        int $offset,
-        int $limit,
-    ): array {
+    private function sortDocIdsBySpecs(array $docIds, array $specs, array $scores): array
+    {
         if ($docIds === []) {
             return [];
         }
@@ -4062,7 +4128,74 @@ class Index
             return $a <=> $b;
         });
 
-        return array_slice($docIds, $offset, $limit);
+        return $docIds;
+    }
+
+    /**
+     * Sort $docIds by the given sort specs and paginate.
+     *
+     * @param  list<int>                             $docIds
+     * @param  list<array{field: string, asc: bool}> $specs
+     * @param  array<int, float>                     $scores  BM25 scores; empty array for boolean path
+     * @param  int                                   $offset
+     * @param  int                                   $limit
+     * @return list<int>
+     */
+    private function applySortedPagination(
+        array $docIds,
+        array $specs,
+        array $scores,
+        int $offset,
+        int $limit,
+    ): array {
+        return array_slice($this->sortDocIdsBySpecs($docIds, $specs, $scores), $offset, $limit);
+    }
+
+    /**
+     * Apply distinct deduplication to a sort-ordered list of doc IDs.
+     *
+     * Walks $sortedIds in order, keeping at most $count docs per unique value of the distinct
+     * field. Docs whose value is null (field absent on the document) always pass through and
+     * are never collapsed with each other.
+     *
+     * @param  list<int>                    $sortedIds  Candidate doc IDs in final sort order.
+     * @param  array<int, float|string|null> $valueMap   doc_id → distinct field value.
+     * @param  int                          $count      Max surviving docs per distinct value.
+     * @param  int                   $offset     Pagination offset into the surviving list.
+     * @param  int                   $limit      Page size (0 = return empty ids but compute hits).
+     * @return array{list<int>, int} [pagedIds, totalSurviving]
+     */
+    /**
+     * @param  list<int>                     $sortedIds
+     * @param  array<int, float|string|null> $valueMap
+     * @return array{list<int>, int}
+     */
+    private function applyDistinctPagination(
+        array $sortedIds,
+        array $valueMap,
+        int $count,
+        int $offset,
+        int $limit,
+    ): array {
+        /** @var array<string, int> $seenCounts */
+        $seenCounts = [];
+        /** @var list<int> $surviving */
+        $surviving  = [];
+        foreach ($sortedIds as $id) {
+            $val = $valueMap[$id] ?? null;
+            if ($val === null) {
+                $surviving[] = $id;
+                continue;
+            }
+            $key  = (string) $val;
+            $seen = $seenCounts[$key] ?? 0;
+            if ($seen >= $count) {
+                continue;
+            }
+            $seenCounts[$key] = $seen + 1;
+            $surviving[] = $id;
+        }
+        return [array_slice($surviving, $offset, $limit), count($surviving)];
     }
 
     /**

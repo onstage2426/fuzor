@@ -390,3 +390,60 @@ $results = $index->search('watch', filter: ['brand' => 'Casio'], facets: ['categ
 ```php
 $results = $index->searchBoolean('sedan or coupe', sort: ['price:asc']);
 ```
+
+## Distinct / deduplication
+
+Pass `distinct` to return at most N results per unique value of a facet field. This is useful for collapsing product variants (colour, size) so only the best representative per SKU group surfaces in results.
+
+```php
+// At most one result per brand
+$results = $index->search('shirt', distinct: 'brand');
+
+// At most two results per brand
+$results = $index->search('shirt', distinct: 'brand', distinctCount: 2);
+```
+
+The field must be declared as a `facetField` at index creation. An unknown field name is silently ignored and all results pass through unchanged.
+
+### Which document wins per group
+
+The highest-scoring document for each distinct value is kept. When `sort` is also specified, the sort order determines the winner instead of BM25 score — the first document in sort order for each value survives.
+
+```php
+// Cheapest item per brand
+$results = $index->search('shirt', sort: ['price:asc'], distinct: 'brand');
+```
+
+### Docs without a value
+
+Documents that have no value for the distinct field are never collapsed with each other — each passes through independently.
+
+### `$hits` with distinct
+
+`$hits` reflects the total number of surviving documents after deduplication, not the raw match count. This keeps pagination correct: `ceil($hits / $limit)` gives the right page count.
+
+```php
+$results = $index->search('shirt', limit: 20, distinct: 'brand');
+$totalPages = (int) ceil($results->hits / 20); // based on distinct-collapsed count
+```
+
+Use `limit: 0` to count distinct groups without fetching any documents:
+
+```php
+$countOnly = $index->search('shirt', limit: 0, distinct: 'brand');
+$distinctGroups = $countOnly->hits;
+```
+
+### Combining distinct with filter and facets
+
+`distinct`, `filter`, `facets`, and `sort` compose freely. Facet counts are computed over the pre-distinct result set (consistent with how counts behave relative to sort):
+
+```php
+$results = $index->search('shirt', filter: ['category' => 'tops'], facets: ['brand'], distinct: 'brand');
+```
+
+`searchBoolean()` accepts `distinct` and `distinctCount` with the same semantics:
+
+```php
+$results = $index->searchBoolean('shirt or blouse', distinct: 'brand');
+```

@@ -3818,6 +3818,250 @@ class IndexTest extends TestCase
         $this->assertContains(1, $index->search('product', sort: [])->ids);
     }
 
+    // --- Distinct ---
+
+    public function testDistinctCollapsesDuplicateStringValues(): void
+    {
+        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['brand']));
+        $index->insert([
+            ['id' => 1, 'title' => 'product alpha', 'brand' => 'Nike'],
+            ['id' => 2, 'title' => 'product beta',  'brand' => 'Nike'],
+            ['id' => 3, 'title' => 'product gamma', 'brand' => 'Adidas'],
+            ['id' => 4, 'title' => 'product delta', 'brand' => 'Adidas'],
+        ]);
+        $result = $index->search('product', distinct: 'brand');
+        $this->assertCount(2, $result->ids);
+        // One doc per brand — IDs 1/2 are Nike, 3/4 are Adidas; both groups must be represented.
+        $nikeIds   = array_filter($result->ids, fn(int $id): bool => in_array($id, [1, 2], true));
+        $adidasIds = array_filter($result->ids, fn(int $id): bool => in_array($id, [3, 4], true));
+        $this->assertCount(1, $nikeIds);
+        $this->assertCount(1, $adidasIds);
+    }
+
+    public function testDistinctHitsReflectsDeduplicatedCount(): void
+    {
+        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['brand']));
+        $index->insert([
+            ['id' => 1, 'title' => 'product', 'brand' => 'Nike'],
+            ['id' => 2, 'title' => 'product', 'brand' => 'Nike'],
+            ['id' => 3, 'title' => 'product', 'brand' => 'Adidas'],
+            ['id' => 4, 'title' => 'product', 'brand' => 'Adidas'],
+        ]);
+        $result = $index->search('product', distinct: 'brand');
+        $this->assertSame(2, $result->hits);
+    }
+
+    public function testDistinctCountAllowsMultiplePerGroup(): void
+    {
+        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['brand']));
+        $index->insert([
+            ['id' => 1, 'title' => 'product', 'brand' => 'Nike'],
+            ['id' => 2, 'title' => 'product', 'brand' => 'Nike'],
+            ['id' => 3, 'title' => 'product', 'brand' => 'Nike'],
+            ['id' => 4, 'title' => 'product', 'brand' => 'Adidas'],
+        ]);
+        $result = $index->search('product', distinct: 'brand', distinctCount: 2);
+        $this->assertSame(3, $result->hits);
+        // 2 Nike (IDs 1,2,3) + 1 Adidas (ID 4) survive
+        $ids    = $result->ids;
+        $this->assertCount(3, $ids);
+        $nikes  = array_filter($ids, fn(int $id): bool => in_array($id, [1, 2, 3], true));
+        $adidas = array_filter($ids, fn(int $id): bool => $id === 4);
+        $this->assertCount(2, $nikes);
+        $this->assertCount(1, $adidas);
+    }
+
+    public function testDistinctPreservesScoreOrderWithinGroup(): void
+    {
+        // Doc 1 has "widget" once; doc 2 has "widget widget" — doc 2 scores higher.
+        // With distinct on brand (same group), only the top scorer survives.
+        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['brand']));
+        $index->insert([
+            ['id' => 1, 'title' => 'widget',        'brand' => 'Acme'],
+            ['id' => 2, 'title' => 'widget widget',  'brand' => 'Acme'],
+        ]);
+        $result = $index->search('widget', distinct: 'brand');
+        $this->assertSame([2], $result->ids);
+    }
+
+    public function testDistinctNullPassesThrough(): void
+    {
+        // Docs without the distinct field value each appear independently.
+        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['brand']));
+        $index->insert([
+            ['id' => 1, 'title' => 'product'],
+            ['id' => 2, 'title' => 'product'],
+            ['id' => 3, 'title' => 'product', 'brand' => 'Nike'],
+        ]);
+        $result = $index->search('product', distinct: 'brand');
+        // Both null-brand docs pass through; Nike collapses to 1 → 3 total
+        $this->assertSame(3, $result->hits);
+        $this->assertContains(1, $result->ids);
+        $this->assertContains(2, $result->ids);
+        $this->assertContains(3, $result->ids);
+    }
+
+    public function testDistinctWithPagination(): void
+    {
+        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['brand']));
+        $index->insert([
+            ['id' => 1, 'title' => 'product alpha',  'brand' => 'A'],
+            ['id' => 2, 'title' => 'product beta',   'brand' => 'A'],
+            ['id' => 3, 'title' => 'product gamma',  'brand' => 'B'],
+            ['id' => 4, 'title' => 'product delta',  'brand' => 'B'],
+            ['id' => 5, 'title' => 'product epsilon','brand' => 'C'],
+        ]);
+        // 3 distinct groups; page 1 (offset 0, limit 2) gets groups A and B
+        $page1 = $index->search('product', limit: 2, offset: 0, distinct: 'brand');
+        $page2 = $index->search('product', limit: 2, offset: 2, distinct: 'brand');
+        $this->assertSame(3, $page1->hits);
+        $this->assertSame(3, $page2->hits);
+        $this->assertCount(2, $page1->ids);
+        $this->assertCount(1, $page2->ids);
+        // No overlap between pages
+        $this->assertEmpty(array_intersect($page1->ids, $page2->ids));
+    }
+
+    public function testDistinctLimitZeroReportsAccurateHits(): void
+    {
+        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['brand']));
+        $index->insert([
+            ['id' => 1, 'title' => 'product', 'brand' => 'Nike'],
+            ['id' => 2, 'title' => 'product', 'brand' => 'Nike'],
+            ['id' => 3, 'title' => 'product', 'brand' => 'Adidas'],
+        ]);
+        $result = $index->search('product', limit: 0, distinct: 'brand');
+        $this->assertSame([], $result->ids);
+        $this->assertSame(2, $result->hits);
+    }
+
+    public function testDistinctCountOneWithAllUniqueValuesMatchesNonDistinct(): void
+    {
+        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['sku']));
+        $index->insert([
+            ['id' => 1, 'title' => 'product', 'sku' => 'A'],
+            ['id' => 2, 'title' => 'product', 'sku' => 'B'],
+            ['id' => 3, 'title' => 'product', 'sku' => 'C'],
+        ]);
+        $plain    = $index->search('product');
+        $distinct = $index->search('product', distinct: 'sku');
+        $this->assertSame($plain->hits, $distinct->hits);
+        $this->assertEqualsCanonicalizing($plain->ids, $distinct->ids);
+    }
+
+    public function testDistinctOnBooleanSearch(): void
+    {
+        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['brand']));
+        $index->insert([
+            ['id' => 1, 'title' => 'product', 'brand' => 'Nike'],
+            ['id' => 2, 'title' => 'product', 'brand' => 'Nike'],
+            ['id' => 3, 'title' => 'product', 'brand' => 'Adidas'],
+        ]);
+        $result = $index->searchBoolean('product', distinct: 'brand');
+        $this->assertSame(2, $result->hits);
+        $this->assertCount(2, $result->ids);
+        $this->assertNull($result->score($result->ids[0]));
+    }
+
+    public function testDistinctBooleanWithPagination(): void
+    {
+        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['brand']));
+        $index->insert([
+            ['id' => 1, 'title' => 'product', 'brand' => 'A'],
+            ['id' => 2, 'title' => 'product', 'brand' => 'A'],
+            ['id' => 3, 'title' => 'product', 'brand' => 'B'],
+            ['id' => 4, 'title' => 'product', 'brand' => 'C'],
+        ]);
+        $page1 = $index->searchBoolean('product', limit: 2, offset: 0, distinct: 'brand');
+        $page2 = $index->searchBoolean('product', limit: 2, offset: 2, distinct: 'brand');
+        $this->assertSame(3, $page1->hits);
+        $this->assertSame(3, $page2->hits);
+        $this->assertCount(2, $page1->ids);
+        $this->assertCount(1, $page2->ids);
+        $this->assertEmpty(array_intersect($page1->ids, $page2->ids));
+    }
+
+    public function testDistinctWithSort(): void
+    {
+        // sort: price:asc determines which doc wins per brand group, not BM25 score
+        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['brand', 'price']));
+        $index->insert([
+            ['id' => 1, 'title' => 'product', 'brand' => 'Nike',   'price' => 90],
+            ['id' => 2, 'title' => 'product', 'brand' => 'Nike',   'price' => 50],
+            ['id' => 3, 'title' => 'product', 'brand' => 'Adidas', 'price' => 70],
+            ['id' => 4, 'title' => 'product', 'brand' => 'Adidas', 'price' => 30],
+        ]);
+        $result = $index->search('product', sort: ['price:asc'], distinct: 'brand');
+        // Cheapest Nike (id 2, price 50) and cheapest Adidas (id 4, price 30) survive
+        // Sort order: Adidas $30 first, then Nike $50
+        $this->assertSame([4, 2], $result->ids);
+    }
+
+    public function testDistinctWithFacetFilter(): void
+    {
+        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['brand', 'category']));
+        $index->insert([
+            ['id' => 1, 'title' => 'product', 'brand' => 'Nike',   'category' => 'shoes'],
+            ['id' => 2, 'title' => 'product', 'brand' => 'Nike',   'category' => 'shirts'],
+            ['id' => 3, 'title' => 'product', 'brand' => 'Adidas', 'category' => 'shoes'],
+            ['id' => 4, 'title' => 'product', 'brand' => 'Adidas', 'category' => 'shoes'],
+        ]);
+        $result = $index->search('product', filter: ['category' => 'shoes'], distinct: 'brand');
+        // Only shoe docs remain (IDs 1, 3, 4); one per brand → IDs 1 (Nike) and one of 3/4 (Adidas)
+        $this->assertSame(2, $result->hits);
+        $this->assertCount(2, $result->ids);
+        $nikeId   = array_filter($result->ids, fn(int $id): bool => $id === 1);
+        $adidasId = array_filter($result->ids, fn(int $id): bool => in_array($id, [3, 4], true));
+        $this->assertCount(1, $nikeId);
+        $this->assertCount(1, $adidasId);
+    }
+
+    public function testDistinctWithFacetCounts(): void
+    {
+        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['brand', 'category']));
+        $index->insert([
+            ['id' => 1, 'title' => 'product', 'brand' => 'Nike',   'category' => 'shoes'],
+            ['id' => 2, 'title' => 'product', 'brand' => 'Nike',   'category' => 'shirts'],
+            ['id' => 3, 'title' => 'product', 'brand' => 'Adidas', 'category' => 'shoes'],
+        ]);
+        // Facet counts are computed on the pre-distinct filtered result set (same as without distinct)
+        $result = $index->search('product', facets: ['category'], distinct: 'brand');
+        $this->assertTrue($result->hasFacets());
+        $this->assertSame(2, $result->facetCount('category', 'shoes'));
+        $this->assertSame(1, $result->facetCount('category', 'shirts'));
+    }
+
+    public function testDistinctOnNumericFacet(): void
+    {
+        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['rating']));
+        $index->insert([
+            ['id' => 1, 'title' => 'product', 'rating' => 5],
+            ['id' => 2, 'title' => 'product', 'rating' => 5],
+            ['id' => 3, 'title' => 'product', 'rating' => 4],
+        ]);
+        $result = $index->search('product', distinct: 'rating');
+        $this->assertSame(2, $result->hits);
+        // IDs 1/2 = rating 5 (one survives); ID 3 = rating 4 (survives)
+        $rating5 = array_filter($result->ids, fn(int $id): bool => in_array($id, [1, 2], true));
+        $rating4 = array_filter($result->ids, fn(int $id): bool => $id === 3);
+        $this->assertCount(1, $rating5);
+        $this->assertCount(1, $rating4);
+    }
+
+    public function testDistinctUnknownFieldIsNoop(): void
+    {
+        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['brand']));
+        $index->insert([
+            ['id' => 1, 'title' => 'product', 'brand' => 'Nike'],
+            ['id' => 2, 'title' => 'product', 'brand' => 'Nike'],
+            ['id' => 3, 'title' => 'product', 'brand' => 'Adidas'],
+        ]);
+        // 'color' is not a declared facet field — distinct is silently ignored
+        $result = $index->search('product', distinct: 'color');
+        $this->assertSame(3, $result->hits);
+        $this->assertCount(3, $result->ids);
+    }
+
     // --- Field boosts ---
 
     public function testFieldBoostPromotesTitleMatchOverBodyMatch(): void
