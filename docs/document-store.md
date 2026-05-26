@@ -4,6 +4,8 @@ The document store persists the raw document array inside the same SQLite file a
 
 The store is **enabled by default**. Pass `store: false` to opt out — useful for embedding contexts where disk space is constrained or raw document retrieval is not needed.
 
+Even if you never call `get()` or use `$result->documents()`, keeping the store on lets you use `Index::rebuild()` without a callback: the stored documents are streamed into the new index automatically, so you can re-index with a different schema at any time without maintaining a separate copy of your source data. See [indexing.md § Atomic rebuild](indexing.md#atomic-rebuild) for details.
+
 ```php
 use Fuzor\Index;
 
@@ -92,23 +94,24 @@ Documents are stored as JSON (UTF-8) in a `documents` table in the same SQLite f
 
 ## Atomic rebuild
 
-`rebuild()` inherits the store setting from the existing index by default. Pass `store` to override:
-
-| `$store` value | Effect |
-|----------------|--------|
-| `null` (default) | Inherit from the existing index |
-| `true` | Enable the store in the rebuilt index |
-| `false` | Disable the store in the rebuilt index |
+`rebuild()` inherits the store setting from the existing index by default. Pass a `SchemaConfig` with an explicit `store` value to override it in the rebuilt index:
 
 ```php
+use Fuzor\SchemaConfig;
+
 // Inherit (default) — store stays on if the existing index had it on
 Index::rebuild('/path/to/articles.db', function (Index $new) use ($docs) {
     $new->insert($docs);
 });
 
-// Force the store on even if the existing index had it off
-Index::rebuild('/path/to/articles.db', callback: $fn, store: true);
+// Force the store off to shrink the rebuilt file
+Index::rebuild('/path/to/articles.db',
+    fn (Index $new) => $new->insert($docs),
+    schema: new SchemaConfig(store: false),
+);
 ```
+
+See [indexing.md § Atomic rebuild](indexing.md#atomic-rebuild) for full details including the no-callback form.
 
 ## Performance notes
 

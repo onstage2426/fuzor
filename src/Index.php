@@ -258,25 +258,42 @@ class Index
     /**
      * Atomically rebuild an index by writing to a temporary file and renaming it over the target.
      *
-     * The callback receives a fresh, empty Index to populate. If the callback throws,
-     * the temporary file is removed and the original index is left untouched.
+     * When $callback is provided it receives a fresh, empty Index to populate.
+     *
+     * When $callback is omitted (null), the existing index must have the document store enabled;
+     * all stored documents are streamed into the new index automatically. This lets you re-index
+     * with a different SchemaConfig (e.g. new searchableFields or facetFields) without maintaining
+     * a separate copy of the source data.
+     *
+     * If the callback throws, or if the automatic streaming path fails, the temporary file is
+     * removed and the original index is left untouched.
      *
      * Pass a SchemaConfig to override the schema; omit it (null) to inherit the existing
      * index's schema. When no existing index is present, null uses SchemaConfig defaults.
      *
      * @param  string            $path     Absolute or relative path to the index file to rebuild.
-     * @param  callable          $callback fn(Index $new): void — populate the new index here.
+     * @param  callable|null     $callback fn(Index $new): void — populate the new index here;
+     *                                     null streams from the existing document store.
      * @param  SchemaConfig|null $schema   Schema for the new index; null inherits from the existing index.
      * @return self               Open index pointing at the rebuilt file.
+     * @throws \InvalidArgumentException If $callback is null and the existing index has no document store.
      * @throws IOException        If the rename fails or the parent directory does not exist.
      */
     public static function rebuild(
         string $path,
-        callable $callback,
+        ?callable $callback = null,
         ?SchemaConfig $schema = null,
     ): self {
         $resolved = self::resolvePath($path);
         $existing = file_exists($resolved) ? new self($resolved) : null;
+
+        if ($callback === null && ($existing === null || !$existing->documentStoreEnabled)) {
+            $existing?->close();
+            throw new \InvalidArgumentException(
+                "Cannot rebuild without a callback: the existing index at {$resolved} has no document store."
+            );
+        }
+
         if ($schema === null && $existing !== null) {
             $schema = new SchemaConfig(
                 language:         $existing->language,
@@ -286,15 +303,26 @@ class Index
                 stripHtml:        $existing->stripHtml,
             );
         }
-        /** @infection-ignore-all MethodCallRemoval: resource cleanup; GC closes the connection if skipped, no observable effect on the rebuild outcome */
-        $existing?->close();
+
+        // In the callback path the existing index is no longer needed; null it so
+        // finally{} below is a no-op and phpstan can narrow $existing in the else arm.
+        if ($callback !== null) {
+            /** @infection-ignore-all MethodCallRemoval: resource cleanup; GC closes the connection if skipped, no observable effect on the rebuild outcome */
+            $existing?->close();
+            $existing = null;
+        }
 
         /** @infection-ignore-all DecrementInteger|IncrementInteger|ConcatOperandRemoval|Concat: temp path construction details; any unique path in the same directory produces identical rename semantics */
         $tmp = $resolved . '.tmp-' . bin2hex(random_bytes(4));
 
         try {
             $handle = new self($tmp, schema: $schema);
-            $callback($handle);
+            if ($callback !== null) {
+                $callback($handle);
+            } elseif ($existing !== null) {
+                // Always true here (validated above); the elseif narrows $existing to non-null.
+                $handle->insert($existing->streamAllDocuments());
+            }
             $handle->close();
 
             /** @infection-ignore-all Throw_: rename() returns false only on OS-level failure (cross-device, permissions); not reproducible in unit tests without filesystem mocking */
@@ -306,6 +334,8 @@ class Index
             @unlink($tmp . '-wal');
             @unlink($tmp . '-shm');
             throw $e;
+        } finally {
+            $existing?->close();
         }
 
         return new self($resolved);
@@ -1704,6 +1734,25 @@ class Index
             }
         }
         return $result;
+    }
+
+    /**
+     * Yield every document from the store in doc_id order.
+     *
+     * Used by the no-callback path of rebuild() to stream the existing document store
+     * into a fresh index without loading all rows into memory at once.
+     *
+     * @return \Generator<int, array<string, mixed>>
+     */
+    private function streamAllDocuments(): \Generator
+    {
+        $stmt = $this->stmt('streamAllDocs', 'SELECT data FROM documents ORDER BY doc_id');
+        $stmt->execute();
+        while (($data = $stmt->fetchColumn()) !== false) {
+            /** @var array<string, mixed> $doc */
+            $doc = json_decode((string) $data, true, 512, JSON_THROW_ON_ERROR);
+            yield $doc;
+        }
     }
 
     // --- Private write helpers ----------------------------------------------

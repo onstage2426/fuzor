@@ -64,6 +64,20 @@ use Fuzor\Config;
 $index = new Index('/path/to/articles.db', config: new Config(maxDocs: 200));
 ```
 
+### Schema
+
+The schema settings control how the index is structured at creation time. They are persisted inside the index file and cannot be changed without rebuilding.
+
+| Parameter | Default | Effect |
+|-----------|---------|--------|
+| `language` | `null` | BCP 47 language tag; `null` disables stopwords and stemming |
+| `store` | `true` | Enable the document store |
+| `facetFields` | `[]` | Fields routed to the facet index |
+| `searchableFields` | `null` | Fields tokenised for FTS; `null` = all non-facet fields |
+| `stripHtml` | `false` | Strip HTML tags before tokenisation |
+
+These same settings are grouped by the `SchemaConfig` value object used when passing a schema override to `rebuild()` — see [Atomic rebuild](#atomic-rebuild).
+
 ## Inserting
 
 Every document must have a unique integer `id` field; all other fields are indexed as full-text.
@@ -239,7 +253,9 @@ $index->snapshotTo('/path/to/articles-snapshot.db');
 
 ## Atomic rebuild
 
-Replaces the entire contents of an index in one atomic operation. The callback receives a fresh, empty handle to populate; if it throws, the original file is left completely untouched.
+Replaces the entire contents of an index in one atomic operation. If anything throws, the original file is left completely untouched.
+
+Pass a callback to populate the new index yourself:
 
 ```php
 Index::rebuild('/path/to/articles.db', function (Index $new) use ($docs) {
@@ -247,51 +263,45 @@ Index::rebuild('/path/to/articles.db', function (Index $new) use ($docs) {
 });
 ```
 
+When the existing index has the **document store enabled**, the callback can be omitted — all stored documents are streamed into the new index automatically. This lets you re-index with a different schema without maintaining a separate copy of the source data:
+
+```php
+// Re-index with the same schema — no callback, no external data needed
+Index::rebuild('/path/to/articles.db');
+
+// Re-index with new facet fields
+use Fuzor\SchemaConfig;
+
+Index::rebuild('/path/to/articles.db', schema: new SchemaConfig(
+    language:         'en',
+    facetFields:      ['brand', 'price', 'category'],
+    searchableFields: ['title', 'body'],
+));
+```
+
+Throws `\InvalidArgumentException` if the callback is omitted and the existing index has no document store.
+
 Internally, `rebuild` writes to a temporary file alongside the target, then renames it over the original — a POSIX-atomic operation on the same filesystem.
 
-### Language on rebuild
+### Overriding the schema
 
-The `language` argument controls which language the rebuilt index uses:
-
-| Value | Effect |
-|-------|--------|
-| *(omitted)* / `false` | Inherit the language from the existing index (default) |
-| `null` | Build with no language, regardless of what the existing index has |
-| `'en'`, `'de'`, … | Use this BCP 47 tag, overriding the existing index |
+`rebuild()` inherits the full schema from the existing index by default. Pass a `SchemaConfig` to use different settings in the rebuilt index. The object is used as-is — not merged with the existing index — so include every setting you want to keep. See [Schema](#schema) for the full parameter reference.
 
 ```php
-// Inherit (default) — tokenisation stays consistent without extra config
-Index::rebuild('/path/to/articles.db', callback: fn (Index $new) => $new->insert($docs));
+use Fuzor\SchemaConfig;
 
-// Clear language
-Index::rebuild('/path/to/articles.db', callback: fn (Index $new) => $new->insert($docs), language: null);
+// Switch to German
+Index::rebuild('/path/to/articles.db',
+    fn (Index $new) => $new->insert($docs),
+    schema: new SchemaConfig(language: 'de'),
+);
 
-// Override language
-Index::rebuild('/path/to/articles.db', callback: fn (Index $new) => $new->insert($docs), language: 'de');
-```
-
-### Document store on rebuild
-
-`rebuild()` inherits the store setting from the existing index. Pass `store` to override:
-
-| `$store` value | Effect |
-|----------------|--------|
-| `null` (default) | Inherit from the existing index |
-| `true` | Enable the store in the rebuilt index |
-| `false` | Disable the store in the rebuilt index |
-
-```php
-// Inherit (default)
-Index::rebuild('/path/to/articles.db', callback: fn (Index $new) => $new->insert($docs));
-
-// Force the store off even if the existing index had it on
-Index::rebuild('/path/to/articles.db', callback: fn (Index $new) => $new->insert($docs), store: false);
-```
-
-### Schema on rebuild
-
-`rebuild()` inherits `facetFields`, `searchableFields`, and `stripHtml` from the existing index automatically. Documents inserted inside the callback are routed using the inherited schema — no extra configuration needed.
-
-```php
-Index::rebuild('/path/to/articles.db', callback: fn (Index $new) => $new->insert($docs));
+// Change searchable fields; turn the store off to shrink the rebuilt file
+Index::rebuild('/path/to/articles.db',
+    fn (Index $new) => $new->insert($docs),
+    schema: new SchemaConfig(
+        searchableFields: ['title', 'body'],
+        store: false,
+    ),
+);
 ```
