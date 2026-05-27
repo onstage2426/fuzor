@@ -1500,27 +1500,21 @@ class Index
      * 2 for 9+. Respects Config::$fuzzyPrefixLength and $fuzzyMaxExpansions.
      * Shorter words use exact + optional as-you-type prefix matching only.
      *
-     * @param  string                                        $phrase    Raw search phrase; will be tokenised.
-     * @param  bool                                          $asYouType Last keyword matched as prefix when true.
-     * @param  int                                           $limit     Maximum number of document IDs to return.
-     * @param  int                                           $offset    Number of top-ranked results to skip.
-     * @param  array<string, string|list<string>|FacetRange> $filter   Facet filters; keyed by facet key name.
-     * @param  list<string>                                  $facets    Facet key names to compute counts for.
-     * @param  list<string>                                  $sort      Sort specs, e.g. ['price:asc', 'name:desc'].
-     * @param  string|null                                   $distinct      Facet field to collapse on (null = off).
-     * @param  int                                           $distinctCount Max results per distinct value (default 1).
+     * @param  string        $phrase  Raw search phrase; will be tokenised.
+     * @param  SearchOptions $options Per-query options (limit, offset, filter, facets, sort, …).
      */
     public function search(
         string $phrase,
-        bool $asYouType = true,
-        int $limit = 100,
-        int $offset = 0,
-        array $filter = [],
-        array $facets = [],
-        array $sort = [],
-        ?string $distinct = null,
-        int $distinctCount = 1,
+        SearchOptions $options = new SearchOptions(),
     ): SearchResult {
+        $asYouType     = $options->asYouType;
+        $limit         = $options->limit;
+        $offset        = $options->offset;
+        $filter        = $options->filter;
+        $facets        = $options->facets;
+        $sort          = $options->sort;
+        $distinct      = $options->distinct;
+        $distinctCount = $options->distinctCount;
         $sortSpecs     = $this->parseSortSpec($sort);
         $parsed        = $this->filterQueryTokens($phrase);
         /** @var list<string> $keywords */
@@ -1706,7 +1700,6 @@ class Index
             return new SearchResult(
                 ids: [],
                 totalHits: 0,
-                scores: $docScores,
                 documents: $this->hydrateIds([]),
                 facetCounts: $facetCounts,
                 query: $phrase,
@@ -1743,7 +1736,6 @@ class Index
             return new SearchResult(
                 ids: $pagedIds,
                 totalHits: $distinctHits,
-                scores: $docScores,
                 documents: $this->hydrateIds($pagedIds),
                 facetCounts: $facetCounts,
                 query: $phrase,
@@ -1756,7 +1748,6 @@ class Index
             return new SearchResult(
                 ids: [],
                 totalHits: $total,
-                scores: $docScores,
                 documents: $this->hydrateIds([]),
                 facetCounts: $facetCounts,
                 query: $phrase,
@@ -1790,7 +1781,6 @@ class Index
         return new SearchResult(
             ids: $pagedIds,
             totalHits: $total,
-            scores: $docScores,
             documents: $this->hydrateIds($pagedIds),
             facetCounts: $facetCounts,
             query: $phrase,
@@ -1803,29 +1793,23 @@ class Index
      * Run a boolean full-text search using Shunting-Yard postfix evaluation.
      *
      * Operator precedence (tightest to loosest): NOT (~) > AND (&, space) > OR ( or ).
-     * Parentheses override precedence. docScores is always null.
+     * Parentheses override precedence. BM25 scores are not available in boolean mode.
      *
-     * @param  string                                        $phrase    Boolean query string.
-     * @param  bool                                          $asYouType Last keyword matched as prefix when true.
-     * @param  int                                           $limit     Maximum number of document IDs to return.
-     * @param  int                                           $offset    Number of results to skip (for pagination).
-     * @param  array<string, string|list<string>|FacetRange> $filter   Facet filters; keyed by facet key name.
-     * @param  list<string>                                  $facets    Facet key names to compute counts for.
-     * @param  list<string>                                  $sort      Sort specs, e.g. ['price:asc', 'name:desc'].
-     * @param  string|null                                   $distinct      Facet field to collapse on (null = off).
-     * @param  int                                           $distinctCount Max results per distinct value (default 1).
+     * @param  string        $phrase  Boolean query string.
+     * @param  SearchOptions $options Per-query options (limit, offset, filter, facets, sort, …).
      */
     public function searchBoolean(
         string $phrase,
-        bool $asYouType = true,
-        int $limit = 100,
-        int $offset = 0,
-        array $filter = [],
-        array $facets = [],
-        array $sort = [],
-        ?string $distinct = null,
-        int $distinctCount = 1,
+        SearchOptions $options = new SearchOptions(),
     ): SearchResult {
+        $asYouType     = $options->asYouType;
+        $limit         = $options->limit;
+        $offset        = $options->offset;
+        $filter        = $options->filter;
+        $facets        = $options->facets;
+        $sort          = $options->sort;
+        $distinct      = $options->distinct;
+        $distinctCount = $options->distinctCount;
         $sortSpecs = $this->parseSortSpec($sort);
         $parsed       = $this->filterQueryTokens($phrase);
         /** @var list<list<string>> $phraseGroups */

@@ -6,6 +6,7 @@ namespace Fuzor\Benchmarks;
 
 use Fuzor\Index;
 use Fuzor\SchemaConfig;
+use Fuzor\SearchOptions;
 use PhpBench\Attributes\AfterMethods;
 use PhpBench\Attributes\BeforeMethods;
 use PhpBench\Attributes\Groups;
@@ -159,7 +160,7 @@ class FuzorBench
     #[ParamProviders('provideSearchQueries')]
     public function benchSearch(array $params): void
     {
-        $this->index->search($params['query'], asYouType: false);
+        $this->index->search($params['query'], new SearchOptions(asYouType: false));
     }
 
     /** @return iterable<string, array{query: string}> */
@@ -238,7 +239,7 @@ class FuzorBench
     #[ParamProviders('provideBooleanQueries')]
     public function benchSearchBoolean(array $params): void
     {
-        $this->index->searchBoolean($params['query'], asYouType: false);
+        $this->index->searchBoolean($params['query'], new SearchOptions(asYouType: false));
     }
 
     /** @return iterable<string, array{query: string}> */

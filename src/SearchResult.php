@@ -28,26 +28,21 @@ class SearchResult
      * Facet value counts keyed by facet field name.
      * String facets: array<string, int> (value → count). Numeric facets: array{min: float, max: float, count: int}.
      *
-     * @var array<string, mixed>
+     * @var array<string, array<string, int>|array{min: float, max: float, count: int}>
      */
     public readonly array $facetDistribution;
-
-    /** @var array<int, float> BM25 scores keyed by doc ID; empty for boolean search. */
-    private readonly array $scores;
 
     /** @var list<int> Document IDs in relevance order; used internally for score lookups. */
     private readonly array $ids;
 
     /**
      * @param list<int>                             $ids
-     * @param array<int, float>                     $scores
      * @param array<int, array<string, mixed>>|null $documents
-     * @param array<string, mixed>                  $facetCounts
+     * @param array<string, array<string, int>|array{min: float, max: float, count: int}> $facetCounts
      */
     public function __construct(
         array $ids,
         int|null $totalHits,
-        array $scores = [],
         ?array $documents = null,
         array $facetCounts = [],
         string $query = '',
@@ -56,7 +51,6 @@ class SearchResult
     ) {
         $this->ids               = $ids;
         $this->totalHits         = $totalHits;
-        $this->scores            = $scores;
         $this->query             = $query;
         $this->limit             = $limit;
         $this->offset            = $offset;
@@ -114,7 +108,7 @@ class SearchResult
         return $this->hits[$index] ?? [];
     }
 
-    /** @return array<string, mixed> */
+    /** @return array<string, array<string, int>|array{min: float, max: float, count: int}> */
     public function getFacetDistribution(): array
     {
         return $this->facetDistribution;
