@@ -1700,7 +1700,7 @@ class Index
             return new SearchResult(
                 ids: [],
                 totalHits: 0,
-                documents: $this->hydrateIds([]),
+                documents: $this->hydrateAndFormat([], $phrase, $options),
                 facetCounts: $facetCounts,
                 query: $phrase,
                 limit: $limit,
@@ -1736,7 +1736,7 @@ class Index
             return new SearchResult(
                 ids: $pagedIds,
                 totalHits: $distinctHits,
-                documents: $this->hydrateIds($pagedIds),
+                documents: $this->hydrateAndFormat($pagedIds, $phrase, $options),
                 facetCounts: $facetCounts,
                 query: $phrase,
                 limit: $limit,
@@ -1748,7 +1748,7 @@ class Index
             return new SearchResult(
                 ids: [],
                 totalHits: $total,
-                documents: $this->hydrateIds([]),
+                documents: $this->hydrateAndFormat([], $phrase, $options),
                 facetCounts: $facetCounts,
                 query: $phrase,
                 limit: $limit,
@@ -1781,7 +1781,7 @@ class Index
         return new SearchResult(
             ids: $pagedIds,
             totalHits: $total,
-            documents: $this->hydrateIds($pagedIds),
+            documents: $this->hydrateAndFormat($pagedIds, $phrase, $options),
             facetCounts: $facetCounts,
             query: $phrase,
             limit: $limit,
@@ -1937,7 +1937,7 @@ class Index
             return new SearchResult(
                 ids: $pagedIds,
                 totalHits: $distinctHits,
-                documents: $this->hydrateIds($pagedIds),
+                documents: $this->hydrateAndFormat($pagedIds, $phrase, $options),
                 facetCounts: $facetCounts,
                 query: $phrase,
                 limit: $limit,
@@ -1954,7 +1954,7 @@ class Index
         return new SearchResult(
             ids: $docIds,
             totalHits: $total,
-            documents: $this->hydrateIds($docIds),
+            documents: $this->hydrateAndFormat($docIds, $phrase, $options),
             facetCounts: $facetCounts,
             query: $phrase,
             limit: $limit,
@@ -1983,6 +1983,91 @@ class Index
             }
         }
         return $result;
+    }
+
+    /**
+     * Hydrate documents for $ids and attach '_formatted' when format options are active.
+     *
+     * @param  list<int>    $ids
+     * @return array<int, array<string, mixed>>|null
+     */
+    private function hydrateAndFormat(array $ids, string $phrase, SearchOptions $options): ?array
+    {
+        $documents = $this->hydrateIds($ids);
+        if (
+            $documents !== null && $documents !== [] &&
+            ($options->attributesToHighlight !== null || $options->attributesToCrop !== null)
+        ) {
+            $documents = $this->applyFormatting($documents, $phrase, $options);
+        }
+        return $documents;
+    }
+
+    /**
+     * Attach '_formatted' to each document with highlighted and/or cropped string field values.
+     *
+     * Cropping runs first; highlighting is applied to the (possibly cropped) text, so a field
+     * in both lists gets a short, highlighted excerpt. Only string-typed fields are processed.
+     *
+     * @param  array<int, array<string, mixed>> $documents
+     * @return array<int, array<string, mixed>>
+     */
+    private function applyFormatting(array $documents, string $phrase, SearchOptions $options): array
+    {
+        $highlightFields = $options->attributesToHighlight;
+        $cropFields      = $options->attributesToCrop;
+
+        $highlighter = $highlightFields !== null
+            ? $this->highlighter($options->highlightPreTag, $options->highlightPostTag, $options->asYouType)
+            : null;
+
+        $snippeter = $cropFields !== null
+            ? $this->snippeter($options->cropLength, 1, $options->cropMarker)
+            : null;
+
+        foreach ($documents as $id => $doc) {
+            $stringFields = [];
+            foreach ($doc as $k => $v) {
+                if (is_string($v)) {
+                    $stringFields[$k] = $v;
+                }
+            }
+
+            if ($stringFields === []) {
+                continue;
+            }
+
+            /** @var array<string, string> $formatted */
+            $formatted = [];
+
+            // Crop first so the highlight step works on the shorter text.
+            if ($snippeter !== null) {
+                $fields    = $cropFields === ['*']
+                    ? $stringFields
+                    : array_intersect_key($stringFields, array_flip($cropFields));
+                $formatted = $snippeter->snippetMany($phrase, $fields);
+            }
+
+            // Highlight — applied to the cropped version when both target the same field.
+            if ($highlighter !== null) {
+                $fields = $highlightFields === ['*']
+                    ? $stringFields
+                    : array_intersect_key($stringFields, array_flip($highlightFields));
+                $inputs = [];
+                foreach ($fields as $key => $value) {
+                    $inputs[$key] = $formatted[$key] ?? $value;
+                }
+                foreach ($highlighter->highlightMany($phrase, $inputs) as $key => $value) {
+                    $formatted[$key] = $value;
+                }
+            }
+
+            if ($formatted !== []) {
+                $documents[$id]['_formatted'] = $formatted;
+            }
+        }
+
+        return $documents;
     }
 
     // --- Private write helpers ----------------------------------------------

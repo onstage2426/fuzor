@@ -3111,6 +3111,114 @@ class IndexTest extends TestCase
         }
     }
 
+    // --- _formatted (highlight / crop) ---
+
+    public function testFormattedHighlightSingleField(): void
+    {
+        $index = new Index($this->dbPath);
+        $index->insert([['id' => 1, 'title' => 'Mercedes Benz', 'body' => 'Great car']]);
+        $result    = $index->search('mercedes', new SearchOptions(attributesToHighlight: ['title']));
+        $formatted = $result->getHit(0)['_formatted'];
+        $this->assertIsArray($formatted);
+        $this->assertSame('<em>Mercedes</em> Benz', $formatted['title']);
+        $this->assertArrayNotHasKey('body', $formatted);
+    }
+
+    public function testFormattedHighlightAllFields(): void
+    {
+        $index = new Index($this->dbPath);
+        $index->insert([['id' => 1, 'title' => 'Mercedes', 'body' => 'Mercedes is a brand']]);
+        $result    = $index->search('mercedes', new SearchOptions(attributesToHighlight: ['*']));
+        $formatted = $result->getHit(0)['_formatted'];
+        $this->assertIsArray($formatted);
+        $this->assertSame('<em>Mercedes</em>', $formatted['title']);
+        $this->assertSame('<em>Mercedes</em> is a brand', $formatted['body']);
+    }
+
+    public function testFormattedHighlightCustomTags(): void
+    {
+        $index = new Index($this->dbPath);
+        $index->insert([['id' => 1, 'title' => 'Mercedes Benz']]);
+        $result = $index->search(
+            'mercedes',
+            new SearchOptions(
+                attributesToHighlight: ['title'],
+                highlightPreTag: '<mark>',
+                highlightPostTag: '</mark>',
+            ),
+        );
+        $formatted = $result->getHit(0)['_formatted'];
+        $this->assertIsArray($formatted);
+        $this->assertSame('<mark>Mercedes</mark> Benz', $formatted['title']);
+    }
+
+    public function testFormattedCropSingleField(): void
+    {
+        $index = new Index($this->dbPath);
+        $long  = 'aaa bbb ccc ddd eee fff ggg hhh iii jjj mercedes kkk lll mmm nnn ooo ppp qqq rrr sss ttt';
+        $index->insert([['id' => 1, 'title' => 'car', 'body' => $long]]);
+        $result    = $index->search('mercedes', new SearchOptions(attributesToCrop: ['body'], cropLength: 80));
+        $formatted = $result->getHit(0)['_formatted'];
+        $this->assertIsArray($formatted);
+        $this->assertArrayHasKey('body', $formatted);
+        $this->assertIsString($formatted['body']);
+        $this->assertStringContainsStringIgnoringCase('mercedes', $formatted['body']);
+        $this->assertLessThan(mb_strlen($long), mb_strlen($formatted['body']));
+        $this->assertArrayNotHasKey('title', $formatted);
+    }
+
+    public function testFormattedCropThenHighlight(): void
+    {
+        $index = new Index($this->dbPath);
+        $pre   = str_repeat('aaa bbb ', 10);  // 80 chars before the term
+        $post  = str_repeat('kkk lll ', 10);  // 80 chars after the term
+        $long  = $pre . 'mercedes ' . $post;
+        $index->insert([['id' => 1, 'body' => $long]]);
+        $result = $index->search(
+            'mercedes',
+            new SearchOptions(
+                attributesToCrop: ['body'],
+                cropLength: 80,
+                attributesToHighlight: ['body'],
+            ),
+        );
+        $formatted = $result->getHit(0)['_formatted'];
+        $this->assertIsArray($formatted);
+        $this->assertArrayHasKey('body', $formatted);
+        $this->assertIsString($formatted['body']);
+        $this->assertStringContainsString('<em>', $formatted['body']);
+        $this->assertStringContainsStringIgnoringCase('mercedes', $formatted['body']);
+        // Cropped text (without tags) must be shorter than the full body.
+        $stripped = strip_tags($formatted['body']);
+        $this->assertLessThan(mb_strlen($long), mb_strlen($stripped));
+    }
+
+    public function testFormattedAbsentWhenNoOptionsSet(): void
+    {
+        $index = new Index($this->dbPath);
+        $index->insert([['id' => 1, 'title' => 'Mercedes Benz']]);
+        $result = $index->search('mercedes');
+        $this->assertArrayNotHasKey('_formatted', $result->getHit(0));
+    }
+
+    public function testFormattedAbsentWhenStoreDisabled(): void
+    {
+        $index = new Index($this->dbPath, schema: new SchemaConfig(store: false));
+        $index->insert([['id' => 1, 'title' => 'Mercedes Benz']]);
+        $result = $index->search('mercedes', new SearchOptions(attributesToHighlight: ['title']));
+        $this->assertSame(['id' => 1], $result->getHit(0));
+    }
+
+    public function testFormattedBooleanSearch(): void
+    {
+        $index = new Index($this->dbPath);
+        $index->insert([['id' => 1, 'title' => 'Mercedes Benz']]);
+        $result    = $index->searchBoolean('mercedes', new SearchOptions(attributesToHighlight: ['title']));
+        $formatted = $result->getHit(0)['_formatted'];
+        $this->assertIsArray($formatted);
+        $this->assertSame('<em>Mercedes</em> Benz', $formatted['title']);
+    }
+
     // --- Facets: construction ---
 
     public function testFacetsAlwaysEnabled(): void

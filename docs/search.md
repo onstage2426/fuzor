@@ -8,7 +8,7 @@ Both methods return a `SearchResult` object:
 
 | Member                  | Type                  | Description                                                              |
 |-------------------------|-----------------------|--------------------------------------------------------------------------|
-| `$hits`                 | `list<array>`         | Documents in relevance order (current page); stubs `['id' => n]` when the document store is off |
+| `$hits`                 | `list<array>`         | Documents in relevance order (current page); stubs `['id' => n]` when the document store is off; gains `_formatted` when highlight/crop options are set |
 | `$hitsCount`            | `int`                 | Number of documents in this page (≤ limit)                              |
 | `$totalHits`            | `int\|null`           | Total matching documents across all pages                                |
 | `$query`                | `string`              | Original query string                                                    |
@@ -44,6 +44,36 @@ When the [document store](document-store.md) is disabled, `$hits` contains id-on
 $result->hits; // [['id' => 3], ['id' => 1], ['id' => 7]]
 ```
 
+## SearchOptions
+
+All search parameters beyond the query phrase are passed as a `SearchOptions` value object. `new SearchOptions()` reproduces the defaults — you only need to set the properties that differ from the default.
+
+```php
+use Fuzor\SearchOptions;
+
+$result = $index->search('city car', new SearchOptions(
+    limit:  20,
+    offset: 40,
+));
+```
+
+| Property                | Default   | Description                                                                     |
+|-------------------------|-----------|---------------------------------------------------------------------------------|
+| `asYouType`             | `true`    | Match the last keyword as a word prefix (autocomplete)                          |
+| `limit`                 | `100`     | Maximum hits to return                                                          |
+| `offset`                | `0`       | Hits to skip (pagination)                                                       |
+| `filter`                | `[]`      | Facet filters — `array<string, string\|list<string>\|FacetRange>`              |
+| `facets`                | `[]`      | Facet fields to compute value counts for — `list<string>`                       |
+| `sort`                  | `[]`      | Sort specs — `list<string>` of `'field:asc'` / `'field:desc'`                  |
+| `distinct`              | `null`    | Facet field to collapse on (deduplication)                                      |
+| `distinctCount`         | `1`       | Max hits per distinct value                                                     |
+| `attributesToHighlight` | `null`    | String fields to include in `_formatted` with matched terms wrapped in tags; `['*']` for all |
+| `highlightPreTag`       | `'<em>'`  | Opening tag placed before each highlighted match                                |
+| `highlightPostTag`      | `'</em>'` | Closing tag placed after each highlighted match                                 |
+| `attributesToCrop`      | `null`    | String fields to crop to a short excerpt in `_formatted`; `['*']` for all      |
+| `cropLength`            | `200`     | Excerpt window size in characters                                               |
+| `cropMarker`            | `'…'`     | Text inserted at crop boundaries                                                |
+
 ## Full-text search
 
 Scores results with Okapi BM25. Documents are ranked by how relevant each term is relative to the rest of the index.
@@ -52,7 +82,7 @@ Scores results with Okapi BM25. Documents are ranked by how relevant each term i
 $result = $index->search('city car');
 
 // Limit results
-$result = $index->search('city car', limit: 20);
+$result = $index->search('city car', new SearchOptions(limit: 20));
 ```
 
 ### Pagination
@@ -60,8 +90,8 @@ $result = $index->search('city car', limit: 20);
 Use `offset` to page through results. `$totalHits` always reflects the full match count regardless of the page window.
 
 ```php
-$page1 = $index->search('city car', limit: 20, offset: 0);
-$page2 = $index->search('city car', limit: 20, offset: 20);
+$page1 = $index->search('city car', new SearchOptions(limit: 20, offset: 0));
+$page2 = $index->search('city car', new SearchOptions(limit: 20, offset: 20));
 
 $totalPages = (int) ceil($page1->totalHits / 20);
 ```
@@ -197,7 +227,7 @@ Spaces adjacent to parentheses are stripped before the AND-substitution step run
 Boolean search also supports `offset` for pagination:
 
 ```php
-$page2 = $index->searchBoolean('sedan or coupe', limit: 20, offset: 20);
+$page2 = $index->searchBoolean('sedan or coupe', new SearchOptions(limit: 20, offset: 20));
 ```
 
 ## Phrase search
@@ -226,9 +256,102 @@ When `asYouType` is `true` (default), the last query word is matched as a prefix
 
 ```php
 // Disable for exact keyword queries
-$result = $index->search('sedan', asYouType: false);
-$result = $index->searchBoolean('sedan or coupe', asYouType: false);
+$result = $index->search('sedan', new SearchOptions(asYouType: false));
+$result = $index->searchBoolean('sedan or coupe', new SearchOptions(asYouType: false));
 ```
+
+## Formatting
+
+Pass `attributesToHighlight` or `attributesToCrop` (or both) in `SearchOptions` to receive a `_formatted` key on each hit. Fuzor handles the cropping and highlighting automatically — no manual post-processing required.
+
+### Highlighting
+
+`attributesToHighlight` wraps matched query terms in the specified string fields with HTML tags. The default tags are `<em>` / `</em>`.
+
+```php
+$result = $index->search('mercedes sedan', new SearchOptions(
+    attributesToHighlight: ['title', 'body'],
+));
+
+foreach ($result->hits as $hit) {
+    echo $hit['_formatted']['title'];
+    // "<em>Mercedes</em> <em>Sedan</em> review"
+    echo $hit['_formatted']['body'];
+    // "The new <em>Mercedes</em> E-Class is a fine <em>sedan</em> …"
+}
+```
+
+Pass `['*']` to highlight every string-typed field in the document:
+
+```php
+$result = $index->search('mercedes', new SearchOptions(
+    attributesToHighlight: ['*'],
+));
+```
+
+Customise the tags with `highlightPreTag` and `highlightPostTag`:
+
+```php
+$result = $index->search('mercedes', new SearchOptions(
+    attributesToHighlight: ['title'],
+    highlightPreTag:  '<mark>',
+    highlightPostTag: '</mark>',
+));
+// $hit['_formatted']['title'] → "<mark>Mercedes</mark> Benz"
+```
+
+### Cropping (snippeting)
+
+`attributesToCrop` extracts a short excerpt from the specified fields centred on where the query terms appear.
+
+```php
+$result = $index->search('mercedes', new SearchOptions(
+    attributesToCrop: ['body'],
+));
+
+echo $result->getHit(0)['_formatted']['body'];
+// "… the new Mercedes S-Class raises the bar for …"
+```
+
+`cropLength` sets the window size in characters (default `200`). `cropMarker` sets the boundary string (default `'…'`):
+
+```php
+$result = $index->search('mercedes', new SearchOptions(
+    attributesToCrop: ['body'],
+    cropLength:       120,
+    cropMarker:       '[…]',
+));
+```
+
+Pass `['*']` to crop every string-typed field:
+
+```php
+$result = $index->search('mercedes', new SearchOptions(
+    attributesToCrop: ['*'],
+));
+```
+
+### Combining crop and highlight
+
+When a field appears in both lists, it is cropped first and then highlighted — the result is a short excerpt with matched terms wrapped in tags:
+
+```php
+$result = $index->search('mercedes sedan', new SearchOptions(
+    attributesToCrop:      ['body'],
+    attributesToHighlight: ['title', 'body'],
+    cropLength:            150,
+));
+
+// $hit['_formatted']['title'] — full title, matched terms highlighted
+// $hit['_formatted']['body']  — short excerpt with matched terms highlighted
+```
+
+### When `_formatted` is absent
+
+`_formatted` is not added to a hit when:
+
+- Neither `attributesToHighlight` nor `attributesToCrop` is set (the default).
+- The document store is disabled — hits contain only `['id' => n]` and there is no text to process.
 
 ## Facet filtering
 
@@ -240,49 +363,52 @@ Pass a single value or an array of values. An array is treated as OR within that
 
 ```php
 // Single value
-$result = $index->search('watch', filter: ['brand' => 'Casio']);
+$result = $index->search('watch', new SearchOptions(filter: ['brand' => 'Casio']));
 
 // Multiple values — OR within the key
-$result = $index->search('watch', filter: ['brand' => ['Casio', 'Seiko']]);
+$result = $index->search('watch', new SearchOptions(filter: ['brand' => ['Casio', 'Seiko']]));
 
 // Multiple keys — AND between keys
-$result = $index->search('watch', filter: [
+$result = $index->search('watch', new SearchOptions(filter: [
     'brand'    => 'Casio',
     'category' => 'Watches',
-]);
+]));
 ```
 
 ### Numeric range facets
 
-Use `FacetRange` to filter by a numeric range. Either bound may be `null` (open-ended).
+Use `FacetRange` to filter by a numeric range. Either bound may be omitted (open-ended).
 
 ```php
 use Fuzor\FacetRange;
 
 // Price between 50 and 200 (inclusive on both ends)
-$result = $index->search('watch', filter: [
+$result = $index->search('watch', new SearchOptions(filter: [
     'price' => FacetRange::between(50.0, 200.0),
-]);
+]));
 
 // Price 100 or above (no upper bound)
-$result = $index->search('watch', filter: [
+$result = $index->search('watch', new SearchOptions(filter: [
     'price' => FacetRange::min(100.0),
-]);
+]));
 ```
 
 Filters compose with all other options:
 
 ```php
-$result = $index->search('gshock', limit: 20, filter: [
-    'brand' => 'Casio',
-    'price' => FacetRange::max(300.0),
-]);
+$result = $index->search('gshock', new SearchOptions(
+    limit:  20,
+    filter: [
+        'brand' => 'Casio',
+        'price' => FacetRange::max(300.0),
+    ],
+));
 ```
 
-`searchBoolean()` accepts the same `filter` parameter:
+`searchBoolean()` accepts the same `filter` option:
 
 ```php
-$result = $index->searchBoolean('shock resistant', filter: ['brand' => 'Casio']);
+$result = $index->searchBoolean('shock resistant', new SearchOptions(filter: ['brand' => 'Casio']));
 ```
 
 ## Facet counts
@@ -290,7 +416,7 @@ $result = $index->searchBoolean('shock resistant', filter: ['brand' => 'Casio'])
 Pass a `facets` list to compute per-value counts across the result set.
 
 ```php
-$result = $index->search('watch', facets: ['brand', 'category', 'price']);
+$result = $index->search('watch', new SearchOptions(facets: ['brand', 'category', 'price']));
 
 $result->facetDistribution;
 // ['brand' => ['Casio' => 12, 'Seiko' => 8, ...], 'price' => [...], ...]
@@ -323,7 +449,10 @@ $result->facetDistribution['price'];
 `facets` and `filter` are independent and can be used together:
 
 ```php
-$result = $index->search('watch', filter: ['brand' => 'Casio'], facets: ['category', 'price']);
+$result = $index->search('watch', new SearchOptions(
+    filter: ['brand' => 'Casio'],
+    facets: ['category', 'price'],
+));
 ```
 
 ### Disjunctive facet counting
@@ -333,7 +462,10 @@ In standard faceted navigation, the counts shown for a facet key should reflect 
 When a `filter` is active on a key that is also in the `facets` list, its counts are computed over the result set *without* that key's filter applied. All other facet key counts are computed over the filtered result set.
 
 ```php
-$result = $index->search('watch', filter: ['brand' => 'Casio'], facets: ['brand', 'category']);
+$result = $index->search('watch', new SearchOptions(
+    filter: ['brand' => 'Casio'],
+    facets: ['brand', 'category'],
+));
 
 // Brand counts show all brands available in the unfiltered query result
 $result->facetDistribution['brand'];
@@ -354,13 +486,13 @@ Fields used for sorting must be declared as `facetFields` at index creation — 
 
 ```php
 // Cheapest first
-$result = $index->search('watch', sort: ['price:asc']);
+$result = $index->search('watch', new SearchOptions(sort: ['price:asc']));
 
 // Most expensive first
-$result = $index->search('watch', sort: ['price:desc']);
+$result = $index->search('watch', new SearchOptions(sort: ['price:desc']));
 
 // Multiple keys — left-to-right priority
-$result = $index->search('watch', sort: ['brand:asc', 'price:asc']);
+$result = $index->search('watch', new SearchOptions(sort: ['brand:asc', 'price:asc']));
 ```
 
 Each spec is a `'field:asc'` or `'field:desc'` string (case-insensitive direction). An invalid format throws `\InvalidArgumentException`.
@@ -375,7 +507,7 @@ Documents that do not have a value for the sort field always appear last, regard
 
 ```php
 // Docs with no 'price' field sort after all priced docs
-$result = $index->search('watch', sort: ['price:asc']);
+$result = $index->search('watch', new SearchOptions(sort: ['price:asc']));
 ```
 
 ### Combining sort with filter and facets
@@ -383,15 +515,19 @@ $result = $index->search('watch', sort: ['price:asc']);
 `sort`, `filter`, and `facets` compose freely:
 
 ```php
-$result = $index->search('watch', filter: ['brand' => 'Casio'], facets: ['category'], sort: ['price:asc']);
+$result = $index->search('watch', new SearchOptions(
+    filter: ['brand' => 'Casio'],
+    facets: ['category'],
+    sort:   ['price:asc'],
+));
 ```
 
 `sort` affects the order of hits and pagination; it does not change `$totalHits` or facet distribution.
 
-`searchBoolean()` accepts the same `sort` parameter:
+`searchBoolean()` accepts the same `sort` option:
 
 ```php
-$result = $index->searchBoolean('sedan or coupe', sort: ['price:asc']);
+$result = $index->searchBoolean('sedan or coupe', new SearchOptions(sort: ['price:asc']));
 ```
 
 ## Distinct / deduplication
@@ -400,10 +536,10 @@ Pass `distinct` to return at most N results per unique value of a facet field. T
 
 ```php
 // At most one result per brand
-$result = $index->search('shirt', distinct: 'brand');
+$result = $index->search('shirt', new SearchOptions(distinct: 'brand'));
 
 // At most two results per brand
-$result = $index->search('shirt', distinct: 'brand', distinctCount: 2);
+$result = $index->search('shirt', new SearchOptions(distinct: 'brand', distinctCount: 2));
 ```
 
 The field must be declared as a `facetField` at index creation. An unknown field name is silently ignored and all results pass through unchanged.
@@ -414,7 +550,7 @@ The highest-scoring document for each distinct value is kept. When `sort` is als
 
 ```php
 // Cheapest item per brand
-$result = $index->search('shirt', sort: ['price:asc'], distinct: 'brand');
+$result = $index->search('shirt', new SearchOptions(sort: ['price:asc'], distinct: 'brand'));
 ```
 
 ### Docs without a value
@@ -426,14 +562,14 @@ Documents that have no value for the distinct field are never collapsed with eac
 `$totalHits` reflects the total number of surviving documents after deduplication, not the raw match count. This keeps pagination correct: `ceil($totalHits / $limit)` gives the right page count.
 
 ```php
-$result = $index->search('shirt', limit: 20, distinct: 'brand');
+$result = $index->search('shirt', new SearchOptions(limit: 20, distinct: 'brand'));
 $totalPages = (int) ceil($result->totalHits / 20); // based on distinct-collapsed count
 ```
 
 Use `limit: 0` to count distinct groups without fetching any documents:
 
 ```php
-$countOnly = $index->search('shirt', limit: 0, distinct: 'brand');
+$countOnly = $index->search('shirt', new SearchOptions(limit: 0, distinct: 'brand'));
 $distinctGroups = $countOnly->totalHits;
 ```
 
@@ -442,11 +578,15 @@ $distinctGroups = $countOnly->totalHits;
 `distinct`, `filter`, `facets`, and `sort` compose freely. Facet counts are computed over the pre-distinct result set (consistent with how counts behave relative to sort):
 
 ```php
-$result = $index->search('shirt', filter: ['category' => 'tops'], facets: ['brand'], distinct: 'brand');
+$result = $index->search('shirt', new SearchOptions(
+    filter:   ['category' => 'tops'],
+    facets:   ['brand'],
+    distinct: 'brand',
+));
 ```
 
 `searchBoolean()` accepts `distinct` and `distinctCount` with the same semantics:
 
 ```php
-$result = $index->searchBoolean('shirt or blouse', distinct: 'brand');
+$result = $index->searchBoolean('shirt or blouse', new SearchOptions(distinct: 'brand'));
 ```
