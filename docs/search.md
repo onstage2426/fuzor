@@ -6,37 +6,42 @@ Fuzor has two search methods: `search()` for BM25 ranked results and `searchBool
 
 Both methods return a `SearchResult` object:
 
-| Member              | Type                           | Description                                                              |
-|---------------------|--------------------------------|--------------------------------------------------------------------------|
-| `$ids`              | `int[]`                        | Document IDs in relevance order (current page only)                      |
-| `$hits`             | `int`                          | Total matching documents across all pages                                |
-| `hasScores()`       | `bool`                         | `true` for BM25 results; `false` for boolean search                      |
-| `score(int $id)`    | `float\|null`                  | BM25 score for a doc ID; `null` in boolean mode or ID not in result      |
-| `scores()`          | `array<int,float>`             | All BM25 scores keyed by doc ID; empty array for boolean search          |
-| `hasDocuments()`    | `bool`                         | `true` when the document store is enabled on this result                 |
-| `document(int $id)` | `array\|null`                  | Single hydrated document; `null` when store is off or ID not in result   |
-| `documents()`       | `array<int,array>\|null`       | All hydrated documents keyed by doc ID; `null` when document store is off |
-| `hasFacets()`       | `bool`                         | `true` when facet counts were computed for this result                   |
-| `facetCounts()`     | `array<string,mixed>`          | All facet counts keyed by facet key name; empty array when not requested |
-| `facetCount(string $key, string $value)` | `int\|null` | Count for a specific string facet value; `null` for numeric facets or absent entries |
+| Member                  | Type                  | Description                                                              |
+|-------------------------|-----------------------|--------------------------------------------------------------------------|
+| `$hits`                 | `list<array>`         | Documents in relevance order (current page); stubs `['id' => n]` when the document store is off |
+| `$hitsCount`            | `int`                 | Number of documents in this page (≤ limit)                              |
+| `$totalHits`            | `int\|null`           | Total matching documents across all pages                                |
+| `$query`                | `string`              | Original query string                                                    |
+| `$limit`                | `int\|null`           | Page limit                                                               |
+| `$offset`               | `int\|null`           | Page offset                                                              |
+| `$facetDistribution`    | `array<string,mixed>` | Per-value counts keyed by facet field name; empty when not requested     |
+| `getIds()`              | `list<int>`           | Document IDs in relevance order (current page)                           |
+| `getHits()`             | `list<array>`         | Same as `$hits`                                                          |
+| `getHit(int $index)`    | `array`               | Document at position `$index` (0-based); empty array when out of bounds  |
+| `getHitsCount()`        | `int`                 | Same as `$hitsCount`                                                     |
+| `getTotalHits()`        | `int\|null`           | Same as `$totalHits`                                                     |
+| `getQuery()`            | `string`              | Same as `$query`                                                         |
+| `getLimit()`            | `int\|null`           | Same as `$limit`                                                         |
+| `getOffset()`           | `int\|null`           | Same as `$offset`                                                        |
+| `getFacetDistribution()` | `array<string,mixed>` | Same as `$facetDistribution`                                            |
+| `toArray()`             | `array`               | Full result as a plain array                                             |
+| `toJson(int $flags = 0)` | `string`             | JSON-encoded result; pass `JSON_PRETTY_PRINT` etc. via `$flags`          |
 
 ```php
-$results = $index->search('city car');
+$result = $index->search('city car');
 
-$results->ids;          // [3, 1, 7]
-$results->hits;         // total matches (may exceed count($results->ids) when paginating)
-$results->hasScores();  // true
-$results->score(3);     // 1.4  — BM25 score for doc 3
-$results->score(99);    // null — doc not in result set
-$results->scores();     // [3 => 1.4, 1 => 0.9, 7 => 0.3]
+$result->hits;         // [['id' => 3, 'title' => 'City Car', ...], ...]
+$result->totalHits;    // total matches (may exceed count($result->hits) when paginating)
+$result->hitsCount;    // count of documents in this page
+$result->getHit(0);    // first document, or [] if result is empty
+$result->getIds();     // [3, 1, 7] — IDs in relevance order
 ```
 
-When the [document store](document-store.md) is enabled, documents are automatically populated:
+When the [document store](document-store.md) is disabled, `$hits` contains id-only stubs:
 
 ```php
-$results->hasDocuments(); // true
-$results->document(3);    // the full document array for doc 3, or null if not in result
-$results->documents();    // array<int, array> keyed by doc ID, in relevance order
+// store: false index
+$result->hits; // [['id' => 3], ['id' => 1], ['id' => 7]]
 ```
 
 ## Full-text search
@@ -44,21 +49,21 @@ $results->documents();    // array<int, array> keyed by doc ID, in relevance ord
 Scores results with Okapi BM25. Documents are ranked by how relevant each term is relative to the rest of the index.
 
 ```php
-$results = $index->search('city car');
+$result = $index->search('city car');
 
 // Limit results
-$results = $index->search('city car', limit: 20);
+$result = $index->search('city car', limit: 20);
 ```
 
 ### Pagination
 
-Use `offset` to page through results. `$hits` always reflects the full match count regardless of the page window.
+Use `offset` to page through results. `$totalHits` always reflects the full match count regardless of the page window.
 
 ```php
 $page1 = $index->search('city car', limit: 20, offset: 0);
 $page2 = $index->search('city car', limit: 20, offset: 20);
 
-$totalPages = (int) ceil($page1->hits / 20);
+$totalPages = (int) ceil($page1->totalHits / 20);
 ```
 
 ### Typo tolerance
@@ -66,7 +71,7 @@ $totalPages = (int) ceil($page1->hits / 20);
 Typo tolerance is automatic. When a query word has no exact or prefix match and meets the minimum word length, Fuzor scans the wordlist for candidates within edit distance and ranks them closest-first before BM25 scoring.
 
 ```php
-$results = $index->search('economi'); // matches 'economy'
+$result = $index->search('economi'); // matches 'economy'
 ```
 
 The allowed edit distance scales automatically with word length:
@@ -97,7 +102,7 @@ $index = new Index('/path/to/articles.db', config: new Config(
     fieldBoosts: ['title' => 5.0, 'body' => 1.0],
 ));
 
-$results = $index->search('turbo');
+$result = $index->search('turbo');
 // Documents where "turbo" appears in the title rank above those where it only appears in the body.
 ```
 
@@ -168,13 +173,13 @@ Synonyms are not applied inside quoted phrases — `"automobile wash"` matches t
 
 ## Boolean search
 
-Set-based: no BM25 scoring, `score()` always returns `null`. Useful for filtering rather than ranking.
+Set-based: no BM25 scoring. Useful for filtering rather than ranking.
 
 ```php
-$results = $index->searchBoolean('sedan or coupe');
-$results = $index->searchBoolean('suv -electric');
-$results = $index->searchBoolean('fast & comfortable');
-$results = $index->searchBoolean('(sedan or coupe) -electric');
+$result = $index->searchBoolean('sedan or coupe');
+$result = $index->searchBoolean('suv -electric');
+$result = $index->searchBoolean('fast & comfortable');
+$result = $index->searchBoolean('(sedan or coupe) -electric');
 ```
 
 | Syntax              | Operator | Effect                          |
@@ -200,17 +205,17 @@ $page2 = $index->searchBoolean('sedan or coupe', limit: 20, offset: 20);
 Wrap words in double quotes to require them to appear as a contiguous, ordered sequence. Works in both `search()` and `searchBoolean()`.
 
 ```php
-$results = $index->search('"quick brown fox"');
+$result = $index->search('"quick brown fox"');
 
 // Mix phrases and free keywords
-$results = $index->search('"quick brown" sedan');
+$result = $index->search('"quick brown" sedan');
 
 // Multiple phrases — all must match
-$results = $index->search('"quick brown" "fast car"');
+$result = $index->search('"quick brown" "fast car"');
 
 // In boolean queries
-$results = $index->searchBoolean('"quick brown" or sedan');
-$results = $index->searchBoolean('"exact phrase" -electric');
+$result = $index->searchBoolean('"quick brown" or sedan');
+$result = $index->searchBoolean('"exact phrase" -electric');
 ```
 
 Phrase words participate in BM25 scoring normally. `asYouType` applies to the last token even when it is inside a phrase — `"quick brow"` matches `quick` followed immediately by any word starting with `brow`.
@@ -221,8 +226,8 @@ When `asYouType` is `true` (default), the last query word is matched as a prefix
 
 ```php
 // Disable for exact keyword queries
-$results = $index->search('sedan', asYouType: false);
-$results = $index->searchBoolean('sedan or coupe', asYouType: false);
+$result = $index->search('sedan', asYouType: false);
+$result = $index->searchBoolean('sedan or coupe', asYouType: false);
 ```
 
 ## Facet filtering
@@ -235,13 +240,13 @@ Pass a single value or an array of values. An array is treated as OR within that
 
 ```php
 // Single value
-$results = $index->search('watch', filter: ['brand' => 'Casio']);
+$result = $index->search('watch', filter: ['brand' => 'Casio']);
 
 // Multiple values — OR within the key
-$results = $index->search('watch', filter: ['brand' => ['Casio', 'Seiko']]);
+$result = $index->search('watch', filter: ['brand' => ['Casio', 'Seiko']]);
 
 // Multiple keys — AND between keys
-$results = $index->search('watch', filter: [
+$result = $index->search('watch', filter: [
     'brand'    => 'Casio',
     'category' => 'Watches',
 ]);
@@ -255,12 +260,12 @@ Use `FacetRange` to filter by a numeric range. Either bound may be `null` (open-
 use Fuzor\FacetRange;
 
 // Price between 50 and 200 (inclusive on both ends)
-$results = $index->search('watch', filter: [
+$result = $index->search('watch', filter: [
     'price' => FacetRange::between(50.0, 200.0),
 ]);
 
 // Price 100 or above (no upper bound)
-$results = $index->search('watch', filter: [
+$result = $index->search('watch', filter: [
     'price' => FacetRange::min(100.0),
 ]);
 ```
@@ -268,7 +273,7 @@ $results = $index->search('watch', filter: [
 Filters compose with all other options:
 
 ```php
-$results = $index->search('gshock', limit: 20, filter: [
+$result = $index->search('gshock', limit: 20, filter: [
     'brand' => 'Casio',
     'price' => FacetRange::max(300.0),
 ]);
@@ -277,7 +282,7 @@ $results = $index->search('gshock', limit: 20, filter: [
 `searchBoolean()` accepts the same `filter` parameter:
 
 ```php
-$results = $index->searchBoolean('shock resistant', filter: ['brand' => 'Casio']);
+$result = $index->searchBoolean('shock resistant', filter: ['brand' => 'Casio']);
 ```
 
 ## Facet counts
@@ -285,42 +290,40 @@ $results = $index->searchBoolean('shock resistant', filter: ['brand' => 'Casio']
 Pass a `facets` list to compute per-value counts across the result set.
 
 ```php
-$results = $index->search('watch', facets: ['brand', 'category', 'price']);
+$result = $index->search('watch', facets: ['brand', 'category', 'price']);
 
-$results->hasFacets();   // true
-$results->facetCounts(); // ['brand' => ['Casio' => 12, 'Seiko' => 8, ...], 'price' => [...], ...]
+$result->facetDistribution;
+// ['brand' => ['Casio' => 12, 'Seiko' => 8, ...], 'price' => [...], ...]
 ```
 
 ### String facet counts
 
-For string facets, `facetCounts()['key']` is an `array<string, int>` of value → count pairs, sorted by count descending:
+For string facets, `$facetDistribution['key']` is an `array<string, int>` of value → count pairs, sorted by count descending:
 
 ```php
-$results->facetCounts()['brand'];
+$result->facetDistribution['brand'];
 // ['Casio' => 12, 'Seiko' => 8, 'Citizen' => 5]
 
-// Convenience accessor for a single value
-$results->facetCount('brand', 'Casio');   // 12
-$results->facetCount('brand', 'Unknown'); // null — value not present in result set
+// Single value lookup
+$result->facetDistribution['brand']['Casio'] ?? null;   // 12
+$result->facetDistribution['brand']['Unknown'] ?? null; // null
 ```
 
 ### Numeric facet counts
 
-For numeric facets (int/float field values), `facetCounts()['key']` is an aggregate summary:
+For numeric facets (int/float field values), `$facetDistribution['key']` is an aggregate summary:
 
 ```php
-$results->facetCounts()['price'];
+$result->facetDistribution['price'];
 // ['min' => 29.99, 'max' => 499.0, 'count' => 20]
 ```
-
-`facetCount()` returns `null` for numeric facets — read `facetCounts()['price']['min']` etc. directly.
 
 ### Combining facets with filters
 
 `facets` and `filter` are independent and can be used together:
 
 ```php
-$results = $index->search('watch', filter: ['brand' => 'Casio'], facets: ['category', 'price']);
+$result = $index->search('watch', filter: ['brand' => 'Casio'], facets: ['category', 'price']);
 ```
 
 ### Disjunctive facet counting
@@ -330,14 +333,14 @@ In standard faceted navigation, the counts shown for a facet key should reflect 
 When a `filter` is active on a key that is also in the `facets` list, its counts are computed over the result set *without* that key's filter applied. All other facet key counts are computed over the filtered result set.
 
 ```php
-$results = $index->search('watch', filter: ['brand' => 'Casio'], facets: ['brand', 'category']);
+$result = $index->search('watch', filter: ['brand' => 'Casio'], facets: ['brand', 'category']);
 
 // Brand counts show all brands available in the unfiltered query result
-$results->facetCounts()['brand'];
+$result->facetDistribution['brand'];
 // ['Casio' => 12, 'Seiko' => 8, 'Citizen' => 5]
 
 // Category counts are scoped to the Casio filter
-$results->facetCounts()['category'];
+$result->facetDistribution['category'];
 // ['Watches' => 10, 'Accessories' => 2]
 ```
 
@@ -351,13 +354,13 @@ Fields used for sorting must be declared as `facetFields` at index creation — 
 
 ```php
 // Cheapest first
-$results = $index->search('watch', sort: ['price:asc']);
+$result = $index->search('watch', sort: ['price:asc']);
 
 // Most expensive first
-$results = $index->search('watch', sort: ['price:desc']);
+$result = $index->search('watch', sort: ['price:desc']);
 
 // Multiple keys — left-to-right priority
-$results = $index->search('watch', sort: ['brand:asc', 'price:asc']);
+$result = $index->search('watch', sort: ['brand:asc', 'price:asc']);
 ```
 
 Each spec is a `'field:asc'` or `'field:desc'` string (case-insensitive direction). An invalid format throws `\InvalidArgumentException`.
@@ -372,7 +375,7 @@ Documents that do not have a value for the sort field always appear last, regard
 
 ```php
 // Docs with no 'price' field sort after all priced docs
-$results = $index->search('watch', sort: ['price:asc']);
+$result = $index->search('watch', sort: ['price:asc']);
 ```
 
 ### Combining sort with filter and facets
@@ -380,15 +383,15 @@ $results = $index->search('watch', sort: ['price:asc']);
 `sort`, `filter`, and `facets` compose freely:
 
 ```php
-$results = $index->search('watch', filter: ['brand' => 'Casio'], facets: ['category'], sort: ['price:asc']);
+$result = $index->search('watch', filter: ['brand' => 'Casio'], facets: ['category'], sort: ['price:asc']);
 ```
 
-`sort` affects the order of `$ids` and pagination; it does not change `$hits` or facet counts.
+`sort` affects the order of hits and pagination; it does not change `$totalHits` or facet distribution.
 
 `searchBoolean()` accepts the same `sort` parameter:
 
 ```php
-$results = $index->searchBoolean('sedan or coupe', sort: ['price:asc']);
+$result = $index->searchBoolean('sedan or coupe', sort: ['price:asc']);
 ```
 
 ## Distinct / deduplication
@@ -397,10 +400,10 @@ Pass `distinct` to return at most N results per unique value of a facet field. T
 
 ```php
 // At most one result per brand
-$results = $index->search('shirt', distinct: 'brand');
+$result = $index->search('shirt', distinct: 'brand');
 
 // At most two results per brand
-$results = $index->search('shirt', distinct: 'brand', distinctCount: 2);
+$result = $index->search('shirt', distinct: 'brand', distinctCount: 2);
 ```
 
 The field must be declared as a `facetField` at index creation. An unknown field name is silently ignored and all results pass through unchanged.
@@ -411,27 +414,27 @@ The highest-scoring document for each distinct value is kept. When `sort` is als
 
 ```php
 // Cheapest item per brand
-$results = $index->search('shirt', sort: ['price:asc'], distinct: 'brand');
+$result = $index->search('shirt', sort: ['price:asc'], distinct: 'brand');
 ```
 
 ### Docs without a value
 
 Documents that have no value for the distinct field are never collapsed with each other — each passes through independently.
 
-### `$hits` with distinct
+### `$totalHits` with distinct
 
-`$hits` reflects the total number of surviving documents after deduplication, not the raw match count. This keeps pagination correct: `ceil($hits / $limit)` gives the right page count.
+`$totalHits` reflects the total number of surviving documents after deduplication, not the raw match count. This keeps pagination correct: `ceil($totalHits / $limit)` gives the right page count.
 
 ```php
-$results = $index->search('shirt', limit: 20, distinct: 'brand');
-$totalPages = (int) ceil($results->hits / 20); // based on distinct-collapsed count
+$result = $index->search('shirt', limit: 20, distinct: 'brand');
+$totalPages = (int) ceil($result->totalHits / 20); // based on distinct-collapsed count
 ```
 
 Use `limit: 0` to count distinct groups without fetching any documents:
 
 ```php
 $countOnly = $index->search('shirt', limit: 0, distinct: 'brand');
-$distinctGroups = $countOnly->hits;
+$distinctGroups = $countOnly->totalHits;
 ```
 
 ### Combining distinct with filter and facets
@@ -439,11 +442,11 @@ $distinctGroups = $countOnly->hits;
 `distinct`, `filter`, `facets`, and `sort` compose freely. Facet counts are computed over the pre-distinct result set (consistent with how counts behave relative to sort):
 
 ```php
-$results = $index->search('shirt', filter: ['category' => 'tops'], facets: ['brand'], distinct: 'brand');
+$result = $index->search('shirt', filter: ['category' => 'tops'], facets: ['brand'], distinct: 'brand');
 ```
 
 `searchBoolean()` accepts `distinct` and `distinctCount` with the same semantics:
 
 ```php
-$results = $index->searchBoolean('shirt or blouse', distinct: 'brand');
+$result = $index->searchBoolean('shirt or blouse', distinct: 'brand');
 ```

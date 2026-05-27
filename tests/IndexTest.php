@@ -51,7 +51,7 @@ class IndexTest extends TestCase
         $index->close();
 
         $reopened = new Index($this->dbPath);
-        $this->assertContains(1, $reopened->search('sedan')->ids);
+        $this->assertContains(1, $reopened->search('sedan')->getIds());
     }
 
     public function testStatsPersistAfterReopen(): void
@@ -96,7 +96,7 @@ class IndexTest extends TestCase
         $index->close();
 
         $fresh = new Index($this->dbPath, force: true);
-        $this->assertSame([], $fresh->search('sedan')->ids);
+        $this->assertSame([], $fresh->search('sedan')->getIds());
     }
 
     public function testCreateWithForceRefusesToOverwriteNonSqliteFile(): void
@@ -224,7 +224,7 @@ class IndexTest extends TestCase
         $index->insert([['id' => 1, 'title' => 'fast sedan', 'body' => 'comfortable city car']]);
 
         $result = $index->search('sedan');
-        $this->assertContains(1, $result->ids);
+        $this->assertContains(1, $result->getIds());
     }
 
     public function testStoredOnlyFieldIsNotIndexed(): void
@@ -237,9 +237,9 @@ class IndexTest extends TestCase
             'unique'    => 'shouldnotbeindexed',
         ]]);
 
-        $this->assertSame([1], $index->search('sedan')->ids);
-        $this->assertSame([], $index->search('shouldnotbeindexed')->ids);
-        $this->assertSame([], $index->search('permalink')->ids);
+        $this->assertSame([1], $index->search('sedan')->getIds());
+        $this->assertSame([], $index->search('shouldnotbeindexed')->getIds());
+        $this->assertSame([], $index->search('permalink')->getIds());
     }
 
     public function testStoredOnlyFieldIsPreservedInDocumentStore(): void
@@ -248,7 +248,7 @@ class IndexTest extends TestCase
         $index = new Index($this->dbPath, schema: new SchemaConfig(store: true, searchableFields: ['title']));
         $index->insert([$doc]);
 
-        $this->assertSame($doc, $index->search('sedan')->document(1));
+        $this->assertSame($doc, $index->search('sedan')->getHit(0));
     }
 
     public function testSearchReturnsEmptyForNoMatch(): void
@@ -257,62 +257,8 @@ class IndexTest extends TestCase
         $index->insert([['id' => 1, 'title' => 'sedan car']]);
 
         $result = $index->search('helicopter');
-        $this->assertSame([], $result->ids);
-        $this->assertSame(0, $result->hits);
-    }
-
-    public function testSearchReturnsBm25Scores(): void
-    {
-        $index = new Index($this->dbPath);
-        // Two docs so the term is not universal; smoothed IDF is always > 0 anyway.
-        $index->insert([
-            ['id' => 1, 'title' => 'sedan car'],
-            ['id' => 2, 'title' => 'suv truck'],
-        ]);
-
-        $result = $index->search('sedan');
-        $this->assertNotNull($result->score(1));
-        $this->assertGreaterThan(0.0, $result->score(1));
-    }
-
-    public function testHasScoresTrueForBm25Search(): void
-    {
-        $index = new Index($this->dbPath);
-        $index->insert([['id' => 1, 'title' => 'sedan']]);
-
-        $this->assertTrue($index->search('sedan')->hasScores());
-    }
-
-    public function testHasScoresFalseForBooleanSearch(): void
-    {
-        $index = new Index($this->dbPath);
-        $index->insert([['id' => 1, 'title' => 'sedan']]);
-
-        $this->assertFalse($index->searchBoolean('sedan')->hasScores());
-    }
-
-    public function testScoresReturnsFullMap(): void
-    {
-        $index = new Index($this->dbPath);
-        $index->insert([
-            ['id' => 1, 'title' => 'sedan car'],
-            ['id' => 2, 'title' => 'sedan coupe'],
-        ]);
-
-        $result = $index->search('sedan');
-        $scores = $result->scores();
-        $this->assertArrayHasKey(1, $scores);
-        $this->assertArrayHasKey(2, $scores);
-        $this->assertSame($result->score(1), $scores[1]);
-        $this->assertSame($result->score(2), $scores[2]);
-    }
-
-    public function testScoresEmptyForBooleanSearch(): void
-    {
-        $index = new Index($this->dbPath);
-        $index->insert([['id' => 1, 'title' => 'sedan']]);
-
-        $this->assertSame([], $index->searchBoolean('sedan')->scores());
+        $this->assertSame([], $result->getIds());
+        $this->assertSame(0, $result->totalHits);
     }
 
     public function testSearchHitsCountsAllMatchingDocs(): void
@@ -325,7 +271,7 @@ class IndexTest extends TestCase
         ]);
 
         $result = $index->search('sedan');
-        $this->assertSame(2, $result->hits);
+        $this->assertSame(2, $result->totalHits);
     }
 
     public function testInsertSharedTermAcrossCallsPreservesTermAfterDelete(): void
@@ -337,7 +283,7 @@ class IndexTest extends TestCase
 
         // If the cache-hit UPDATE was a no-op, wordlist num_hits for 'sedan' would still be 1
         // after the second insert. Deleting doc 1 (1 hit) would zero it and prune the term.
-        $this->assertContains(2, $index->search('sedan')->ids);
+        $this->assertContains(2, $index->search('sedan')->getIds());
     }
 
     public function testSearchRespectsNumOfResults(): void
@@ -350,8 +296,8 @@ class IndexTest extends TestCase
         ]);
 
         $result = $index->search('sedan', limit: 2);
-        $this->assertCount(2, $result->ids);
-        $this->assertSame(3, $result->hits); // total untruncated
+        $this->assertCount(2, $result->getIds());
+        $this->assertSame(3, $result->totalHits); // total untruncated
     }
 
     public function testSearchDefaultNumOfResultsIsOneHundred(): void
@@ -361,12 +307,12 @@ class IndexTest extends TestCase
         $index->insert(array_map(fn($i): array => ['id' => $i, 'title' => 'sedan'], range(1, 101)));
 
         $result = $index->search('sedan');
-        $this->assertCount(100, $result->ids);
-        $this->assertSame(101, $result->hits);
+        $this->assertCount(100, $result->getIds());
+        $this->assertSame(101, $result->totalHits);
 
         $resultBool = $index->searchBoolean('sedan');
-        $this->assertCount(100, $resultBool->ids);
-        $this->assertSame(101, $resultBool->hits);
+        $this->assertCount(100, $resultBool->getIds());
+        $this->assertSame(101, $resultBool->totalHits);
     }
 
     public function testSearchIsCaseInsensitive(): void
@@ -374,8 +320,8 @@ class IndexTest extends TestCase
         $index = new Index($this->dbPath);
         $index->insert([['id' => 1, 'title' => 'SEDAN']]);
 
-        $this->assertContains(1, $index->search('sedan')->ids);
-        $this->assertContains(1, $index->search('SEDAN')->ids);
+        $this->assertContains(1, $index->search('sedan')->getIds());
+        $this->assertContains(1, $index->search('SEDAN')->getIds());
     }
 
     public function testSearchLowercasesMultibyteQueryViaSearch(): void
@@ -387,7 +333,7 @@ class IndexTest extends TestCase
         // 'Ü' (U+00DC) is two UTF-8 bytes; strtolower leaves it unchanged, so 'ÜBER' stays
         // uppercase and doesn't match the lowercase-stored term 'über'.
         // searchBoolean already lowercases in lexExpression, so this test must use search().
-        $this->assertContains(1, $index->search('ÜBER', asYouType: false)->ids);
+        $this->assertContains(1, $index->search('ÜBER', asYouType: false)->getIds());
     }
 
     public function testShortWordsSkipFuzzyGate(): void
@@ -397,7 +343,7 @@ class IndexTest extends TestCase
         $index = new Index($this->dbPath);
         $index->insert([['id' => 1, 'title' => 'hello']]);
 
-        $this->assertEmpty($index->search('helo', asYouType: false)->ids);
+        $this->assertEmpty($index->search('helo', asYouType: false)->getIds());
     }
 
     public function testLongWordTypoFuzzyFires(): void
@@ -407,7 +353,7 @@ class IndexTest extends TestCase
         $index = new Index($this->dbPath);
         $index->insert([['id' => 1, 'title' => 'hello']]);
 
-        $this->assertContains(1, $index->search('hellow', asYouType: false)->ids);
+        $this->assertContains(1, $index->search('hellow', asYouType: false)->getIds());
     }
 
     public function testSearchOrdersByRelevance(): void
@@ -419,7 +365,7 @@ class IndexTest extends TestCase
         ]);
 
         $result = $index->search('sedan');
-        $this->assertSame(2, $result->ids[0]);
+        $this->assertSame(2, $result->getIds()[0]);
     }
 
     public function testSearchResultsOrderedByBm25NotFetchOrder(): void
@@ -433,7 +379,7 @@ class IndexTest extends TestCase
         ]);
         $result = $index->search('sedan');
         // Short doc must rank first; without arsort the raw DB order (doc 2) would win.
-        $this->assertSame(1, $result->ids[0]);
+        $this->assertSame(1, $result->getIds()[0]);
     }
 
     public function testMultiKeywordSearchAccumulatesScoresAcrossTerms(): void
@@ -447,7 +393,7 @@ class IndexTest extends TestCase
         // Doc 2 earns only a sedan score (high TF but heavily length-penalised).
         // Without accumulation the coalesce bug resets doc1 to sedan-only, so doc2 wins.
         $result = $index->search('car sedan', asYouType: false);
-        $this->assertSame(1, $result->ids[0]);
+        $this->assertSame(1, $result->getIds()[0]);
     }
 
     public function testMatchCountTierRanksFullMatchAbovePartialMatch(): void
@@ -470,7 +416,7 @@ class IndexTest extends TestCase
 
         $result = $index->search('rare common', asYouType: false);
 
-        $this->assertSame(2, $result->ids[0], 'Doc matching both query terms must rank first');
+        $this->assertSame(2, $result->getIds()[0], 'Doc matching both query terms must rank first');
     }
 
     public function testSearchReturnsEmptyIdsWhenNumOfResultsIsZero(): void
@@ -478,8 +424,8 @@ class IndexTest extends TestCase
         $index = new Index($this->dbPath);
         $index->insert([['id' => 1, 'title' => 'sedan']]);
         $result = $index->search('sedan', limit: 0);
-        $this->assertSame([], $result->ids);
-        $this->assertSame(1, $result->hits);
+        $this->assertSame([], $result->getIds());
+        $this->assertSame(1, $result->totalHits);
     }
 
     // --- as-you-type prefix ---
@@ -490,7 +436,7 @@ class IndexTest extends TestCase
         $index->insert([['id' => 1, 'title' => 'Mercedes Benz']]);
 
         $result = $index->search('merc');
-        $this->assertContains(1, $result->ids);
+        $this->assertContains(1, $result->getIds());
     }
 
     public function testAsYouTypeDisabledNoPartialMatch(): void
@@ -499,7 +445,7 @@ class IndexTest extends TestCase
         $index->insert([['id' => 1, 'title' => 'Mercedes Benz']]);
 
         $result = $index->search('merc', asYouType: false);
-        $this->assertNotContains(1, $result->ids);
+        $this->assertNotContains(1, $result->getIds());
     }
 
     public function testPrefixSearchExpandsAllMatchingTerms(): void
@@ -511,8 +457,8 @@ class IndexTest extends TestCase
         ]);
         // Mutant 190 returns only the first wordlist row, so one doc would be missing.
         $result = $index->search('s');
-        $this->assertContains(1, $result->ids);
-        $this->assertContains(2, $result->ids);
+        $this->assertContains(1, $result->getIds());
+        $this->assertContains(2, $result->getIds());
     }
 
     // --- maxDocs ---
@@ -529,7 +475,7 @@ class IndexTest extends TestCase
         ]);
 
         $result = $index->search('sedan');
-        $this->assertCount(2, $result->ids);
+        $this->assertCount(2, $result->getIds());
     }
 
     // --- top-k / heap ---
@@ -549,19 +495,11 @@ class IndexTest extends TestCase
         // Request only 3 results (total=5 > 3 triggers the heap path).
         $result = $index->search('sedan', limit: 3);
 
-        $this->assertCount(3, $result->ids);
+        $this->assertCount(3, $result->getIds());
         // Doc 5 has the highest TF so it must be ranked first.
-        $this->assertSame(5, $result->ids[0]);
-        $counter = count($result->ids);
-        // Results must be in descending score order.
-        for ($i = 1; $i < $counter; $i++) {
-            $prev = $result->ids[$i - 1];
-            $curr = $result->ids[$i];
-            $this->assertGreaterThanOrEqual(
-                $result->score($curr),
-                $result->score($prev),
-            );
-        }
+        $this->assertSame(5, $result->getIds()[0]);
+        // IDs must be in descending relevance order (5 > 4 > 3 by TF).
+        $this->assertSame([5, 4, 3], $result->getIds());
     }
 
     public function testSearchTopKSelectsByBm25NotByHitCount(): void
@@ -580,10 +518,10 @@ class IndexTest extends TestCase
         // Correct: short docs win on BM25 → ids [3, 4].
         // Mutant 34 (> → <=): short docs are never swapped in → ids [1, 2] instead.
         $result = $index->search('sedan', limit: 2);
-        $this->assertContains(3, $result->ids);
-        $this->assertContains(4, $result->ids);
-        $this->assertNotContains(1, $result->ids);
-        $this->assertNotContains(2, $result->ids);
+        $this->assertContains(3, $result->getIds());
+        $this->assertContains(4, $result->getIds());
+        $this->assertNotContains(1, $result->getIds());
+        $this->assertNotContains(2, $result->getIds());
     }
 
     public function testSearchHeapMinIsSetWhenHeapBecomesFull(): void
@@ -605,10 +543,10 @@ class IndexTest extends TestCase
 
         $result = $index->search('sedan', limit: 2);
 
-        $this->assertCount(2, $result->ids);
-        $this->assertContains(1, $result->ids);     // always in top-2
-        $this->assertContains(3, $result->ids);     // middle replaces weakest (correct heapMin)
-        $this->assertNotContains(2, $result->ids); // weakest is evicted
+        $this->assertCount(2, $result->getIds());
+        $this->assertContains(1, $result->getIds());     // always in top-2
+        $this->assertContains(3, $result->getIds());     // middle replaces weakest (correct heapMin)
+        $this->assertNotContains(2, $result->getIds()); // weakest is evicted
     }
 
     public function testSearchTopKWithNumOfResultsOneReturnsStrictlyBestDoc(): void
@@ -629,8 +567,8 @@ class IndexTest extends TestCase
             ['id' => 3, 'title' => 'sedan sedan'],
         ]);
         $result = $index->search('sedan', limit: 1);
-        $this->assertCount(1, $result->ids);
-        $this->assertSame(1, $result->ids[0]); // doc1 has the highest BM25 score
+        $this->assertCount(1, $result->getIds());
+        $this->assertSame(1, $result->getIds()[0]); // doc1 has the highest BM25 score
     }
 
     public function testSearchOffsetSkipsTopResults(): void
@@ -649,24 +587,24 @@ class IndexTest extends TestCase
         $page2 = $index->search('sedan', limit: 2, offset: 2);
         $page3 = $index->search('sedan', limit: 2, offset: 4);
 
-        $this->assertCount(2, $page1->ids);
-        $this->assertCount(2, $page2->ids);
-        $this->assertCount(1, $page3->ids);
+        $this->assertCount(2, $page1->getIds());
+        $this->assertCount(2, $page2->getIds());
+        $this->assertCount(1, $page3->getIds());
 
         // hits is always the full total regardless of offset.
-        $this->assertSame(5, $page1->hits);
-        $this->assertSame(5, $page2->hits);
-        $this->assertSame(5, $page3->hits);
+        $this->assertSame(5, $page1->totalHits);
+        $this->assertSame(5, $page2->totalHits);
+        $this->assertSame(5, $page3->totalHits);
 
         // Pages are non-overlapping and together cover all 5 docs.
-        $allIds = array_merge($page1->ids, $page2->ids, $page3->ids);
+        $allIds = array_merge($page1->getIds(), $page2->getIds(), $page3->getIds());
         $this->assertEqualsCanonicalizing([1, 2, 3, 4, 5], array_unique($allIds));
 
         // Page 1 must start with the best-scoring doc.
-        $this->assertSame(5, $page1->ids[0]);
+        $this->assertSame(5, $page1->getIds()[0]);
         // Pages must not overlap.
-        $this->assertEmpty(array_intersect($page1->ids, $page2->ids));
-        $this->assertEmpty(array_intersect($page2->ids, $page3->ids));
+        $this->assertEmpty(array_intersect($page1->getIds(), $page2->getIds()));
+        $this->assertEmpty(array_intersect($page2->getIds(), $page3->getIds()));
     }
 
     public function testSearchOffsetBeyondTotalReturnsEmptyIds(): void
@@ -676,8 +614,8 @@ class IndexTest extends TestCase
 
         $result = $index->search('sedan', limit: 10, offset: 5);
 
-        $this->assertSame([], $result->ids);
-        $this->assertSame(1, $result->hits);
+        $this->assertSame([], $result->getIds());
+        $this->assertSame(1, $result->totalHits);
     }
 
     public function testSearchBooleanOffsetSkipsTopResults(): void
@@ -692,11 +630,11 @@ class IndexTest extends TestCase
         $page1 = $index->searchBoolean('sedan', limit: 2, offset: 0);
         $page2 = $index->searchBoolean('sedan', limit: 2, offset: 2);
 
-        $this->assertCount(2, $page1->ids);
-        $this->assertCount(1, $page2->ids);
-        $this->assertSame(3, $page1->hits);
-        $this->assertSame(3, $page2->hits);
-        $this->assertEmpty(array_intersect($page1->ids, $page2->ids));
+        $this->assertCount(2, $page1->getIds());
+        $this->assertCount(1, $page2->getIds());
+        $this->assertSame(3, $page1->totalHits);
+        $this->assertSame(3, $page2->totalHits);
+        $this->assertEmpty(array_intersect($page1->getIds(), $page2->getIds()));
     }
 
     // --- insertMany ---
@@ -709,8 +647,8 @@ class IndexTest extends TestCase
             ['id' => 2, 'title' => 'suv truck'],
         ]);
 
-        $this->assertContains(1, $index->search('sedan')->ids);
-        $this->assertContains(2, $index->search('suv')->ids);
+        $this->assertContains(1, $index->search('sedan')->getIds());
+        $this->assertContains(2, $index->search('suv')->getIds());
     }
 
     public function testInsertManyWithEmptyArrayIsNoop(): void
@@ -718,7 +656,7 @@ class IndexTest extends TestCase
         $index = new Index($this->dbPath);
         $index->insert([]);
 
-        $this->assertSame(0, $index->search('anything')->hits);
+        $this->assertSame(0, $index->search('anything')->totalHits);
     }
 
     // --- update ---
@@ -729,8 +667,8 @@ class IndexTest extends TestCase
         $index->insert([['id' => 1, 'title' => 'sedan car']]);
         $index->update([['id' => 1, 'title' => 'suv truck']]);
 
-        $this->assertEmpty($index->search('sedan')->ids);
-        $this->assertContains(1, $index->search('suv')->ids);
+        $this->assertEmpty($index->search('sedan')->getIds());
+        $this->assertContains(1, $index->search('suv')->getIds());
     }
 
     public function testUpdatePreservesTotalDocumentCount(): void
@@ -742,7 +680,7 @@ class IndexTest extends TestCase
         ]);
         $index->update([['id' => 1, 'title' => 'suv']]);
 
-        $this->assertSame(2, $index->search('suv')->hits + $index->search('coupe')->hits);
+        $this->assertSame(2, $index->search('suv')->totalHits + $index->search('coupe')->totalHits);
     }
 
     public function testUpdateExistingDocDoesNotIncrementTotalDocuments(): void
@@ -784,7 +722,7 @@ class IndexTest extends TestCase
         $index = new Index($this->dbPath);
         $index->upsert([['id' => 999, 'title' => 'sedan']]);
 
-        $this->assertContains(999, $index->search('sedan')->ids);
+        $this->assertContains(999, $index->search('sedan')->getIds());
     }
 
     public function testUpsertNonExistentDocIncrementsCount(): void
@@ -801,8 +739,8 @@ class IndexTest extends TestCase
         $index->insert([['id' => 1, 'title' => 'sedan car']]);
         $index->upsert([['id' => 1, 'title' => 'suv truck']]);
 
-        $this->assertEmpty($index->search('sedan')->ids);
-        $this->assertContains(1, $index->search('suv')->ids);
+        $this->assertEmpty($index->search('sedan')->getIds());
+        $this->assertContains(1, $index->search('suv')->getIds());
     }
 
     public function testUpsertExistingDocDoesNotIncrementTotalDocuments(): void
@@ -832,10 +770,10 @@ class IndexTest extends TestCase
             ['id' => 2, 'title' => 'hatchback'],
         ]);
 
-        $this->assertEmpty($index->search('sedan')->ids);
-        $this->assertEmpty($index->search('coupe')->ids);
-        $this->assertContains(1, $index->search('suv')->ids);
-        $this->assertContains(2, $index->search('hatchback')->ids);
+        $this->assertEmpty($index->search('sedan')->getIds());
+        $this->assertEmpty($index->search('coupe')->getIds());
+        $this->assertContains(1, $index->search('suv')->getIds());
+        $this->assertContains(2, $index->search('hatchback')->getIds());
     }
 
     public function testUpdateManyPreservesTotalDocumentCount(): void
@@ -916,8 +854,8 @@ class IndexTest extends TestCase
         }
 
         // id 1 must be unchanged — the upfront check prevented any write
-        $this->assertContains(1, $index->search('sedan')->ids);
-        $this->assertEmpty($index->search('suv')->ids);
+        $this->assertContains(1, $index->search('sedan')->getIds());
+        $this->assertEmpty($index->search('suv')->getIds());
     }
 
     public function testUpdateManyUpdatesAvgDocLength(): void
@@ -958,8 +896,8 @@ class IndexTest extends TestCase
             ['id' => 2, 'title' => 'coupe'],
         ]);
 
-        $this->assertContains(1, $index->search('sedan')->ids);
-        $this->assertContains(2, $index->search('coupe')->ids);
+        $this->assertContains(1, $index->search('sedan')->getIds());
+        $this->assertContains(2, $index->search('coupe')->getIds());
     }
 
     public function testUpsertManyMixedExistingAndNewIdsUpdatesCount(): void
@@ -999,7 +937,7 @@ class IndexTest extends TestCase
         $index->insert([['id' => 1, 'title' => 'sedan']]);
         $index->upsert([]);
 
-        $this->assertContains(1, $index->search('sedan')->ids);
+        $this->assertContains(1, $index->search('sedan')->getIds());
         $info = $index->inspectQuery('sedan')['index_info'];
         $this->assertSame('1', $info['total_documents']);
     }
@@ -1012,7 +950,7 @@ class IndexTest extends TestCase
         $index->insert([['id' => 1, 'title' => 'sedan car']]);
         $index->delete(1);
 
-        $this->assertEmpty($index->search('sedan')->ids);
+        $this->assertEmpty($index->search('sedan')->getIds());
     }
 
     public function testDeleteDoesNotAffectOtherDocuments(): void
@@ -1024,7 +962,7 @@ class IndexTest extends TestCase
         ]);
         $index->delete(1);
 
-        $this->assertContains(2, $index->search('suv')->ids);
+        $this->assertContains(2, $index->search('suv')->getIds());
     }
 
     public function testDeleteNonexistentDocumentIsNoop(): void
@@ -1033,7 +971,7 @@ class IndexTest extends TestCase
         $index->insert([['id' => 1, 'title' => 'sedan']]);
         $index->delete(999);
 
-        $this->assertContains(1, $index->search('sedan')->ids);
+        $this->assertContains(1, $index->search('sedan')->getIds());
     }
 
     public function testDeleteDecrementsDocumentCount(): void
@@ -1061,9 +999,9 @@ class IndexTest extends TestCase
         ]);
         $index->delete(1, 2);
 
-        $this->assertEmpty($index->search('sedan')->ids);
-        $this->assertEmpty($index->search('coupe')->ids);
-        $this->assertContains(3, $index->search('suv')->ids);
+        $this->assertEmpty($index->search('sedan')->getIds());
+        $this->assertEmpty($index->search('coupe')->getIds());
+        $this->assertContains(3, $index->search('suv')->getIds());
     }
 
     public function testDeleteManyUpdatesDocumentCount(): void
@@ -1117,7 +1055,7 @@ class IndexTest extends TestCase
         $index->insert([['id' => 1, 'title' => 'sedan']]);
         $index->delete();
 
-        $this->assertContains(1, $index->search('sedan')->ids);
+        $this->assertContains(1, $index->search('sedan')->getIds());
     }
 
     public function testDeleteManyIgnoresNonexistentIds(): void
@@ -1126,7 +1064,7 @@ class IndexTest extends TestCase
         $index->insert([['id' => 1, 'title' => 'sedan']]);
         $index->delete(1, 999);
 
-        $this->assertEmpty($index->search('sedan')->ids);
+        $this->assertEmpty($index->search('sedan')->getIds());
     }
 
     public function testDeleteManyIsAtomicOnFailure(): void
@@ -1141,8 +1079,8 @@ class IndexTest extends TestCase
         ]);
         $index->delete(1, 888, 2);
 
-        $this->assertEmpty($index->search('sedan')->ids);
-        $this->assertEmpty($index->search('coupe')->ids);
+        $this->assertEmpty($index->search('sedan')->getIds());
+        $this->assertEmpty($index->search('coupe')->getIds());
     }
 
     // --- clear ---
@@ -1157,9 +1095,9 @@ class IndexTest extends TestCase
         ]);
         $index->clear();
 
-        $this->assertEmpty($index->search('sedan')->ids);
-        $this->assertEmpty($index->search('coupe')->ids);
-        $this->assertEmpty($index->search('suv')->ids);
+        $this->assertEmpty($index->search('sedan')->getIds());
+        $this->assertEmpty($index->search('coupe')->getIds());
+        $this->assertEmpty($index->search('suv')->getIds());
     }
 
     public function testClearResetsDocumentCount(): void
@@ -1194,8 +1132,8 @@ class IndexTest extends TestCase
         $index->clear();
         $index->insert([['id' => 1, 'title' => 'coupe']]);
 
-        $this->assertEmpty($index->search('sedan')->ids);
-        $this->assertContains(1, $index->search('coupe')->ids);
+        $this->assertEmpty($index->search('sedan')->getIds());
+        $this->assertContains(1, $index->search('coupe')->getIds());
         $this->assertSame(1, $index->count());
     }
 
@@ -1418,18 +1356,15 @@ class IndexTest extends TestCase
         $index->insert([['id' => 1, 'title' => 'Mercedes Benz', 'body' => 'luxury car']]);
 
         $result = $index->search('mercdes');
-        $this->assertContains(1, $result->ids);
+        $this->assertContains(1, $result->getIds());
     }
 
-    public function testSearchFuzzyReturnsDocScores(): void
+    public function testSearchFuzzyReturnsMatch(): void
     {
         $index = new Index($this->dbPath);
         $index->insert([['id' => 1, 'title' => 'Volkswagen Golf']]);
 
-        $result = $index->search('volksagen');
-        $this->assertContains(1, $result->ids);
-        $this->assertNotNull($result->score(1));
-        $this->assertGreaterThan(0.0, $result->score(1));
+        $this->assertContains(1, $index->search('volksagen')->getIds());
     }
 
     public function testSearchFuzzyNoMatchReturnsEmpty(): void
@@ -1438,8 +1373,8 @@ class IndexTest extends TestCase
         $index->insert([['id' => 1, 'title' => 'sedan']]);
 
         $result = $index->search('xqzpwk');
-        $this->assertSame([], $result->ids);
-        $this->assertSame(0, $result->hits);
+        $this->assertSame([], $result->getIds());
+        $this->assertSame(0, $result->totalHits);
     }
 
     public function testFuzzyMinWordLengthGateBlocksShortWords(): void
@@ -1448,7 +1383,7 @@ class IndexTest extends TestCase
         $index = new Index($this->dbPath);
         $index->insert([['id' => 1, 'title' => 'sedan']]);
 
-        $this->assertEmpty($index->search('sedn', asYouType: false)->ids);
+        $this->assertEmpty($index->search('sedn', asYouType: false)->getIds());
     }
 
     public function testFuzzyMinWordLengthGateAllowsLongWords(): void
@@ -1457,7 +1392,7 @@ class IndexTest extends TestCase
         $index = new Index($this->dbPath);
         $index->insert([['id' => 1, 'title' => 'sedan']]);
 
-        $this->assertContains(1, $index->search('sedaan', asYouType: false)->ids);
+        $this->assertContains(1, $index->search('sedaan', asYouType: false)->getIds());
     }
 
     public function testFuzzyMinWordLengthConfigurable(): void
@@ -1468,7 +1403,7 @@ class IndexTest extends TestCase
         $index = new Index($this->dbPath, config: new \Fuzor\Config(fuzzyMinWordLength: 3));
         $index->insert([['id' => 1, 'title' => 'sedan']]);
 
-        $this->assertContains(1, $index->search('sedn', asYouType: false)->ids);
+        $this->assertContains(1, $index->search('sedn', asYouType: false)->getIds());
     }
 
     public function testFuzzyAutoTierShortWordCappedAtOneTypo(): void
@@ -1478,7 +1413,7 @@ class IndexTest extends TestCase
         $index = new Index($this->dbPath);
         $index->insert([['id' => 1, 'title' => 'sedan']]);
 
-        $this->assertNotContains(1, $index->search('seddaan')->ids);
+        $this->assertNotContains(1, $index->search('seddaan')->getIds());
     }
 
     public function testFuzzyAutoTierLongWordAllowsTwoTypos(): void
@@ -1488,7 +1423,7 @@ class IndexTest extends TestCase
         $index = new Index($this->dbPath);
         $index->insert([['id' => 1, 'title' => 'volkswaagen']]);
 
-        $this->assertContains(1, $index->search('volkswagen')->ids);
+        $this->assertContains(1, $index->search('volkswagen')->getIds());
     }
 
     public function testFuzzySearchCloserMatchRanksFirst(): void
@@ -1503,9 +1438,9 @@ class IndexTest extends TestCase
 
         $result = $index->search('volkswage', asYouType: false);
 
-        $this->assertContains(1, $result->ids);
-        $this->assertContains(2, $result->ids);
-        $pos = array_flip($result->ids);
+        $this->assertContains(1, $result->getIds());
+        $this->assertContains(2, $result->getIds());
+        $pos = array_flip($result->getIds());
         $this->assertLessThan($pos[2], $pos[1]);
     }
 
@@ -1521,7 +1456,7 @@ class IndexTest extends TestCase
         // are at the same edit distance from 'drako', so the secondary sort by num_hits
         // decides order: DESC → 'drake' first (5 hits), ASC (mutant) → 'draka' first (1 hit).
         $result = $index->search('drako');
-        $this->assertSame(1, $result->ids[0]);
+        $this->assertSame(1, $result->getIds()[0]);
     }
 
     // --- searchBoolean ---
@@ -1536,9 +1471,9 @@ class IndexTest extends TestCase
         ]);
 
         $result = $index->searchBoolean('sedan coupe');
-        $this->assertContains(1, $result->ids);
-        $this->assertNotContains(2, $result->ids);
-        $this->assertNotContains(3, $result->ids);
+        $this->assertContains(1, $result->getIds());
+        $this->assertNotContains(2, $result->getIds());
+        $this->assertNotContains(3, $result->getIds());
     }
 
     public function testSearchBooleanOr(): void
@@ -1551,9 +1486,9 @@ class IndexTest extends TestCase
         ]);
 
         $result = $index->searchBoolean('sedan or suv');
-        $this->assertContains(1, $result->ids);
-        $this->assertContains(2, $result->ids);
-        $this->assertNotContains(3, $result->ids);
+        $this->assertContains(1, $result->getIds());
+        $this->assertContains(2, $result->getIds());
+        $this->assertNotContains(3, $result->getIds());
     }
 
     public function testSearchBooleanNot(): void
@@ -1565,8 +1500,8 @@ class IndexTest extends TestCase
         ]);
 
         $result = $index->searchBoolean('sedan -bmw');
-        $this->assertContains(2, $result->ids);
-        $this->assertNotContains(1, $result->ids);
+        $this->assertContains(2, $result->getIds());
+        $this->assertNotContains(1, $result->getIds());
     }
 
     public function testSearchBooleanNotRespectsAsYouTypePrefix(): void
@@ -1580,18 +1515,8 @@ class IndexTest extends TestCase
         // Both docs match 'sedan', but doc 1 must be excluded because
         // 'mercedes' starts with 'merc' and asYouType prefix NOT is enabled.
         $result = $index->searchBoolean('sedan -merc');
-        $this->assertContains(2, $result->ids);
-        $this->assertNotContains(1, $result->ids);
-    }
-
-    public function testSearchBooleanDocScoresIsNull(): void
-    {
-        $index = new Index($this->dbPath);
-        $index->insert([['id' => 1, 'title' => 'sedan']]);
-
-        $result = $index->searchBoolean('sedan');
-        // Boolean search never scores; score() always returns null.
-        $this->assertNull($result->score(1));
+        $this->assertContains(2, $result->getIds());
+        $this->assertNotContains(1, $result->getIds());
     }
 
     public function testSearchBooleanAndLastTermPrefixMatches(): void
@@ -1604,9 +1529,9 @@ class IndexTest extends TestCase
         ]);
 
         $result = $index->searchBoolean('bmw sed');
-        $this->assertContains(1, $result->ids);
-        $this->assertNotContains(2, $result->ids);
-        $this->assertNotContains(3, $result->ids);
+        $this->assertContains(1, $result->getIds());
+        $this->assertNotContains(2, $result->getIds());
+        $this->assertNotContains(3, $result->getIds());
     }
 
     public function testSearchBooleanOrLastTermPrefixMatches(): void
@@ -1619,9 +1544,9 @@ class IndexTest extends TestCase
         ]);
 
         $result = $index->searchBoolean('bmw or sed');
-        $this->assertContains(1, $result->ids);
-        $this->assertContains(2, $result->ids);
-        $this->assertNotContains(3, $result->ids);
+        $this->assertContains(1, $result->getIds());
+        $this->assertContains(2, $result->getIds());
+        $this->assertNotContains(3, $result->getIds());
     }
 
     public function testSearchBooleanAsYouTypeDisabledNoPartialMatch(): void
@@ -1633,7 +1558,7 @@ class IndexTest extends TestCase
         ]);
 
         $result = $index->searchBoolean('bmw sed', asYouType: false);
-        $this->assertEmpty($result->ids);
+        $this->assertEmpty($result->getIds());
     }
 
     public function testSearchBooleanOnlyLastTermIsPrefixExpanded(): void
@@ -1648,7 +1573,7 @@ class IndexTest extends TestCase
         // 'cou' should expand 'coupe' only for the last term.
         $result = $index->searchBoolean('sed cou');
         // 'sed' is not the last term so it must match exactly — no doc has 'sed' literally.
-        $this->assertEmpty($result->ids);
+        $this->assertEmpty($result->getIds());
     }
 
     public function testSearchBooleanSingleTermAsYouTypePrefix(): void
@@ -1662,8 +1587,8 @@ class IndexTest extends TestCase
         // A single-term boolean query: the term is at postfix index 0.
         // The loop that finds lastTerm must reach index 0 or prefix expansion breaks.
         $result = $index->searchBoolean('sed');
-        $this->assertContains(1, $result->ids);
-        $this->assertNotContains(2, $result->ids);
+        $this->assertContains(1, $result->getIds());
+        $this->assertNotContains(2, $result->getIds());
     }
 
     public function testSearchBooleanAndMissingTermReturnsEmpty(): void
@@ -1672,7 +1597,7 @@ class IndexTest extends TestCase
         $index->insert([['id' => 1, 'title' => 'sedan']]);
 
         $result = $index->searchBoolean('sedan helicopter');
-        $this->assertSame([], $result->ids);
+        $this->assertSame([], $result->getIds());
     }
 
     public function testSearchBooleanHitsExceedsNumOfResults(): void
@@ -1685,8 +1610,8 @@ class IndexTest extends TestCase
         ]);
 
         $result = $index->searchBoolean('sedan', limit: 2);
-        $this->assertCount(2, $result->ids);
-        $this->assertSame(3, $result->hits);
+        $this->assertCount(2, $result->getIds());
+        $this->assertSame(3, $result->totalHits);
     }
 
     public function testSearchBooleanMultipleNots(): void
@@ -1699,9 +1624,9 @@ class IndexTest extends TestCase
         ]);
 
         $result = $index->searchBoolean('sedan -bmw -audi');
-        $this->assertContains(3, $result->ids);
-        $this->assertNotContains(1, $result->ids);
-        $this->assertNotContains(2, $result->ids);
+        $this->assertContains(3, $result->getIds());
+        $this->assertNotContains(1, $result->getIds());
+        $this->assertNotContains(2, $result->getIds());
     }
 
     public function testSearchBooleanNormalizesUnicodeUppercase(): void
@@ -1709,7 +1634,7 @@ class IndexTest extends TestCase
         $index = new Index($this->dbPath);
         $index->insert([['id' => 1, 'title' => 'café']]);
         $result = $index->searchBoolean('CAFÉ', asYouType: false);
-        $this->assertContains(1, $result->ids);
+        $this->assertContains(1, $result->getIds());
     }
 
     public function testBooleanAndBindsTighterThanOr(): void
@@ -1725,9 +1650,9 @@ class IndexTest extends TestCase
         // Correct: matches 1 and 2; not 3 (coupe without truck).
         // With reversed precedence it would parse as (sedan OR coupe) AND truck — matching 2 only.
         $result = $index->searchBoolean('sedan or coupe truck', asYouType: false);
-        $this->assertContains(1, $result->ids);
-        $this->assertContains(2, $result->ids);
-        $this->assertNotContains(3, $result->ids);
+        $this->assertContains(1, $result->getIds());
+        $this->assertContains(2, $result->getIds());
+        $this->assertNotContains(3, $result->getIds());
     }
 
     public function testBooleanNotBindsTighterThanAnd(): void
@@ -1743,8 +1668,8 @@ class IndexTest extends TestCase
         // But '&' priority change OR default priority change could shift grouping.
         // This exercises both '&'(2) and '~'(3) precedence in one query.
         $result = $index->searchBoolean('php -laravel', asYouType: false);
-        $this->assertContains(2, $result->ids);    // php AND NOT laravel → doc2
-        $this->assertNotContains(1, $result->ids); // doc1 has laravel → excluded
+        $this->assertContains(2, $result->getIds());    // php AND NOT laravel → doc2
+        $this->assertNotContains(1, $result->getIds()); // doc1 has laravel → excluded
     }
 
     public function testBooleanExplicitAndWithParenthesisedOrOnRight(): void
@@ -1761,9 +1686,9 @@ class IndexTest extends TestCase
         //   → array_diff(ids('php'), right['__not__']) where right['__not__'] is undefined
         //   → TypeError / wrong result.
         $result = $index->searchBoolean('php&(laravel or nodejs)', asYouType: false);
-        $this->assertContains(1, $result->ids);
-        $this->assertContains(2, $result->ids);
-        $this->assertNotContains(3, $result->ids);
+        $this->assertContains(1, $result->getIds());
+        $this->assertContains(2, $result->getIds());
+        $this->assertNotContains(3, $result->getIds());
     }
 
     public function testBooleanAndWithMaterializedOrResultIsIntersection(): void
@@ -1781,10 +1706,10 @@ class IndexTest extends TestCase
         // Mutation (||): is_array(right)=true → AND-NOT branch → array_diff(ids(php), right['__not__']).
         //   right['__not__'] is undefined → null → TypeError (fatal — kills the mutant).
         $result = $index->searchBoolean('php&(laravel or nodejs)', asYouType: false);
-        $this->assertCount(2, $result->ids);
-        $this->assertContains(1, $result->ids);
-        $this->assertContains(2, $result->ids);
-        $this->assertNotContains(3, $result->ids);
+        $this->assertCount(2, $result->getIds());
+        $this->assertContains(1, $result->getIds());
+        $this->assertContains(2, $result->getIds());
+        $this->assertNotContains(3, $result->getIds());
     }
 
     public function testBooleanSliceStartsAtIndexZero(): void
@@ -1799,9 +1724,9 @@ class IndexTest extends TestCase
         // Original: array_slice($docIds, 0, 2) → first two docs; doc 1 is included.
         // Mutation IncrementInteger: array_slice($docIds, 1, 2) → skips doc 1.
         $result = $index->searchBoolean('sedan', asYouType: false, limit: 2);
-        $this->assertCount(2, $result->ids);
-        $this->assertSame(3, $result->hits);
-        $this->assertContains(1, $result->ids); // first doc must survive the slice
+        $this->assertCount(2, $result->getIds());
+        $this->assertSame(3, $result->totalHits);
+        $this->assertContains(1, $result->getIds()); // first doc must survive the slice
     }
 
     public function testBooleanSearchLowercasesNonAsciiViaMultibyte(): void
@@ -1811,7 +1736,7 @@ class IndexTest extends TestCase
         // mb_strtolower('NAÏVE') → 'naïve'. strtolower('NAÏVE') → 'naÏve' (Ï stays uppercase).
         // Without mb_, the mutated query 'naÏve' does not match 'naïve' in the wordlist.
         $result = $index->searchBoolean('NAÏVE', asYouType: false);
-        $this->assertContains(1, $result->ids);
+        $this->assertContains(1, $result->getIds());
     }
 
     public function testBooleanSearchStripsSpacesAroundParentheses(): void
@@ -1825,8 +1750,8 @@ class IndexTest extends TestCase
         //   → preg_replace skipped → spaces around parens survive → str_replace converts them
         //   to spurious '&' operators inside the group → malformed postfix → empty result.
         $result = $index->searchBoolean('( café or latté )', asYouType: false);
-        $this->assertContains(1, $result->ids);
-        $this->assertContains(2, $result->ids);
+        $this->assertContains(1, $result->getIds());
+        $this->assertContains(2, $result->getIds());
     }
 
     public function testBooleanSearchFindsDocumentByUppercaseMultibyteQuery(): void
@@ -1836,7 +1761,7 @@ class IndexTest extends TestCase
         // 'Ü' (U+00DC) is two bytes in UTF-8; strtolower leaves it unchanged.
         $index->insert([['id' => 1, 'title' => 'über']]);
         $result = $index->searchBoolean('ÜBER', asYouType: false);
-        $this->assertContains(1, $result->ids);
+        $this->assertContains(1, $result->getIds());
     }
 
     public function testBooleanGroupNotFollowedByNot(): void
@@ -1853,10 +1778,10 @@ class IndexTest extends TestCase
         // Without the negative lookahead fix the space is consumed and '-electric' becomes
         // a literal word token rather than a NOT operator, returning docs 1–3 instead of 1.
         $result = $index->searchBoolean('(sedan or coupe) -electric', asYouType: false);
-        $this->assertContains(1, $result->ids);
-        $this->assertNotContains(2, $result->ids);
-        $this->assertNotContains(3, $result->ids);
-        $this->assertNotContains(4, $result->ids);
+        $this->assertContains(1, $result->getIds());
+        $this->assertNotContains(2, $result->getIds());
+        $this->assertNotContains(3, $result->getIds());
+        $this->assertNotContains(4, $result->getIds());
     }
 
     public function testBooleanGroupingConstrainsChainedAnd(): void
@@ -1873,11 +1798,11 @@ class IndexTest extends TestCase
         // operator inside the group on the stack. The resulting malformed postfix evaluates to
         // alpha ∪ (gamma ∩ delta) instead of alpha ∩ (beta ∪ gamma) ∩ delta, including doc 3.
         $result = $index->searchBoolean('alpha&(beta or gamma)&delta', asYouType: false);
-        $this->assertCount(2, $result->ids);
-        $this->assertContains(1, $result->ids);
-        $this->assertContains(2, $result->ids);
-        $this->assertNotContains(3, $result->ids);
-        $this->assertNotContains(4, $result->ids);
+        $this->assertCount(2, $result->getIds());
+        $this->assertContains(1, $result->getIds());
+        $this->assertContains(2, $result->getIds());
+        $this->assertNotContains(3, $result->getIds());
+        $this->assertNotContains(4, $result->getIds());
     }
 
     // --- inspectQuery ---
@@ -2097,7 +2022,7 @@ class IndexTest extends TestCase
         $index->inspectQuery('sedan', asYouType: false);
         // If cache is warm, search returns the same result without extra DB reads.
         $result = $index->search('sedan');
-        $this->assertContains(1, $result->ids);
+        $this->assertContains(1, $result->getIds());
     }
 
     public function testInspectQueryShortWordSkipsFuzzy(): void
@@ -2167,7 +2092,7 @@ class IndexTest extends TestCase
             $new->insert([['id' => 1, 'title' => 'sedan']]);
         });
 
-        $this->assertContains(1, $rebuilt->search('sedan')->ids);
+        $this->assertContains(1, $rebuilt->search('sedan')->getIds());
     }
 
     public function testRebuildRemovesOldContent(): void
@@ -2180,8 +2105,8 @@ class IndexTest extends TestCase
             $new->insert([['id' => 2, 'title' => 'new content']]);
         });
 
-        $this->assertEmpty($rebuilt->search('old')->ids);
-        $this->assertContains(2, $rebuilt->search('new')->ids);
+        $this->assertEmpty($rebuilt->search('old')->getIds());
+        $this->assertContains(2, $rebuilt->search('new')->getIds());
     }
 
     public function testRebuildLeavesOriginalIntactOnCallbackException(): void
@@ -2199,8 +2124,8 @@ class IndexTest extends TestCase
         }
 
         $surviving = new Index($this->dbPath);
-        $this->assertContains(1, $surviving->search('original')->ids);
-        $this->assertEmpty($surviving->search('partial')->ids);
+        $this->assertContains(1, $surviving->search('original')->getIds());
+        $this->assertEmpty($surviving->search('partial')->getIds());
     }
 
     public function testRebuildPropagatesCallbackException(): void
@@ -2249,7 +2174,7 @@ class IndexTest extends TestCase
             $new->insert([['id' => 1, 'title' => 'sedan']]);
         });
 
-        $this->assertContains(1, $rebuilt->search('sedan')->ids);
+        $this->assertContains(1, $rebuilt->search('sedan')->getIds());
     }
 
     public function testRebuildCountReflectsNewDocuments(): void
@@ -2272,7 +2197,7 @@ class IndexTest extends TestCase
         $index = new Index($this->dbPath, schema: new SchemaConfig(language: 'zh'));
         $index->insert([['id' => 1, 'body' => '轿车测试']]);
 
-        $this->assertContains(1, $index->search('轿车')->ids);
+        $this->assertContains(1, $index->search('轿车')->getIds());
     }
 
     public function testZhSingleCharSearch(): void
@@ -2281,7 +2206,7 @@ class IndexTest extends TestCase
         $index = new Index($this->dbPath, schema: new SchemaConfig(language: 'zh'));
         $index->insert([['id' => 1, 'body' => '轿车测试']]);
 
-        $this->assertContains(1, $index->search('车')->ids);
+        $this->assertContains(1, $index->search('车')->getIds());
     }
 
     public function testZhDoesNotMatchUnrelatedDocument(): void
@@ -2292,7 +2217,7 @@ class IndexTest extends TestCase
             ['id' => 2, 'body' => '飞机起飞'],
         ]);
 
-        $this->assertNotContains(2, $index->search('轿车')->ids);
+        $this->assertNotContains(2, $index->search('轿车')->getIds());
     }
 
     public function testJaInsertAndSearchBigram(): void
@@ -2300,7 +2225,7 @@ class IndexTest extends TestCase
         $index = new Index($this->dbPath, schema: new SchemaConfig(language: 'ja'));
         $index->insert([['id' => 1, 'body' => '東京タワー']]);
 
-        $this->assertContains(1, $index->search('東京')->ids);
+        $this->assertContains(1, $index->search('東京')->getIds());
     }
 
     public function testKoInsertAndSearchBigram(): void
@@ -2308,7 +2233,7 @@ class IndexTest extends TestCase
         $index = new Index($this->dbPath, schema: new SchemaConfig(language: 'ko'));
         $index->insert([['id' => 1, 'body' => '서울특별시']]);
 
-        $this->assertContains(1, $index->search('서울')->ids);
+        $this->assertContains(1, $index->search('서울')->getIds());
     }
 
     public function testThInsertAndSearchTrigram(): void
@@ -2317,7 +2242,7 @@ class IndexTest extends TestCase
         $index->insert([['id' => 1, 'body' => 'กรุงเทพมหานคร']]);
 
         // 'กรุงเท' is a trigram within the indexed text
-        $this->assertContains(1, $index->search('กรุงเท')->ids);
+        $this->assertContains(1, $index->search('กรุงเท')->getIds());
     }
 
     public function testZhBooleanSearch(): void
@@ -2329,8 +2254,8 @@ class IndexTest extends TestCase
         ]);
 
         $result = $index->searchBoolean('轿车 -飞机');
-        $this->assertContains(1, $result->ids);
-        $this->assertNotContains(2, $result->ids);
+        $this->assertContains(1, $result->getIds());
+        $this->assertNotContains(2, $result->getIds());
     }
 
     public function testZhQueryTokensAreNgrammed(): void
@@ -2355,8 +2280,8 @@ class IndexTest extends TestCase
 
         // Both docs contain '轿车'; only doc 1 also contains 'bmw'.
         $result = $index->searchBoolean('bmw 轿车');
-        $this->assertContains(1, $result->ids);
-        $this->assertNotContains(2, $result->ids);
+        $this->assertContains(1, $result->getIds());
+        $this->assertNotContains(2, $result->getIds());
     }
 
     // --- positions ---
@@ -2478,7 +2403,7 @@ class IndexTest extends TestCase
         $results = $index->search('fast car');
 
         // Both docs have the same terms; proximity should rank doc 1 higher (adjacent terms).
-        $this->assertSame([1, 2], $results->ids);
+        $this->assertSame([1, 2], $results->getIds());
     }
 
     public function testProximityBoostDisabledWhenBoostIsZero(): void
@@ -2492,9 +2417,9 @@ class IndexTest extends TestCase
 
         // With proximityBoost=0.0 the result order is pure BM25 (identical here → stable order).
         $results = $index->search('fast car');
-        $this->assertCount(2, $results->ids);
-        $this->assertContains(1, $results->ids);
-        $this->assertContains(2, $results->ids);
+        $this->assertCount(2, $results->getIds());
+        $this->assertContains(1, $results->getIds());
+        $this->assertContains(2, $results->getIds());
     }
 
     public function testProximityBoostNoEffectOnSingleKeyword(): void
@@ -2507,7 +2432,7 @@ class IndexTest extends TestCase
 
         // Single keyword: no proximity applied, just BM25.
         $results = $index->search('fast');
-        $this->assertCount(2, $results->ids);
+        $this->assertCount(2, $results->getIds());
     }
 
     public function testProximityBoostPartialMatchDocNotBoosted(): void
@@ -2521,7 +2446,7 @@ class IndexTest extends TestCase
 
         $results = $index->search('fast car');
         // doc 1 should rank above doc 2 (has both terms; doc 2 misses "car").
-        $this->assertSame(1, $results->ids[0]);
+        $this->assertSame(1, $results->getIds()[0]);
     }
 
     public function testProxWindowSizeDefaultIsZero(): void
@@ -2542,7 +2467,7 @@ class IndexTest extends TestCase
 
         $results = $index->search('fast car');
 
-        $this->assertSame([1, 2], $results->ids);
+        $this->assertSame([1, 2], $results->getIds());
     }
 
     public function testProxWindowSizePositiveCapsBoostedCandidates(): void
@@ -2565,7 +2490,7 @@ class IndexTest extends TestCase
         $results = $index->search('fast car');
 
         // Doc 1 is proximity-penalised inside the window; doc 2 escapes it and wins on full BM25.
-        $this->assertSame(2, $results->ids[0]);
+        $this->assertSame(2, $results->getIds()[0]);
     }
 
     // --- insertMany progress callback ---
@@ -2604,7 +2529,7 @@ class IndexTest extends TestCase
     {
         $index = new Index($this->dbPath);
         $index->insert([['id' => 1, 'title' => 'sedan']]);
-        $this->assertContains(1, $index->search('sedan')->ids);
+        $this->assertContains(1, $index->search('sedan')->getIds());
     }
 
     public function testInsertManyProgressEmptyBatchFiresZeroTimes(): void
@@ -2647,7 +2572,7 @@ class IndexTest extends TestCase
         $write->close();
 
         $read = new Index($this->dbPath, readonly: true);
-        $this->assertContains(1, $read->search('sedan')->ids);
+        $this->assertContains(1, $read->search('sedan')->getIds());
     }
 
     public function testReadonlyInsertThrows(): void
@@ -2742,8 +2667,8 @@ class IndexTest extends TestCase
             $write->snapshotTo($readPath);
 
             $read = new Index($readPath);
-            $this->assertContains(1, $read->search('sedan')->ids);
-            $this->assertContains(2, $read->search('suv')->ids);
+            $this->assertContains(1, $read->search('sedan')->getIds());
+            $this->assertContains(2, $read->search('suv')->getIds());
             $read->close();
         } finally {
             foreach ([$readPath, $readPath . '-wal', $readPath . '-shm'] as $f) {
@@ -2761,7 +2686,7 @@ class IndexTest extends TestCase
             $write->snapshotTo($readPath);
 
             $read = new Index($readPath, readonly: true);
-            $this->assertContains(1, $read->search('sedan')->ids);
+            $this->assertContains(1, $read->search('sedan')->getIds());
             $read->close();
         } finally {
             @unlink($readPath);
@@ -2780,7 +2705,7 @@ class IndexTest extends TestCase
             $write->snapshotTo($readPath);
 
             $read = new Index($readPath);
-            $this->assertContains(2, $read->search('second')->ids);
+            $this->assertContains(2, $read->search('second')->getIds());
             $read->close();
         } finally {
             @unlink($readPath);
@@ -3039,103 +2964,41 @@ class IndexTest extends TestCase
         $this->assertSame(0, $index->count());
     }
 
-    // --- Document store: hasDocuments ---
+    // --- Document store: hits ---
 
-    public function testHasDocumentsFalseWhenStoreDisabled(): void
+    public function testHitsContainIdStubsWhenStoreDisabled(): void
     {
         $index = new Index($this->dbPath, schema: new SchemaConfig(store: false));
         $index->insert([['id' => 1, 'title' => 'sedan']]);
 
-        $this->assertFalse($index->search('sedan')->hasDocuments());
+        $this->assertSame([['id' => 1]], $index->search('sedan')->hits);
     }
 
-    public function testHasDocumentsTrueWhenStoreEnabled(): void
-    {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(store: true));
-        $index->insert([['id' => 1, 'title' => 'sedan']]);
-
-        $this->assertTrue($index->search('sedan')->hasDocuments());
-    }
-
-    public function testHasDocumentsTrueEvenWhenNoResults(): void
-    {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(store: true));
-        $index->insert([['id' => 1, 'title' => 'sedan']]);
-
-        $this->assertTrue($index->search('coupe')->hasDocuments());
-    }
-
-    public function testDocumentReturnsDocForIdInResult(): void
+    public function testHitsContainFullDocWhenStoreEnabled(): void
     {
         $doc   = ['id' => 1, 'title' => 'sedan'];
         $index = new Index($this->dbPath, schema: new SchemaConfig(store: true));
         $index->insert([$doc]);
 
-        $this->assertSame($doc, $index->search('sedan')->document(1));
+        $this->assertSame($doc, $index->search('sedan')->getHit(0));
     }
 
-    public function testDocumentReturnsNullForIdNotInResult(): void
+    public function testHitsEmptyWhenNoResults(): void
     {
         $index = new Index($this->dbPath, schema: new SchemaConfig(store: true));
         $index->insert([['id' => 1, 'title' => 'sedan']]);
 
-        $this->assertNull($index->search('sedan')->document(99));
-    }
-
-    public function testDocumentReturnsNullWhenStoreDisabled(): void
-    {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(store: false));
-        $index->insert([['id' => 1, 'title' => 'sedan']]);
-
-        $this->assertNull($index->search('sedan')->document(1));
-    }
-
-    public function testDocumentsReturnsNullWhenStoreDisabled(): void
-    {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(store: false));
-        $index->insert([['id' => 1, 'title' => 'sedan']]);
-
-        $this->assertNull($index->search('sedan')->documents());
-    }
-
-    public function testDocumentsReturnsFullMap(): void
-    {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(store: true));
-        $index->insert([
-            ['id' => 10, 'title' => 'sedan'],
-            ['id' => 20, 'title' => 'sedan coupe'],
-        ]);
-
-        $result = $index->search('sedan');
-        $docs = $result->documents();
-        $this->assertNotNull($docs);
-        $this->assertArrayHasKey(10, $docs);
-        $this->assertArrayHasKey(20, $docs);
-        $this->assertSame($result->document(10), $docs[10]);
-        $this->assertSame($result->document(20), $docs[20]);
+        $this->assertSame([], $index->search('coupe')->hits);
     }
 
     // --- Document store: search hydration ---
 
-    public function testSearchDocumentsIsNullWhenStoreDisabled(): void
+    public function testSearchHitsStubsWhenStoreDisabled(): void
     {
         $index = new Index($this->dbPath, schema: new SchemaConfig(store: false));
         $index->insert([['id' => 1, 'title' => 'sedan']]);
 
-        $result = $index->search('sedan');
-        $this->assertFalse($result->hasDocuments());
-        $this->assertNull($result->document(1));
-    }
-
-    public function testSearchDocumentsIsEmptyArrayWhenNoMatch(): void
-    {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(store: true));
-        $index->insert([['id' => 1, 'title' => 'sedan']]);
-
-        $result = $index->search('coupe');
-        $this->assertTrue($result->hasDocuments());
-        $this->assertEmpty($result->ids);
-        $this->assertNull($result->document(1));
+        $this->assertSame([['id' => 1]], $index->search('sedan')->hits);
     }
 
     public function testSearchHydratesDocuments(): void
@@ -3144,12 +3007,10 @@ class IndexTest extends TestCase
         $index = new Index($this->dbPath, schema: new SchemaConfig(store: true));
         $index->insert([$doc]);
 
-        $result = $index->search('sedan');
-        $this->assertTrue($result->hasDocuments());
-        $this->assertSame($doc, $result->document(1));
+        $this->assertSame($doc, $index->search('sedan')->getHit(0));
     }
 
-    public function testSearchDocumentsKeyedByDocId(): void
+    public function testSearchHitsKeyedByPosition(): void
     {
         $index = new Index($this->dbPath, schema: new SchemaConfig(store: true));
         $index->insert([
@@ -3158,23 +3019,19 @@ class IndexTest extends TestCase
         ]);
 
         $result = $index->search('sedan');
-        $this->assertTrue($result->hasDocuments());
-        $doc10 = $result->document(10);
-        $doc20 = $result->document(20);
-        $this->assertNotNull($doc10);
-        $this->assertNotNull($doc20);
-        $this->assertSame(10, $doc10['id']);
-        $this->assertSame(20, $doc20['id']);
+        $byId   = array_column($result->hits, null, 'id');
+        $this->assertArrayHasKey(10, $byId);
+        $this->assertArrayHasKey(20, $byId);
+        $this->assertSame(10, $byId[10]['id']);
+        $this->assertSame(20, $byId[20]['id']);
     }
 
-    public function testSearchBooleanDocumentsIsNullWhenStoreDisabled(): void
+    public function testSearchBooleanHitsStubsWhenStoreDisabled(): void
     {
         $index = new Index($this->dbPath, schema: new SchemaConfig(store: false));
         $index->insert([['id' => 1, 'title' => 'sedan']]);
 
-        $result = $index->searchBoolean('sedan');
-        $this->assertFalse($result->hasDocuments());
-        $this->assertNull($result->document(1));
+        $this->assertSame([['id' => 1]], $index->searchBoolean('sedan')->hits);
     }
 
     public function testSearchBooleanHydratesDocuments(): void
@@ -3183,9 +3040,7 @@ class IndexTest extends TestCase
         $index = new Index($this->dbPath, schema: new SchemaConfig(store: true));
         $index->insert([$doc]);
 
-        $result = $index->searchBoolean('sedan');
-        $this->assertTrue($result->hasDocuments());
-        $this->assertSame($doc, $result->document(1));
+        $this->assertSame($doc, $index->searchBoolean('sedan')->getHit(0));
     }
 
     // --- Document store: rebuild ---
@@ -3279,7 +3134,7 @@ class IndexTest extends TestCase
 
         // 'red' should NOT appear in search results (it's a facet value, not a text token)
         $result = $index->search('red');
-        $this->assertNotContains(1, $result->ids);
+        $this->assertNotContains(1, $result->getIds());
     }
 
     public function testInsertSingleDocWithFacets(): void
@@ -3288,9 +3143,8 @@ class IndexTest extends TestCase
         $index->insert([['id' => 1, 'title' => 'car', 'color' => 'red']]);
 
         $result = $index->search('car', facets: ['color']);
-        $this->assertContains(1, $result->ids);
-        $this->assertTrue($result->hasFacets());
-        $this->assertSame(['red' => 1], $result->facetCounts()['color']);
+        $this->assertContains(1, $result->getIds());
+        $this->assertSame(['red' => 1], $result->facetDistribution['color']);
     }
 
     public function testDeleteRemovesFacetValues(): void
@@ -3300,8 +3154,8 @@ class IndexTest extends TestCase
         $index->delete(1);
 
         $result = $index->search('car', facets: ['color']);
-        $this->assertNotContains(1, $result->ids);
-        $this->assertSame([], $result->facetCounts());
+        $this->assertNotContains(1, $result->getIds());
+        $this->assertSame([], $result->facetDistribution);
     }
 
     // --- Facets: bulk insert / delete ---
@@ -3316,8 +3170,8 @@ class IndexTest extends TestCase
         ]);
 
         $result = $index->search('car', facets: ['color']);
-        $this->assertSame(2, $result->facetCount('color', 'red'));
-        $this->assertSame(1, $result->facetCount('color', 'blue'));
+        $this->assertSame(2, $result->facetDistribution['color']['red']);
+        $this->assertSame(1, $result->facetDistribution['color']['blue']);
     }
 
     public function testDeleteManyRemovesFacetValues(): void
@@ -3330,7 +3184,7 @@ class IndexTest extends TestCase
         $index->delete(1, 2);
 
         $result = $index->search('car', facets: ['color']);
-        $this->assertSame([], $result->facetCounts());
+        $this->assertSame([], $result->facetDistribution);
     }
 
     // --- Facets: string filter ---
@@ -3344,8 +3198,8 @@ class IndexTest extends TestCase
         ]);
 
         $result = $index->search('car', filter: ['color' => 'red']);
-        $this->assertSame([1], $result->ids);
-        $this->assertSame(1, $result->hits);
+        $this->assertSame([1], $result->getIds());
+        $this->assertSame(1, $result->totalHits);
     }
 
     public function testSearchWithStringMultiValueOrFilter(): void
@@ -3358,10 +3212,10 @@ class IndexTest extends TestCase
         ]);
 
         $result = $index->search('car', filter: ['color' => ['red', 'blue']]);
-        $this->assertCount(2, $result->ids);
-        $this->assertContains(1, $result->ids);
-        $this->assertContains(2, $result->ids);
-        $this->assertNotContains(3, $result->ids);
+        $this->assertCount(2, $result->getIds());
+        $this->assertContains(1, $result->getIds());
+        $this->assertContains(2, $result->getIds());
+        $this->assertNotContains(3, $result->getIds());
     }
 
     // --- Facets: numeric range filter ---
@@ -3376,10 +3230,10 @@ class IndexTest extends TestCase
         ]);
 
         $result = $index->search('car', filter: ['price' => FacetRange::between(10000, 30000)]);
-        $this->assertCount(2, $result->ids);
-        $this->assertContains(1, $result->ids);
-        $this->assertContains(2, $result->ids);
-        $this->assertNotContains(3, $result->ids);
+        $this->assertCount(2, $result->getIds());
+        $this->assertContains(1, $result->getIds());
+        $this->assertContains(2, $result->getIds());
+        $this->assertNotContains(3, $result->getIds());
     }
 
     // --- Facets: counts ---
@@ -3394,9 +3248,9 @@ class IndexTest extends TestCase
         ]);
 
         $result = $index->search('car', facets: ['color']);
-        $this->assertSame(2, $result->facetCount('color', 'red'));
-        $this->assertSame(1, $result->facetCount('color', 'blue'));
-        $this->assertNull($result->facetCount('color', 'green'));
+        $this->assertSame(2, $result->facetDistribution['color']['red']);
+        $this->assertSame(1, $result->facetDistribution['color']['blue']);
+        $this->assertNull($result->facetDistribution['color']['green'] ?? null);
     }
 
     public function testSearchFacetCountsNumericFacet(): void
@@ -3411,9 +3265,9 @@ class IndexTest extends TestCase
         $result = $index->search('car', facets: ['price']);
         $this->assertSame(
             ['price' => ['min' => 10000.0, 'max' => 30000.0, 'count' => 3]],
-            $result->facetCounts(),
+            $result->facetDistribution,
         );
-        $this->assertNull($result->facetCount('price', 'anything'));
+        $this->assertNull($result->facetDistribution['price']['anything'] ?? null);
     }
 
     // --- Facets: disjunctive counts ---
@@ -3430,8 +3284,8 @@ class IndexTest extends TestCase
         // Filter by 'red' but count against the full result set for the 'color' key
         $result = $index->search('car', filter: ['color' => 'red'], facets: ['color']);
         // Disjunctive: both 'red' (2) and 'blue' (1) should appear even though filter is active
-        $this->assertSame(2, $result->facetCount('color', 'red'));
-        $this->assertSame(1, $result->facetCount('color', 'blue'));
+        $this->assertSame(2, $result->facetDistribution['color']['red']);
+        $this->assertSame(1, $result->facetDistribution['color']['blue']);
     }
 
     // --- Facets: multi-value per document ---
@@ -3442,8 +3296,8 @@ class IndexTest extends TestCase
         $index->insert([['id' => 1, 'title' => 'car', 'color' => ['red', 'blue']]]);
 
         $result = $index->search('car', facets: ['color']);
-        $this->assertSame(1, $result->facetCount('color', 'red'));
-        $this->assertSame(1, $result->facetCount('color', 'blue'));
+        $this->assertSame(1, $result->facetDistribution['color']['red']);
+        $this->assertSame(1, $result->facetDistribution['color']['blue']);
     }
 
     // --- Facets: boolean search ---
@@ -3457,8 +3311,8 @@ class IndexTest extends TestCase
         ]);
 
         $result = $index->searchBoolean('car', filter: ['color' => 'red']);
-        $this->assertSame([1], $result->ids);
-        $this->assertSame(1, $result->hits);
+        $this->assertSame([1], $result->getIds());
+        $this->assertSame(1, $result->totalHits);
     }
 
     public function testSearchBooleanWithFacetCounts(): void
@@ -3470,8 +3324,8 @@ class IndexTest extends TestCase
         ]);
 
         $result = $index->searchBoolean('car', facets: ['color']);
-        $this->assertSame(1, $result->facetCount('color', 'red'));
-        $this->assertSame(1, $result->facetCount('color', 'blue'));
+        $this->assertSame(1, $result->facetDistribution['color']['red']);
+        $this->assertSame(1, $result->facetDistribution['color']['blue']);
     }
 
     // --- Facets: no data for requested key ---
@@ -3482,8 +3336,7 @@ class IndexTest extends TestCase
         $index->insert([['id' => 1, 'title' => 'car']]);
 
         $result = $index->search('car', facets: ['color']);
-        $this->assertFalse($result->hasFacets());
-        $this->assertSame([], $result->facetCounts());
+        $this->assertSame([], $result->facetDistribution);
     }
 
     // --- facetFields / searchableFields schema persistence ---
@@ -3517,7 +3370,7 @@ class IndexTest extends TestCase
         $index = new Index($this->dbPath, schema: new SchemaConfig(searchableFields: []));
         $index->insert([['id' => 1, 'title' => 'car']]);
 
-        $this->assertSame([], $index->search('car')->ids);
+        $this->assertSame([], $index->search('car')->getIds());
     }
 
     public function testFacetFieldNotReturnedByFts(): void
@@ -3525,8 +3378,8 @@ class IndexTest extends TestCase
         $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['color']));
         $index->insert([['id' => 1, 'title' => 'car', 'color' => 'scarlet']]);
 
-        $this->assertSame([], $index->search('scarlet')->ids);
-        $this->assertSame([1], $index->search('car')->ids);
+        $this->assertSame([], $index->search('scarlet')->getIds());
+        $this->assertSame([1], $index->search('car')->getIds());
     }
 
     public function testSearchableFieldsRestrictsTokenization(): void
@@ -3534,8 +3387,8 @@ class IndexTest extends TestCase
         $index = new Index($this->dbPath, schema: new SchemaConfig(searchableFields: ['title']));
         $index->insert([['id' => 1, 'title' => 'car', 'sku' => 'ABC-123']]);
 
-        $this->assertSame([1], $index->search('car')->ids);
-        $this->assertSame([], $index->search('ABC')->ids);
+        $this->assertSame([1], $index->search('car')->getIds());
+        $this->assertSame([], $index->search('ABC')->getIds());
     }
 
     public function testFieldInBothFacetAndSearchableIsIndexedAndFaceted(): void
@@ -3545,10 +3398,10 @@ class IndexTest extends TestCase
         $index->insert([['id' => 1, 'title' => 'watch', 'brand' => 'Casio']]);
 
         // brand is searchable
-        $this->assertSame([1], $index->search('casio')->ids);
+        $this->assertSame([1], $index->search('casio')->getIds());
         // brand is also faceted
         $result = $index->search('casio', facets: ['brand']);
-        $this->assertSame(1, $result->facetCount('brand', 'Casio'));
+        $this->assertSame(1, $result->facetDistribution['brand']['Casio']);
     }
 
     public function testRebuildInheritsFacetAndSearchableFields(): void
@@ -3571,7 +3424,7 @@ class IndexTest extends TestCase
         $index->insert([$doc]);
 
         // image_url is stored but not indexed
-        $this->assertSame([], $index->search('example')->ids);
+        $this->assertSame([], $index->search('example')->getIds());
         $this->assertSame($doc, $index->get(1));
     }
 
@@ -3599,7 +3452,7 @@ class IndexTest extends TestCase
         $index->clear();
 
         $result = $index->search('car', facets: ['color']);
-        $this->assertSame([], $result->facetCounts());
+        $this->assertSame([], $result->facetDistribution);
     }
 
     // --- Sort ---
@@ -3612,7 +3465,7 @@ class IndexTest extends TestCase
             ['id' => 2, 'title' => 'product', 'price' => 10],
             ['id' => 3, 'title' => 'product', 'price' => 20],
         ]);
-        $this->assertSame([2, 3, 1], $index->search('product', sort: ['price:asc'])->ids);
+        $this->assertSame([2, 3, 1], $index->search('product', sort: ['price:asc'])->getIds());
     }
 
     public function testSortByNumericFacetDesc(): void
@@ -3623,7 +3476,7 @@ class IndexTest extends TestCase
             ['id' => 2, 'title' => 'product', 'price' => 10],
             ['id' => 3, 'title' => 'product', 'price' => 20],
         ]);
-        $this->assertSame([1, 3, 2], $index->search('product', sort: ['price:desc'])->ids);
+        $this->assertSame([1, 3, 2], $index->search('product', sort: ['price:desc'])->getIds());
     }
 
     public function testSortByStringFacetAsc(): void
@@ -3634,7 +3487,7 @@ class IndexTest extends TestCase
             ['id' => 2, 'title' => 'product', 'brand' => 'Adidas'],
             ['id' => 3, 'title' => 'product', 'brand' => 'Puma'],
         ]);
-        $this->assertSame([2, 1, 3], $index->search('product', sort: ['brand:asc'])->ids);
+        $this->assertSame([2, 1, 3], $index->search('product', sort: ['brand:asc'])->getIds());
     }
 
     public function testSortByStringFacetDesc(): void
@@ -3645,7 +3498,7 @@ class IndexTest extends TestCase
             ['id' => 2, 'title' => 'product', 'brand' => 'Adidas'],
             ['id' => 3, 'title' => 'product', 'brand' => 'Puma'],
         ]);
-        $this->assertSame([3, 1, 2], $index->search('product', sort: ['brand:desc'])->ids);
+        $this->assertSame([3, 1, 2], $index->search('product', sort: ['brand:desc'])->getIds());
     }
 
     public function testSortDirectionCaseInsensitive(): void
@@ -3655,7 +3508,7 @@ class IndexTest extends TestCase
             ['id' => 1, 'title' => 'product', 'price' => 30],
             ['id' => 2, 'title' => 'product', 'price' => 10],
         ]);
-        $this->assertSame([2, 1], $index->search('product', sort: ['price:ASC'])->ids);
+        $this->assertSame([2, 1], $index->search('product', sort: ['price:ASC'])->getIds());
     }
 
     public function testSortNullsLastAsc(): void
@@ -3666,7 +3519,7 @@ class IndexTest extends TestCase
             ['id' => 2, 'title' => 'product'],
             ['id' => 3, 'title' => 'product', 'price' => 5],
         ]);
-        $this->assertSame([3, 1, 2], $index->search('product', sort: ['price:asc'])->ids);
+        $this->assertSame([3, 1, 2], $index->search('product', sort: ['price:asc'])->getIds());
     }
 
     public function testSortNullsLastDesc(): void
@@ -3677,7 +3530,7 @@ class IndexTest extends TestCase
             ['id' => 2, 'title' => 'product'],
             ['id' => 3, 'title' => 'product', 'price' => 5],
         ]);
-        $this->assertSame([1, 3, 2], $index->search('product', sort: ['price:desc'])->ids);
+        $this->assertSame([1, 3, 2], $index->search('product', sort: ['price:desc'])->getIds());
     }
 
     public function testSortMultiKey(): void
@@ -3690,7 +3543,7 @@ class IndexTest extends TestCase
             ['id' => 4, 'title' => 'product', 'category' => 'b', 'price' => 5],
         ]);
         $result = $index->search('product', sort: ['category:asc', 'price:asc']);
-        $this->assertSame([3, 2, 4, 1], $result->ids);
+        $this->assertSame([3, 2, 4, 1], $result->getIds());
     }
 
     public function testSortWithFacetFilter(): void
@@ -3702,8 +3555,8 @@ class IndexTest extends TestCase
             ['id' => 3, 'title' => 'product', 'category' => 'a', 'price' => 5],
         ]);
         $result = $index->search('product', filter: ['category' => 'a'], sort: ['price:asc']);
-        $this->assertSame([3, 1], $result->ids);
-        $this->assertSame(2, $result->hits);
+        $this->assertSame([3, 1], $result->getIds());
+        $this->assertSame(2, $result->totalHits);
     }
 
     public function testSortDoesNotAffectHitsCount(): void
@@ -3715,8 +3568,8 @@ class IndexTest extends TestCase
             ['id' => 3, 'title' => 'product', 'price' => 20],
         ]);
         $this->assertSame(
-            $index->search('product')->hits,
-            $index->search('product', sort: ['price:asc'])->hits,
+            $index->search('product')->totalHits,
+            $index->search('product', sort: ['price:asc'])->totalHits,
         );
     }
 
@@ -3729,8 +3582,8 @@ class IndexTest extends TestCase
             ['id' => 3, 'title' => 'product', 'price' => 20, 'color' => 'red'],
         ]);
         $this->assertSame(
-            $index->search('product', facets: ['color'])->facetCounts(),
-            $index->search('product', facets: ['color'], sort: ['price:asc'])->facetCounts(),
+            $index->search('product', facets: ['color'])->facetDistribution,
+            $index->search('product', facets: ['color'], sort: ['price:asc'])->facetDistribution,
         );
     }
 
@@ -3745,8 +3598,8 @@ class IndexTest extends TestCase
         ]);
         $page1 = $index->search('product', limit: 2, offset: 0, sort: ['price:asc']);
         $page2 = $index->search('product', limit: 2, offset: 2, sort: ['price:asc']);
-        $this->assertSame([2, 4], $page1->ids);
-        $this->assertSame([3, 1], $page2->ids);
+        $this->assertSame([2, 4], $page1->getIds());
+        $this->assertSame([3, 1], $page2->getIds());
     }
 
     public function testSortUnknownFieldAllNull(): void
@@ -3762,7 +3615,7 @@ class IndexTest extends TestCase
         $sorted   = $index->search('product', sort: ['weight:asc']);
         $unsorted = $index->search('product', sort: ['weight:desc']);
         // Both produce the same IDs (all null → doc_id tiebreaker either way)
-        $this->assertSame($sorted->ids, $unsorted->ids);
+        $this->assertSame($sorted->getIds(), $unsorted->getIds());
     }
 
     public function testSortOnBooleanSearch(): void
@@ -3773,7 +3626,7 @@ class IndexTest extends TestCase
             ['id' => 2, 'title' => 'product', 'price' => 10],
             ['id' => 3, 'title' => 'product', 'price' => 20],
         ]);
-        $this->assertSame([2, 3, 1], $index->searchBoolean('product', sort: ['price:asc'])->ids);
+        $this->assertSame([2, 3, 1], $index->searchBoolean('product', sort: ['price:asc'])->getIds());
     }
 
     public function testSortBooleanNullsLast(): void
@@ -3784,7 +3637,7 @@ class IndexTest extends TestCase
             ['id' => 2, 'title' => 'product'],
             ['id' => 3, 'title' => 'product', 'price' => 5],
         ]);
-        $this->assertSame([3, 1, 2], $index->searchBoolean('product', sort: ['price:asc'])->ids);
+        $this->assertSame([3, 1, 2], $index->searchBoolean('product', sort: ['price:asc'])->getIds());
     }
 
     public function testSortInvalidSpecThrowsOnSearch(): void
@@ -3815,7 +3668,7 @@ class IndexTest extends TestCase
     {
         $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['price']));
         $index->insert([['id' => 1, 'title' => 'product', 'price' => 10]]);
-        $this->assertContains(1, $index->search('product', sort: [])->ids);
+        $this->assertContains(1, $index->search('product', sort: [])->getIds());
     }
 
     // --- Distinct ---
@@ -3830,10 +3683,10 @@ class IndexTest extends TestCase
             ['id' => 4, 'title' => 'product delta', 'brand' => 'Adidas'],
         ]);
         $result = $index->search('product', distinct: 'brand');
-        $this->assertCount(2, $result->ids);
+        $this->assertCount(2, $result->getIds());
         // One doc per brand — IDs 1/2 are Nike, 3/4 are Adidas; both groups must be represented.
-        $nikeIds   = array_filter($result->ids, fn(int $id): bool => in_array($id, [1, 2], true));
-        $adidasIds = array_filter($result->ids, fn(int $id): bool => in_array($id, [3, 4], true));
+        $nikeIds   = array_filter($result->getIds(), fn(int $id): bool => in_array($id, [1, 2], true));
+        $adidasIds = array_filter($result->getIds(), fn(int $id): bool => in_array($id, [3, 4], true));
         $this->assertCount(1, $nikeIds);
         $this->assertCount(1, $adidasIds);
     }
@@ -3848,7 +3701,7 @@ class IndexTest extends TestCase
             ['id' => 4, 'title' => 'product', 'brand' => 'Adidas'],
         ]);
         $result = $index->search('product', distinct: 'brand');
-        $this->assertSame(2, $result->hits);
+        $this->assertSame(2, $result->totalHits);
     }
 
     public function testDistinctCountAllowsMultiplePerGroup(): void
@@ -3861,9 +3714,9 @@ class IndexTest extends TestCase
             ['id' => 4, 'title' => 'product', 'brand' => 'Adidas'],
         ]);
         $result = $index->search('product', distinct: 'brand', distinctCount: 2);
-        $this->assertSame(3, $result->hits);
+        $this->assertSame(3, $result->totalHits);
         // 2 Nike (IDs 1,2,3) + 1 Adidas (ID 4) survive
-        $ids    = $result->ids;
+        $ids    = $result->getIds();
         $this->assertCount(3, $ids);
         $nikes  = array_filter($ids, fn(int $id): bool => in_array($id, [1, 2, 3], true));
         $adidas = array_filter($ids, fn(int $id): bool => $id === 4);
@@ -3881,7 +3734,7 @@ class IndexTest extends TestCase
             ['id' => 2, 'title' => 'widget widget',  'brand' => 'Acme'],
         ]);
         $result = $index->search('widget', distinct: 'brand');
-        $this->assertSame([2], $result->ids);
+        $this->assertSame([2], $result->getIds());
     }
 
     public function testDistinctNullPassesThrough(): void
@@ -3895,10 +3748,10 @@ class IndexTest extends TestCase
         ]);
         $result = $index->search('product', distinct: 'brand');
         // Both null-brand docs pass through; Nike collapses to 1 → 3 total
-        $this->assertSame(3, $result->hits);
-        $this->assertContains(1, $result->ids);
-        $this->assertContains(2, $result->ids);
-        $this->assertContains(3, $result->ids);
+        $this->assertSame(3, $result->totalHits);
+        $this->assertContains(1, $result->getIds());
+        $this->assertContains(2, $result->getIds());
+        $this->assertContains(3, $result->getIds());
     }
 
     public function testDistinctWithPagination(): void
@@ -3914,12 +3767,12 @@ class IndexTest extends TestCase
         // 3 distinct groups; page 1 (offset 0, limit 2) gets groups A and B
         $page1 = $index->search('product', limit: 2, offset: 0, distinct: 'brand');
         $page2 = $index->search('product', limit: 2, offset: 2, distinct: 'brand');
-        $this->assertSame(3, $page1->hits);
-        $this->assertSame(3, $page2->hits);
-        $this->assertCount(2, $page1->ids);
-        $this->assertCount(1, $page2->ids);
+        $this->assertSame(3, $page1->totalHits);
+        $this->assertSame(3, $page2->totalHits);
+        $this->assertCount(2, $page1->getIds());
+        $this->assertCount(1, $page2->getIds());
         // No overlap between pages
-        $this->assertEmpty(array_intersect($page1->ids, $page2->ids));
+        $this->assertEmpty(array_intersect($page1->getIds(), $page2->getIds()));
     }
 
     public function testDistinctLimitZeroReportsAccurateHits(): void
@@ -3931,8 +3784,8 @@ class IndexTest extends TestCase
             ['id' => 3, 'title' => 'product', 'brand' => 'Adidas'],
         ]);
         $result = $index->search('product', limit: 0, distinct: 'brand');
-        $this->assertSame([], $result->ids);
-        $this->assertSame(2, $result->hits);
+        $this->assertSame([], $result->getIds());
+        $this->assertSame(2, $result->totalHits);
     }
 
     public function testDistinctCountOneWithAllUniqueValuesMatchesNonDistinct(): void
@@ -3945,8 +3798,8 @@ class IndexTest extends TestCase
         ]);
         $plain    = $index->search('product');
         $distinct = $index->search('product', distinct: 'sku');
-        $this->assertSame($plain->hits, $distinct->hits);
-        $this->assertEqualsCanonicalizing($plain->ids, $distinct->ids);
+        $this->assertSame($plain->totalHits, $distinct->totalHits);
+        $this->assertEqualsCanonicalizing($plain->getIds(), $distinct->getIds());
     }
 
     public function testDistinctOnBooleanSearch(): void
@@ -3958,9 +3811,8 @@ class IndexTest extends TestCase
             ['id' => 3, 'title' => 'product', 'brand' => 'Adidas'],
         ]);
         $result = $index->searchBoolean('product', distinct: 'brand');
-        $this->assertSame(2, $result->hits);
-        $this->assertCount(2, $result->ids);
-        $this->assertNull($result->score($result->ids[0]));
+        $this->assertSame(2, $result->totalHits);
+        $this->assertCount(2, $result->getIds());
     }
 
     public function testDistinctBooleanWithPagination(): void
@@ -3974,11 +3826,11 @@ class IndexTest extends TestCase
         ]);
         $page1 = $index->searchBoolean('product', limit: 2, offset: 0, distinct: 'brand');
         $page2 = $index->searchBoolean('product', limit: 2, offset: 2, distinct: 'brand');
-        $this->assertSame(3, $page1->hits);
-        $this->assertSame(3, $page2->hits);
-        $this->assertCount(2, $page1->ids);
-        $this->assertCount(1, $page2->ids);
-        $this->assertEmpty(array_intersect($page1->ids, $page2->ids));
+        $this->assertSame(3, $page1->totalHits);
+        $this->assertSame(3, $page2->totalHits);
+        $this->assertCount(2, $page1->getIds());
+        $this->assertCount(1, $page2->getIds());
+        $this->assertEmpty(array_intersect($page1->getIds(), $page2->getIds()));
     }
 
     public function testDistinctWithSort(): void
@@ -3994,7 +3846,7 @@ class IndexTest extends TestCase
         $result = $index->search('product', sort: ['price:asc'], distinct: 'brand');
         // Cheapest Nike (id 2, price 50) and cheapest Adidas (id 4, price 30) survive
         // Sort order: Adidas $30 first, then Nike $50
-        $this->assertSame([4, 2], $result->ids);
+        $this->assertSame([4, 2], $result->getIds());
     }
 
     public function testDistinctWithFacetFilter(): void
@@ -4008,10 +3860,10 @@ class IndexTest extends TestCase
         ]);
         $result = $index->search('product', filter: ['category' => 'shoes'], distinct: 'brand');
         // Only shoe docs remain (IDs 1, 3, 4); one per brand → IDs 1 (Nike) and one of 3/4 (Adidas)
-        $this->assertSame(2, $result->hits);
-        $this->assertCount(2, $result->ids);
-        $nikeId   = array_filter($result->ids, fn(int $id): bool => $id === 1);
-        $adidasId = array_filter($result->ids, fn(int $id): bool => in_array($id, [3, 4], true));
+        $this->assertSame(2, $result->totalHits);
+        $this->assertCount(2, $result->getIds());
+        $nikeId   = array_filter($result->getIds(), fn(int $id): bool => $id === 1);
+        $adidasId = array_filter($result->getIds(), fn(int $id): bool => in_array($id, [3, 4], true));
         $this->assertCount(1, $nikeId);
         $this->assertCount(1, $adidasId);
     }
@@ -4026,9 +3878,8 @@ class IndexTest extends TestCase
         ]);
         // Facet counts are computed on the pre-distinct filtered result set (same as without distinct)
         $result = $index->search('product', facets: ['category'], distinct: 'brand');
-        $this->assertTrue($result->hasFacets());
-        $this->assertSame(2, $result->facetCount('category', 'shoes'));
-        $this->assertSame(1, $result->facetCount('category', 'shirts'));
+        $this->assertSame(2, $result->facetDistribution['category']['shoes']);
+        $this->assertSame(1, $result->facetDistribution['category']['shirts']);
     }
 
     public function testDistinctOnNumericFacet(): void
@@ -4040,10 +3891,10 @@ class IndexTest extends TestCase
             ['id' => 3, 'title' => 'product', 'rating' => 4],
         ]);
         $result = $index->search('product', distinct: 'rating');
-        $this->assertSame(2, $result->hits);
+        $this->assertSame(2, $result->totalHits);
         // IDs 1/2 = rating 5 (one survives); ID 3 = rating 4 (survives)
-        $rating5 = array_filter($result->ids, fn(int $id): bool => in_array($id, [1, 2], true));
-        $rating4 = array_filter($result->ids, fn(int $id): bool => $id === 3);
+        $rating5 = array_filter($result->getIds(), fn(int $id): bool => in_array($id, [1, 2], true));
+        $rating4 = array_filter($result->getIds(), fn(int $id): bool => $id === 3);
         $this->assertCount(1, $rating5);
         $this->assertCount(1, $rating4);
     }
@@ -4058,8 +3909,8 @@ class IndexTest extends TestCase
         ]);
         // 'color' is not a declared facet field — distinct is silently ignored
         $result = $index->search('product', distinct: 'color');
-        $this->assertSame(3, $result->hits);
-        $this->assertCount(3, $result->ids);
+        $this->assertSame(3, $result->totalHits);
+        $this->assertCount(3, $result->getIds());
     }
 
     // --- Field boosts ---
@@ -4075,7 +3926,7 @@ class IndexTest extends TestCase
             ['id' => 2, 'title' => 'engine overview', 'body' => 'turbo turbo turbo details here'],
         ]);
         $result = $index->search('turbo');
-        $this->assertSame([1, 2], $result->ids);
+        $this->assertSame([1, 2], $result->getIds());
     }
 
     public function testFieldBoostOnOldIndexThrowsQueryException(): void
@@ -4105,8 +3956,8 @@ class IndexTest extends TestCase
             ['id' => 2, 'title' => 'gamma delta', 'body' => 'alpha beta'],
         ]);
         $result = $index->search('alpha');
-        $this->assertContains(1, $result->ids);
-        $this->assertContains(2, $result->ids);
+        $this->assertContains(1, $result->getIds());
+        $this->assertContains(2, $result->getIds());
     }
 
     public function testFieldBoostWithUnknownFieldNameIsIgnored(): void
@@ -4118,7 +3969,7 @@ class IndexTest extends TestCase
             ['id' => 1, 'title' => 'widget', 'body' => 'some content'],
         ]);
         $result = $index->search('widget');
-        $this->assertContains(1, $result->ids);
+        $this->assertContains(1, $result->getIds());
     }
 
     public function testFieldBoostOnReopenedIndex(): void
@@ -4133,7 +3984,7 @@ class IndexTest extends TestCase
 
         $index2 = new Index($this->dbPath, config: new Config(fieldBoosts: ['title' => 5.0, 'body' => 1.0]));
         $result = $index2->search('turbo');
-        $this->assertSame([1, 2], $result->ids);
+        $this->assertSame([1, 2], $result->getIds());
     }
 
     public function testFieldBoostUpsertUpdatesFieldHits(): void
@@ -4145,9 +3996,7 @@ class IndexTest extends TestCase
         $index->upsert([['id' => 1, 'title' => 'product overview', 'body' => 'widget listed here']]);
 
         $result = $index->search('widget');
-        $this->assertContains(1, $result->ids);
-        // Score should reflect body-only placement (title boost no longer applies).
-        $this->assertGreaterThan(0.0, $result->score(1));
+        $this->assertContains(1, $result->getIds());
     }
 
     public function testFieldBoostDeleteClearsFieldHits(): void
@@ -4157,7 +4006,7 @@ class IndexTest extends TestCase
         $index->delete(1);
         // After delete, index should be empty.
         $result = $index->search('target');
-        $this->assertSame([], $result->ids);
+        $this->assertSame([], $result->getIds());
     }
 
     public function testFieldBoostClearClearsFieldHits(): void
@@ -4167,7 +4016,7 @@ class IndexTest extends TestCase
         $index->clear();
         $this->assertSame(0, $index->count());
         $result = $index->search('alpha');
-        $this->assertSame([], $result->ids);
+        $this->assertSame([], $result->getIds());
     }
 
     public function testFieldBoostBulkInsertPreservesScoreOrder(): void
@@ -4181,7 +4030,7 @@ class IndexTest extends TestCase
             ['id' => 3, 'title' => 'car guide', 'body' => 'another plain description'],
         ]);
         $result = $index->search('turbo');
-        $this->assertSame(1, $result->ids[0], 'Title match should rank first with high title boost');
+        $this->assertSame(1, $result->getIds()[0], 'Title match should rank first with high title boost');
     }
 
     // --- Synonyms: API management ---
@@ -4266,7 +4115,7 @@ class IndexTest extends TestCase
             ['id' => 2, 'title' => 'bike race'],
         ]);
         $index->setSynonyms(equivalences: [['car', 'automobile']]);
-        $this->assertContains(1, $index->search('car')->ids);
+        $this->assertContains(1, $index->search('car')->getIds());
     }
 
     public function testEquivalenceSynonymExpandsSearchForOtherTerm(): void
@@ -4277,7 +4126,7 @@ class IndexTest extends TestCase
             ['id' => 2, 'title' => 'bike race'],
         ]);
         $index->setSynonyms(equivalences: [['car', 'automobile']]);
-        $this->assertContains(1, $index->search('automobile')->ids);
+        $this->assertContains(1, $index->search('automobile')->getIds());
     }
 
     public function testOneWaySynonymExpandsSearch(): void
@@ -4288,8 +4137,8 @@ class IndexTest extends TestCase
             ['id' => 2, 'title' => 'laptop review'],
         ]);
         $index->setSynonyms(oneWay: ['phone' => ['smartphone']]);
-        $this->assertContains(1, $index->search('phone')->ids);
-        $this->assertNotContains(2, $index->search('phone')->ids);
+        $this->assertContains(1, $index->search('phone')->getIds());
+        $this->assertNotContains(2, $index->search('phone')->getIds());
     }
 
     public function testOneWaySynonymDoesNotExpandReverse(): void
@@ -4300,17 +4149,7 @@ class IndexTest extends TestCase
             ['id' => 2, 'title' => 'laptop review'],
         ]);
         $index->setSynonyms(oneWay: ['phone' => ['smartphone']]);
-        $this->assertNotContains(1, $index->search('smartphone')->ids);
-    }
-
-    public function testSynonymMatchProducesNonZeroScore(): void
-    {
-        $index = new Index($this->dbPath);
-        $index->insert([['id' => 1, 'title' => 'automobile']]);
-        $index->setSynonyms(oneWay: ['car' => ['automobile']]);
-        $result = $index->search('car');
-        $this->assertContains(1, $result->ids);
-        $this->assertGreaterThan(0.0, $result->score(1));
+        $this->assertNotContains(1, $index->search('smartphone')->getIds());
     }
 
     public function testMultipleSynonymTargetsAllExpand(): void
@@ -4322,7 +4161,7 @@ class IndexTest extends TestCase
             ['id' => 3, 'title' => 'laptop model'],
         ]);
         $index->setSynonyms(oneWay: ['phone' => ['smartphone', 'mobile']]);
-        $ids = $index->search('phone')->ids;
+        $ids = $index->search('phone')->getIds();
         $this->assertContains(1, $ids);
         $this->assertContains(2, $ids);
         $this->assertNotContains(3, $ids);
@@ -4335,7 +4174,7 @@ class IndexTest extends TestCase
             ['id' => 1, 'title' => 'automobile'],
             ['id' => 2, 'title' => 'car'],
         ]);
-        $ids = $index->search('car', asYouType: false)->ids;
+        $ids = $index->search('car', asYouType: false)->getIds();
         $this->assertContains(2, $ids);
         $this->assertNotContains(1, $ids);
     }
@@ -4350,7 +4189,7 @@ class IndexTest extends TestCase
             ['id' => 2, 'title' => 'bike race'],
         ]);
         $index->setSynonyms(equivalences: [['car', 'automobile']]);
-        $this->assertContains(1, $index->searchBoolean('car')->ids);
+        $this->assertContains(1, $index->searchBoolean('car')->getIds());
     }
 
     public function testOneWaySynonymInBooleanDoesNotExpandReverse(): void
@@ -4360,7 +4199,7 @@ class IndexTest extends TestCase
             ['id' => 1, 'title' => 'phone review'],
         ]);
         $index->setSynonyms(oneWay: ['phone' => ['smartphone']]);
-        $this->assertNotContains(1, $index->searchBoolean('smartphone')->ids);
+        $this->assertNotContains(1, $index->searchBoolean('smartphone')->getIds());
     }
 
     // --- Synonyms: phrase exclusion ---
@@ -4374,8 +4213,8 @@ class IndexTest extends TestCase
         ]);
         $index->setSynonyms(equivalences: [['car', 'automobile']]);
         $result = $index->search('"automobile"');
-        $this->assertContains(1, $result->ids);
-        $this->assertNotContains(2, $result->ids);
+        $this->assertContains(1, $result->getIds());
+        $this->assertNotContains(2, $result->getIds());
     }
 
     // --- Synonyms: persistence ---
@@ -4388,7 +4227,7 @@ class IndexTest extends TestCase
         $index->close();
 
         $index = new Index($this->dbPath);
-        $this->assertContains(1, $index->search('car')->ids);
+        $this->assertContains(1, $index->search('car')->getIds());
     }
 
     // --- Synonyms: stemmer normalization ---
@@ -4400,7 +4239,7 @@ class IndexTest extends TestCase
         // 'cars' stems to 'car'; synonym target 'sedan' is unchanged.
         // Searching 'car' should find the sedan doc via synonym.
         $index->setSynonyms(oneWay: ['cars' => ['sedan']]);
-        $this->assertContains(1, $index->search('car', asYouType: false)->ids);
+        $this->assertContains(1, $index->search('car', asYouType: false)->getIds());
     }
 
     // --- Synonyms: rebuild ---
@@ -4430,7 +4269,7 @@ class IndexTest extends TestCase
             $new->insert([['id' => 1, 'title' => 'automobile']]);
         });
 
-        $this->assertContains(1, $rebuilt->search('car')->ids);
+        $this->assertContains(1, $rebuilt->search('car')->getIds());
     }
 
     public function testRebuildCallbackCanClearSynonyms(): void
@@ -4445,7 +4284,7 @@ class IndexTest extends TestCase
         });
 
         $this->assertSame([], $rebuilt->getSynonyms());
-        $this->assertNotContains(1, $rebuilt->search('car')->ids);
+        $this->assertNotContains(1, $rebuilt->search('car')->getIds());
     }
 
     public function testRebuildWithNoExistingSynonymsIsOk(): void
@@ -4457,6 +4296,6 @@ class IndexTest extends TestCase
         });
 
         $this->assertSame([], $rebuilt->getSynonyms());
-        $this->assertContains(1, $rebuilt->search('sedan')->ids);
+        $this->assertContains(1, $rebuilt->search('sedan')->getIds());
     }
 }

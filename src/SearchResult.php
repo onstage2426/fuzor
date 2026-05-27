@@ -6,103 +6,136 @@ namespace Fuzor;
 
 class SearchResult
 {
+    /** @var list<array<string, mixed>> Documents in relevance order; stubs with only 'id' when store is disabled. */
+    public readonly array $hits;
+
+    /** Number of documents in this page (≤ limit). */
+    public readonly int $hitsCount;
+
+    /** Total matching documents across all pages. */
+    public readonly int|null $totalHits;
+
+    /** Original query string. */
+    public readonly string $query;
+
+    /** Page limit. */
+    public readonly int|null $limit;
+
+    /** Page offset. */
+    public readonly int|null $offset;
+
     /**
-     * @param list<int>                              $ids          Document IDs in relevance order (paged window).
-     * @param int                                    $hits         Total matching documents across all pages.
-     * @param array<int, float>                      $scores       BM25 scores keyed by doc ID; empty for boolean.
-     * @param array<int, array<string, mixed>>|null  $documents    Stored documents keyed by doc ID; null when disabled.
-     * @param array<string, mixed> $facetCounts Facet value counts; empty when not requested.
-     *        String facets: array<string, int> (value → count).
-     *        Numeric facets: array{min: float, max: float, count: int}.
+     * Facet value counts keyed by facet field name.
+     * String facets: array<string, int> (value → count). Numeric facets: array{min: float, max: float, count: int}.
+     *
+     * @var array<string, mixed>
+     */
+    public readonly array $facetDistribution;
+
+    /** @var array<int, float> BM25 scores keyed by doc ID; empty for boolean search. */
+    private readonly array $scores;
+
+    /** @var list<int> Document IDs in relevance order; used internally for score lookups. */
+    private readonly array $ids;
+
+    /**
+     * @param list<int>                             $ids
+     * @param array<int, float>                     $scores
+     * @param array<int, array<string, mixed>>|null $documents
+     * @param array<string, mixed>                  $facetCounts
      */
     public function __construct(
-        public readonly array $ids,
-        public readonly int $hits,
-        private readonly array $scores = [],
-        private readonly ?array $documents = null,
-        private readonly array $facetCounts = [],
+        array $ids,
+        int|null $totalHits,
+        array $scores = [],
+        ?array $documents = null,
+        array $facetCounts = [],
+        string $query = '',
+        int|null $limit = null,
+        int|null $offset = null,
     ) {
+        $this->ids               = $ids;
+        $this->totalHits         = $totalHits;
+        $this->scores            = $scores;
+        $this->query             = $query;
+        $this->limit             = $limit;
+        $this->offset            = $offset;
+        $this->facetDistribution = $facetCounts;
+
+        $this->hits = $documents === null
+            ? array_map(fn(int $id) => ['id' => $id], $ids)
+            : array_map(fn(int $id) => $documents[$id] ?? ['id' => $id], $ids);
+
+        $this->hitsCount = count($this->hits);
     }
 
-    /** True when BM25 scores are available (false for boolean search results). */
-    public function hasScores(): bool
+    public function getQuery(): string
     {
-        return $this->scores !== [];
+        return $this->query;
     }
 
-    /** BM25 score for the given doc ID, or null in boolean mode or if the ID is not in the result. */
-    public function score(int $id): float|null
+    public function getLimit(): int|null
     {
-        return $this->scores[$id] ?? null;
+        return $this->limit;
     }
 
-    /**
-     * All BM25 scores keyed by doc ID, or an empty array for boolean search results.
-     *
-     * @return array<int, float>
-     */
-    public function scores(): array
+    public function getOffset(): int|null
     {
-        return $this->scores;
+        return $this->offset;
     }
 
-    /** True when the document store is enabled on the index that produced this result. */
-    public function hasDocuments(): bool
+    /** Number of documents in this page. */
+    public function getHitsCount(): int
     {
-        return $this->documents !== null;
+        return $this->hitsCount;
     }
 
-    /**
-     * Stored document for the given doc ID, or null when the store is disabled or the ID is not in the result.
-     *
-     * @return array<string, mixed>|null
-     */
-    public function document(int $id): array|null
+    /** Total matching documents across all pages. */
+    public function getTotalHits(): int|null
     {
-        return $this->documents[$id] ?? null;
+        return $this->totalHits;
     }
 
-    /**
-     * All stored documents keyed by doc ID, or null when the store is disabled.
-     *
-     * @return array<int, array<string, mixed>>|null
-     */
-    public function documents(): array|null
+    /** @return list<int> Document IDs in relevance order (current page). */
+    public function getIds(): array
     {
-        return $this->documents;
+        return $this->ids;
     }
 
-    /** True when facet counts were computed for this result. */
-    public function hasFacets(): bool
+    /** @return list<array<string, mixed>> */
+    public function getHits(): array
     {
-        return $this->facetCounts !== [];
+        return $this->hits;
     }
 
-    /**
-     * All facet counts keyed by facet key name.
-     *
-     * String facets: array<string, int> (value → count, ordered by count desc).
-     * Numeric facets: array{min: float, max: float, count: int}.
-     *
-     * @return array<string, mixed>
-     */
-    public function facetCounts(): array
+    /** @return array<string, mixed> Document at position $index (0-based); empty array when out of bounds. */
+    public function getHit(int $index): array
     {
-        return $this->facetCounts;
+        return $this->hits[$index] ?? [];
     }
 
-    /**
-     * Count for a specific string facet value, or null if not present.
-     *
-     * Returns null for numeric facets (use facetCounts()['price']['min'] etc. instead).
-     */
-    public function facetCount(string $key, string $value): ?int
+    /** @return array<string, mixed> */
+    public function getFacetDistribution(): array
     {
-        $counts = $this->facetCounts[$key] ?? null;
-        if (!is_array($counts) || isset($counts['min'])) {
-            return null;
-        }
-        $count = $counts[$value] ?? null;
-        return is_numeric($count) ? (int) $count : null;
+        return $this->facetDistribution;
+    }
+
+    /** @return array<string, mixed> */
+    public function toArray(): array
+    {
+        return [
+            'hits'              => $this->hits,
+            'query'             => $this->query,
+            'hitsCount'         => $this->hitsCount,
+            'totalHits'         => $this->totalHits,
+            'limit'             => $this->limit,
+            'offset'            => $this->offset,
+            'facetDistribution' => $this->facetDistribution,
+        ];
+    }
+
+    public function toJson(int $flags = 0): string
+    {
+        return json_encode($this->toArray(), $flags) ?: '{}';
     }
 }

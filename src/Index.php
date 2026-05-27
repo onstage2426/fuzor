@@ -1705,10 +1705,13 @@ class Index
         if ($total === 0) {
             return new SearchResult(
                 ids: [],
-                hits: 0,
+                totalHits: 0,
                 scores: $docScores,
                 documents: $this->hydrateIds([]),
                 facetCounts: $facetCounts,
+                query: $phrase,
+                limit: $limit,
+                offset: $offset,
             );
         }
 
@@ -1739,20 +1742,26 @@ class Index
             );
             return new SearchResult(
                 ids: $pagedIds,
-                hits: $distinctHits,
+                totalHits: $distinctHits,
                 scores: $docScores,
                 documents: $this->hydrateIds($pagedIds),
                 facetCounts: $facetCounts,
+                query: $phrase,
+                limit: $limit,
+                offset: $offset,
             );
         }
 
         if ($limit === 0) {
             return new SearchResult(
                 ids: [],
-                hits: $total,
+                totalHits: $total,
                 scores: $docScores,
                 documents: $this->hydrateIds([]),
                 facetCounts: $facetCounts,
+                query: $phrase,
+                limit: $limit,
+                offset: $offset,
             );
         }
 
@@ -1780,10 +1789,13 @@ class Index
         }
         return new SearchResult(
             ids: $pagedIds,
-            hits: $total,
+            totalHits: $total,
             scores: $docScores,
             documents: $this->hydrateIds($pagedIds),
             facetCounts: $facetCounts,
+            query: $phrase,
+            limit: $limit,
+            offset: $offset,
         );
     }
 
@@ -1940,9 +1952,12 @@ class Index
             );
             return new SearchResult(
                 ids: $pagedIds,
-                hits: $distinctHits,
+                totalHits: $distinctHits,
                 documents: $this->hydrateIds($pagedIds),
                 facetCounts: $facetCounts,
+                query: $phrase,
+                limit: $limit,
+                offset: $offset,
             );
         }
 
@@ -1954,9 +1969,12 @@ class Index
 
         return new SearchResult(
             ids: $docIds,
-            hits: $total,
+            totalHits: $total,
             documents: $this->hydrateIds($docIds),
             facetCounts: $facetCounts,
+            query: $phrase,
+            limit: $limit,
+            offset: $offset,
         );
     }
 
