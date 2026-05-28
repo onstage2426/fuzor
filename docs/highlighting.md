@@ -13,7 +13,7 @@ $result = $index->search('fast sedan', new SearchOptions(
 
 foreach ($result->hits as $hit) {
     echo $hit['_formatted']['title'];
-    // "<em>Fast</em> <em>sedan</em> review"
+    // "<mark>Fast</mark> <mark>sedan</mark> review"
 }
 ```
 
@@ -40,8 +40,8 @@ $result = $index->search('fast sedan', new SearchOptions(
 | `SearchOptions` property | Default      | Description                                         |
 |--------------------------|--------------|-----------------------------------------------------|
 | `attributesToHighlight`  | `null`       | Fields to highlight; `['*']` for all string fields; `null` disables highlighting |
-| `highlightPreTag`        | `'<em>'`     | Tag inserted before each match                      |
-| `highlightPostTag`       | `'</em>'`    | Tag inserted after each match                       |
+| `highlightPreTag`        | `'<mark>'`     | Tag inserted before each match                      |
+| `highlightPostTag`       | `'</mark>'`    | Tag inserted after each match                       |
 
 Matching is Unicode-aware, case-insensitive, and follows the same tokenisation as the index. The last token is matched as a prefix when `asYouType` is enabled (the default), so a query like `"merc"` highlights `"Mercedes"`.
 
@@ -58,7 +58,7 @@ $result = $index->search('fast connections', new SearchOptions(
 
 foreach ($result->hits as $hit) {
     echo $hit['_formatted']['body'];
-    // "… offers <em>fast</em> broadband <em>connections</em> for …"
+    // "… offers <mark>fast</mark> broadband <mark>connections</mark> for …"
 }
 ```
 

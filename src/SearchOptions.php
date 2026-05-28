@@ -24,8 +24,8 @@ final readonly class SearchOptions
      * @param int           $distinctCount Maximum hits per distinct value when $distinct is set.
      * @param list<string>|null $attributesToHighlight String fields to include in '_formatted' with matched
      *                                                 terms wrapped in highlight tags; ['*'] for all. Null = off.
-     * @param string $highlightPreTag  Opening tag before each highlighted match (default '<em>').
-     * @param string $highlightPostTag Closing tag after each highlighted match (default '</em>').
+     * @param string $highlightPreTag  Opening tag before each highlighted match (default '<mark>').
+     * @param string $highlightPostTag Closing tag after each highlighted match (default '</mark>').
      * @param list<string>|null $attributesToCrop String fields to crop to a short excerpt in '_formatted';
      *                                            ['*'] for all string fields. Null = off.
      * @param int    $cropLength  Excerpt window size in characters (default 200).
@@ -41,8 +41,8 @@ final readonly class SearchOptions
         public readonly ?string $distinct = null,
         public readonly int $distinctCount = 1,
         public readonly ?array $attributesToHighlight = null,
-        public readonly string $highlightPreTag = '<em>',
-        public readonly string $highlightPostTag = '</em>',
+        public readonly string $highlightPreTag = '<mark>',
+        public readonly string $highlightPostTag = '</mark>',
         public readonly ?array $attributesToCrop = null,
         public readonly int $cropLength = 200,
         public readonly string $cropMarker = '…',

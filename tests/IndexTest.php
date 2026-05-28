@@ -3120,7 +3120,7 @@ class IndexTest extends TestCase
         $result    = $index->search('mercedes', new SearchOptions(attributesToHighlight: ['title']));
         $formatted = $result->getHit(0)['_formatted'];
         $this->assertIsArray($formatted);
-        $this->assertSame('<em>Mercedes</em> Benz', $formatted['title']);
+        $this->assertSame('<mark>Mercedes</mark> Benz', $formatted['title']);
         $this->assertArrayNotHasKey('body', $formatted);
     }
 
@@ -3131,8 +3131,8 @@ class IndexTest extends TestCase
         $result    = $index->search('mercedes', new SearchOptions(attributesToHighlight: ['*']));
         $formatted = $result->getHit(0)['_formatted'];
         $this->assertIsArray($formatted);
-        $this->assertSame('<em>Mercedes</em>', $formatted['title']);
-        $this->assertSame('<em>Mercedes</em> is a brand', $formatted['body']);
+        $this->assertSame('<mark>Mercedes</mark>', $formatted['title']);
+        $this->assertSame('<mark>Mercedes</mark> is a brand', $formatted['body']);
     }
 
     public function testFormattedHighlightCustomTags(): void
@@ -3186,7 +3186,7 @@ class IndexTest extends TestCase
         $this->assertIsArray($formatted);
         $this->assertArrayHasKey('body', $formatted);
         $this->assertIsString($formatted['body']);
-        $this->assertStringContainsString('<em>', $formatted['body']);
+        $this->assertStringContainsString('<mark>', $formatted['body']);
         $this->assertStringContainsStringIgnoringCase('mercedes', $formatted['body']);
         // Cropped text (without tags) must be shorter than the full body.
         $stripped = strip_tags($formatted['body']);
@@ -3216,7 +3216,7 @@ class IndexTest extends TestCase
         $result    = $index->searchBoolean('mercedes', new SearchOptions(attributesToHighlight: ['title']));
         $formatted = $result->getHit(0)['_formatted'];
         $this->assertIsArray($formatted);
-        $this->assertSame('<em>Mercedes</em> Benz', $formatted['title']);
+        $this->assertSame('<mark>Mercedes</mark> Benz', $formatted['title']);
     }
 
     // --- Facets: construction ---

@@ -68,8 +68,8 @@ $result = $index->search('city car', new SearchOptions(
 | `distinct`              | `null`    | Facet field to collapse on (deduplication)                                      |
 | `distinctCount`         | `1`       | Max hits per distinct value                                                     |
 | `attributesToHighlight` | `null`    | String fields to include in `_formatted` with matched terms wrapped in tags; `['*']` for all |
-| `highlightPreTag`       | `'<em>'`  | Opening tag placed before each highlighted match                                |
-| `highlightPostTag`      | `'</em>'` | Closing tag placed after each highlighted match                                 |
+| `highlightPreTag`       | `'<mark>'`  | Opening tag placed before each highlighted match                                |
+| `highlightPostTag`      | `'</mark>'` | Closing tag placed after each highlighted match                                 |
 | `attributesToCrop`      | `null`    | String fields to crop to a short excerpt in `_formatted`; `['*']` for all      |
 | `cropLength`            | `200`     | Excerpt window size in characters                                               |
 | `cropMarker`            | `'…'`     | Text inserted at crop boundaries                                                |
@@ -266,7 +266,7 @@ Pass `attributesToHighlight` or `attributesToCrop` (or both) in `SearchOptions` 
 
 ### Highlighting
 
-`attributesToHighlight` wraps matched query terms in the specified string fields with HTML tags. The default tags are `<em>` / `</em>`.
+`attributesToHighlight` wraps matched query terms in the specified string fields with HTML tags. The default tags are `<mark>` / `</mark>`.
 
 ```php
 $result = $index->search('mercedes sedan', new SearchOptions(
@@ -275,9 +275,9 @@ $result = $index->search('mercedes sedan', new SearchOptions(
 
 foreach ($result->hits as $hit) {
     echo $hit['_formatted']['title'];
-    // "<em>Mercedes</em> <em>Sedan</em> review"
+    // "<mark>Mercedes</mark> <mark>Sedan</mark> review"
     echo $hit['_formatted']['body'];
-    // "The new <em>Mercedes</em> E-Class is a fine <em>sedan</em> …"
+    // "The new <mark>Mercedes</mark> E-Class is a fine <mark>sedan</mark> …"
 }
 ```
 
