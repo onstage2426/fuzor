@@ -41,6 +41,14 @@ final readonly class Config
          *  Counts are approximate when the result set exceeds this cap. */
         public int $maxFacetCountDocs = 10_000,
         /**
+         * Maximum number of values returned per facet field in $facetDistribution.
+         * Values are ordered by count descending; the tail is truncated.
+         * 0 returns all values (use with care on high-cardinality fields).
+         *
+         * @infection-ignore-all: default value; mutations only affect result size, not correctness
+         */
+        public int $maxValuesPerFacet = 100,
+        /**
          * Maximum number of candidates to apply proximity ranking to, chosen by highest BM25 first.
          * 0 (default) means apply proximity to all candidates.
          * A positive value restores the original windowed behaviour and caps the proximity

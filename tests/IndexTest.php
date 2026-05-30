@@ -3378,6 +3378,43 @@ class IndexTest extends TestCase
         $this->assertSame(['min' => 10000.0, 'max' => 30000.0], $result->facetStats['price']);
     }
 
+    public function testFacetDistributionRespectMaxValuesPerFacet(): void
+    {
+        $index = new Index(
+            $this->dbPath,
+            config: new Config(maxValuesPerFacet: 2),
+            schema: new SchemaConfig(facetFields: ['color']),
+        );
+        $index->insert([
+            ['id' => 1, 'title' => 'car', 'color' => 'red'],
+            ['id' => 2, 'title' => 'car', 'color' => 'red'],
+            ['id' => 3, 'title' => 'car', 'color' => 'blue'],
+            ['id' => 4, 'title' => 'car', 'color' => 'green'],
+        ]);
+
+        $result = $index->search('car', new SearchOptions(facets: ['color']));
+        // Top 2 by count: red (2), then one of blue/green (1 each)
+        $this->assertCount(2, $result->facetDistribution['color']);
+        $this->assertSame(2, $result->facetDistribution['color']['red']);
+    }
+
+    public function testFacetDistributionUnlimitedWhenMaxValuesPerFacetIsZero(): void
+    {
+        $index = new Index(
+            $this->dbPath,
+            config: new Config(maxValuesPerFacet: 0),
+            schema: new SchemaConfig(facetFields: ['color']),
+        );
+        $index->insert([
+            ['id' => 1, 'title' => 'car', 'color' => 'red'],
+            ['id' => 2, 'title' => 'car', 'color' => 'blue'],
+            ['id' => 3, 'title' => 'car', 'color' => 'green'],
+        ]);
+
+        $result = $index->search('car', new SearchOptions(facets: ['color']));
+        $this->assertCount(3, $result->facetDistribution['color']);
+    }
+
     // --- Facets: disjunctive counts ---
 
     public function testDisjunctiveFacetCountsShowAllValuesWhenFiltered(): void

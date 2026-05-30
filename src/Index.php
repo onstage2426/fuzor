@@ -4463,6 +4463,8 @@ class Index
             return ['distribution' => [], 'stats' => []];
         }
 
+        $maxValues = $this->config->maxValuesPerFacet;
+
         /** @var array<string, array<array-key, int>> $distribution */
         $distribution   = [];
         /** @var array<string, array{min: float, max: float}> $stats */
@@ -4502,7 +4504,10 @@ class Index
                 : [$keyName => $this->fetchFacetCountsForKey($keyId, $docIds)];
             foreach ($result as $k => $v) {
                 if ($v['distribution'] !== []) {
-                    $distribution[$k] = $v['distribution'];
+                    $dist = $v['distribution'];
+                    $distribution[$k] = $maxValues > 0 && count($dist) > $maxValues
+                        ? array_slice($dist, 0, $maxValues, true)
+                        : $dist;
                     if ($v['stats'] !== null) {
                         $stats[$k] = $v['stats'];
                     }
@@ -4520,7 +4525,10 @@ class Index
                     // One query for all keys driven from doc IDs — O(N × avg_facets).
                     foreach ($this->fetchAllFacetCountsJoin($commonNameToId, $docIds) as $k => $v) {
                         if ($v['distribution'] !== []) {
-                            $distribution[$k] = $v['distribution'];
+                            $dist = $v['distribution'];
+                            $distribution[$k] = $maxValues > 0 && count($dist) > $maxValues
+                                ? array_slice($dist, 0, $maxValues, true)
+                                : $dist;
                             if ($v['stats'] !== null) {
                                 $stats[$k] = $v['stats'];
                             }
@@ -4531,7 +4539,10 @@ class Index
                     foreach ($commonNameToId as $keyName => $keyId) {
                         $v = $this->fetchFacetCountsForKey($keyId, $docIds);
                         if ($v['distribution'] !== []) {
-                            $distribution[$keyName] = $v['distribution'];
+                            $dist = $v['distribution'];
+                            $distribution[$keyName] = $maxValues > 0 && count($dist) > $maxValues
+                                ? array_slice($dist, 0, $maxValues, true)
+                                : $dist;
                             if ($v['stats'] !== null) {
                                 $stats[$keyName] = $v['stats'];
                             }

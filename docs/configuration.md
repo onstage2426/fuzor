@@ -28,6 +28,7 @@ Omitting `config` uses the optimised defaults shown below.
 | `proximityBoost`     | `1.0`    | Strength of bonus for multi-term queries where terms appear close together; `0` disables |
 | `filterMaxDocs`      | `2000`   | Max documents fetched per FTS term when a facet `filter` is active; higher values improve recall at the cost of more scoring work |
 | `maxFacetCountDocs`  | `10000`  | Max result doc IDs included in the facet count query; counts are approximate when the result set exceeds this cap |
+| `maxValuesPerFacet`  | `100`    | Max values returned per facet field in `$facetDistribution`, ordered by count descending; `0` returns all values |
 | `fieldBoosts`        | `[]`     | Per-field BM25 multipliers — see [Field boosting](#field-boosting) below |
 
 ## Field boosting
