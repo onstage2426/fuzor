@@ -1321,7 +1321,8 @@ class Index
      * Stream all documents from the store in ascending doc_id order.
      *
      * Yields doc_id => document pairs one at a time. $batchSize controls how many rows
-     * are fetched from SQLite per round-trip via a keyset cursor (WHERE doc_id > :last),
+     * are fetched from SQLite per round-trip via a keyset cursor (WHERE doc_id > :last).
+     * Pass the last yielded key as $afterId to resume from a checkpoint or fetch the next page.
      * so each fetch is O(1) against the clustered PK regardless of position in the dataset.
      *
      * @param  int $batchSize Rows fetched per SQL round-trip (default 100).
@@ -1329,7 +1330,7 @@ class Index
      * @throws QueryException            If the document store is not enabled.
      * @throws \InvalidArgumentException If $batchSize < 1.
      */
-    public function stream(int $batchSize = 100): \Generator
+    public function stream(int $batchSize = 100, int $afterId = 0): \Generator
     {
         if (!$this->documentStoreEnabled) {
             throw new QueryException(
@@ -1339,7 +1340,7 @@ class Index
         if ($batchSize < 1) {
             throw new \InvalidArgumentException('batchSize must be >= 1.');
         }
-        $lastId = 0;
+        $lastId = $afterId;
         do {
             $stmt = $this->stmt(
                 'streamCursor',
@@ -1685,7 +1686,7 @@ class Index
         }
 
         // Phase 4: Compute disjunctive facet counts on the full filtered result set.
-        $facetCounts = $this->computeFacetCounts(
+        ['distribution' => $facetDistribution, 'stats' => $facetStats] = $this->computeFacetCounts(
             $facets,
             $filterSets,
             $rawDocScores,
@@ -1701,7 +1702,8 @@ class Index
                 ids: [],
                 totalHits: 0,
                 documents: $this->hydrateAndFormat([], $phrase, $options),
-                facetCounts: $facetCounts,
+                facetCounts: $facetDistribution,
+                facetStats: $facetStats,
                 query: $phrase,
                 limit: $limit,
                 offset: $offset,
@@ -1737,7 +1739,8 @@ class Index
                 ids: $pagedIds,
                 totalHits: $distinctHits,
                 documents: $this->hydrateAndFormat($pagedIds, $phrase, $options),
-                facetCounts: $facetCounts,
+                facetCounts: $facetDistribution,
+                facetStats: $facetStats,
                 query: $phrase,
                 limit: $limit,
                 offset: $offset,
@@ -1749,7 +1752,8 @@ class Index
                 ids: [],
                 totalHits: $total,
                 documents: $this->hydrateAndFormat([], $phrase, $options),
-                facetCounts: $facetCounts,
+                facetCounts: $facetDistribution,
+                facetStats: $facetStats,
                 query: $phrase,
                 limit: $limit,
                 offset: $offset,
@@ -1782,7 +1786,8 @@ class Index
             ids: $pagedIds,
             totalHits: $total,
             documents: $this->hydrateAndFormat($pagedIds, $phrase, $options),
-            facetCounts: $facetCounts,
+            facetCounts: $facetDistribution,
+            facetStats: $facetStats,
             query: $phrase,
             limit: $limit,
             offset: $offset,
@@ -1911,7 +1916,7 @@ class Index
 
         // Phase 4: disjunctive facet counts on the full filtered result.
         $filteredDocSet = array_flip($docIds);
-        $facetCounts    = $this->computeFacetCounts(
+        ['distribution' => $facetDistribution, 'stats' => $facetStats] = $this->computeFacetCounts(
             $facets,
             $filterSets,
             $rawDocSet,
@@ -1938,7 +1943,8 @@ class Index
                 ids: $pagedIds,
                 totalHits: $distinctHits,
                 documents: $this->hydrateAndFormat($pagedIds, $phrase, $options),
-                facetCounts: $facetCounts,
+                facetCounts: $facetDistribution,
+                facetStats: $facetStats,
                 query: $phrase,
                 limit: $limit,
                 offset: $offset,
@@ -1955,7 +1961,8 @@ class Index
             ids: $docIds,
             totalHits: $total,
             documents: $this->hydrateAndFormat($docIds, $phrase, $options),
-            facetCounts: $facetCounts,
+            facetCounts: $facetDistribution,
+            facetStats: $facetStats,
             query: $phrase,
             limit: $limit,
             offset: $offset,
@@ -4440,7 +4447,10 @@ class Index
      * @param  array<int, mixed>           $rawDocScores   All scored docs before any facet filter.
      * @param  array<int, mixed>           $filteredScores Docs after all facet filters.
      * @param  int                         $maxDocs        Cap on doc IDs sent in the IN() clause.
-     * @return array<string, array<string, int>|array{min: float, max: float, count: int}>
+     * @return array{
+     *     distribution: array<string, array<array-key, int>>,
+     *     stats: array<string, array{min: float, max: float}>
+     * }
      */
     private function computeFacetCounts(
         array $facetKeys,
@@ -4450,10 +4460,13 @@ class Index
         int $maxDocs,
     ): array {
         if ($facetKeys === [] || !$this->facetsEnabled) {
-            return [];
+            return ['distribution' => [], 'stats' => []];
         }
 
-        $counts      = [];
+        /** @var array<string, array<array-key, int>> $distribution */
+        $distribution   = [];
+        /** @var array<string, array{min: float, max: float}> $stats */
+        $stats          = [];
         // Keys that use the common filteredScores doc set (non-disjunctive).
         /** @var array<string, int> $commonNameToId */
         $commonNameToId = [];
@@ -4488,8 +4501,11 @@ class Index
                 ? $this->fetchAllFacetCountsJoin([$keyName => $keyId], $docIds)
                 : [$keyName => $this->fetchFacetCountsForKey($keyId, $docIds)];
             foreach ($result as $k => $v) {
-                if ($v !== []) {
-                    $counts[$k] = $v;
+                if ($v['distribution'] !== []) {
+                    $distribution[$k] = $v['distribution'];
+                    if ($v['stats'] !== null) {
+                        $stats[$k] = $v['stats'];
+                    }
                 }
             }
         }
@@ -4503,23 +4519,29 @@ class Index
                 if (count($docIds) <= self::FACET_JOIN_THRESHOLD) {
                     // One query for all keys driven from doc IDs — O(N × avg_facets).
                     foreach ($this->fetchAllFacetCountsJoin($commonNameToId, $docIds) as $k => $v) {
-                        if ($v !== []) {
-                            $counts[$k] = $v;
+                        if ($v['distribution'] !== []) {
+                            $distribution[$k] = $v['distribution'];
+                            if ($v['stats'] !== null) {
+                                $stats[$k] = $v['stats'];
+                            }
                         }
                     }
                 } else {
                     // Per-key sequential PK scan — O(K) per key, optimal for large N.
                     foreach ($commonNameToId as $keyName => $keyId) {
-                        $result = $this->fetchFacetCountsForKey($keyId, $docIds);
-                        if ($result !== []) {
-                            $counts[$keyName] = $result;
+                        $v = $this->fetchFacetCountsForKey($keyId, $docIds);
+                        if ($v['distribution'] !== []) {
+                            $distribution[$keyName] = $v['distribution'];
+                            if ($v['stats'] !== null) {
+                                $stats[$keyName] = $v['stats'];
+                            }
                         }
                     }
                 }
             }
         }
 
-        return $counts;
+        return ['distribution' => $distribution, 'stats' => $stats];
     }
 
     /**
@@ -4534,7 +4556,7 @@ class Index
      *
      * @param  array<string, int> $nameToId  Facet key name → key_id.
      * @param  list<int>          $docIds
-     * @return array<string, array<string, int>|array{min: float, max: float, count: int}>
+     * @return array<string, array{distribution: array<array-key, int>, stats: array{min: float, max: float}|null}>
      */
     private function fetchAllFacetCountsJoin(array $nameToId, array $docIds): array
     {
@@ -4574,18 +4596,20 @@ class Index
             if ($kCounts === []) {
                 continue;
             }
+            arsort($kCounts);
             $total  = $totalCount[$keyId] ?? 0;
             $numCnt = $numCount[$keyId] ?? 0;
             if ($numCnt === $total && $numCnt > 0) {
                 $nums = array_values($numValues[$keyId] ?? []);
                 $counts[$keyName] = [
-                    'min'   => $nums !== [] ? (float) min($nums) : 0.0,
-                    'max'   => $nums !== [] ? (float) max($nums) : 0.0,
-                    'count' => $total,
+                    'distribution' => $kCounts,
+                    'stats' => [
+                        'min' => $nums !== [] ? (float) min($nums) : 0.0,
+                        'max' => $nums !== [] ? (float) max($nums) : 0.0,
+                    ],
                 ];
             } else {
-                arsort($kCounts);
-                $counts[$keyName] = $kCounts;
+                $counts[$keyName] = ['distribution' => $kCounts, 'stats' => null];
             }
         }
         return $counts;
@@ -4604,7 +4628,7 @@ class Index
      * compilation overhead.
      *
      * @param  list<int> $docIds
-     * @return array<string, int>|array{min: float, max: float, count: int}
+     * @return array{distribution: array<array-key, int>, stats: array{min: float, max: float}|null}
      */
     private function fetchFacetCountsForKey(int $keyId, array $docIds): array
     {
@@ -4625,29 +4649,30 @@ class Index
         $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
         if ($rows === []) {
-            return [];
+            return ['distribution' => [], 'stats' => null];
         }
 
         $totalCount = (int) array_sum(array_column($rows, 'n'));
         $numCount   = (int) array_sum(array_column($rows, 'num_count'));
 
-        // If every row has a num_value, treat as a numeric facet and return stats.
+        $distribution = [];
+        foreach ($rows as $row) {
+            $distribution[$row['value']] = (int) $row['n'];
+        }
+
         if ($numCount === $totalCount && $numCount > 0) {
             $minNums = array_filter(array_column($rows, 'min_num'));
             $maxNums = array_filter(array_column($rows, 'max_num'));
             return [
-                'min'   => $minNums !== [] ? (float) min($minNums) : 0.0,
-                'max'   => $maxNums !== [] ? (float) max($maxNums) : 0.0,
-                'count' => $totalCount,
+                'distribution' => $distribution,
+                'stats' => [
+                    'min' => $minNums !== [] ? (float) min($minNums) : 0.0,
+                    'max' => $maxNums !== [] ? (float) max($maxNums) : 0.0,
+                ],
             ];
         }
 
-        // String facet: return value → count map ordered by count desc.
-        $result = [];
-        foreach ($rows as $row) {
-            $result[$row['value']] = (int) $row['n'];
-        }
-        return $result;
+        return ['distribution' => $distribution, 'stats' => null];
     }
 
     // --- Infrastructure -----------------------------------------------------

@@ -26,11 +26,19 @@ class SearchResult
 
     /**
      * Facet value counts keyed by facet field name.
-     * String facets: array<string, int> (value → count). Numeric facets: array{min: float, max: float, count: int}.
+     * All facets (string and numeric) are value → count maps.
      *
-     * @var array<string, array<string, int>|array{min: float, max: float, count: int}>
+     * @var array<string, array<array-key, int>>
      */
     public readonly array $facetDistribution;
+
+    /**
+     * Aggregate stats for numeric facet fields: min and max over the result set.
+     * Only present for fields where every document has a numeric value.
+     *
+     * @var array<string, array{min: float, max: float}>
+     */
+    public readonly array $facetStats;
 
     /** @var list<int> Document IDs in relevance order; used internally for score lookups. */
     private readonly array $ids;
@@ -38,7 +46,8 @@ class SearchResult
     /**
      * @param list<int>                             $ids
      * @param array<int, array<string, mixed>>|null $documents
-     * @param array<string, array<string, int>|array{min: float, max: float, count: int}> $facetCounts
+     * @param array<string, array<array-key, int>>     $facetCounts
+     * @param array<string, array{min: float, max: float}> $facetStats
      */
     public function __construct(
         array $ids,
@@ -48,6 +57,7 @@ class SearchResult
         string $query = '',
         int|null $limit = null,
         int|null $offset = null,
+        array $facetStats = [],
     ) {
         $this->ids               = $ids;
         $this->totalHits         = $totalHits;
@@ -55,6 +65,7 @@ class SearchResult
         $this->limit             = $limit;
         $this->offset            = $offset;
         $this->facetDistribution = $facetCounts;
+        $this->facetStats        = $facetStats;
 
         $this->hits = $documents === null
             ? array_map(fn(int $id) => ['id' => $id], $ids)
@@ -108,10 +119,16 @@ class SearchResult
         return $this->hits[$index] ?? [];
     }
 
-    /** @return array<string, array<string, int>|array{min: float, max: float, count: int}> */
+    /** @return array<string, array<array-key, int>> */
     public function getFacetDistribution(): array
     {
         return $this->facetDistribution;
+    }
+
+    /** @return array<string, array{min: float, max: float}> */
+    public function getFacetStats(): array
+    {
+        return $this->facetStats;
     }
 
     /** @return array<string, mixed> */
@@ -125,6 +142,7 @@ class SearchResult
             'limit'             => $this->limit,
             'offset'            => $this->offset,
             'facetDistribution' => $this->facetDistribution,
+            'facetStats'        => $this->facetStats,
         ];
     }
 

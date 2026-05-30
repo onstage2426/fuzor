@@ -3372,10 +3372,10 @@ class IndexTest extends TestCase
         ]);
 
         $result = $index->search('car', new SearchOptions(facets: ['price']));
-        $this->assertSame(
-            ['price' => ['min' => 10000.0, 'max' => 30000.0, 'count' => 3]],
-            $result->facetDistribution,
-        );
+        $this->assertSame(1, $result->facetDistribution['price'][10000]);
+        $this->assertSame(1, $result->facetDistribution['price'][20000]);
+        $this->assertSame(1, $result->facetDistribution['price'][30000]);
+        $this->assertSame(['min' => 10000.0, 'max' => 30000.0], $result->facetStats['price']);
     }
 
     // --- Facets: disjunctive counts ---

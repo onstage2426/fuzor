@@ -150,7 +150,7 @@ $index->insert([
 |------------|---------|-----------|
 | String | `'brand' => 'Casio'` | Exact-match string facet |
 | Array of strings | `'gender' => ['men', 'unisex']` | Multi-value; contributes one count per value |
-| Integer or float | `'price' => 129.99` | Numeric facet; aggregated as min/max/count at search time |
+| Integer or float | `'price' => 129.99` | Numeric facet; per-value counts in `$facetDistribution` (stringified keys) + min/max in `$facetStats` |
 
 Documents that omit a declared facet field are indexed normally for full-text but contribute nothing to the facet index for that field.
 

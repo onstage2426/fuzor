@@ -14,7 +14,8 @@ Both methods return a `SearchResult` object:
 | `$query`                | `string`              | Original query string                                                    |
 | `$limit`                | `int\|null`           | Page limit                                                               |
 | `$offset`               | `int\|null`           | Page offset                                                              |
-| `$facetDistribution`    | `array<string,mixed>` | Per-value counts keyed by facet field name; empty when not requested     |
+| `$facetDistribution`    | `array<string, array<string,int>>` | Per-value counts keyed by facet field name; all facets (string and numeric) use value → count maps; empty when not requested |
+| `$facetStats`           | `array<string, array{min:float,max:float}>` | Min/max stats for numeric facet fields; absent for string facets and when facets not requested |
 | `getIds()`              | `list<int>`           | Document IDs in relevance order (current page)                           |
 | `getHits()`             | `list<array>`         | Same as `$hits`                                                          |
 | `getHit(int $index)`    | `array`               | Document at position `$index` (0-based); empty array when out of bounds  |
@@ -23,7 +24,8 @@ Both methods return a `SearchResult` object:
 | `getQuery()`            | `string`              | Same as `$query`                                                         |
 | `getLimit()`            | `int\|null`           | Same as `$limit`                                                         |
 | `getOffset()`           | `int\|null`           | Same as `$offset`                                                        |
-| `getFacetDistribution()` | `array<string,mixed>` | Same as `$facetDistribution`                                            |
+| `getFacetDistribution()` | `array<string, array<string,int>>` | Same as `$facetDistribution`                                |
+| `getFacetStats()`       | `array<string, array{min:float,max:float}>` | Same as `$facetStats`                              |
 | `toArray()`             | `array`               | Full result as a plain array                                             |
 | `toJson(int $flags = 0)` | `string`             | JSON-encoded result; pass `JSON_PRETTY_PRINT` etc. via `$flags`          |
 
@@ -437,11 +439,20 @@ $result->facetDistribution['brand']['Unknown'] ?? null; // null
 
 ### Numeric facet counts
 
-For numeric facets (int/float field values), `$facetDistribution['key']` is an aggregate summary:
+For numeric facets (int/float field values), `$facetDistribution['key']` is a value → count map like string facets — numeric values are stringified keys. Range stats are available separately in `$facetStats`:
 
 ```php
+$result->facetDistribution['size'];
+// ['8' => 12, '9' => 34, '10' => 7, '11' => 3]
+
+$result->facetStats['size'];
+// ['min' => 8.0, 'max' => 11.0]
+
 $result->facetDistribution['price'];
-// ['min' => 29.99, 'max' => 499.0, 'count' => 20]
+// ['29.99' => 4, '49.99' => 8, '499.0' => 2, ...]
+
+$result->facetStats['price'];
+// ['min' => 29.99, 'max' => 499.0]
 ```
 
 ### Combining facets with filters
