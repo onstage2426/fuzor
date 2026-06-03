@@ -95,7 +95,7 @@ class Index
     public private(set) bool $documentStoreEnabled = false;
 
     /** Whether the facet index is active on this index. */
-    public private(set) bool $facetsEnabled = false;
+    public private(set) bool $facetsEnabled = true;
 
     /** @var list<string> Field names routed to the facet index; not FTS-indexed unless also in searchableFields. */
     public private(set) array $facetFields = [];
@@ -111,9 +111,6 @@ class Index
 
     /** @var array<string, int> Maps searchable field name → field_names.id; populated lazily; cleared on connection change. */
     private array $fieldNameCache = [];
-
-    /** Whether this index has the field_hits table (false for indexes created before field boost support). */
-    private bool $hasFieldHits = false;
 
     /** @var array<string, int> Pre-computed isset-lookup set derived from facetFields (array_flip); rebuilt whenever facetFields is assigned. */
     private array $facetFieldSet = [];
@@ -527,9 +524,6 @@ class Index
              ON facet_values (key_id, num_value, doc_id)
              WHERE num_value IS NOT NULL"
         );
-        $pdo->exec("INSERT INTO info (key, value) VALUES ('has_facets', '1')");
-        $this->facetsEnabled = true;
-
         // field_names: one row per searchable field name (~2–10 entries; fully cached in PHP).
         $pdo->exec(
             "CREATE TABLE IF NOT EXISTS field_names (
@@ -551,7 +545,6 @@ class Index
         );
         /** @infection-ignore-all MethodCallRemoval: field_hits_doc_id is a performance index; DELETE-by-doc_id still works via full scan */
         $pdo->exec("CREATE INDEX IF NOT EXISTS 'main'.'field_hits_doc_id' ON field_hits (doc_id);");
-        $this->hasFieldHits = true;
 
         // WITHOUT ROWID clusters on (source, target); single-SELECT synonym lookup is a pure B-tree scan.
         $pdo->exec(
@@ -602,8 +595,7 @@ class Index
         $pdo   = $this->pdo;
         $stmt  = $pdo->query(
             "SELECT key, value FROM info"
-            . " WHERE key IN ('language', 'has_document_store', 'has_facets', 'facet_fields', 'searchable_fields',"
-            . " 'strip_html')"
+            . " WHERE key IN ('language', 'has_document_store', 'facet_fields', 'searchable_fields', 'strip_html')"
         );
         $infoRows = [];
         if ($stmt) {
@@ -614,16 +606,12 @@ class Index
         $lang = ($infoRows['language'] ?? '') !== '' ? $infoRows['language'] : null;
         $this->applyLanguage($lang);
         $this->documentStoreEnabled = ($infoRows['has_document_store'] ?? '0') === '1';
-        $this->facetsEnabled        = ($infoRows['has_facets']          ?? '0') === '1';
         $this->facetFields        = self::decodeStringList($infoRows['facet_fields'] ?? '[]');
         $sfRaw                    = $infoRows['searchable_fields'] ?? '';
         $this->searchableFields   = $sfRaw === '' ? null : self::decodeStringList($sfRaw);
         $this->facetFieldSet      = array_flip($this->facetFields);
         $this->searchableFieldSet = $this->searchableFields !== null ? array_flip($this->searchableFields) : null;
         $this->stripHtml          = ($infoRows['strip_html'] ?? '0') === '1';
-
-        $probe = $pdo->query("SELECT 1 FROM sqlite_master WHERE type='table' AND name='field_hits'");
-        $this->hasFieldHits = $probe !== false && $probe->fetchColumn() !== false;
     }
 
     /**
@@ -820,17 +808,13 @@ class Index
                     CREATE INDEX IF NOT EXISTS doclist_term_hitcount ON doclist (term_id, hit_count DESC);
                     CREATE INDEX IF NOT EXISTS positions_doc_id ON positions (doc_id);
                 ');
-                if ($this->facetsEnabled) {
-                    $pdo->exec('
-                        CREATE INDEX IF NOT EXISTS facet_doc_id_index ON facet_values (doc_id);
-                        CREATE INDEX IF NOT EXISTS facet_numeric_index ON facet_values (key_id, num_value, doc_id)
-                            WHERE num_value IS NOT NULL;
-                    ');
-                }
-                if ($this->hasFieldHits) {
-                    /** @infection-ignore-all MethodCallRemoval: rebuilding field_hits_doc_id is a performance step; correctness is unaffected */
-                    $pdo->exec('CREATE INDEX IF NOT EXISTS field_hits_doc_id ON field_hits (doc_id);');
-                }
+                $pdo->exec('
+                    CREATE INDEX IF NOT EXISTS facet_doc_id_index ON facet_values (doc_id);
+                    CREATE INDEX IF NOT EXISTS facet_numeric_index ON facet_values (key_id, num_value, doc_id)
+                        WHERE num_value IS NOT NULL;
+                ');
+                /** @infection-ignore-all MethodCallRemoval: rebuilding field_hits_doc_id is a performance step; correctness is unaffected */
+                $pdo->exec('CREATE INDEX IF NOT EXISTS field_hits_doc_id ON field_hits (doc_id);');
             }
             /** @infection-ignore-all MethodCallRemoval: restoring pragmas after bulk load is a performance step; the next connection will re-apply from applyPragmas() */
             $this->restoreNormalPragmas();
@@ -1090,12 +1074,8 @@ class Index
             if ($this->documentStoreEnabled) {
                 $pdo->exec('DELETE FROM documents');
             }
-            if ($this->facetsEnabled) {
-                $pdo->exec('DELETE FROM facet_values');
-            }
-            if ($this->hasFieldHits) {
-                $pdo->exec('DELETE FROM field_hits');
-            }
+            $pdo->exec('DELETE FROM facet_values');
+            $pdo->exec('DELETE FROM field_hits');
 
             $this->stmt(
                 'statsWrite',
@@ -1530,12 +1510,6 @@ class Index
 
         $fieldBoosts    = $this->config->fieldBoosts;
         $useFieldBoosts = $fieldBoosts !== [];
-        if ($useFieldBoosts && !$this->hasFieldHits) {
-            throw new QueryException(
-                'fieldBoosts requires an index built with field boost support. '
-                . 'Rebuild the index to enable field boosting.'
-            );
-        }
         /** @var array<int, float> $termIdfMap  termId → idfK1p1; populated when $useFieldBoosts for post-loop re-scoring. */
         $termIdfMap = [];
         /** @var array<int, array<int, true>> $docContribTermIds  docId → set<termId>; populated when $useFieldBoosts. */
@@ -1710,7 +1684,7 @@ class Index
             );
         }
 
-        if ($distinct !== null && $this->facetsEnabled) {
+        if ($distinct !== null) {
             $keyId = $this->lookupFacetKeyId($distinct);
             if ($sortSpecs !== []) {
                 $sortedIds = $this->sortDocIdsBySpecs(array_keys($docScores), $sortSpecs, $docScores);
@@ -1926,7 +1900,7 @@ class Index
 
         $total = count($docIds);
 
-        if ($distinct !== null && $this->facetsEnabled) {
+        if ($distinct !== null) {
             $keyId     = $this->lookupFacetKeyId($distinct);
             $sortedIds = $sortSpecs !== [] && $total > 0
                 ? $this->sortDocIdsBySpecs($docIds, $sortSpecs, [])
@@ -2126,12 +2100,8 @@ class Index
             if ($this->documentStoreEnabled) {
                 $this->prepare("DELETE FROM documents WHERE doc_id IN ({$placeholders})")->execute($chunk);
             }
-            if ($this->facetsEnabled) {
-                $this->prepare("DELETE FROM facet_values WHERE doc_id IN ({$placeholders})")->execute($chunk);
-            }
-            if ($this->hasFieldHits) {
-                $this->prepare("DELETE FROM field_hits WHERE doc_id IN ({$placeholders})")->execute($chunk);
-            }
+            $this->prepare("DELETE FROM facet_values WHERE doc_id IN ({$placeholders})")->execute($chunk);
+            $this->prepare("DELETE FROM field_hits WHERE doc_id IN ({$placeholders})")->execute($chunk);
 
             // Prune orphan terms scoped to the affected set; avoids a full wordlist table scan.
             if ($affectedTermIds !== []) {
@@ -2194,16 +2164,12 @@ class Index
             ->execute([':documentId' => $documentId]);
 
         // 4b. Remove facet rows for this document.
-        if ($this->facetsEnabled) {
-            $this->stmt('facetValuesDeleteByDoc', 'DELETE FROM facet_values WHERE doc_id = :documentId')
-                ->execute([':documentId' => $documentId]);
-        }
+        $this->stmt('facetValuesDeleteByDoc', 'DELETE FROM facet_values WHERE doc_id = :documentId')
+            ->execute([':documentId' => $documentId]);
 
         // 4c. Remove field_hits rows for this document.
-        if ($this->hasFieldHits) {
-            $this->stmt('fieldHitsDeleteByDoc', 'DELETE FROM field_hits WHERE doc_id = :documentId')
-                ->execute([':documentId' => $documentId]);
-        }
+        $this->stmt('fieldHitsDeleteByDoc', 'DELETE FROM field_hits WHERE doc_id = :documentId')
+            ->execute([':documentId' => $documentId]);
 
         // 5. Remove doc_lengths and return the old token count (null if the document was not found).
         $delStmt = $this->stmt(
@@ -2295,7 +2261,7 @@ class Index
      * tokenizeDocumentFields() delegate here so the tokenisation pipeline is defined once.
      *
      * @param array<string, int>                 $termCounts      mutated in-place
-     * @param array<string, array<string, int>>  $fieldTermCounts mutated in-place (no-op when !$this->hasFieldHits)
+     * @param array<string, array<string, int>>  $fieldTermCounts mutated in-place
      * @param array<string, list<int>>           $termPositions   mutated in-place
      */
     private function indexFieldColumn(
@@ -2330,13 +2296,10 @@ class Index
         if ($this->stemmer instanceof \Fuzor\Stemmer) {
             $tokens = $this->stemmer->stemTokens($tokens);
         }
-        $trackFields = $this->hasFieldHits;
         foreach ($tokens as $token) {
             $termCounts[$token]      = ($termCounts[$token] ?? 0) + 1;
             $termPositions[$token][] = $position++;
-            if ($trackFields) {
-                $fieldTermCounts[$fieldName][$token] = ($fieldTermCounts[$fieldName][$token] ?? 0) + 1;
-            }
+            $fieldTermCounts[$fieldName][$token] = ($fieldTermCounts[$fieldName][$token] ?? 0) + 1;
         }
     }
 
@@ -2360,7 +2323,7 @@ class Index
 
         $termIds = $this->upsertWordlist($termCounts);
         $this->saveDoclist($documentId, $termIds);
-        if ($this->hasFieldHits && $fieldTermCounts !== []) {
+        if ($fieldTermCounts !== []) {
             $this->saveFieldHits($documentId, $fieldTermCounts);
         }
         if ($termPositions !== []) {
@@ -2375,7 +2338,7 @@ class Index
         }
         $this->saveDocLength($documentId, $length);
 
-        if ($this->facetsEnabled && $this->facetFieldSet !== []) {
+        if ($this->facetFieldSet !== []) {
             $this->saveFacets($documentId, array_intersect_key($row, $this->facetFieldSet));
         }
 
@@ -2523,7 +2486,7 @@ class Index
         $facetBuffer       = [];
         /** @var array<int, array<string, mixed>> $rawDocuments Raw document arrays for the document store; empty when store is disabled. */
         $rawDocuments      = [];
-        /** @var array<int, array<string, array<string, int>>> $fieldTermBuffer  docId → fieldName → term → hitCount; only populated when $hasFieldHits */
+        /** @var array<int, array<string, array<string, int>>> $fieldTermBuffer  docId → fieldName → term → hitCount */
         $fieldTermBuffer   = [];
 
         $total = count($documents);
@@ -2531,7 +2494,7 @@ class Index
 
         // Pre-compute the facet field lookup map once for the whole batch (not per-document).
         $facetFieldFlipped = $this->facetFieldSet;
-        $hasFacetFields    = $this->facetsEnabled && $facetFieldFlipped !== [];
+        $hasFacetFields    = $facetFieldFlipped !== [];
 
         foreach ($documents as $document) {
             $documentId = $this->extractId($document['id']);
@@ -2544,7 +2507,7 @@ class Index
             $docTermBuffer[$documentId]     = $termCounts;
             $docLengthBuffer[$documentId]   = $length;
             $docPositionBuffer[$documentId] = $termPositions;
-            if ($this->hasFieldHits && $fieldTermCounts !== []) {
+            if ($fieldTermCounts !== []) {
                 $fieldTermBuffer[$documentId] = $fieldTermCounts;
             }
             if ($hasFacetFields) {
@@ -2629,7 +2592,7 @@ class Index
         $this->bulkInsertDoclistRows($termDocMap);
 
         // Step 2b: invert fieldTermBuffer and bulk-insert per-field hit counts.
-        if ($this->hasFieldHits && $fieldTermBuffer !== []) {
+        if ($fieldTermBuffer !== []) {
             $termDocFieldMap = $this->invertFieldBuffer($fieldTermBuffer, $termIdMap);
             $this->bulkInsertFieldHitRows($termDocFieldMap);
         }
@@ -2649,7 +2612,7 @@ class Index
 
         // Step 6: bulk-insert facet values sorted by (key_id, value, doc_id) for
         // WITHOUT ROWID clustered B-tree sequential appends.
-        if ($this->facetsEnabled && $facetBuffer !== []) {
+        if ($facetBuffer !== []) {
             $this->bulkFlushFacets($facetBuffer);
         }
 
@@ -4329,7 +4292,7 @@ class Index
      */
     private function loadFacetKeySets(array $filter, int $filterMaxDocs, array $candidateDocIds = []): array
     {
-        if ($filter === [] || !$this->facetsEnabled) {
+        if ($filter === []) {
             return [];
         }
         $sets = [];
@@ -4459,7 +4422,7 @@ class Index
         array $filteredScores,
         int $maxDocs,
     ): array {
-        if ($facetKeys === [] || !$this->facetsEnabled) {
+        if ($facetKeys === []) {
             return ['distribution' => [], 'stats' => []];
         }
 

@@ -51,18 +51,6 @@ This weighted TF replaces the raw `hit_count` in the BM25 formula. A term found 
 
 Fields omitted from the map fall back to a multiplier of `1.0`. Fields that do not appear in any document are simply ignored.
 
-### Indexes built before field boost support
-
-Field boost support requires per-field hit counts to be stored at index time (`field_hits` table). All indexes created with the current version include this automatically.
-
-Calling `search()` with a non-empty `fieldBoosts` on an older index (one built before this feature was added) throws `QueryException`. Rebuild the index to enable field boosting:
-
-```php
-Index::rebuild('/path/to/articles.db', function (Index $new) use ($docs) {
-    $new->insert($docs);
-});
-```
-
 ### Performance
 
 The uniform BM25 path is completely unaffected when `fieldBoosts` is empty (the default). When boosts are configured, a second query fetches field hit counts for the bounded candidate set after the initial BM25 pass — the main `doclist` LIMIT query is unchanged.

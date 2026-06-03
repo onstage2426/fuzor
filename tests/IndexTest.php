@@ -4076,24 +4076,6 @@ class IndexTest extends TestCase
         $this->assertSame([1, 2], $result->getIds());
     }
 
-    public function testFieldBoostOnOldIndexThrowsQueryException(): void
-    {
-        // Simulate a pre-feature index by dropping the field_hits table after creation.
-        $index = new Index($this->dbPath);
-        $index->insert([['id' => 1, 'title' => 'test document', 'body' => 'content here']]);
-        $index->close();
-
-        // Drop field_hits to simulate an index built before field boost support was added.
-        $pdo = new \PDO('sqlite:' . $this->dbPath);
-        $pdo->exec('DROP TABLE IF EXISTS field_hits; DROP TABLE IF EXISTS field_names;');
-        unset($pdo);
-
-        // Re-open with boosts configured — must throw QueryException.
-        $index2 = new Index($this->dbPath, config: new Config(fieldBoosts: ['title' => 2.0]));
-        $this->expectException(QueryException::class);
-        $index2->search('test');
-    }
-
     public function testFieldBoostEmptyArrayUsesNormalBM25(): void
     {
         // Empty fieldBoosts = uniform path; search should still return results normally.
