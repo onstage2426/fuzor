@@ -24,7 +24,7 @@
         "squizlabs/php_codesniffer": "^4.0",
         "phpstan/phpstan": "^2.1",
         "phpbench/phpbench": "^1.5",
-        "infection/infection": "^0.32.6",
+        "infection/infection": "^0.32.6 || ^0.33.0",
         "rector/rector": "^2.4"
     },
     "autoload": {
