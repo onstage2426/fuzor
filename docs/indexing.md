@@ -76,6 +76,8 @@ $index = new Index('/path/to/articles.db', config: new Config(maxDocs: 200));
 
 Schema settings control how the index is structured at creation time. They are persisted inside the index file and cannot be changed without rebuilding. All schema settings are grouped in a `SchemaConfig` value object and passed as the `schema:` named argument.
 
+Passing `schema:` when opening an existing file throws `QueryException`. Use `Index::rebuild()` to change the schema without losing data, or `force: true` to overwrite the file entirely.
+
 | `SchemaConfig` property | Default | Effect |
 |-------------------------|---------|--------|
 | `language` | `null` | BCP 47 language tag; `null` disables stopwords and stemming |

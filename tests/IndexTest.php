@@ -90,6 +90,23 @@ class IndexTest extends TestCase
         new Index('/nonexistent/dir/index.db', schema: new SchemaConfig(language: 'xx'));
     }
 
+    public function testSchemaOnExistingIndexThrowsQueryException(): void
+    {
+        (new Index($this->dbPath))->close();
+
+        $this->expectException(QueryException::class);
+        new Index($this->dbPath, schema: new SchemaConfig(language: 'en'));
+    }
+
+    public function testSchemaWithForceDoesNotThrow(): void
+    {
+        (new Index($this->dbPath))->close();
+
+        // force: true means "recreate", so schema is applied to the new index — no throw.
+        $index = new Index($this->dbPath, force: true, schema: new SchemaConfig(language: 'en'));
+        $this->assertSame('en', $index->language);
+    }
+
     public function testCreateWithForceOverwritesExistingFile(): void
     {
         $index = new Index($this->dbPath);

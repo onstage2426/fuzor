@@ -150,6 +150,7 @@ class Index
         private readonly bool $readonly = false,
         ?SchemaConfig $schema = null,
     ) {
+        $schemaProvided = $schema !== null;
         $schema         = $schema ?? new SchemaConfig();
         $this->config   = $config ?? new Config();
         if ($this->readonly && $force) {
@@ -164,6 +165,12 @@ class Index
             throw new IOException("Index does not exist: {$resolved}");
         }
         if (file_exists($resolved) && !$force) {
+            if ($schemaProvided) {
+                throw new QueryException(
+                    "Cannot apply SchemaConfig to an existing index. "
+                    . "Use rebuild() to change the schema, or force: true to overwrite."
+                );
+            }
             $this->selectIndex();
         } else {
             $this->createIndex($force, $schema);
