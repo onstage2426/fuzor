@@ -3218,19 +3218,6 @@ class IndexTest extends TestCase
 
     // --- Facets: construction ---
 
-    public function testFacetsAlwaysEnabled(): void
-    {
-        $index = new Index($this->dbPath);
-        $this->assertTrue($index->facetsEnabled);
-    }
-
-    public function testFacetsPersistedAfterReopen(): void
-    {
-        (new Index($this->dbPath))->close();
-        $index = new Index($this->dbPath);
-        $this->assertTrue($index->facetsEnabled);
-    }
-
     // --- Facets: insert / delete isolation ---
 
     public function testFacetFieldNotIndexedAsText(): void
@@ -3581,7 +3568,6 @@ class IndexTest extends TestCase
         });
 
         $index = new Index($this->dbPath);
-        $this->assertTrue($index->facetsEnabled);
         $this->assertSame(['color'], $index->facetFields);
     }
 

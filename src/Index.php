@@ -94,9 +94,6 @@ class Index
     /** Whether the optional document store is active on this index. */
     public private(set) bool $documentStoreEnabled = false;
 
-    /** Whether the facet index is active on this index. */
-    public private(set) bool $facetsEnabled = true;
-
     /** @var list<string> Field names routed to the facet index; not FTS-indexed unless also in searchableFields. */
     public private(set) array $facetFields = [];
 
