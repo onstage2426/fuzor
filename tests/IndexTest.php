@@ -65,8 +65,8 @@ class IndexTest extends TestCase
         $index->delete(1);
         $index->close();
         $index = new Index($this->dbPath);
-        $info = $index->inspectQuery('coupe')['index_info'];
-        $this->assertSame('1', $info['total_documents']);
+        $info = $index->inspectQuery('coupe');
+        $this->assertSame(1, $info->totalDocuments);
     }
 
     public function testConstructorThrowsIfDirectoryDoesNotExist(): void
@@ -712,8 +712,8 @@ class IndexTest extends TestCase
 
         // A mutation that swaps the strict branch would call adjustStats(+1, newLength)
         // instead of adjustStats(0, delta), growing total_documents from 2 to 3.
-        $info = $index->inspectQuery('suv')['index_info'];
-        $this->assertSame('2', $info['total_documents']);
+        $info = $index->inspectQuery('suv');
+        $this->assertSame(2, $info->totalDocuments);
     }
 
     public function testUpdateThrowsIfDocumentDoesNotExist(): void
@@ -729,8 +729,8 @@ class IndexTest extends TestCase
         $index = new Index($this->dbPath);
         $index->insert([['id' => 1, 'title' => 'alpha beta gamma delta']]);
         $index->update([['id' => 1, 'title' => 'zeta']]);
-        $info = $index->inspectQuery('zeta')['index_info'];
-        $this->assertEqualsWithDelta(1.0, (float) $info['avg_doc_length'], 0.01);
+        $info = $index->inspectQuery('zeta');
+        $this->assertEqualsWithDelta(1.0, $info->avgDocLength, 0.01);
     }
 
     // --- upsert ---
@@ -747,8 +747,8 @@ class IndexTest extends TestCase
     {
         $index = new Index($this->dbPath);
         $index->upsert([['id' => 1, 'title' => 'sedan']]);
-        $info = $index->inspectQuery('sedan')['index_info'];
-        $this->assertSame('1', $info['total_documents']);
+        $info = $index->inspectQuery('sedan');
+        $this->assertSame(1, $info->totalDocuments);
     }
 
     public function testUpsertReplacesOldContent(): void
@@ -770,8 +770,8 @@ class IndexTest extends TestCase
         ]);
         $index->upsert([['id' => 1, 'title' => 'suv']]);
 
-        $info = $index->inspectQuery('suv')['index_info'];
-        $this->assertSame('2', $info['total_documents']);
+        $info = $index->inspectQuery('suv');
+        $this->assertSame(2, $info->totalDocuments);
     }
 
     // --- updateMany ---
@@ -807,8 +807,8 @@ class IndexTest extends TestCase
             ['id' => 2, 'title' => 'convertible'],
         ]);
 
-        $info = $index->inspectQuery('suv')['index_info'];
-        $this->assertSame('3', $info['total_documents']);
+        $info = $index->inspectQuery('suv');
+        $this->assertSame(3, $info->totalDocuments);
     }
 
     public function testUpdateManyExistingDocsDoNotIncrementTotalDocuments(): void
@@ -823,8 +823,8 @@ class IndexTest extends TestCase
             ['id' => 2, 'title' => 'truck'],
         ]);
 
-        $info = $index->inspectQuery('suv')['index_info'];
-        $this->assertSame('2', $info['total_documents']);
+        $info = $index->inspectQuery('suv');
+        $this->assertSame(2, $info->totalDocuments);
     }
 
     public function testUpdateManyThrowsIfAnyIdMissing(): void
@@ -891,8 +891,8 @@ class IndexTest extends TestCase
 
         // MinusEqual/PlusEqual mutations on `$lengthDelta += $newLength - (int) $oldLength`
         // corrupt the accumulated delta, yielding an avg_doc_length other than 1.0.
-        $info = $index->inspectQuery('eta')['index_info'];
-        $this->assertEqualsWithDelta(1.0, (float) $info['avg_doc_length'], 0.01);
+        $info = $index->inspectQuery('eta');
+        $this->assertEqualsWithDelta(1.0, $info->avgDocLength, 0.01);
     }
 
     public function testUpdateManyThrowsOnMissingIdKey(): void
@@ -929,8 +929,8 @@ class IndexTest extends TestCase
 
         // If docDelta accumulation is wrong (e.g., incremented for every doc instead of
         // only new ones), total_documents would be 3 instead of 2.
-        $info = $index->inspectQuery('suv')['index_info'];
-        $this->assertSame('2', $info['total_documents']);
+        $info = $index->inspectQuery('suv');
+        $this->assertSame(2, $info->totalDocuments);
     }
 
     public function testUpsertManyAllNewDocsAccumulatesAvgDocLength(): void
@@ -945,8 +945,8 @@ class IndexTest extends TestCase
         // Assignment/MinusEqual mutations on `$lengthDelta += $newLength` (the all-new-docs
         // branch) use direct assignment or subtraction instead of accumulation, so the last
         // doc's length wins and avg_doc_length ends up as 1.0 instead of (3+2+1)/3 = 2.0.
-        $info = $index->inspectQuery('alpha')['index_info'];
-        $this->assertEqualsWithDelta(2.0, (float) $info['avg_doc_length'], 0.01);
+        $info = $index->inspectQuery('alpha');
+        $this->assertEqualsWithDelta(2.0, $info->avgDocLength, 0.01);
     }
 
     public function testUpsertManyWithEmptyIterableIsNoop(): void
@@ -956,8 +956,8 @@ class IndexTest extends TestCase
         $index->upsert([]);
 
         $this->assertContains(1, $index->search('sedan')->getIds());
-        $info = $index->inspectQuery('sedan')['index_info'];
-        $this->assertSame('1', $info['total_documents']);
+        $info = $index->inspectQuery('sedan');
+        $this->assertSame(1, $info->totalDocuments);
     }
 
     // --- delete ---
@@ -1001,8 +1001,8 @@ class IndexTest extends TestCase
         // NotIdentical / MethodCallRemoval / IncrementInteger mutations on the adjustStats call
         // inside delete() skip or corrupt the document-count decrement, leaving total_documents=1
         // instead of 0 after the deletion.
-        $info = $index->inspectQuery('any')['index_info'];
-        $this->assertSame('0', $info['total_documents']);
+        $info = $index->inspectQuery('any');
+        $this->assertSame(0, $info->totalDocuments);
     }
 
     // --- deleteMany ---
@@ -1032,8 +1032,8 @@ class IndexTest extends TestCase
         ]);
         $index->delete(1, 2);
 
-        $info = $index->inspectQuery('suv')['index_info'];
-        $this->assertSame('1', $info['total_documents']);
+        $info = $index->inspectQuery('suv');
+        $this->assertSame(1, $info->totalDocuments);
     }
 
     public function testDeleteManyOfOnlyOneDocResetsCount(): void
@@ -1045,8 +1045,8 @@ class IndexTest extends TestCase
         // DecrementInteger mutation on `if ($docDelta !== 0)` changes 0 to -1:
         // the guard then reads `$docDelta !== -1`, which is false when exactly one doc
         // is deleted ($docDelta=-1), so adjustStats is never called and total stays at 1.
-        $info = $index->inspectQuery('any')['index_info'];
-        $this->assertSame('0', $info['total_documents']);
+        $info = $index->inspectQuery('any');
+        $this->assertSame(0, $info->totalDocuments);
     }
 
     public function testDeleteManyUpdatesAverageDocLength(): void
@@ -1063,8 +1063,8 @@ class IndexTest extends TestCase
         // Assignment/MinusEqual mutations on `$lengthDelta -= $length` use direct assignment
         // instead of accumulation, so the total removed length is wrong (last doc's length
         // only instead of the sum), yielding avg_doc_length ≠ 1.
-        $info = $index->inspectQuery('zeta')['index_info'];
-        $this->assertEqualsWithDelta(1.0, (float) $info['avg_doc_length'], 0.01);
+        $info = $index->inspectQuery('zeta');
+        $this->assertEqualsWithDelta(1.0, $info->avgDocLength, 0.01);
     }
 
     public function testDeleteManyWithEmptyArrayIsNoop(): void
@@ -1139,8 +1139,8 @@ class IndexTest extends TestCase
         ]);
         $index->clear();
 
-        $info = $index->inspectQuery('any')['index_info'];
-        $this->assertEqualsWithDelta(0.0, (float) $info['avg_doc_length'], 0.001);
+        $info = $index->inspectQuery('any');
+        $this->assertEqualsWithDelta(0.0, $info->avgDocLength, 0.001);
     }
 
     public function testClearAllowsReinsertionAfterwards(): void
@@ -1827,38 +1827,38 @@ class IndexTest extends TestCase
     {
         $index = new Index($this->dbPath);
         $result = $index->inspectQuery('Hello World');
-        $this->assertSame(['hello', 'world'], $result['raw_tokens']);
+        $this->assertSame(['hello', 'world'], $result->rawTokens);
     }
 
     public function testInspectQueryNoLanguageFilteredTokensEqualRaw(): void
     {
         $index = new Index($this->dbPath);
         $result = $index->inspectQuery('hello world');
-        $this->assertSame($result['raw_tokens'], $result['filtered_tokens']);
-        $this->assertFalse($result['stopwords_active']);
-        $this->assertFalse($result['stemmer_active']);
+        $this->assertSame($result->rawTokens, $result->filteredTokens);
+        $this->assertFalse($result->stopwordsActive);
+        $this->assertFalse($result->stemmerActive);
     }
 
     public function testInspectQueryStopwordsActiveWhenLanguageSet(): void
     {
         $index = new Index($this->dbPath, schema: new SchemaConfig(language: 'en'));
         $result = $index->inspectQuery('hello world');
-        $this->assertTrue($result['stopwords_active']);
+        $this->assertTrue($result->stopwordsActive);
     }
 
     public function testInspectQueryStemmerActiveWhenLanguageSet(): void
     {
         $index = new Index($this->dbPath, schema: new SchemaConfig(language: 'en'));
         $result = $index->inspectQuery('hello world');
-        $this->assertTrue($result['stemmer_active']);
+        $this->assertTrue($result->stemmerActive);
     }
 
     public function testInspectQueryFilteredTokensDropsStopwords(): void
     {
         $index = new Index($this->dbPath, schema: new SchemaConfig(language: 'en'));
         $result = $index->inspectQuery('the quick');
-        $this->assertNotContains('the', $result['filtered_tokens']);
-        $this->assertContains('the', $result['raw_tokens']);
+        $this->assertNotContains('the', $result->filteredTokens);
+        $this->assertContains('the', $result->rawTokens);
     }
 
     public function testInspectQueryAllStrippedTrueWhenOnlyStopwords(): void
@@ -1867,16 +1867,16 @@ class IndexTest extends TestCase
         // so use two stopwords to trigger the all-stripped fallback.
         $index = new Index($this->dbPath, schema: new SchemaConfig(language: 'en'));
         $result = $index->inspectQuery('the and');
-        $this->assertTrue($result['all_stripped']);
+        $this->assertTrue($result->allStripped);
         // Fallback fires — filtered_tokens equals raw_tokens.
-        $this->assertSame($result['raw_tokens'], $result['filtered_tokens']);
+        $this->assertSame($result->rawTokens, $result->filteredTokens);
     }
 
     public function testInspectQueryAllStrippedFalseWithNoLanguage(): void
     {
         $index = new Index($this->dbPath);
         $result = $index->inspectQuery('the and');
-        $this->assertFalse($result['all_stripped']);
+        $this->assertFalse($result->allStripped);
     }
 
     public function testInspectQueryStemmerApplied(): void
@@ -1884,15 +1884,15 @@ class IndexTest extends TestCase
         $index = new Index($this->dbPath, schema: new SchemaConfig(language: 'en'));
         $result = $index->inspectQuery('running');
         // 'running' stems to 'run' in English Snowball
-        $this->assertSame('run', $result['filtered_tokens'][0]);
+        $this->assertSame('run', $result->filteredTokens[0]);
     }
 
     public function testInspectQueryRawToProcessedMapping(): void
     {
         $index = new Index($this->dbPath, schema: new SchemaConfig(language: 'en'));
         $result = $index->inspectQuery('running');
-        $this->assertSame('running', $result['tokens'][0]['raw']);
-        $this->assertSame('run', $result['tokens'][0]['processed']);
+        $this->assertSame('running', $result->tokens[0]->raw);
+        $this->assertSame('run', $result->tokens[0]->processed);
     }
 
     public function testInspectQueryFoundTrueForIndexedTerm(): void
@@ -1900,19 +1900,19 @@ class IndexTest extends TestCase
         $index = new Index($this->dbPath);
         $index->insert([['id' => 1, 'body' => 'sedan']]);
         $result = $index->inspectQuery('sedan', asYouType: false);
-        $this->assertTrue($result['tokens'][0]['found']);
-        $this->assertGreaterThanOrEqual(1, $result['tokens'][0]['num_docs']);
-        $this->assertGreaterThanOrEqual(1, $result['tokens'][0]['num_hits']);
+        $this->assertTrue($result->tokens[0]->found);
+        $this->assertGreaterThanOrEqual(1, $result->tokens[0]->numDocs);
+        $this->assertGreaterThanOrEqual(1, $result->tokens[0]->numHits);
     }
 
     public function testInspectQueryFoundFalseForMissingTerm(): void
     {
         $index = new Index($this->dbPath);
         $result = $index->inspectQuery('zzznomatch', asYouType: false);
-        $this->assertFalse($result['tokens'][0]['found']);
-        $this->assertSame('none', $result['tokens'][0]['match_type']);
-        $this->assertSame(0, $result['tokens'][0]['num_docs']);
-        $this->assertSame(0, $result['tokens'][0]['num_hits']);
+        $this->assertFalse($result->tokens[0]->found);
+        $this->assertSame('none', $result->tokens[0]->matchType);
+        $this->assertSame(0, $result->tokens[0]->numDocs);
+        $this->assertSame(0, $result->tokens[0]->numHits);
     }
 
     public function testInspectQueryMatchTypeExact(): void
@@ -1920,7 +1920,7 @@ class IndexTest extends TestCase
         $index = new Index($this->dbPath);
         $index->insert([['id' => 1, 'body' => 'sedan']]);
         $result = $index->inspectQuery('sedan', asYouType: false);
-        $this->assertSame('exact', $result['tokens'][0]['match_type']);
+        $this->assertSame('exact', $result->tokens[0]->matchType);
     }
 
     public function testInspectQueryMatchTypePrefix(): void
@@ -1928,8 +1928,8 @@ class IndexTest extends TestCase
         $index = new Index($this->dbPath);
         $index->insert([['id' => 1, 'body' => 'sedan']]);
         $result = $index->inspectQuery('sed');
-        $this->assertSame('prefix', $result['tokens'][0]['match_type']);
-        $terms = array_column($result['tokens'][0]['wordlist_rows'], 'term');
+        $this->assertSame('prefix', $result->tokens[0]->matchType);
+        $terms = array_column($result->tokens[0]->wordlistRows, 'term');
         $this->assertContains('sedan', $terms);
     }
 
@@ -1938,8 +1938,8 @@ class IndexTest extends TestCase
         $index = new Index($this->dbPath);
         $index->insert([['id' => 1, 'body' => 'sedan']]);
         $result = $index->inspectQuery('sedaan', asYouType: false);
-        $this->assertSame('fuzzy', $result['tokens'][0]['match_type']);
-        $this->assertNotNull($result['tokens'][0]['wordlist_rows'][0]['distance']);
+        $this->assertSame('fuzzy', $result->tokens[0]->matchType);
+        $this->assertNotNull($result->tokens[0]->wordlistRows[0]['distance']);
     }
 
     public function testInspectQueryMatchTypeNoneWhenNoCandidate(): void
@@ -1947,7 +1947,7 @@ class IndexTest extends TestCase
         $index = new Index($this->dbPath);
         $index->insert([['id' => 1, 'body' => 'sedan']]);
         $result = $index->inspectQuery('zzznomatch', asYouType: false);
-        $this->assertSame('none', $result['tokens'][0]['match_type']);
+        $this->assertSame('none', $result->tokens[0]->matchType);
     }
 
     public function testInspectQueryPrefixExpandsMultipleTerms(): void
@@ -1958,7 +1958,7 @@ class IndexTest extends TestCase
             ['id' => 2, 'body' => 'sediment'],
         ]);
         $result = $index->inspectQuery('sed');
-        $terms = array_column($result['tokens'][0]['wordlist_rows'], 'term');
+        $terms = array_column($result->tokens[0]->wordlistRows, 'term');
         $this->assertContains('sedan', $terms);
         $this->assertContains('sediment', $terms);
     }
@@ -1967,40 +1967,39 @@ class IndexTest extends TestCase
     {
         $index = new Index($this->dbPath);
         $result = $index->inspectQuery('fast sedan review');
-        $this->assertFalse($result['tokens'][0]['is_last']);
-        $this->assertFalse($result['tokens'][1]['is_last']);
-        $this->assertTrue($result['tokens'][2]['is_last']);
+        $this->assertFalse($result->tokens[0]->isLast);
+        $this->assertFalse($result->tokens[1]->isLast);
+        $this->assertTrue($result->tokens[2]->isLast);
     }
 
     public function testInspectQueryIndexInfoContainsDocumentCount(): void
     {
         $index = new Index($this->dbPath);
         $index->insert([['id' => 1, 'body' => 'sedan']]);
-        $info = $index->inspectQuery('sedan')['index_info'];
-        $this->assertArrayHasKey('total_documents', $info);
-        $this->assertArrayHasKey('avg_doc_length', $info);
-        $this->assertSame('1', $info['total_documents']);
+        $info = $index->inspectQuery('sedan');
+        $this->assertSame(1, $info->totalDocuments);
+        $this->assertGreaterThanOrEqual(0.0, $info->avgDocLength);
     }
 
     public function testInspectQueryBooleanPostfixAndOperator(): void
     {
         $index = new Index($this->dbPath);
         $result = $index->inspectQuery('php laravel');
-        $this->assertContains('&', $result['boolean_postfix']);
+        $this->assertContains('&', $result->booleanPostfix);
     }
 
     public function testInspectQueryBooleanPostfixOrOperator(): void
     {
         $index = new Index($this->dbPath);
         $result = $index->inspectQuery('php or laravel');
-        $this->assertContains('|', $result['boolean_postfix']);
+        $this->assertContains('|', $result->booleanPostfix);
     }
 
     public function testInspectQueryBooleanPostfixNotOperator(): void
     {
         $index = new Index($this->dbPath);
         $result = $index->inspectQuery('php -wordpress');
-        $this->assertContains('~', $result['boolean_postfix']);
+        $this->assertContains('~', $result->booleanPostfix);
     }
 
     public function testInspectQueryBooleanPostfixContainsOrForSingleTerm(): void
@@ -2010,25 +2009,25 @@ class IndexTest extends TestCase
         // Mutation ConcatOperandRemoval: toPostfix('php') → ['php'] — no '|'.
         // Original: toPostfix('|php') → ['php', '|'].
         $result = $index->inspectQuery('php');
-        $this->assertContains('|', $result['boolean_postfix']);
+        $this->assertContains('|', $result->booleanPostfix);
     }
 
     public function testInspectQueryEmptyPhraseReturnsEmptyLists(): void
     {
         $index = new Index($this->dbPath);
         $result = $index->inspectQuery('');
-        $this->assertSame([], $result['raw_tokens']);
-        $this->assertSame([], $result['filtered_tokens']);
-        $this->assertSame([], $result['tokens']);
+        $this->assertSame([], $result->rawTokens);
+        $this->assertSame([], $result->filteredTokens);
+        $this->assertSame([], $result->tokens);
     }
 
     public function testInspectQueryDoesNotChangeDocumentCount(): void
     {
         $index = new Index($this->dbPath);
         $index->insert([['id' => 1, 'body' => 'sedan']]);
-        $before = $index->inspectQuery('sedan')['index_info']['total_documents'];
+        $before = $index->inspectQuery('sedan')->totalDocuments;
         $index->inspectQuery('sedan');
-        $this->assertSame($before, $index->inspectQuery('sedan')['index_info']['total_documents']);
+        $this->assertSame($before, $index->inspectQuery('sedan')->totalDocuments);
     }
 
     public function testInspectQueryWarmsWordlistCacheForSearch(): void
@@ -2050,7 +2049,7 @@ class IndexTest extends TestCase
         // Mutation TrueValue: gate removed → fuzzy fires → 'sedn' matches 'sedan' → 'fuzzy'.
         // Original: gate blocks → no match → 'none'.
         $result = $index->inspectQuery('sedn', asYouType: false);
-        $this->assertSame('none', $result['tokens'][0]['match_type']);
+        $this->assertSame('none', $result->tokens[0]->matchType);
     }
 
     public function testInspectQueryExactMatchIsNotFuzzyType(): void
@@ -2060,7 +2059,7 @@ class IndexTest extends TestCase
 
         // Exact wordlist hit has no 'distance' key → match_type must be 'exact', not 'fuzzy'.
         $result = $index->inspectQuery('sedan', asYouType: false);
-        $this->assertSame('exact', $result['tokens'][0]['match_type']);
+        $this->assertSame('exact', $result->tokens[0]->matchType);
     }
 
     public function testInspectQueryWordlistRowsHaveExactKeys(): void
@@ -2068,11 +2067,9 @@ class IndexTest extends TestCase
         $index = new Index($this->dbPath);
         $index->insert([['id' => 1, 'title' => 'sedan']]);
 
-        $rows = $index->inspectQuery('sedan', asYouType: false)['tokens'][0]['wordlist_rows'];
+        $rows = $index->inspectQuery('sedan', asYouType: false)->tokens[0]->wordlistRows;
         $this->assertNotEmpty($rows);
-        // Mutation UnwrapArrayMap: $wordlistRows = $rows (raw rows with extra internal fields).
-        // Correct: array_map remaps to exactly {term, num_hits, num_docs, distance}.
-        $this->assertSame(['term', 'num_hits', 'num_docs', 'distance'], array_keys($rows[0]));
+        $this->assertSame('sedan', $rows[0]['term']);
     }
 
     public function testInspectQueryNumHitsAndNumDocsValues(): void
@@ -2080,9 +2077,9 @@ class IndexTest extends TestCase
         $index = new Index($this->dbPath);
         $index->insert([['id' => 1, 'title' => 'sedan sedan']]);
 
-        $token = $index->inspectQuery('sedan', asYouType: false)['tokens'][0];
-        $this->assertSame(2, $token['num_hits']);
-        $this->assertSame(1, $token['num_docs']);
+        $token = $index->inspectQuery('sedan', asYouType: false)->tokens[0];
+        $this->assertSame(2, $token->numHits);
+        $this->assertSame(1, $token->numDocs);
     }
 
     // --- rebuild ---
@@ -2280,9 +2277,9 @@ class IndexTest extends TestCase
         $index  = new Index($this->dbPath, schema: new SchemaConfig(language: 'zh'));
         $result = $index->inspectQuery('轿车');
 
-        $this->assertContains('轿车', $result['filtered_tokens']);
+        $this->assertContains('轿车', $result->filteredTokens);
         // Raw tokens show the output of the base tokenizer (whole string as one unit).
-        $this->assertSame(['轿车'], $result['raw_tokens']);
+        $this->assertSame(['轿车'], $result->rawTokens);
     }
 
     public function testZhMixedQueryAsciiTokenPassthrough(): void

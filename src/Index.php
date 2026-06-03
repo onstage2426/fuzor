@@ -1380,27 +1380,8 @@ class Index
      * benefits from warm cache entries.
      *
      * @param  string $phrase Raw query string; processed identically to search().
-     * @return array{
-     *     raw_tokens:       list<string>,
-     *     filtered_tokens:  list<string>,
-     *     stopwords_active: bool,
-     *     stemmer_active:   bool,
-     *     all_stripped:     bool,
-     *     index_info:       array{total_documents: string, avg_doc_length: string},
-     *     tokens: list<array{
-     *         raw:           string,
-     *         processed:     string,
-     *         is_last:       bool,
-     *         found:         bool,
-     *         match_type:    string,
-     *         wordlist_rows: list<array{term: string, num_hits: int, num_docs: int, distance: int|null}>,
-     *         num_hits:      int,
-     *         num_docs:      int,
-     *     }>,
-     *     boolean_postfix: list<string>,
-     * }
      */
-    public function inspectQuery(string $phrase, bool $asYouType = true): array
+    public function inspectQuery(string $phrase, bool $asYouType = true): QueryInspection
     {
         $verbose = $this->filterQueryTokens($phrase, verbose: true);
         /** @var list<string> $filteredTokens */
@@ -1426,42 +1407,42 @@ class Index
             $wordlistRows = array_map(
                 fn(array $r): array => [
                     'term'     => $r['term'],
-                    'num_hits' => $r['num_hits'],
-                    'num_docs' => $r['num_docs'],
-                    'distance' => $r['distance'] ?? null,
+                    'numHits'  => (int) $r['num_hits'],
+                    'numDocs'  => (int) $r['num_docs'],
+                    'distance' => isset($r['distance']) ? (int) $r['distance'] : null,
                 ],
                 $rows
             );
 
-            $tokens[] = [
-                'raw'           => $survivingRaw[$i] ?? $processed,
-                'processed'     => $processed,
-                'is_last'       => $isLast,
-                'found'         => $rows !== [],
-                'match_type'    => $matchType,
-                'wordlist_rows' => $wordlistRows,
+            $tokens[] = new QueryToken(
+                raw:          $survivingRaw[$i] ?? $processed,
+                processed:    $processed,
+                isLast:       $isLast,
+                found:        $rows !== [],
+                matchType:    $matchType,
+                wordlistRows: $wordlistRows,
                 /** @infection-ignore-all CastInt: array_sum() on numeric strings returns int in PHP 8; the cast is defensive documentation, not a type change */
-                'num_hits'      => array_sum(array_column($rows, 'num_hits')),
-                /** @infection-ignore-all CastInt: same as num_hits — array_sum already returns int here */
-                'num_docs'      => array_sum(array_column($rows, 'num_docs')),
-            ];
+                numHits:      (int) array_sum(array_column($rows, 'num_hits')),
+                /** @infection-ignore-all CastInt: same as numHits — array_sum already returns int here */
+                numDocs:      (int) array_sum(array_column($rows, 'num_docs')),
+            );
         }
 
-        /** @var array{total_documents: string, avg_doc_length: string} $indexInfo */
         $indexInfo = $this->getInfoValues(['total_documents', 'avg_doc_length']);
 
-        return [
-            'raw_tokens'       => $verbose['raw_tokens'],
-            'filtered_tokens'  => $filteredTokens,
-            'stopwords_active' => $this->stopwords instanceof \Fuzor\Stopwords,
-            'stemmer_active'   => $this->stemmer instanceof \Fuzor\Stemmer,
-            'all_stripped'     => $verbose['all_stripped'],
-            'index_info'       => $indexInfo,
-            'tokens'           => $tokens,
+        return new QueryInspection(
+            rawTokens:       $verbose['raw_tokens'],
+            filteredTokens:  $filteredTokens,
+            stopwordsActive: $this->stopwords instanceof \Fuzor\Stopwords,
+            stemmerActive:   $this->stemmer instanceof \Fuzor\Stemmer,
+            allStripped:     $verbose['all_stripped'],
+            totalDocuments:  (int) ($indexInfo['total_documents'] ?? 0),
+            avgDocLength:    (float) ($indexInfo['avg_doc_length'] ?? 0),
+            tokens:          $tokens,
             /** @infection-ignore-all Concat|ConcatOperandRemoval: '|' prepend is the OR identity; '|' . $phrase and $phrase . '|' both yield identical postfix because '|' is always the last operator popped */
-            'boolean_postfix'  => BooleanParser::toPostfix('|' . $verbose['free_phrase'])[0],
-            'phrase_groups'    => $verbose['phrase_groups'],
-        ];
+            booleanPostfix:  BooleanParser::toPostfix('|' . $verbose['free_phrase'])[0],
+            phraseGroups:    $verbose['phrase_groups'],
+        );
     }
 
     /**
