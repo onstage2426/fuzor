@@ -1203,18 +1203,28 @@ class Index
     }
 
     /**
-     * Check whether one or more documents exist in the index.
+     * Check whether a document exists in the index.
+     */
+    public function has(int $id): bool
+    {
+        $stmt = $this->stmt('hasOne', 'SELECT 1 FROM doc_lengths WHERE doc_id = ?');
+        $stmt->execute([$id]);
+        return $stmt->fetchColumn() !== false;
+    }
+
+    /**
+     * Check whether multiple documents exist in the index.
      *
-     * With a single ID returns bool. With multiple IDs returns a map of id => bool.
+     * Returns an `id => bool` map in the same order as the input.
+     * Returns an empty array when called with no arguments.
      *
      * @param  int             ...$ids Document IDs to check.
-     * @return bool|array<int, bool>
-     * @throws \InvalidArgumentException If called with no arguments.
+     * @return array<int, bool>
      */
-    public function has(int ...$ids): bool|array
+    public function hasMany(int ...$ids): array
     {
         if ($ids === []) {
-            throw new \InvalidArgumentException('has() requires at least one document ID.');
+            return [];
         }
 
         /** @var list<int> $found */
@@ -1229,10 +1239,6 @@ class Index
         }
         $foundSet = array_flip($found);
 
-        if (count($ids) === 1) {
-            return isset($foundSet[$ids[0]]);
-        }
-
         $result = [];
         foreach ($ids as $id) {
             $result[$id] = isset($foundSet[$id]);
@@ -1241,19 +1247,33 @@ class Index
     }
 
     /**
-     * Fetch one or more stored documents by ID.
+     * Fetch a stored document by ID.
      *
-     * With a single ID returns the document array, or null if not found.
-     * With multiple IDs returns a map of doc_id => document; missing IDs are silently omitted.
-     * With no arguments returns an empty array.
-     *
-     * Requires the document store to be enabled (enabled by default; pass store: false to opt out).
-     *
-     * @param  int ...$ids Document IDs to fetch.
-     * @return array<string, mixed>|array<int, array<string, mixed>>|null
+     * @return array<string, mixed>|null Document array, or null if not found.
      * @throws QueryException If the document store is not enabled on this index.
      */
-    public function get(int ...$ids): array|null
+    public function get(int $id): ?array
+    {
+        if (!$this->documentStoreEnabled) {
+            throw new QueryException(
+                'Document store is not enabled on this index (created with store: false in SchemaConfig).'
+            );
+        }
+        $map = $this->fetchDocuments([$id]);
+        return $map[$id] ?? null;
+    }
+
+    /**
+     * Fetch multiple stored documents by ID.
+     *
+     * Missing IDs are silently omitted from the result.
+     * Returns an empty array when called with no arguments.
+     *
+     * @param  int ...$ids Document IDs to fetch.
+     * @return array<int, array<string, mixed>>
+     * @throws QueryException If the document store is not enabled on this index.
+     */
+    public function getMany(int ...$ids): array
     {
         if (!$this->documentStoreEnabled) {
             throw new QueryException(
@@ -1263,11 +1283,7 @@ class Index
         if ($ids === []) {
             return [];
         }
-        $map = $this->fetchDocuments(array_values($ids));
-        if (count($ids) === 1) {
-            return $map[$ids[0]] ?? null;
-        }
-        return $map;
+        return $this->fetchDocuments(array_values($ids));
     }
 
     /**

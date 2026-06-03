@@ -230,11 +230,12 @@ $index->delete(1, 2, 3);    // multiple (variadic)
 
 ## Check existence
 
-Returns `true`/`false` for a single ID, or a `id => bool` map for multiple IDs.
+`has()` checks a single ID and returns `bool`. `hasMany()` checks multiple IDs and returns an `id => bool` map.
 
 ```php
-$index->has(1);          // bool
-$index->has(1, 2, 3);    // [1 => true, 2 => false, 3 => true]
+$index->has(1);                // bool
+$index->hasMany(1, 2, 3);      // [1 => true, 2 => false, 3 => true]
+$index->hasMany();             // []
 ```
 
 ## Document count

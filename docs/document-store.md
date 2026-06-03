@@ -76,11 +76,11 @@ Retrieve documents directly without a search:
 $doc = $index->get(42);
 
 // Multiple documents — returns map<int, array>; missing IDs are silently omitted
-$docs = $index->get(1, 2, 3);
+$docs = $index->getMany(1, 2, 3);
 $docs[1]; // ['id' => 1, 'title' => '…', …]
 ```
 
-Both methods throw `QueryException` if called on an index where the store was not enabled.
+Both throw `QueryException` if called on an index where the store was not enabled.
 
 ## Checking whether the store is active
 

@@ -1293,7 +1293,7 @@ class IndexTest extends TestCase
             ['id' => 3, 'title' => 'suv'],
         ]);
 
-        $this->assertSame([1 => true, 2 => true, 3 => true], $index->has(1, 2, 3));
+        $this->assertSame([1 => true, 2 => true, 3 => true], $index->hasMany(1, 2, 3));
     }
 
     public function testHasManyReturnsMixedBooleans(): void
@@ -1305,7 +1305,7 @@ class IndexTest extends TestCase
         ]);
 
         // ID 2 was never inserted — its value must be false, not absent from the map.
-        $this->assertSame([1 => true, 2 => false, 3 => true], $index->has(1, 2, 3));
+        $this->assertSame([1 => true, 2 => false, 3 => true], $index->hasMany(1, 2, 3));
     }
 
     public function testHasManyReturnsFalseForAllAbsentIds(): void
@@ -1313,14 +1313,13 @@ class IndexTest extends TestCase
         $index = new Index($this->dbPath);
         $index->insert([['id' => 1, 'title' => 'sedan']]);
 
-        $this->assertSame([99 => false, 100 => false], $index->has(99, 100));
+        $this->assertSame([99 => false, 100 => false], $index->hasMany(99, 100));
     }
 
-    public function testHasWithNoArgumentsThrows(): void
+    public function testHasManyWithNoArgumentsReturnsEmptyArray(): void
     {
         $index = new Index($this->dbPath);
-        $this->expectException(\InvalidArgumentException::class);
-        $index->has();
+        $this->assertSame([], $index->hasMany());
     }
 
     public function testHasManyPreservesInputOrder(): void
@@ -1333,7 +1332,7 @@ class IndexTest extends TestCase
         ]);
 
         // Keys must follow the input order [5, 3, 1], not ascending DB order.
-        $this->assertSame([5 => true, 3 => true, 1 => true], $index->has(5, 3, 1));
+        $this->assertSame([5 => true, 3 => true, 1 => true], $index->hasMany(5, 3, 1));
     }
 
     public function testHasManyReturnsFalseForDeletedId(): void
@@ -1345,7 +1344,7 @@ class IndexTest extends TestCase
         ]);
         $index->delete(2);
 
-        $this->assertSame([1 => true, 2 => false], $index->has(1, 2));
+        $this->assertSame([1 => true, 2 => false], $index->hasMany(1, 2));
     }
 
     // --- search (fuzzy) ---
@@ -2787,7 +2786,7 @@ class IndexTest extends TestCase
         $index->insert([['id' => 1, 'title' => 'sedan']]);
 
         $this->expectException(QueryException::class);
-        $index->get(1);
+        $index->getMany(1);
     }
 
     public function testGetReturnsNullForMissingId(): void
@@ -2796,10 +2795,10 @@ class IndexTest extends TestCase
         $this->assertNull($index->get(999));
     }
 
-    public function testGetManyEmptyArrayReturnsEmpty(): void
+    public function testGetManyEmptyArgumentsReturnsEmpty(): void
     {
         $index = new Index($this->dbPath, schema: new SchemaConfig(store: true));
-        $this->assertSame([], $index->get());
+        $this->assertSame([], $index->getMany());
     }
 
     public function testGetManyOmitsMissingIds(): void
@@ -2807,8 +2806,7 @@ class IndexTest extends TestCase
         $index = new Index($this->dbPath, schema: new SchemaConfig(store: true));
         $index->insert([['id' => 1, 'title' => 'sedan']]);
 
-        $result = $index->get(1, 999);
-        $this->assertIsArray($result);
+        $result = $index->getMany(1, 999);
         $this->assertArrayHasKey(1, $result);
         $this->assertArrayNotHasKey(999, $result);
     }
