@@ -1316,12 +1316,11 @@ class IndexTest extends TestCase
         $this->assertSame([99 => false, 100 => false], $index->has(99, 100));
     }
 
-    public function testHasManyWithEmptyArrayReturnsEmpty(): void
+    public function testHasWithNoArgumentsThrows(): void
     {
         $index = new Index($this->dbPath);
-        $index->insert([['id' => 1, 'title' => 'sedan']]);
-
-        $this->assertSame([], $index->has());
+        $this->expectException(\InvalidArgumentException::class);
+        $index->has();
     }
 
     public function testHasManyPreservesInputOrder(): void

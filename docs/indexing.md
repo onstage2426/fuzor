@@ -21,7 +21,9 @@ $index = new Index('/path/to/articles.db', force: true);
 Pass a BCP 47 `language` tag to enable stopword filtering and stemming at creation time:
 
 ```php
-$index = new Index('/path/to/articles.db', language: 'en');
+use Fuzor\SchemaConfig;
+
+$index = new Index('/path/to/articles.db', schema: new SchemaConfig(language: 'en'));
 ```
 
 Pass `readonly: true` to open an existing index in read-only mode. All write methods throw `IOException`; searches work normally:
@@ -30,11 +32,13 @@ Pass `readonly: true` to open an existing index in read-only mode. All write met
 $index = new Index('/path/to/articles-read.db', readonly: true);
 ```
 
-The document store is enabled by default: raw documents are stored as JSON inside the same SQLite file and search results are automatically hydrated. Pass `store: false` to opt out. See [document-store.md](document-store.md) for details.
+The document store is enabled by default: raw documents are stored as JSON inside the same SQLite file and search results are automatically hydrated. Pass `store: false` inside a `SchemaConfig` to opt out. See [document-store.md](document-store.md) for details.
 
 ```php
+use Fuzor\SchemaConfig;
+
 // Store off — smaller file, no document retrieval
-$index = new Index('/path/to/articles.db', store: false);
+$index = new Index('/path/to/articles.db', schema: new SchemaConfig(store: false));
 ```
 
 The facet index is always enabled. Declare which fields are facet fields at creation time using `facetFields`. Their values are stored in a separate index table and can be used to filter results and compute per-value counts at search time. See [search.md](search.md) for querying and filtering by facets.
@@ -42,18 +46,22 @@ The facet index is always enabled. Declare which fields are facet fields at crea
 By default every field (except `id` and any declared `facetFields`) is tokenised for full-text. Pass `searchableFields` to restrict FTS to an explicit list of fields — any field not in either list is stored but not indexed.
 
 ```php
+use Fuzor\SchemaConfig;
+
 // Watches index: two facetable fields, two searchable fields,
 // image_url and sku are stored-only automatically.
-$index = new Index('/path/to/watches.db',
+$index = new Index('/path/to/watches.db', schema: new SchemaConfig(
     facetFields:      ['brand', 'price', 'category', 'gender'],
     searchableFields: ['title', 'body'],
-);
+));
 ```
 
 Pass `stripHtml: true` when documents contain HTML markup. Each field value is passed through `strip_tags()` before tokenisation so tag names, attributes, and entity-like fragments never enter the FTS index. The raw HTML is still stored unchanged in the document store. Ignored when opening an existing index.
 
 ```php
-$index = new Index('/path/to/articles.db', stripHtml: true);
+use Fuzor\SchemaConfig;
+
+$index = new Index('/path/to/articles.db', schema: new SchemaConfig(stripHtml: true));
 ```
 
 Pass a `Config` object to tune BM25, typo tolerance, and other search behaviour. See [configuration.md](configuration.md) for details.
@@ -66,17 +74,15 @@ $index = new Index('/path/to/articles.db', config: new Config(maxDocs: 200));
 
 ### Schema
 
-The schema settings control how the index is structured at creation time. They are persisted inside the index file and cannot be changed without rebuilding.
+Schema settings control how the index is structured at creation time. They are persisted inside the index file and cannot be changed without rebuilding. All schema settings are grouped in a `SchemaConfig` value object and passed as the `schema:` named argument.
 
-| Parameter | Default | Effect |
-|-----------|---------|--------|
+| `SchemaConfig` property | Default | Effect |
+|-------------------------|---------|--------|
 | `language` | `null` | BCP 47 language tag; `null` disables stopwords and stemming |
 | `store` | `true` | Enable the document store |
 | `facetFields` | `[]` | Fields routed to the facet index |
 | `searchableFields` | `null` | Fields tokenised for FTS; `null` = all non-facet fields |
 | `stripHtml` | `false` | Strip HTML tags before tokenisation |
-
-These same settings are grouped by the `SchemaConfig` value object used when passing a schema override to `rebuild()` — see [Atomic rebuild](#atomic-rebuild).
 
 ## Inserting
 
@@ -120,9 +126,11 @@ $index->insert($docs, progress: function (int $done, int $total): void {
 Fields listed in `facetFields` at creation time are automatically routed to the facet index. They are never tokenised for full-text — `search()` and `searchBoolean()` will not match against their contents — unless the field is also listed in `searchableFields`.
 
 ```php
-$index = new Index('/path/to/watches.db',
+use Fuzor\SchemaConfig;
+
+$index = new Index('/path/to/watches.db', schema: new SchemaConfig(
     facetFields: ['brand', 'gender', 'category', 'price'],
-);
+));
 
 $index->insert([
     [
@@ -159,11 +167,13 @@ Documents that omit a declared facet field are indexed normally for full-text bu
 A field that is not in `facetFields` and not in `searchableFields` (when `searchableFields` is set) is stored in the document store but never indexed — neither for full-text nor for facets. This is the right place for URLs, image paths, internal SKUs, and timestamps you want to retrieve but not search on.
 
 ```php
-$index = new Index('/path/to/watches.db',
+use Fuzor\SchemaConfig;
+
+$index = new Index('/path/to/watches.db', schema: new SchemaConfig(
     facetFields:      ['brand', 'price'],
     searchableFields: ['title', 'body'],
     // image_url and sku are stored-only automatically
-);
+));
 
 $index->insert([[
     'id'        => 1,

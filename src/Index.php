@@ -1206,16 +1206,15 @@ class Index
      * Check whether one or more documents exist in the index.
      *
      * With a single ID returns bool. With multiple IDs returns a map of id => bool.
-     * With no arguments returns an empty array.
      *
      * @param  int             ...$ids Document IDs to check.
      * @return bool|array<int, bool>
+     * @throws \InvalidArgumentException If called with no arguments.
      */
     public function has(int ...$ids): bool|array
     {
-        /** @infection-ignore-all ReturnRemoval: SQLite evaluates IN() as no-match and returns an empty result set; removing the early return produces the same [] */
         if ($ids === []) {
-            return [];
+            throw new \InvalidArgumentException('has() requires at least one document ID.');
         }
 
         /** @var list<int> $found */
@@ -1258,7 +1257,7 @@ class Index
     {
         if (!$this->documentStoreEnabled) {
             throw new QueryException(
-                'Document store is not enabled on this index. Pass store: false at construction to opt out.'
+                'Document store is not enabled on this index (created with store: false in SchemaConfig).'
             );
         }
         if ($ids === []) {
@@ -1314,7 +1313,7 @@ class Index
     {
         if (!$this->documentStoreEnabled) {
             throw new QueryException(
-                'Document store is not enabled on this index. Pass store: false at construction to opt out.'
+                'Document store is not enabled on this index (created with store: false in SchemaConfig).'
             );
         }
         if ($batchSize < 1) {
@@ -1650,8 +1649,7 @@ class Index
             $docScores = array_intersect_key($docScores, array_flip($matchIds));
         }
 
-        // Phase 1: Load per-key filter doc ID sets and intersect to get the global filter.
-        // Phase 3: Apply it to the score map.
+        // Apply facet filters: load per-key doc ID sets and intersect with the score map.
         $filterSets   = $this->loadFacetKeySets($filter, $this->config->filterMaxDocs, array_keys($docScores));
         $rawDocScores = $docScores;
         if ($filterSets !== []) {
@@ -1659,7 +1657,7 @@ class Index
             $docScores = array_intersect_key($docScores, $globalFilter);
         }
 
-        // Phase 4: Compute disjunctive facet counts on the full filtered result set.
+        // Compute disjunctive facet counts on the full filtered result set.
         ['distribution' => $facetDistribution, 'stats' => $facetStats] = $this->computeFacetCounts(
             $facets,
             $filterSets,
@@ -1879,7 +1877,7 @@ class Index
             $docIds = $this->filterDocsByPhrases($docIds, $phraseGroups, $lastTerm ?? '', $asYouType);
         }
 
-        // Phase 1 + 3: load filter sets and apply global intersection.
+        // Apply facet filters: load per-key doc ID sets and intersect with the result.
         // array_flip($docIds) gives doc_id → position, usable as a set for array_intersect_key.
         $filterSets = $this->loadFacetKeySets($filter, $this->config->filterMaxDocs, $docIds);
         $rawDocSet  = array_flip($docIds);
@@ -1888,7 +1886,7 @@ class Index
             $docIds = array_keys(array_intersect_key($rawDocSet, $globalFilter));
         }
 
-        // Phase 4: disjunctive facet counts on the full filtered result.
+        // Compute disjunctive facet counts on the full filtered result.
         $filteredDocSet = array_flip($docIds);
         ['distribution' => $facetDistribution, 'stats' => $facetStats] = $this->computeFacetCounts(
             $facets,
@@ -2105,9 +2103,9 @@ class Index
 
             // Prune orphan terms scoped to the affected set; avoids a full wordlist table scan.
             if ($affectedTermIds !== []) {
-                $tp = $this->placeholders(count($affectedTermIds));
+                $termPlaceholders = $this->placeholders(count($affectedTermIds));
                 $this->prepare(
-                    "DELETE FROM wordlist WHERE num_hits <= 0 AND id IN ({$tp})"
+                    "DELETE FROM wordlist WHERE num_hits <= 0 AND id IN ({$termPlaceholders})"
                 )->execute($affectedTermIds);
             }
         }
@@ -2130,7 +2128,7 @@ class Index
     {
         // 1. Decrement wordlist stats for every term this document contributed.
         // UPDATE … FROM (SQLite 3.33+) joins once rather than running a correlated subquery per row.
-        /** @infection-ignore-all MethodCallRemoval,ArrayItemRemoval: skipping execute() or omitting the :documentId param leaves wordlist num_docs/num_hits inflated; doclist rows are still removed in step 3, so search results are unaffected (BM25-scoring stats only) */
+        /** @infection-ignore-all MethodCallRemoval,ArrayItemRemoval: skipping execute() or omitting the :documentId param leaves wordlist num_docs/num_hits inflated; doclist rows are still removed in step 4, so search results are unaffected (BM25-scoring stats only) */
         $this->stmt(
             'wordlistDecrementByDoc',
             'WITH doc_terms AS (
@@ -2145,7 +2143,7 @@ class Index
 
         // 2. Prune any term whose hit count reached zero.
         // Scoped to terms belonging to this document via doc_id_index. The doclist rows still
-        // exist at this point (step 3 removes them), so the subquery is valid. SQLite serialises
+        // exist at this point (step 4 removes them), so the subquery is valid. SQLite serialises
         // writers, so no concurrent operation can produce new orphans for other terms between
         // steps 1 and 2; limiting to this document's terms avoids a full wordlist table scan.
         /** @infection-ignore-all MethodCallRemoval,ArrayItemRemoval: orphan pruning is a housekeeping step; stale wordlist entries without doclist rows produce empty fetch results */
@@ -2163,15 +2161,15 @@ class Index
         $this->stmt('positionsDeleteByDoc', 'DELETE FROM positions WHERE doc_id = :documentId')
             ->execute([':documentId' => $documentId]);
 
-        // 4b. Remove facet rows for this document.
+        // 5. Remove facet rows for this document.
         $this->stmt('facetValuesDeleteByDoc', 'DELETE FROM facet_values WHERE doc_id = :documentId')
             ->execute([':documentId' => $documentId]);
 
-        // 4c. Remove field_hits rows for this document.
+        // 6. Remove field_hits rows for this document.
         $this->stmt('fieldHitsDeleteByDoc', 'DELETE FROM field_hits WHERE doc_id = :documentId')
             ->execute([':documentId' => $documentId]);
 
-        // 5. Remove doc_lengths and return the old token count (null if the document was not found).
+        // 7. Remove doc_lengths and return the old token count (null if the document was not found).
         $delStmt = $this->stmt(
             'docLengthsDelete',
             'DELETE FROM doc_lengths WHERE doc_id = :documentId RETURNING length'
@@ -2416,8 +2414,7 @@ class Index
     /**
      * Accumulate one document's facet fields into the shared name→value→docId→numValue buffer.
      *
-     * Called once per document in buildBatchBuffer. Avoids the 311K intermediate
-     * {name, value, numValue} PHP array allocations of the old per-doc normalizeFacets approach.
+     * Called once per document in buildBatchBuffer.
      *
      * @param array<string, mixed>                                   $extracted    array_intersect_key result
      * @param array<string, array<int|string, array<int, float|null>>>   $facetBuffer  mutated in-place
@@ -2591,26 +2588,26 @@ class Index
         [$termDocMap, $termDocPosMap] = $this->invertTermBuffers($docTermBuffer, $docPositionBuffer, $termIdMap);
         $this->bulkInsertDoclistRows($termDocMap);
 
-        // Step 2b: invert fieldTermBuffer and bulk-insert per-field hit counts.
+        // Step 3: invert fieldTermBuffer and bulk-insert per-field hit counts.
         if ($fieldTermBuffer !== []) {
             $termDocFieldMap = $this->invertFieldBuffer($fieldTermBuffer, $termIdMap);
             $this->bulkInsertFieldHitRows($termDocFieldMap);
         }
 
-        // Step 3: bulk-insert doc_lengths.
+        // Step 4: bulk-insert doc_lengths.
         $this->bulkInsertDocLengthRows($docLengthBuffer);
 
-        // Step 4: bulk-insert positions in (term_id, doc_id, position) PK order.
+        // Step 5: bulk-insert positions in (term_id, doc_id, position) PK order.
         if ($termDocPosMap !== []) {
             $this->bulkInsertPositionRows($termDocPosMap);
         }
 
-        // Step 5: bulk-insert documents into the document store.
+        // Step 6: bulk-insert documents into the document store.
         if ($this->documentStoreEnabled && $rawDocuments !== []) {
             $this->bulkInsertDocumentRows($rawDocuments);
         }
 
-        // Step 6: bulk-insert facet values sorted by (key_id, value, doc_id) for
+        // Step 7: bulk-insert facet values sorted by (key_id, value, doc_id) for
         // WITHOUT ROWID clustered B-tree sequential appends.
         if ($facetBuffer !== []) {
             $this->bulkFlushFacets($facetBuffer);
@@ -3994,8 +3991,7 @@ class Index
     /**
      * Bulk-upsert facet keys and insert facet_values rows in (key_id, value, doc_id) PK order.
      *
-     * Receives a pre-organized name→value→docId→numValue map built by buildBatchBuffer(),
-     * which avoids the 311K intermediate row-array allocations of the old per-doc approach.
+     * Receives a pre-organized name→value→docId→numValue map built by buildBatchBuffer().
      *
      * @param array<string, array<int|string, array<int, float|null>>> $facetBuffer  name → value → docId → numValue
      */
@@ -4029,8 +4025,7 @@ class Index
             }
         }
 
-        // 2. Remap outer keys from field names to integer key_ids (7 iterations for ecom-like indexes).
-        //    Previously required 311K iterations to build this map from per-doc rows.
+        // 2. Remap outer keys from field names to integer key_ids (~one iteration per declared facet field).
         /** @var array<int, array<int|string, array<int, float|null>>> $kvdMap */
         $kvdMap = [];
         foreach ($facetBuffer as $name => $valueMap) {

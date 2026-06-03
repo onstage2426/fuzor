@@ -18,7 +18,7 @@ Both methods return a `SearchResult` object:
 | `$facetStats`           | `array<string, array{min:float,max:float}>` | Min/max stats for numeric facet fields; absent for string facets and when facets not requested |
 | `getIds()`              | `list<int>`           | Document IDs in relevance order (current page)                           |
 | `getHits()`             | `list<array>`         | Same as `$hits`                                                          |
-| `getHit(int $index)`    | `array`               | Document at position `$index` (0-based); empty array when out of bounds  |
+| `getHit(int $index, array $default = [])` | `array` | Document at position `$index` (0-based); `$default` when out of bounds  |
 | `getHitsCount()`        | `int`                 | Same as `$hitsCount`                                                     |
 | `getTotalHits()`        | `int\|null`           | Same as `$totalHits`                                                     |
 | `getQuery()`            | `string`              | Same as `$query`                                                         |
@@ -27,7 +27,9 @@ Both methods return a `SearchResult` object:
 | `getFacetDistribution()` | `array<string, array<string,int>>` | Same as `$facetDistribution`                                |
 | `getFacetStats()`       | `array<string, array{min:float,max:float}>` | Same as `$facetStats`                              |
 | `toArray()`             | `array`               | Full result as a plain array                                             |
-| `toJson(int $flags = 0)` | `string`             | JSON-encoded result; pass `JSON_PRETTY_PRINT` etc. via `$flags`          |
+| `toJSON(int $flags = 0)` | `string`             | JSON-encoded result; pass `JSON_PRETTY_PRINT` etc. via `$flags`          |
+| `count($result)`        | `int`                 | Number of hits in this page (`Countable`)                               |
+| `foreach ($result as $hit)` | —               | Iterate over hits directly (`IteratorAggregate`)                        |
 
 ```php
 $result = $index->search('city car');

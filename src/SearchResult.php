@@ -4,7 +4,8 @@ declare(strict_types=1);
 
 namespace Fuzor;
 
-class SearchResult
+/** @implements \IteratorAggregate<int, array<string, mixed>> */
+class SearchResult implements \Countable, \IteratorAggregate
 {
     /** @var list<array<string, mixed>> Documents in relevance order; stubs with only 'id' when store is disabled. */
     public readonly array $hits;
@@ -44,9 +45,13 @@ class SearchResult
     private readonly array $ids;
 
     /**
-     * @param list<int>                             $ids
-     * @param array<int, array<string, mixed>>|null $documents
-     * @param array<string, array<array-key, int>>     $facetCounts
+     * @param list<int>                                    $ids
+     * @param int|null                                     $totalHits
+     * @param array<int, array<string, mixed>>|null        $documents
+     * @param array<string, array<array-key, int>>         $facetCounts
+     * @param string                                       $query
+     * @param int|null                                     $limit
+     * @param int|null                                     $offset
      * @param array<string, array{min: float, max: float}> $facetStats
      */
     public function __construct(
@@ -72,6 +77,18 @@ class SearchResult
             : array_map(fn(int $id) => $documents[$id] ?? ['id' => $id], $ids);
 
         $this->hitsCount = count($this->hits);
+    }
+
+    /** Enables count($result). */
+    public function count(): int
+    {
+        return $this->hitsCount;
+    }
+
+    /** @return \ArrayIterator<int, array<string, mixed>> Enables foreach ($result as $hit). */
+    public function getIterator(): \ArrayIterator
+    {
+        return new \ArrayIterator($this->hits);
     }
 
     public function getQuery(): string
@@ -113,10 +130,15 @@ class SearchResult
         return $this->hits;
     }
 
-    /** @return array<string, mixed> Document at position $index (0-based); empty array when out of bounds. */
-    public function getHit(int $index): array
+    /**
+     * Document at position $index (0-based); $default when out of bounds.
+     *
+     * @param  array<string, mixed> $default
+     * @return array<string, mixed>
+     */
+    public function getHit(int $index, array $default = []): array
     {
-        return $this->hits[$index] ?? [];
+        return $this->hits[$index] ?? $default;
     }
 
     /** @return array<string, array<array-key, int>> */
@@ -146,7 +168,7 @@ class SearchResult
         ];
     }
 
-    public function toJson(int $flags = 0): string
+    public function toJSON(int $flags = 0): string
     {
         return json_encode($this->toArray(), $flags) ?: '{}';
     }
