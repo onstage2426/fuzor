@@ -1,121 +1,111 @@
-# Document Store
+# Document store
 
-The document store persists the raw document array inside the same SQLite file as the inverted index. Search results are automatically hydrated — `$result->documents()` returns the full document data without any extra query to a separate database.
-
-The store is **enabled by default**. Pass `store: false` to opt out — useful for embedding contexts where disk space is constrained or raw document retrieval is not needed.
-
-Even if you never call `get()` or use `$result->documents()`, keeping the store on lets you use `Index::rebuild()` without a callback: the stored documents are streamed into the new index automatically, so you can re-index with a different schema at any time without maintaining a separate copy of your source data. See [indexing.md § Atomic rebuild](indexing.md#atomic-rebuild) for details.
+The document store persists the raw document array inside the same SQLite file as the inverted index. When enabled (the default), search results contain the full document data — no second database query needed.
 
 ```php
-use Fuzor\Index;
-
 // Store on (default)
 $index = new Index('/path/to/articles.db');
 
-// Store off
-$index = new Index('/path/to/articles.db', store: false);
+// Store off — smaller file, no document retrieval
+use Fuzor\SchemaConfig;
+$index = new Index('/path/to/articles.db', schema: new SchemaConfig(store: false));
 ```
 
-The setting is persisted in the `info` table of the index file. Opening an existing index restores it automatically — you never need to re-specify it.
+The setting is persisted at creation time. Opening an existing index restores it automatically.
 
-## Auto-hydration on search
+## Documents in search results
 
-When the store is enabled, every `search()` and `searchBoolean()` call automatically attaches the matching documents to the result:
+When the store is enabled, each hit in `$result->hits` is the full document array:
 
 ```php
-$results = $index->search('electric bike');
+$result = $index->search('electric bike');
 
-// array<int, array<string, mixed>> keyed by doc ID, in relevance order
-$results->documents();
-
-// The full document array for doc 3, or null if not in the result
-$results->document(3); // ['id' => 3, 'title' => 'Electric bike', 'body' => '…']
-
-// Check whether the store is active on this result
-$results->hasDocuments(); // true
+foreach ($result->hits as $hit) {
+    echo $hit['title'];    // 'Electric Mountain Bike'
+    echo $hit['price'];    // 899.99
+    echo $hit['image'];    // 'https://…'
+}
 ```
 
-When the store is disabled, `$results->documents()` returns `null` and `$results->hasDocuments()` returns `false`. An empty result page (store enabled, no matches) returns an empty array `[]` from `documents()`, not `null`.
-
-## Stored-only fields
-
-Any field that is not in `facetFields` and not in `searchableFields` (when `searchableFields` is declared) is indexed in neither the FTS nor the facet index. It is stored as-is in the document store and returned unchanged by `document()`, `documents()`, and `get()`.
-
-Use this for data you need at retrieval time — permalinks, image URLs, timestamps, internal SKUs — but do not want to appear in search results or facet filters.
+When the store is disabled, hits are id-only stubs:
 
 ```php
-$index = new Index('/path/to/articles.db',
-    searchableFields: ['title', 'body'],
-    // permalink, image, published are stored-only automatically
-);
-
-$index->insert([[
-    'id'        => 1,
-    'title'     => 'Fast sedan',
-    'body'      => 'Comfortable city car.',
-    'permalink' => '/cars/fast-sedan',
-    'image'     => 'https://example.com/sedan.jpg',
-    'published' => '2026-05-14',
-]]);
+$result->hits; // [['id' => 3], ['id' => 1], ['id' => 7]]
 ```
-
-Stored-only fields are returned alongside the rest of the document:
-
-```php
-$index->search('sedan')->document(1)['permalink']; // '/cars/fast-sedan'
-```
-
-Stored-only fields are updated atomically with the rest of the document on `update()` and `upsert()`.
 
 ## Fetching documents by ID
 
-Retrieve documents directly without a search:
+Retrieve documents without a search:
 
 ```php
 // Single document — returns null if not found
 $doc = $index->get(42);
 
-// Multiple documents — returns map<int, array>; missing IDs are silently omitted
+// Multiple documents — id => document map; missing IDs silently omitted
 $docs = $index->getMany(1, 2, 3);
 $docs[1]; // ['id' => 1, 'title' => '…', …]
 ```
 
-Both throw `QueryException` if called on an index where the store was not enabled.
+## Iterating all documents
+
+Stream the full document store in ascending ID order:
+
+```php
+foreach ($index->stream() as $id => $doc) {
+    echo $id . ': ' . $doc['title'] . "\n";
+}
+```
+
+Increase `$batchSize` (default `100`) for higher throughput:
+
+```php
+foreach ($index->stream(batchSize: 500) as $id => $doc) {
+    // …
+}
+```
+
+## Stored-only fields
+
+A field that is not in `facetFields` and not in `searchableFields` is stored but never indexed — it won't appear in search or filter results, but it will be present in every hit and every `get()` response. Use this for URLs, image paths, timestamps, internal IDs, and anything you need at render time but not at search time.
+
+```php
+$index = new Index('/path/to/watches.db', schema: new SchemaConfig(
+    facetFields:      ['brand', 'price'],
+    searchableFields: ['title', 'body'],
+    // image_url and sku are stored-only automatically
+));
+
+$index->insert([[
+    'id'        => 1,
+    'title'     => 'Casio G-Shock',
+    'body'      => 'Shock resistant.',
+    'brand'     => 'Casio',
+    'price'     => 129.99,
+    'image_url' => 'https://example.com/gshock.jpg',
+    'sku'       => 'GA-2100-1A1ER',
+]]);
+
+$index->search('gshock')->hits[0]['image_url']; // 'https://…'
+```
+
+Stored-only fields are updated atomically when the document is updated or upserted.
+
+## Rebuilding without source data
+
+As long as the store is enabled, you can rebuild the index without keeping a separate copy of your data:
+
+```php
+// Re-index with a new schema — Fuzor streams from the store automatically
+Index::rebuild('/path/to/articles.db', schema: new SchemaConfig(
+    language:    'en',
+    facetFields: ['category', 'price'],
+));
+```
+
+See [indexing.md § Atomic rebuild](indexing.md#atomic-rebuild) for details.
 
 ## Checking whether the store is active
 
 ```php
 $index->documentStoreEnabled; // bool
 ```
-
-## Storage format
-
-Documents are stored as JSON (UTF-8) in a `documents` table in the same SQLite file as the index. Values are decoded with `json_decode($data, true)` on retrieval. Plain PHP arrays with scalar values round-trip perfectly. Nested objects will be returned as arrays — use only array-typed fields if round-trip fidelity matters.
-
-## Atomic rebuild
-
-`rebuild()` inherits the store setting from the existing index by default. Pass a `SchemaConfig` with an explicit `store` value to override it in the rebuilt index:
-
-```php
-use Fuzor\SchemaConfig;
-
-// Inherit (default) — store stays on if the existing index had it on
-Index::rebuild('/path/to/articles.db', function (Index $new) use ($docs) {
-    $new->insert($docs);
-});
-
-// Force the store off to shrink the rebuilt file
-Index::rebuild('/path/to/articles.db',
-    fn (Index $new) => $new->insert($docs),
-    schema: new SchemaConfig(store: false),
-);
-```
-
-See [indexing.md § Atomic rebuild](indexing.md#atomic-rebuild) for full details including the no-callback form.
-
-## Performance notes
-
-- **Write overhead** — each `insert()` / `upsert()` / `update()` adds one `INSERT INTO documents`. Bulk inserts and upserts batch these at 500 rows per statement, which is conservative for large JSON payloads.
-- **Read overhead** — `documents()` triggers one chunked `SELECT` on the `documents` PK after scoring. For a typical `limit: 100` page this is a single indexed query.
-- **File size** — the `documents` table adds roughly the size of `json_encode($doc)` per document to the SQLite file.
-- **Snapshots** — `snapshotTo()` copies the entire SQLite file including the `documents` table. No extra step needed.

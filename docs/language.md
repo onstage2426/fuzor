@@ -1,45 +1,58 @@
 # Language
 
-Pass a BCP 47 language tag to the `Index` constructor to enable stopword filtering and Snowball stemming. If your documents are in a known language, setting it will significantly improve search quality — if unsure, leave it off.
-
-The language is persisted in the index file and immutable after creation. It is restored automatically when you open an existing index — you never need to re-specify it.
+Pass a BCP 47 language tag at index creation time to enable stopword filtering and Snowball stemming. This significantly improves search quality — common words like "the" and "and" are ignored, and "running" and "runs" match the same entries.
 
 ```php
-$index = new Index('/path/to/articles.db', language: 'en');
+use Fuzor\SchemaConfig;
+
+$index = new Index('/path/to/articles.db', schema: new SchemaConfig(language: 'en'));
 ```
+
+The language is persisted in the index and restored automatically when you reopen it. It cannot be changed without rebuilding.
 
 ## What it does
 
-- **Stopword filtering** — removes common words (e.g. "the", "and") from both indexed documents and search queries, reducing index noise.
-- **Snowball stemming** — reduces words to their root form so "running" and "runs" match the same index entries. Applied automatically when a stemmer exists for the chosen language.
+**Stopword filtering** removes high-frequency words (e.g. "the", "and", "is") from both the indexed documents and search queries. This reduces index noise and prevents common words from skewing relevance scores.
 
-## CJK and Thai — built-in n-gram tokenisation
+**Snowball stemming** reduces words to their root form so "running", "runs", and "ran" all match the same index entries. Applied automatically when a stemmer exists for the chosen language.
 
-Chinese, Japanese, Korean, and Thai do not use spaces between words. Fuzor handles these languages automatically using n-gram tokenisation — no external segmenter required.
+## CJK and Thai
 
-| Code | Language | N-gram size |
-|------|----------|:-----------:|
-| `zh` | Chinese  | 2 (bigram)  |
-| `ja` | Japanese | 2 (bigram)  |
-| `ko` | Korean   | 2 (bigram)  |
-| `th` | Thai     | 3 (trigram) |
+Chinese, Japanese, Korean, and Thai don't use spaces between words. Fuzor handles them with n-gram tokenisation — no external segmenter required.
 
-When one of these languages is set, Fuzor splits each CJK/Thai token into overlapping character windows at both index time and query time, so searching for `轿车` finds documents containing that sequence regardless of surrounding characters. ASCII tokens in the same document (e.g. brand names) are indexed normally.
+| Code | Language | N-gram |
+|------|----------|:------:|
+| `zh` | Chinese  | bigram |
+| `ja` | Japanese | bigram |
+| `ko` | Korean   | bigram |
+| `th` | Thai     | trigram |
 
-### Tradeoffs
+Fuzor splits each CJK/Thai string into overlapping character windows at both index and query time. ASCII tokens in the same document (e.g. brand names) are indexed normally alongside them.
 
-- **Index size** — a 10-character Chinese word produces ~9 bigrams instead of 1 token. Expect roughly N× growth in index size relative to a segmented approach.
-- **False positives** — rare character combinations that span natural word boundaries may produce spurious matches. Precision is lower than a real segmenter.
-- **No stemming** — no Snowball stemmer exists for these languages; stopword filtering still applies.
+**Tradeoffs vs. a real segmenter:**
+- Index size grows roughly N× (one 10-character word becomes ~9 bigrams)
+- Rare character sequences that span word boundaries may produce false positives
+- No Snowball stemmer exists for these languages; stopword filtering still applies
 
-If you need higher precision for Chinese content at scale, you can pre-segment with a tool like jieba and index the space-separated output without setting a language.
+For high-precision Chinese search at scale, pre-segment with jieba and index the space-separated output without setting a language.
 
 ## Changing language
 
-Language cannot be changed on an existing index. Recreate the index from your document store:
+Rebuild the index with a new `SchemaConfig`:
 
 ```php
-$index = new Index($path, force: true, language: 'fr');
+use Fuzor\SchemaConfig;
+
+Index::rebuild('/path/to/articles.db',
+    fn (Index $new) => $new->insert($docs),
+    schema: new SchemaConfig(language: 'fr'),
+);
+```
+
+Or recreate from scratch:
+
+```php
+$index = new Index('/path/to/articles.db', force: true, schema: new SchemaConfig(language: 'fr'));
 $index->insert($yourDocs);
 ```
 
@@ -51,76 +64,74 @@ $index->language; // 'en', 'fr', null, …
 
 ## Supported languages
 
-To get the full list at runtime — useful for building a select list in a UI — call `Language::all()`:
+Get the full list at runtime — useful for building a language selector:
 
 ```php
 $languages = \Fuzor\Language::all();
 // ['af' => 'Afrikaans', 'ar' => 'Arabic', 'en' => 'English', …]
 ```
 
-Every tag returned is a valid `$language` argument for the `Index` constructor.
-
 | Code | Language   | Stopwords | Stemmer |
 |------|------------|:---------:|:-------:|
-| `af` | Afrikaans  | ✓         |         |
-| `ar` | Arabic     | ✓         | ✓       |
-| `bg` | Bulgarian  | ✓         |         |
-| `bn` | Bengali    | ✓         |         |
-| `br` | Breton     | ✓         |         |
-| `ca` | Catalan    | ✓         | ✓       |
-| `cs` | Czech      | ✓         |         |
-| `da` | Danish     | ✓         | ✓       |
-| `de` | German     | ✓         | ✓       |
-| `el` | Greek      | ✓         | ✓       |
-| `en` | English    | ✓         | ✓       |
-| `eo` | Esperanto  | ✓         | ✓       |
-| `es` | Spanish    | ✓         | ✓       |
-| `et` | Estonian   | ✓         | ✓       |
-| `eu` | Basque     | ✓         | ✓       |
-| `fa` | Persian    | ✓         |         |
-| `fi` | Finnish    | ✓         | ✓       |
-| `fr` | French     | ✓         | ✓       |
-| `ga` | Irish      | ✓         | ✓       |
-| `gl` | Galician   | ✓         |         |
-| `gu` | Gujarati   | ✓         |         |
-| `ha` | Hausa      | ✓         |         |
-| `he` | Hebrew     | ✓         |         |
-| `hi` | Hindi      | ✓         | ✓       |
-| `hr` | Croatian   | ✓         |         |
-| `hu` | Hungarian  | ✓         | ✓       |
-| `hy` | Armenian   | ✓         | ✓       |
-| `id` | Indonesian | ✓         | ✓       |
-| `it` | Italian    | ✓         | ✓       |
-| `ja` | Japanese   | ✓         |         |
-| `ko` | Korean     | ✓         |         |
-| `ku` | Kurdish    | ✓         |         |
-| `la` | Latin      | ✓         |         |
-| `lt` | Lithuanian | ✓         | ✓       |
-| `lv` | Latvian    | ✓         |         |
-| `mr` | Marathi    | ✓         |         |
-| `ms` | Malay      | ✓         |         |
-| `ne` | Nepali     |           | ✓       |
-| `nl` | Dutch      | ✓         | ✓       |
-| `no` | Norwegian  | ✓         | ✓       |
-| `pl` | Polish     | ✓         | ✓       |
-| `pt` | Portuguese | ✓         | ✓       |
-| `ro` | Romanian   | ✓         | ✓       |
-| `ru` | Russian    | ✓         | ✓       |
-| `sk` | Slovak     | ✓         |         |
-| `sl` | Slovenian  | ✓         |         |
-| `so` | Somali     | ✓         |         |
-| `sr` | Serbian    |           | ✓       |
-| `st` | Sotho      | ✓         |         |
-| `sv` | Swedish    | ✓         | ✓       |
-| `sw` | Swahili    | ✓         |         |
-| `ta` | Tamil      |           | ✓       |
-| `th` | Thai       | ✓         |         |
-| `tl` | Tagalog    | ✓         |         |
-| `tr` | Turkish    | ✓         | ✓       |
-| `uk` | Ukrainian  | ✓         |         |
-| `ur` | Urdu       | ✓         |         |
-| `vi` | Vietnamese | ✓         |         |
-| `yi` | Yiddish    |           | ✓       |
-| `yo` | Yoruba     | ✓         |         |
-| `zh` | Chinese    | ✓         |         |
-| `zu` | Zulu       | ✓         |         |
+| `af` | Afrikaans  | ✓ | |
+| `ar` | Arabic     | ✓ | ✓ |
+| `bg` | Bulgarian  | ✓ | |
+| `bn` | Bengali    | ✓ | |
+| `br` | Breton     | ✓ | |
+| `ca` | Catalan    | ✓ | ✓ |
+| `cs` | Czech      | ✓ | |
+| `da` | Danish     | ✓ | ✓ |
+| `de` | German     | ✓ | ✓ |
+| `el` | Greek      | ✓ | ✓ |
+| `en` | English    | ✓ | ✓ |
+| `eo` | Esperanto  | ✓ | ✓ |
+| `es` | Spanish    | ✓ | ✓ |
+| `et` | Estonian   | ✓ | ✓ |
+| `eu` | Basque     | ✓ | ✓ |
+| `fa` | Persian    | ✓ | |
+| `fi` | Finnish    | ✓ | ✓ |
+| `fr` | French     | ✓ | ✓ |
+| `ga` | Irish      | ✓ | ✓ |
+| `gl` | Galician   | ✓ | |
+| `gu` | Gujarati   | ✓ | |
+| `ha` | Hausa      | ✓ | |
+| `he` | Hebrew     | ✓ | |
+| `hi` | Hindi      | ✓ | ✓ |
+| `hr` | Croatian   | ✓ | |
+| `hu` | Hungarian  | ✓ | ✓ |
+| `hy` | Armenian   | ✓ | ✓ |
+| `id` | Indonesian | ✓ | ✓ |
+| `it` | Italian    | ✓ | ✓ |
+| `ja` | Japanese   | ✓ | |
+| `ko` | Korean     | ✓ | |
+| `ku` | Kurdish    | ✓ | |
+| `la` | Latin      | ✓ | |
+| `lt` | Lithuanian | ✓ | ✓ |
+| `lv` | Latvian    | ✓ | |
+| `mr` | Marathi    | ✓ | |
+| `ms` | Malay      | ✓ | |
+| `ne` | Nepali     | | ✓ |
+| `nl` | Dutch      | ✓ | ✓ |
+| `no` | Norwegian  | ✓ | ✓ |
+| `pl` | Polish     | ✓ | ✓ |
+| `pt` | Portuguese | ✓ | ✓ |
+| `ro` | Romanian   | ✓ | ✓ |
+| `ru` | Russian    | ✓ | ✓ |
+| `sk` | Slovak     | ✓ | |
+| `sl` | Slovenian  | ✓ | |
+| `so` | Somali     | ✓ | |
+| `sr` | Serbian    | | ✓ |
+| `st` | Sotho      | ✓ | |
+| `sv` | Swedish    | ✓ | ✓ |
+| `sw` | Swahili    | ✓ | |
+| `ta` | Tamil      | | ✓ |
+| `th` | Thai       | ✓ | |
+| `tl` | Tagalog    | ✓ | |
+| `tr` | Turkish    | ✓ | ✓ |
+| `uk` | Ukrainian  | ✓ | |
+| `ur` | Urdu       | ✓ | |
+| `vi` | Vietnamese | ✓ | |
+| `yi` | Yiddish    | | ✓ |
+| `yo` | Yoruba     | ✓ | |
+| `zh` | Chinese    | ✓ | |
+| `zu` | Zulu       | ✓ | |

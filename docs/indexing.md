@@ -64,7 +64,7 @@ use Fuzor\SchemaConfig;
 $index = new Index('/path/to/articles.db', schema: new SchemaConfig(stripHtml: true));
 ```
 
-Pass a `Config` object to tune BM25, typo tolerance, and other search behaviour. See [configuration.md](configuration.md) for details.
+Pass a `Config` object to tune BM25, typo tolerance, and other search behaviour. See [tuning.md](tuning.md) for details.
 
 ```php
 use Fuzor\Config;
