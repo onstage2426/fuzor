@@ -6,11 +6,12 @@
 
 Fuzor is a dependency-free full-text search library for PHP. It tokenises your documents, stores an inverted index in a single SQLite file, and scores results with Okapi BM25 — no external services required.
 
-- BM25 ranked search with automatic typo tolerance and boolean modes
-- Faceted search — filter by attribute values and compute per-value counts
-- Search-as-you-type prefix matching
+- BM25 ranked search with automatic typo tolerance
+- Boolean search with AND / OR / NOT operators
+- Faceted filtering and per-value counts
+- Search-as-you-type prefix matching and phrase search
 - Stopword filtering and Snowball stemming for 62 languages
-- Snippet extraction and result highlighting
+- Result highlighting and snippet extraction
 - One SQLite file per index — zero infrastructure
 
 ## Installation
@@ -25,39 +26,48 @@ composer require onstage2426/fuzor
 
 ```php
 use Fuzor\Index;
+use Fuzor\SchemaConfig;
+use Fuzor\SearchOptions;
 use Fuzor\FacetRange;
 
-// Create an index — declare facetable fields once at creation time
-$index = new Index('/path/to/products.db',
+// Create an index — declare facetable fields at creation time
+$index = new Index('/path/to/products.db', schema: new SchemaConfig(
     language:    'en',
     facetFields: ['type', 'price'],
-);
+));
 
 $index->insert([
-    ['id' => 1, 'title' => 'Fast sedan',     'body' => 'City car with great fuel economy.',    'type' => 'sedan',  'price' => 24900],
-    ['id' => 2, 'title' => 'Off-road SUV',   'body' => 'Built for adventure and any terrain.', 'type' => 'suv',    'price' => 41500],
-    ['id' => 3, 'title' => 'Electric coupe', 'body' => 'Zero emissions and instant torque.',   'type' => 'coupe',  'price' => 58000],
+    ['id' => 1, 'title' => 'Fast sedan',     'body' => 'City car with great fuel economy.',    'type' => 'sedan', 'price' => 24900],
+    ['id' => 2, 'title' => 'Off-road SUV',   'body' => 'Built for adventure and any terrain.', 'type' => 'suv',   'price' => 41500],
+    ['id' => 3, 'title' => 'Electric coupe', 'body' => 'Zero emissions and instant torque.',   'type' => 'coupe', 'price' => 58000],
 ]);
 
-// BM25 search — typo tolerance fires automatically on words ≥ 5 chars
-$results = $index->search('economi');
+// BM25 ranked search — typo tolerance fires automatically on words ≥ 5 chars
+$result = $index->search('economi');
 
 // Boolean search
-$results = $index->searchBoolean('sedan or coupe -electric');
+$result = $index->searchBoolean('sedan or coupe -electric');
 
-// Faceted search — filter by attribute, get counts per value
-$results = $index->search('car', filter: ['type' => ['sedan', 'suv'], 'price' => FacetRange::max(45000)], facets: ['type']);
+// Faceted search — filter by attribute, count values
+$result = $index->search('car', new SearchOptions(
+    filter: ['type' => ['sedan', 'suv'], 'price' => FacetRange::max(45000)],
+    facets: ['type'],
+));
+
+$result->hits;               // documents in relevance order
+$result->facetDistribution;  // ['type' => ['sedan' => 1, 'suv' => 1]]
 ```
 
 ## Documentation
 
-- [Indexing](docs/indexing.md) — bulk loading, facet values, upsert, rebuild, snapshots
-- [Search](docs/search.md) — BM25 tuning, typo tolerance, boolean, prefix, facet filtering and counts
+- [Indexing](docs/indexing.md) — creating indexes, inserting, updating, facet fields, rebuild, snapshots
+- [Search](docs/search.md) — BM25, boolean, phrases, typo tolerance, synonyms, facets, sorting, distinct
 - [Language](docs/language.md) — stopwords, stemming, CJK/Thai n-grams
-- [Configuration](docs/configuration.md) — all tuning parameters
-- [Document store](docs/document-store.md) — store and retrieve raw documents
-- [Snippeting](docs/snippeting.md) and [Highlighting](docs/highlighting.md)
-- [Query inspection](docs/inspect-query.md) and [Performance](docs/performance.md)
+- [Formatting](docs/formatting.md) — result highlighting and snippet extraction
+- [Document store](docs/document-store.md) — storing and retrieving raw documents
+- [Tuning](docs/tuning.md) — BM25 parameters, typo tolerance, field boosting
+- [Performance](docs/performance.md) — read/write index split, snapshots
+- [Inspect query](docs/inspect-query.md) — debug the query pipeline
 
 ## License
 
