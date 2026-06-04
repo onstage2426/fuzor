@@ -8,6 +8,8 @@ namespace Fuzor;
  * Unicode-aware edit distance, counted in codepoints rather than bytes.
  *
  * All methods are static; no instance is needed.
+ *
+ * @internal
  */
 final class Levenshtein
 {

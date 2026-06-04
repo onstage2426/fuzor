@@ -9,6 +9,8 @@ namespace Fuzor;
  *
  * Converts a boolean query string to a postfix (Reverse Polish) token list.
  * All methods are stateless; no instance is needed.
+ *
+ * @internal
  */
 class BooleanParser
 {

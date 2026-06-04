@@ -9,6 +9,8 @@ namespace Fuzor;
  *
  * The word list is loaded from a PHP file on first use and cached on the instance.
  * The PHP opcode cache ensures the underlying file is only parsed once per process.
+ *
+ * @internal
  */
 final class Stopwords
 {
