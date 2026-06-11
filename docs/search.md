@@ -51,6 +51,32 @@ $page2 = $index->search('city car', new SearchOptions(limit: 20, offset: 20));
 $totalPages = (int) ceil($page1->totalHits / 20);
 ```
 
+## Browse (empty query)
+
+Pass an empty string (or whitespace-only string) to browse all documents without a text query. The full `SearchOptions` surface — filter, sort, facets, distinct, highlight, crop — works as usual.
+
+```php
+// All documents, newest-inserted first
+$result = $index->search('');
+
+// Sorted by price ascending
+$result = $index->search('', new SearchOptions(sort: ['price:asc']));
+
+// Filtered to one category with facet counts
+$result = $index->search('', new SearchOptions(
+    filter: ['category' => 'shoes'],
+    facets: ['brand'],
+));
+
+// Paginated browse
+$result = $index->search('', new SearchOptions(limit: 20, offset: 0));
+$totalPages = (int) ceil($result->totalHits / 20);
+```
+
+When no `sort` is specified, results are returned in insertion order, newest first (`doc_id DESC`). `$totalHits` reflects the full document count (or filtered count when a filter is active).
+
+`searchBoolean('')` follows the same path.
+
 ## As-you-type prefix
 
 When `asYouType` is `true` (the default), the last query word is matched as a prefix — `"fast se"` also matches documents containing `"sedan"`.

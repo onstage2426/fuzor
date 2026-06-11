@@ -1488,6 +1488,9 @@ class Index
         string $phrase,
         SearchOptions $options = new SearchOptions(),
     ): SearchResult {
+        if (trim($phrase) === '') {
+            return $this->browse($phrase, $options);
+        }
         $asYouType     = $options->asYouType;
         $limit         = $options->limit;
         $offset        = $options->offset;
@@ -1780,6 +1783,9 @@ class Index
         string $phrase,
         SearchOptions $options = new SearchOptions(),
     ): SearchResult {
+        if (trim($phrase) === '') {
+            return $this->browse($phrase, $options);
+        }
         $asYouType     = $options->asYouType;
         $limit         = $options->limit;
         $offset        = $options->offset;
@@ -1940,6 +1946,134 @@ class Index
             limit: $limit,
             offset: $offset,
         );
+    }
+
+    /**
+     * Browse all documents with no FTS scoring — used when $phrase is empty.
+     *
+     * Fast path (no filter / sort / facets / distinct): totalHits from the info cache,
+     * page fetched with a single PK scan. General path: loads all doc IDs (capped),
+     * applies filter/sort/facets/distinct using the same helpers as searchBoolean().
+     * Default order is doc_id DESC (insertion order, newest first).
+     */
+    private function browse(string $phrase, SearchOptions $options): SearchResult
+    {
+        $limit         = $options->limit;
+        $offset        = $options->offset;
+        $filter        = $options->filter;
+        $facets        = $options->facets;
+        $sort          = $options->sort;
+        $distinct      = $options->distinct;
+        $distinctCount = $options->distinctCount;
+        $sortSpecs     = $this->parseSortSpec($sort);
+
+        // Fast path: skip all PHP-side work; one PK scan for the page, total from cache.
+        if ($filter === [] && $sortSpecs === [] && $facets === [] && $distinct === null) {
+            $info  = $this->getInfoValues(['total_documents']);
+            $total = (int) ($info['total_documents'] ?? 0);
+            $stmt  = $this->stmt(
+                'browsePageIds',
+                'SELECT doc_id FROM doc_lengths ORDER BY doc_id DESC LIMIT ? OFFSET ?'
+            );
+            $stmt->execute([$limit, $offset]);
+            /** @var list<int> $pagedIds */
+            $pagedIds = $stmt->fetchAll(PDO::FETCH_COLUMN);
+            return new SearchResult(
+                ids: $pagedIds,
+                totalHits: $total,
+                documents: $this->hydrateAndFormat($pagedIds, $phrase, $options),
+                facetCounts: [],
+                facetStats: [],
+                query: $phrase,
+                limit: $limit,
+                offset: $offset,
+            );
+        }
+
+        // General path: materialise all doc IDs (capped), then reuse the boolean helpers.
+        $cap    = max($this->config->filterMaxDocs, $this->config->maxFacetCountDocs);
+        $docIds = $this->fetchBrowseDocIds($cap);
+
+        $filterSets = $this->loadFacetKeySets($filter, $this->config->filterMaxDocs, $docIds);
+        $rawDocSet  = array_flip($docIds);
+        if ($filterSets !== []) {
+            $globalFilter = $this->intersectFilterSets($filterSets);
+            $docIds = array_keys(array_intersect_key($rawDocSet, $globalFilter));
+        }
+
+        $filteredDocSet = array_flip($docIds);
+        ['distribution' => $facetDistribution, 'stats' => $facetStats] = $this->computeFacetCounts(
+            $facets,
+            $filterSets,
+            $rawDocSet,
+            $filteredDocSet,
+            $this->config->maxFacetCountDocs,
+        );
+
+        // Use info cache for total when no filter is active (accurate even when cap < total docs).
+        $info  = $this->getInfoValues(['total_documents']);
+        $total = $filterSets !== []
+            ? count($docIds)
+            : (int) ($info['total_documents'] ?? 0);
+
+        if ($distinct !== null) {
+            $keyId     = $this->lookupFacetKeyId($distinct);
+            $sortedIds = $sortSpecs !== [] && $total > 0
+                ? $this->sortDocIdsBySpecs($docIds, $sortSpecs, [])
+                : $docIds;
+            $valueMap = $this->fetchSortValues($sortedIds, $keyId);
+            [$pagedIds, $distinctHits] = $this->applyDistinctPagination(
+                $sortedIds,
+                $valueMap,
+                $distinctCount,
+                $offset,
+                $limit,
+            );
+            return new SearchResult(
+                ids: $pagedIds,
+                totalHits: $distinctHits,
+                documents: $this->hydrateAndFormat($pagedIds, $phrase, $options),
+                facetCounts: $facetDistribution,
+                facetStats: $facetStats,
+                query: $phrase,
+                limit: $limit,
+                offset: $offset,
+            );
+        }
+
+        if ($sortSpecs !== [] && $total > 0 && $limit > 0) {
+            $pagedIds = $this->applySortedPagination($docIds, $sortSpecs, [], $offset, $limit);
+        } else {
+            $pagedIds = array_slice($docIds, $offset, $limit);
+        }
+
+        return new SearchResult(
+            ids: $pagedIds,
+            totalHits: $total,
+            documents: $this->hydrateAndFormat($pagedIds, $phrase, $options),
+            facetCounts: $facetDistribution,
+            facetStats: $facetStats,
+            query: $phrase,
+            limit: $limit,
+            offset: $offset,
+        );
+    }
+
+    /**
+     * Fetch all doc IDs from doc_lengths ordered by doc_id DESC, capped at $cap.
+     *
+     * @return list<int>
+     */
+    private function fetchBrowseDocIds(int $cap): array
+    {
+        $stmt = $this->stmt(
+            'fetchBrowseDocIds',
+            'SELECT doc_id FROM doc_lengths ORDER BY doc_id DESC LIMIT ?'
+        );
+        $stmt->execute([$cap]);
+        /** @var list<int> $ids */
+        $ids = $stmt->fetchAll(PDO::FETCH_COLUMN);
+        return $ids;
     }
 
     /**

@@ -3815,6 +3815,120 @@ class IndexTest extends TestCase
         $this->assertContains(1, $index->search('product', new SearchOptions(sort: []))->getIds());
     }
 
+    // --- Browse (empty phrase) ---
+
+    public function testBrowseEmptyPhraseReturnsAllDocsInsertionOrderDesc(): void
+    {
+        $index = new Index($this->dbPath);
+        $index->insert([
+            ['id' => 1, 'title' => 'apple'],
+            ['id' => 2, 'title' => 'banana'],
+            ['id' => 3, 'title' => 'cherry'],
+        ]);
+        $this->assertSame([3, 2, 1], $index->search('')->getIds());
+    }
+
+    public function testBrowseWhitespaceOnlyPhraseRoutes(): void
+    {
+        $index = new Index($this->dbPath);
+        $index->insert([
+            ['id' => 1, 'title' => 'apple'],
+            ['id' => 2, 'title' => 'banana'],
+        ]);
+        $this->assertSame([2, 1], $index->search('   ')->getIds());
+    }
+
+    public function testBrowseEmptyIndexReturnsEmptyResult(): void
+    {
+        $index = new Index($this->dbPath);
+        $result = $index->search('');
+        $this->assertSame([], $result->getIds());
+        $this->assertSame(0, $result->totalHits);
+    }
+
+    public function testBrowseTotalHits(): void
+    {
+        $index = new Index($this->dbPath);
+        $index->insert([
+            ['id' => 1, 'title' => 'apple'],
+            ['id' => 2, 'title' => 'banana'],
+            ['id' => 3, 'title' => 'cherry'],
+        ]);
+        $this->assertSame(3, $index->search('')->totalHits);
+    }
+
+    public function testBrowsePagination(): void
+    {
+        $index = new Index($this->dbPath);
+        $index->insert([
+            ['id' => 1, 'title' => 'a'],
+            ['id' => 2, 'title' => 'b'],
+            ['id' => 3, 'title' => 'c'],
+            ['id' => 4, 'title' => 'd'],
+        ]);
+        $result = $index->search('', new SearchOptions(limit: 2, offset: 1));
+        $this->assertSame([3, 2], $result->getIds());
+        $this->assertSame(4, $result->totalHits);
+    }
+
+    public function testBrowseWithSort(): void
+    {
+        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['price']));
+        $index->insert([
+            ['id' => 1, 'title' => 'a', 'price' => 30],
+            ['id' => 2, 'title' => 'b', 'price' => 10],
+            ['id' => 3, 'title' => 'c', 'price' => 20],
+        ]);
+        $this->assertSame([2, 3, 1], $index->search('', new SearchOptions(sort: ['price:asc']))->getIds());
+    }
+
+    public function testBrowseWithFilter(): void
+    {
+        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['category']));
+        $index->insert([
+            ['id' => 1, 'title' => 'a', 'category' => 'shoes'],
+            ['id' => 2, 'title' => 'b', 'category' => 'shirts'],
+            ['id' => 3, 'title' => 'c', 'category' => 'shoes'],
+        ]);
+        $result = $index->search('', new SearchOptions(filter: ['category' => 'shoes']));
+        $this->assertSame([3, 1], $result->getIds());
+        $this->assertSame(2, $result->totalHits);
+    }
+
+    public function testBrowseWithFacetCounts(): void
+    {
+        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['color']));
+        $index->insert([
+            ['id' => 1, 'title' => 'a', 'color' => 'red'],
+            ['id' => 2, 'title' => 'b', 'color' => 'blue'],
+            ['id' => 3, 'title' => 'c', 'color' => 'red'],
+        ]);
+        $result = $index->search('', new SearchOptions(facets: ['color']));
+        $this->assertSame(['red' => 2, 'blue' => 1], $result->facetDistribution['color']);
+    }
+
+    public function testBrowseViaBooleanSearch(): void
+    {
+        $index = new Index($this->dbPath);
+        $index->insert([
+            ['id' => 1, 'title' => 'apple'],
+            ['id' => 2, 'title' => 'banana'],
+        ]);
+        $this->assertSame([2, 1], $index->searchBoolean('')->getIds());
+    }
+
+    public function testBrowseSortAndFilter(): void
+    {
+        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['category', 'price']));
+        $index->insert([
+            ['id' => 1, 'title' => 'a', 'category' => 'shoes', 'price' => 50],
+            ['id' => 2, 'title' => 'b', 'category' => 'shirts', 'price' => 20],
+            ['id' => 3, 'title' => 'c', 'category' => 'shoes', 'price' => 30],
+        ]);
+        $result = $index->search('', new SearchOptions(filter: ['category' => 'shoes'], sort: ['price:asc']));
+        $this->assertSame([3, 1], $result->getIds());
+    }
+
     // --- Distinct ---
 
     public function testDistinctCollapsesDuplicateStringValues(): void
