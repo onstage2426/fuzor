@@ -2114,14 +2114,16 @@ class Index
             ? count($docIds)
             : (int) ($info['total_documents'] ?? 0);
 
+        // Sort once; used by both the distinct and non-distinct paths below.
+        $sortedDocIds = ($sortSpecs !== [] && $total > 0)
+            ? $this->sortDocIdsBySpecs($docIds, $sortSpecs, [])
+            : $docIds;
+
         if ($distinct !== null) {
-            $keyId     = $this->lookupFacetKeyId($distinct);
-            $sortedIds = $sortSpecs !== [] && $total > 0
-                ? $this->sortDocIdsBySpecs($docIds, $sortSpecs, [])
-                : $docIds;
-            $valueMap = $this->fetchSortValues($sortedIds, $keyId);
+            $keyId    = $this->lookupFacetKeyId($distinct);
+            $valueMap = $this->fetchSortValues($sortedDocIds, $keyId);
             [$pagedIds, $distinctHits] = $this->applyDistinctPagination(
-                $sortedIds,
+                $sortedDocIds,
                 $valueMap,
                 $distinctCount,
                 $offset,
@@ -2139,11 +2141,7 @@ class Index
             );
         }
 
-        if ($sortSpecs !== [] && $total > 0 && $limit > 0) {
-            $pagedIds = $this->applySortedPagination($docIds, $sortSpecs, [], $offset, $limit);
-        } else {
-            $pagedIds = array_slice($docIds, $offset, $limit);
-        }
+        $pagedIds = array_slice($sortedDocIds, $offset, $limit);
 
         return new SearchResult(
             ids: $pagedIds,
