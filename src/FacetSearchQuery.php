@@ -19,7 +19,8 @@ final readonly class FacetSearchQuery
      *                           Quoted phrases (e.g. '"science fiction"') are applied as contiguous-word constraints.
      *                           Candidates are capped at Config::$maxFacetCountDocs, so counts may be approximate
      *                           for queries that match a very large portion of the corpus.
-     * @param array<string, string|list<string>|FacetRange> $filter Facet filters applied before counting; same type as SearchOptions::$filter.
+     * @param array<string, string|list<string>|FacetRange> $filter Facet filters applied before counting;
+     *                           same type as SearchOptions::$filter.
      * @param int    $limit      Maximum number of facet values to return, ordered by count descending.
      */
     public function __construct(

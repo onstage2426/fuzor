@@ -3666,7 +3666,10 @@ class IndexTest extends TestCase
             ['id' => 2, 'title' => 'doc', 'genre' => 'Drama',  'year' => 1990],
         ]);
 
-        $result = $index->facetSearch(new FacetSearchQuery(facetName: 'genre', filter: ['year' => FacetRange::min(2000)]));
+        $result = $index->facetSearch(new FacetSearchQuery(
+            facetName: 'genre',
+            filter:    ['year' => FacetRange::min(2000)],
+        ));
 
         $this->assertCount(1, $result);
         $this->assertSame('Action', $result->facetHits[0]['value']);

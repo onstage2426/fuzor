@@ -1980,15 +1980,16 @@ class Index
             $maxDocs      = $this->config->maxFacetCountDocs;
             $last         = count($keywords) - 1;
             foreach ($keywords as $i => $kw) {
-                $kwDocs        = array_fill_keys($this->fetchBooleanDocIds($this->resolveWordlistIds($kw, $i === $last), $maxDocs), true);
+                $termIds       = $this->resolveWordlistIds($kw, $i === $last);
+                $kwDocs        = array_fill_keys($this->fetchBooleanDocIds($termIds, $maxDocs), true);
                 $ftsCandidates = $ftsCandidates === null ? $kwDocs : array_intersect_key($ftsCandidates, $kwDocs);
                 if ($ftsCandidates === []) {
-                    break; // short-circuit: no doc can satisfy all keywords
+                    break;
                 }
             }
             if ($phraseGroups !== [] && $ftsCandidates !== null && $ftsCandidates !== []) {
-                $lastToken     = end($keywords) ?: '';
-                $matchIds      = $this->filterDocsByPhrases(array_keys($ftsCandidates), $phraseGroups, $lastToken, true);
+                $lastToken = end($keywords) ?: '';
+                $matchIds  = $this->filterDocsByPhrases(array_keys($ftsCandidates), $phraseGroups, $lastToken, true);
                 $ftsCandidates = array_fill_keys($matchIds, true);
             }
         }
@@ -3664,7 +3665,8 @@ class Index
      *
      * Each phrase slot may expand to several term IDs (e.g. via prefix expansion), so
      * the check is: does any start position p exist such that for every slot i, at least
-     * one term ID in phrasePosTermIds[i] has a recorded position of p + i in this doc?
+     * one term ID in phrasePosTermIds[i] has a recorded position of p + i in this
+     * doc?
      *
      * @param array<int, list<int>> $docTermPositions  term_id → sorted position list.
      * @param list<list<int>>       $phrasePosTermIds  Phrase slot → term IDs accepted at that slot.
