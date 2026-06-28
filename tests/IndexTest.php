@@ -4,6 +4,7 @@ namespace Fuzor\Tests;
 
 use Fuzor\Config;
 use Fuzor\FacetRange;
+use Fuzor\FacetSearchQuery;
 use Fuzor\Index;
 use Fuzor\SchemaConfig;
 use Fuzor\SearchOptions;
@@ -3480,6 +3481,335 @@ class IndexTest extends TestCase
 
         $result = $index->search('car', new SearchOptions(facets: ['color']));
         $this->assertSame([], $result->facetDistribution);
+    }
+
+    // --- facetSearch ---
+
+    public function testFacetSearchReturnsAllValuesOrderedByCountDesc(): void
+    {
+        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['genre']));
+        $index->insert([
+            ['id' => 1, 'title' => 'doc', 'genre' => 'Action'],
+            ['id' => 2, 'title' => 'doc', 'genre' => 'Action'],
+            ['id' => 3, 'title' => 'doc', 'genre' => 'Drama'],
+        ]);
+
+        $result = $index->facetSearch(new FacetSearchQuery(facetName: 'genre'));
+
+        $this->assertSame(2, count($result));
+        $this->assertSame([
+            ['value' => 'Action', 'count' => 2],
+            ['value' => 'Drama',  'count' => 1],
+        ], $result->facetHits);
+    }
+
+    public function testFacetSearchPrefixMatchesCaseInsensitively(): void
+    {
+        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['genre']));
+        $index->insert([
+            ['id' => 1, 'title' => 'doc', 'genre' => 'Science Fiction'],
+            ['id' => 2, 'title' => 'doc', 'genre' => 'Action'],
+        ]);
+
+        $result = $index->facetSearch(new FacetSearchQuery(facetName: 'genre', facetQuery: 'sc'));
+
+        $this->assertCount(1, $result);
+        $this->assertSame('Science Fiction', $result->facetHits[0]['value']);
+        $this->assertSame('sc', $result->facetQuery);
+    }
+
+    public function testFacetSearchPrefixUppercaseInputMatchesMixedCaseValues(): void
+    {
+        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['genre']));
+        $index->insert([
+            ['id' => 1, 'title' => 'doc', 'genre' => 'Science Fiction'],
+            ['id' => 2, 'title' => 'doc', 'genre' => 'Action'],
+        ]);
+
+        $result = $index->facetSearch(new FacetSearchQuery(facetName: 'genre', facetQuery: 'SC'));
+
+        $this->assertCount(1, $result);
+        $this->assertSame('Science Fiction', $result->facetHits[0]['value']);
+    }
+
+    public function testFacetSearchPrefixNoMatchReturnsEmpty(): void
+    {
+        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['genre']));
+        $index->insert([
+            ['id' => 1, 'title' => 'doc', 'genre' => 'Action'],
+        ]);
+
+        $result = $index->facetSearch(new FacetSearchQuery(facetName: 'genre', facetQuery: 'zzz'));
+
+        $this->assertSame([], $result->facetHits);
+    }
+
+    public function testFacetSearchEmptyPrefixReturnsAllValues(): void
+    {
+        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['genre']));
+        $index->insert([
+            ['id' => 1, 'title' => 'doc', 'genre' => 'Action'],
+            ['id' => 2, 'title' => 'doc', 'genre' => 'Drama'],
+        ]);
+
+        $result = $index->facetSearch(new FacetSearchQuery(facetName: 'genre', facetQuery: ''));
+
+        $this->assertCount(2, $result);
+    }
+
+    public function testFacetSearchLikeSpecialCharsInPrefixAreEscaped(): void
+    {
+        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['tag']));
+        $index->insert([
+            ['id' => 1, 'title' => 'doc', 'tag' => '50%_off'],
+            ['id' => 2, 'title' => 'doc', 'tag' => 'sale'],
+        ]);
+
+        // Without escaping, '%' would wildcard-match everything; '_' would match any char.
+        $result = $index->facetSearch(new FacetSearchQuery(facetName: 'tag', facetQuery: '50%'));
+
+        $this->assertCount(1, $result);
+        $this->assertSame('50%_off', $result->facetHits[0]['value']);
+    }
+
+    public function testFacetSearchFtsQueryRestrictsCandidateDocs(): void
+    {
+        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['genre']));
+        $index->insert([
+            ['id' => 1, 'title' => 'adventure movie', 'genre' => 'Action'],
+            ['id' => 2, 'title' => 'drama film',      'genre' => 'Drama'],
+        ]);
+
+        $result = $index->facetSearch(new FacetSearchQuery(facetName: 'genre', query: 'adventure'));
+
+        $this->assertCount(1, $result);
+        $this->assertSame('Action', $result->facetHits[0]['value']);
+        $this->assertSame(1, $result->facetHits[0]['count']);
+    }
+
+    public function testFacetSearchFtsQueryMultiKeywordRequiresBothWords(): void
+    {
+        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['genre']));
+        $index->insert([
+            ['id' => 1, 'title' => 'space adventure', 'genre' => 'Action'],   // matches both
+            ['id' => 2, 'title' => 'space opera',     'genre' => 'Drama'],    // matches 'space' only
+            ['id' => 3, 'title' => 'time adventure',  'genre' => 'Comedy'],   // matches 'adventure' only
+        ]);
+
+        $result = $index->facetSearch(new FacetSearchQuery(facetName: 'genre', query: 'space adventure'));
+
+        $values = array_column($result->facetHits, 'value');
+        $this->assertContains('Action', $values);
+        $this->assertNotContains('Drama', $values);
+        $this->assertNotContains('Comedy', $values);
+    }
+
+    public function testFacetSearchFtsQueryPhraseIsApplied(): void
+    {
+        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['genre']));
+        $index->insert([
+            ['id' => 1, 'title' => 'science fiction film', 'genre' => 'Sci-Fi'],  // phrase present, adjacent
+            ['id' => 2, 'title' => 'fiction about science', 'genre' => 'Drama'],  // words present but not adjacent
+        ]);
+
+        $result = $index->facetSearch(new FacetSearchQuery(facetName: 'genre', query: '"science fiction"'));
+
+        $values = array_column($result->facetHits, 'value');
+        $this->assertContains('Sci-Fi', $values);
+        $this->assertNotContains('Drama', $values);
+    }
+
+    public function testFacetSearchFtsQueryNoMatchReturnsEmpty(): void
+    {
+        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['genre']));
+        $index->insert([
+            ['id' => 1, 'title' => 'adventure', 'genre' => 'Action'],
+        ]);
+
+        $result = $index->facetSearch(new FacetSearchQuery(facetName: 'genre', query: 'zzznomatch'));
+
+        $this->assertSame([], $result->facetHits);
+    }
+
+    public function testFacetSearchWhitespaceOnlyQueryIsEquivalentToNoRestriction(): void
+    {
+        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['genre']));
+        $index->insert([
+            ['id' => 1, 'title' => 'doc', 'genre' => 'Action'],
+            ['id' => 2, 'title' => 'doc', 'genre' => 'Drama'],
+        ]);
+
+        $result = $index->facetSearch(new FacetSearchQuery(facetName: 'genre', query: '   '));
+
+        $this->assertCount(2, $result);
+    }
+
+    public function testFacetSearchStringFilterRestrictsCandidateDocs(): void
+    {
+        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['genre', 'lang']));
+        $index->insert([
+            ['id' => 1, 'title' => 'doc', 'genre' => 'Action', 'lang' => 'en'],
+            ['id' => 2, 'title' => 'doc', 'genre' => 'Drama',  'lang' => 'fr'],
+        ]);
+
+        $result = $index->facetSearch(new FacetSearchQuery(facetName: 'genre', filter: ['lang' => 'en']));
+
+        $this->assertCount(1, $result);
+        $this->assertSame('Action', $result->facetHits[0]['value']);
+    }
+
+    public function testFacetSearchNumericRangeFilterRestrictsCandidateDocs(): void
+    {
+        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['genre', 'year']));
+        $index->insert([
+            ['id' => 1, 'title' => 'doc', 'genre' => 'Action', 'year' => 2010],
+            ['id' => 2, 'title' => 'doc', 'genre' => 'Drama',  'year' => 1990],
+        ]);
+
+        $result = $index->facetSearch(new FacetSearchQuery(facetName: 'genre', filter: ['year' => FacetRange::min(2000)]));
+
+        $this->assertCount(1, $result);
+        $this->assertSame('Action', $result->facetHits[0]['value']);
+    }
+
+    public function testFacetSearchFtsAndFilterAndPrefixCombined(): void
+    {
+        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['genre', 'year']));
+        $index->insert([
+            ['id' => 1, 'title' => 'space adventure', 'genre' => 'Science Fiction', 'year' => 2010],
+            ['id' => 2, 'title' => 'space adventure', 'genre' => 'Action',          'year' => 2010],
+            ['id' => 3, 'title' => 'space adventure', 'genre' => 'Science Fiction', 'year' => 1990],
+            ['id' => 4, 'title' => 'comedy film',     'genre' => 'Science Fiction', 'year' => 2010],
+        ]);
+
+        // prefix 'sc' + FTS 'space adventure' + year >= 2000 → only id 1 qualifies
+        $result = $index->facetSearch(new FacetSearchQuery(
+            facetName: 'genre',
+            facetQuery: 'sc',
+            query: 'space adventure',
+            filter: ['year' => FacetRange::min(2000)],
+        ));
+
+        $this->assertCount(1, $result);
+        $this->assertSame('Science Fiction', $result->facetHits[0]['value']);
+        $this->assertSame(1, $result->facetHits[0]['count']);
+    }
+
+    public function testFacetSearchLimitCapsResults(): void
+    {
+        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['genre']));
+        $index->insert([
+            ['id' => 1, 'title' => 'doc', 'genre' => 'Action'],
+            ['id' => 2, 'title' => 'doc', 'genre' => 'Action'],
+            ['id' => 3, 'title' => 'doc', 'genre' => 'Drama'],
+            ['id' => 4, 'title' => 'doc', 'genre' => 'Comedy'],
+        ]);
+
+        $result = $index->facetSearch(new FacetSearchQuery(facetName: 'genre', limit: 2));
+
+        $this->assertCount(2, $result);
+        // Top value by count must be first
+        $this->assertSame('Action', $result->facetHits[0]['value']);
+    }
+
+    public function testFacetSearchUnknownFieldReturnsEmpty(): void
+    {
+        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['genre']));
+        $index->insert([['id' => 1, 'title' => 'doc', 'genre' => 'Action']]);
+
+        $result = $index->facetSearch(new FacetSearchQuery(facetName: 'nonexistent'));
+
+        $this->assertSame([], $result->facetHits);
+    }
+
+    public function testFacetSearchEmptyIndexReturnsEmpty(): void
+    {
+        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['genre']));
+
+        $result = $index->facetSearch(new FacetSearchQuery(facetName: 'genre'));
+
+        $this->assertSame([], $result->facetHits);
+    }
+
+    public function testFacetSearchMultiValueFacetCountsEachValueOnce(): void
+    {
+        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['tag']));
+        $index->insert([
+            ['id' => 1, 'title' => 'doc', 'tag' => ['php', 'search']],
+            ['id' => 2, 'title' => 'doc', 'tag' => ['php', 'sqlite']],
+        ]);
+
+        $result = $index->facetSearch(new FacetSearchQuery(facetName: 'tag'));
+
+        $counts = array_column($result->facetHits, 'count', 'value');
+        $this->assertSame(2, $counts['php']);
+        $this->assertSame(1, $counts['search']);
+        $this->assertSame(1, $counts['sqlite']);
+    }
+
+    public function testFacetSearchPrefixOnNumericFacetMatchesStringRepresentation(): void
+    {
+        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['year']));
+        $index->insert([
+            ['id' => 1, 'title' => 'doc', 'year' => 2010],
+            ['id' => 2, 'title' => 'doc', 'year' => 2014],
+            ['id' => 3, 'title' => 'doc', 'year' => 1990],
+        ]);
+
+        $result = $index->facetSearch(new FacetSearchQuery(facetName: 'year', facetQuery: '201'));
+
+        $values = array_column($result->facetHits, 'value');
+        $this->assertContains('2010', $values);
+        $this->assertContains('2014', $values);
+        $this->assertNotContains('1990', $values);
+    }
+
+    public function testFacetSearchMultiValueOrFilterRestrictsCandidateDocs(): void
+    {
+        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['genre', 'lang']));
+        $index->insert([
+            ['id' => 1, 'title' => 'doc', 'genre' => 'Action', 'lang' => 'en'],
+            ['id' => 2, 'title' => 'doc', 'genre' => 'Drama',  'lang' => 'fr'],
+            ['id' => 3, 'title' => 'doc', 'genre' => 'Comedy', 'lang' => 'de'],
+        ]);
+
+        $result = $index->facetSearch(new FacetSearchQuery(facetName: 'genre', filter: ['lang' => ['en', 'fr']]));
+
+        $values = array_column($result->facetHits, 'value');
+        $this->assertContains('Action', $values);
+        $this->assertContains('Drama', $values);
+        $this->assertNotContains('Comedy', $values);
+    }
+
+    public function testFacetSearchResultIsIterable(): void
+    {
+        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['genre']));
+        $index->insert([
+            ['id' => 1, 'title' => 'doc', 'genre' => 'Action'],
+            ['id' => 2, 'title' => 'doc', 'genre' => 'Drama'],
+        ]);
+
+        $result   = $index->facetSearch(new FacetSearchQuery(facetName: 'genre'));
+        $iterated = [];
+        foreach ($result as $hit) {
+            $iterated[] = $hit['value'];
+        }
+
+        $this->assertContains('Action', $iterated);
+        $this->assertContains('Drama', $iterated);
+    }
+
+    public function testFacetSearchResultToArray(): void
+    {
+        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['genre']));
+        $index->insert([['id' => 1, 'title' => 'doc', 'genre' => 'Action']]);
+
+        $arr = $index->facetSearch(new FacetSearchQuery(facetName: 'genre', facetQuery: 'ac'))->toArray();
+
+        $this->assertArrayHasKey('facetHits', $arr);
+        $this->assertArrayHasKey('facetQuery', $arr);
+        $this->assertSame('ac', $arr['facetQuery']);
+        $this->assertSame([['value' => 'Action', 'count' => 1]], $arr['facetHits']);
     }
 
     // --- facetFields / searchableFields schema persistence ---

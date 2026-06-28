@@ -8,6 +8,8 @@ use Fuzor\BooleanParser;
 use Fuzor\Exceptions\IOException;
 use Fuzor\Exceptions\QueryException;
 use Fuzor\FacetRange;
+use Fuzor\FacetSearchQuery;
+use Fuzor\FacetSearchResult;
 use Fuzor\Highlighter;
 use Fuzor\Levenshtein;
 use Fuzor\Snippeter;
@@ -1946,6 +1948,101 @@ class Index
             limit: $limit,
             offset: $offset,
         );
+    }
+
+    /**
+     * Search within facet values for a given facet field.
+     *
+     * Returns facet values (with document counts) that optionally match a prefix and belong
+     * to documents that optionally match an FTS query and/or facet filters. Results are
+     * ordered by count descending.
+     *
+     * Typical use: autocomplete a filter dropdown — given the partial text the user has typed
+     * into a facet search box, return the matching values and how many documents each has.
+     *
+     * @param FacetSearchQuery $query  Query parameters; only $facetName is required.
+     * @return FacetSearchResult       Matching values with counts, ordered by count descending.
+     */
+    public function facetSearch(FacetSearchQuery $query): FacetSearchResult
+    {
+        $keyId = $this->lookupFacetKeyId($query->facetName);
+        if ($keyId === null) {
+            return new FacetSearchResult([], $query->facetQuery);
+        }
+
+        // --- Step 1: FTS candidate doc IDs (AND-intersection across keywords; phrases applied after) ---
+        $ftsCandidates = null; // null = no FTS restriction
+        if (trim($query->query) !== '') {
+            $parsed       = $this->filterQueryTokens($query->query);
+            $keywords     = $parsed['filtered'];
+            /** @var list<list<string>> $phraseGroups */
+            $phraseGroups = $parsed['phrase_groups'];
+            $maxDocs      = $this->config->maxFacetCountDocs;
+            $last         = count($keywords) - 1;
+            foreach ($keywords as $i => $kw) {
+                $kwDocs        = array_fill_keys($this->fetchBooleanDocIds($this->resolveWordlistIds($kw, $i === $last), $maxDocs), true);
+                $ftsCandidates = $ftsCandidates === null ? $kwDocs : array_intersect_key($ftsCandidates, $kwDocs);
+                if ($ftsCandidates === []) {
+                    break; // short-circuit: no doc can satisfy all keywords
+                }
+            }
+            if ($phraseGroups !== [] && $ftsCandidates !== null && $ftsCandidates !== []) {
+                $lastToken     = end($keywords) ?: '';
+                $matchIds      = $this->filterDocsByPhrases(array_keys($ftsCandidates), $phraseGroups, $lastToken, true);
+                $ftsCandidates = array_fill_keys($matchIds, true);
+            }
+        }
+
+        // --- Step 2: Facet filters, optionally constrained to FTS candidates ---
+        $candidateSet = null; // null = no restriction
+        if ($query->filter !== []) {
+            $candidateDocIds = $ftsCandidates !== null ? array_keys($ftsCandidates) : [];
+            $filterSets      = $this->loadFacetKeySets($query->filter, $this->config->filterMaxDocs, $candidateDocIds);
+            if ($filterSets !== []) {
+                $candidateSet = $this->intersectFilterSets($filterSets);
+            } else {
+                $candidateSet = $ftsCandidates;
+            }
+        } else {
+            $candidateSet = $ftsCandidates;
+        }
+
+        // --- Step 3: Query facet_values GROUP BY value ---
+        $facetQuery = $query->facetQuery;
+        $hasPrefix  = $facetQuery !== '';
+        $conditions = ['key_id = ?'];
+        $params     = [$keyId];
+
+        if ($hasPrefix) {
+            $conditions[] = "LOWER(value) LIKE ? ESCAPE '\\'";
+            // Escape LIKE special chars in the user-supplied prefix so '%' and '_' are literal.
+            $escaped  = str_replace(['\\', '%', '_'], ['\\\\', '\\%', '\\_'], strtolower($facetQuery));
+            $params[] = $escaped . '%';
+        }
+
+        if ($candidateSet !== null) {
+            $conditions[] = 'doc_id IN (SELECT value FROM json_each(?))';
+            $params[]     = json_encode(array_keys($candidateSet));
+        }
+
+        $params[] = $query->limit;
+
+        $stmt = $this->prepare(
+            'SELECT value, COUNT(*) AS count FROM facet_values'
+            . ' WHERE ' . implode(' AND ', $conditions)
+            . ' GROUP BY value ORDER BY count DESC LIMIT ?'
+        );
+        $stmt->execute($params);
+
+        /** @var list<array{value: string, count: string}> $rows */
+        $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+        $hits = array_map(
+            fn(array $row) => ['value' => $row['value'], 'count' => (int) $row['count']],
+            $rows
+        );
+
+        return new FacetSearchResult($hits, $facetQuery);
     }
 
     /**

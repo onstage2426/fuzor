@@ -270,6 +270,73 @@ $result->facetDistribution['category'];
 // ['Watches' => 10, 'Accessories' => 2]
 ```
 
+## Facet value search
+
+`facetSearch()` returns the values present in a facet field, with document counts — useful for autocompleting a filter dropdown as the user types.
+
+```php
+use Fuzor\FacetSearchQuery;
+
+// All values for 'genre', ordered by count descending
+$result = $index->facetSearch(new FacetSearchQuery(facetName: 'genre'));
+
+foreach ($result as $hit) {
+    echo $hit['value'] . ': ' . $hit['count'] . "\n";
+    // e.g. "Action: 42", "Drama: 31", ...
+}
+```
+
+### Prefix match
+
+The `facetQuery` is matched case-insensitively against the start of each value:
+
+```php
+// "sc" matches "Science Fiction" but not "Action" or "Drama"
+$result = $index->facetSearch(new FacetSearchQuery(
+    facetName:  'genre',
+    facetQuery: 'sc',
+));
+```
+
+### Restricting to a document set
+
+Use `query` to restrict candidates via FTS and `filter` to apply facet filters before counting:
+
+```php
+$result = $index->facetSearch(new FacetSearchQuery(
+    facetName:  'genre',
+    facetQuery: 'sc',
+    query:      'adventure',
+    filter:     ['year' => FacetRange::min(2000)],
+    limit:      10,
+));
+```
+
+Only values that appear on documents satisfying both the FTS query and all filters are returned.
+
+### Result object
+
+`facetSearch()` returns a `FacetSearchResult`:
+
+```php
+$result->facetHits;        // list<array{value: string, count: int}>
+$result->facetQuery;       // the prefix that was searched
+count($result);            // number of values returned
+foreach ($result as $hit) { ... }
+$result->toArray();        // serialisable snapshot
+$result->toJSON();
+```
+
+### `FacetSearchQuery` reference
+
+| Property | Default | Description |
+|---|---|---|
+| `facetName` | _(required)_ | Facet field to search; must be declared as a `facetField` at index creation |
+| `facetQuery` | `''` | Prefix matched case-insensitively against values; empty string returns all values |
+| `query` | `''` | FTS phrase to restrict candidate documents; empty string means all documents |
+| `filter` | `[]` | Facet filters applied before counting; same type as `SearchOptions::$filter` |
+| `limit` | `100` | Maximum number of values to return, ordered by count descending |
+
 ## Custom sort
 
 Override relevance order with one or more field values. Fields must be declared as `facetFields` at index creation.

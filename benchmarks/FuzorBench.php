@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Fuzor\Benchmarks;
 
+use Fuzor\FacetSearchQuery;
 use Fuzor\Index;
 use Fuzor\SchemaConfig;
 use Fuzor\SearchOptions;
@@ -42,6 +43,12 @@ class FuzorBench
      * Persists between phpbench invocations; delete manually to force a rebuild.
      */
     private const SEARCH_DB = '/tmp/fuzor_phpbench_search.db';
+
+    /**
+     * Facet index — same corpus with synthetic genre/year facet fields.
+     * Persists between phpbench invocations; delete manually to force a rebuild.
+     */
+    private const FACET_DB = '/tmp/fuzor_phpbench_facet.db';
 
     /** @var list<array{id: int, text: string}> */
     private static array $docs = [];
@@ -88,6 +95,29 @@ class FuzorBench
         $idx->close();
     }
 
+    private static function ensureFacetDb(): void
+    {
+        if (file_exists(self::FACET_DB)) {
+            return;
+        }
+        self::loadDocs();
+        $genres = ['Action', 'Drama', 'Comedy', 'Thriller', 'Horror', 'Romance', 'Science Fiction', 'Documentary'];
+        $idx    = new Index(self::FACET_DB, force: true, schema: new SchemaConfig(
+            language:    'en',
+            facetFields: ['genre', 'year'],
+        ));
+        $docs = array_map(function (array $doc) use ($genres): array {
+            return [
+                'id'    => $doc['id'],
+                'text'  => $doc['text'],
+                'genre' => $genres[$doc['id'] % count($genres)],
+                'year'  => 1980 + ($doc['id'] % 45),
+            ];
+        }, self::$docs);
+        $idx->insert($docs);
+        $idx->close();
+    }
+
     public function setUpIndex(): void
     {
         self::loadDocs();
@@ -97,6 +127,12 @@ class FuzorBench
     {
         self::ensureSearchDb();
         $this->index = new Index(self::SEARCH_DB);
+    }
+
+    public function setUpFacet(): void
+    {
+        self::ensureFacetDb();
+        $this->index = new Index(self::FACET_DB);
     }
 
     public function setUpPrefix(): void
@@ -249,5 +285,83 @@ class FuzorBench
         yield 'love -romance'                   => ['query' => 'love -romance'];
         yield 'hero and villain'                => ['query' => 'hero and villain'];
         yield 'action or adventure or thriller' => ['query' => 'action or adventure or thriller'];
+    }
+
+    // -----------------------------------------------------------------------
+    // facetSearch — facet value enumeration / autocomplete
+    // -----------------------------------------------------------------------
+
+    /**
+     * All values for a facet field — no FTS restriction, no prefix, no filter.
+     * Exercises the pure clustered GROUP BY path on facet_values.
+     */
+    #[Groups(['search', 'facet'])]
+    #[BeforeMethods('setUpFacet')]
+    #[AfterMethods('tearDownSearch')]
+    #[Iterations(5)]
+    #[Revs(200)]
+    #[Warmup(1)]
+    public function benchFacetSearchAll(): void
+    {
+        $this->index->facetSearch(new FacetSearchQuery(facetName: 'genre'));
+    }
+
+    /**
+     * Prefix match on facet values — exercises LOWER(value) LIKE with ESCAPE.
+     * 'sc' matches 'Science Fiction' but not the other 7 synthetic genres.
+     */
+    #[Groups(['search', 'facet'])]
+    #[BeforeMethods('setUpFacet')]
+    #[AfterMethods('tearDownSearch')]
+    #[Iterations(5)]
+    #[Revs(200)]
+    #[Warmup(1)]
+    public function benchFacetSearchPrefix(): void
+    {
+        $this->index->facetSearch(new FacetSearchQuery(facetName: 'genre', facetQuery: 'sc'));
+    }
+
+    /**
+     * FTS restriction — runs the query pipeline to build candidate doc IDs,
+     * then counts genre values only for those docs.
+     *
+     * @param array{query: string} $params
+     */
+    #[Groups(['search', 'facet'])]
+    #[BeforeMethods('setUpFacet')]
+    #[AfterMethods('tearDownSearch')]
+    #[Iterations(5)]
+    #[Revs(100)]
+    #[Warmup(1)]
+    #[ParamProviders('provideFacetSearchQueries')]
+    public function benchFacetSearchWithFtsQuery(array $params): void
+    {
+        $this->index->facetSearch(new FacetSearchQuery(facetName: 'genre', query: (string) $params['query']));
+    }
+
+    /** @return iterable<string, array{query: string}> */
+    public function provideFacetSearchQueries(): iterable
+    {
+        yield 'space'     => ['query' => 'space'];
+        yield 'love'      => ['query' => 'love'];
+        yield 'adventure' => ['query' => 'adventure'];
+    }
+
+    /**
+     * Numeric range filter — restricts candidate docs via the facet_numeric_index,
+     * then counts genre values for those docs.
+     */
+    #[Groups(['search', 'facet'])]
+    #[BeforeMethods('setUpFacet')]
+    #[AfterMethods('tearDownSearch')]
+    #[Iterations(5)]
+    #[Revs(100)]
+    #[Warmup(1)]
+    public function benchFacetSearchWithFilter(): void
+    {
+        $this->index->facetSearch(new FacetSearchQuery(
+            facetName: 'genre',
+            filter:    ['year' => new \Fuzor\FacetRange(gte: 2000.0)],
+        ));
     }
 }

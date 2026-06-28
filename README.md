@@ -8,7 +8,7 @@ Fuzor is a dependency-free full-text search library for PHP. It tokenises your d
 
 - BM25 ranked search with automatic typo tolerance
 - Boolean search with AND / OR / NOT operators
-- Faceted filtering and per-value counts
+- Faceted filtering, per-value counts, and facet value search
 - Search-as-you-type prefix matching and phrase search
 - Stopword filtering and Snowball stemming for 62 languages
 - Result highlighting and snippet extraction
@@ -29,6 +29,7 @@ use Fuzor\Index;
 use Fuzor\SchemaConfig;
 use Fuzor\SearchOptions;
 use Fuzor\FacetRange;
+use Fuzor\FacetSearchQuery;
 
 // Create an index — declare facetable fields at creation time
 $index = new Index('/path/to/products.db', schema: new SchemaConfig(
@@ -56,6 +57,17 @@ $result = $index->search('car', new SearchOptions(
 
 $result->hits;               // documents in relevance order
 $result->facetDistribution;  // ['type' => ['sedan' => 1, 'suv' => 1]]
+
+// Facet value search — autocomplete a filter dropdown
+$facetResult = $index->facetSearch(new FacetSearchQuery(
+    facetName:  'type',
+    facetQuery: 'se',      // prefix-match facet values: matches 'sedan'
+    query:      'car',     // restrict to docs matching this FTS query
+));
+
+foreach ($facetResult as $hit) {
+    echo $hit['value'] . ': ' . $hit['count'] . "\n";  // "sedan: 1"
+}
 ```
 
 ## Documentation
