@@ -4663,19 +4663,38 @@ class IndexTest extends TestCase
 
     public function testSetSynonymsSkipsMultiWordTerms(): void
     {
-        $index = new Index($this->dbPath);
-        $index->setSynonyms(oneWay: ['mobile phone' => ['smartphone']]);
+        $index   = new Index($this->dbPath);
+        $skipped = $index->setSynonyms(oneWay: ['mobile phone' => ['smartphone']]);
         $this->assertSame([], $index->getSynonyms());
+        $this->assertSame(['mobile phone'], $skipped);
     }
 
     public function testSetSynonymsSkipsMultiWordTargets(): void
     {
-        $index = new Index($this->dbPath);
-        $index->setSynonyms(oneWay: ['phone' => ['mobile device', 'smartphone']]);
+        $index   = new Index($this->dbPath);
+        $skipped = $index->setSynonyms(oneWay: ['phone' => ['mobile device', 'smartphone']]);
         $synonyms = $index->getSynonyms();
         $this->assertArrayHasKey('phone', $synonyms);
         $this->assertNotContains('mobile device', $synonyms['phone']);
         $this->assertContains('smartphone', $synonyms['phone']);
+        $this->assertSame(['mobile device'], $skipped);
+    }
+
+    public function testSetSynonymsReturnsEmptyWhenNoTermsSkipped(): void
+    {
+        $index   = new Index($this->dbPath);
+        $skipped = $index->setSynonyms(equivalences: [['car', 'automobile']]);
+        $this->assertSame([], $skipped);
+    }
+
+    public function testSetSynonymsSkipsMultiWordTermsInEquivalenceGroup(): void
+    {
+        $index   = new Index($this->dbPath);
+        $skipped = $index->setSynonyms(equivalences: [['car', 'automobile', 'motor vehicle']]);
+        $synonyms = $index->getSynonyms();
+        $this->assertArrayHasKey('car', $synonyms);
+        $this->assertContains('automobile', $synonyms['car']);
+        $this->assertSame(['motor vehicle'], $skipped);
     }
 
     // --- Synonyms: search expansion ---

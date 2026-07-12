@@ -1124,7 +1124,8 @@ class Index
      * All terms are normalized (lowercased, stemmed if a language is set) before
      * storage, so synonyms remain consistent with indexed tokens regardless of how
      * the caller spells them.  Multi-word terms and terms that reduce to an empty
-     * string after normalization are silently skipped.
+     * string after normalization are skipped and returned to the caller rather than
+     * applied.
      *
      * Equivalences are stored as bidirectional pairs: every term in the group
      * expands to all the others.  One-way entries are directional: only the
@@ -1133,28 +1134,33 @@ class Index
      * Replaces every existing synonym in a single transaction; calling with both
      * parameters empty is equivalent to clearSynonyms().
      *
-     * @param list<list<string>>          $equivalences Groups where each term finds all others.
-     * @param array<string, list<string>> $oneWay       Source → list of targets (one direction only).
+     * @param  list<list<string>>          $equivalences Groups where each term finds all others.
+     * @param  array<string, list<string>> $oneWay       Source → list of targets (one direction only).
+     * @return list<string> Raw (un-normalized) terms that were skipped — typically because they
+     *                       contain more than one word.
      */
-    public function setSynonyms(array $equivalences = [], array $oneWay = []): void
+    public function setSynonyms(array $equivalences = [], array $oneWay = []): array
     {
         $this->assertWritable();
 
         /** @var list<array{string, string}> $pairs */
         $pairs = [];
+        /** @var list<string> $skipped */
+        $skipped = [];
 
         foreach ($equivalences as $group) {
-            foreach ($group as $a) {
-                $normA = $this->normalizeSynonymTerm($a);
-                if ($normA === '') {
+            $normalized = [];
+            foreach ($group as $term) {
+                $norm = $this->normalizeSynonymTerm($term);
+                if ($norm === '') {
+                    $skipped[] = $term;
                     continue;
                 }
-                foreach ($group as $b) {
-                    if ($b === $a) {
-                        continue;
-                    }
-                    $normB = $this->normalizeSynonymTerm($b);
-                    if ($normB === '' || $normA === $normB) {
+                $normalized[] = $norm;
+            }
+            foreach ($normalized as $normA) {
+                foreach ($normalized as $normB) {
+                    if ($normA === $normB) {
                         continue;
                     }
                     $pairs[] = [$normA, $normB];
@@ -1165,11 +1171,16 @@ class Index
         foreach ($oneWay as $source => $targets) {
             $normSource = $this->normalizeSynonymTerm((string) $source);
             if ($normSource === '') {
+                $skipped[] = (string) $source;
                 continue;
             }
             foreach ($targets as $target) {
                 $normTarget = $this->normalizeSynonymTerm($target);
-                if ($normTarget === '' || $normSource === $normTarget) {
+                if ($normTarget === '') {
+                    $skipped[] = $target;
+                    continue;
+                }
+                if ($normSource === $normTarget) {
                     continue;
                 }
                 $pairs[] = [$normSource, $normTarget];
@@ -1199,6 +1210,8 @@ class Index
         });
 
         $this->synonymCache = null;
+
+        return $skipped;
     }
 
     /**

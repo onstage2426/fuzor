@@ -174,7 +174,14 @@ $index->getSynonyms();   // array<string, list<string>> — normalized source �
 $index->clearSynonyms(); // removes all synonyms
 ```
 
-Terms are lowercased and stemmed before storage, so you don't need to pass pre-stemmed forms. Multi-word terms are silently skipped — only single-word synonyms are supported. Synonyms are not applied inside quoted phrases.
+Terms are lowercased and stemmed before storage, so you don't need to pass pre-stemmed forms. Multi-word terms are skipped — only single-word synonyms are supported — and `setSynonyms()` returns the list of raw terms it skipped, so you can surface a warning instead of failing silently:
+
+```php
+$skipped = $index->setSynonyms(oneWay: ['mobile phone' => ['smartphone']]);
+// $skipped === ['mobile phone']
+```
+
+Synonyms are not applied inside quoted phrases.
 
 ## Formatting (highlight & crop)
 
