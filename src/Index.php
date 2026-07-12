@@ -1040,22 +1040,39 @@ class Index
             return;
         }
 
-        $this->wrapInTransaction(function () use ($ids): void {
-            $docDelta    = 0;
-            $lengthDelta = 0;
-
-            foreach ($ids as $id) {
+        if (count($ids) === 1) {
+            $this->wrapInTransaction(function () use ($ids): void {
                 /** @infection-ignore-all CastInt: $id is int from variadic; the cast is defensive only */
-                $length = $this->removeDocumentData((int) $id);
+                $length = $this->removeDocumentData((int) $ids[0]);
                 if ($length !== null) {
-                    $docDelta--;
-                    $lengthDelta -= $length;
+                    $this->adjustStats(-1, -$length);
+                }
+            });
+            return;
+        }
+
+        $this->wrapInTransaction(function () use ($ids): void {
+            $oldLengths = [];
+            foreach (array_chunk($ids, self::CHUNK_1P) as $chunk) {
+                $placeholders = $this->placeholders(count($chunk));
+                $stmt = $this->prepare(
+                    "SELECT doc_id, length FROM doc_lengths WHERE doc_id IN ({$placeholders})"
+                );
+                $stmt->execute($chunk);
+                /** @var list<array{doc_id: int, length: int}> $rows */
+                $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+                foreach ($rows as $row) {
+                    $oldLengths[$row['doc_id']] = $row['length'];
                 }
             }
 
-            if ($docDelta !== 0) {
-                $this->adjustStats($docDelta, $lengthDelta);
+            if ($oldLengths === []) {
+                return;
             }
+
+            $this->bulkRemoveDocuments(array_keys($oldLengths));
+
+            $this->adjustStats(-count($oldLengths), -array_sum($oldLengths));
         });
     }
 
