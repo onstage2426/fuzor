@@ -4,7 +4,6 @@
 
 - Added `Config::$busyTimeoutMs` (default 5000) — sets `PRAGMA busy_timeout` so a second writer waits instead of throwing `SQLITE_BUSY` immediately.
 - `delete()` now uses the bulk-removal path when given more than one id, matching the performance of `update()`/`upsert()`.
-- Documented the `QueryException` vs `\InvalidArgumentException` convention in CLAUDE.md.
 - `setSynonyms()` now returns the list of multi-word terms it silently skipped, instead of discarding them with no signal.
 - Added `Config::$bulkSynchronousOff` (default true) — opt out of the `synchronous=OFF` bulk-load pragma when durability against OS/power-loss crashes matters more than load speed. Documented the precise crash risk in docs/indexing.md.
 - Bumped `composer.lock` dependencies.
