@@ -7,6 +7,7 @@
 - Documented the `QueryException` vs `\InvalidArgumentException` convention in CLAUDE.md.
 - `setSynonyms()` now returns the list of multi-word terms it silently skipped, instead of discarding them with no signal.
 - Added `Config::$bulkSynchronousOff` (default true) — opt out of the `synchronous=OFF` bulk-load pragma when durability against OS/power-loss crashes matters more than load speed. Documented the precise crash risk in docs/indexing.md.
+- Bumped `composer.lock` dependencies.
 
 ## 1.2.0 — 2026-06-28
 
