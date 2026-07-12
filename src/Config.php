@@ -67,6 +67,13 @@ final readonly class Config
          * @infection-ignore-all: default value; mutations only affect field weight magnitude, not correctness
          */
         public array $fieldBoosts = [],
+        /**
+         * Milliseconds SQLite waits for a contended write lock before throwing SQLITE_BUSY,
+         * via PRAGMA busy_timeout. 0 fails immediately on contention (SQLite's own default).
+         *
+         * @infection-ignore-all: default value; mutations only affect wait duration, not correctness
+         */
+        public int $busyTimeoutMs = 5_000,
     ) {
     }
 }

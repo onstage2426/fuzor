@@ -5021,22 +5021,25 @@ class Index
     private function applyPragmas(): void
     {
         assert($this->pdo instanceof \PDO);
+        $busyTimeoutMs = $this->config->busyTimeoutMs;
         if (!$this->readonly) {
-            $this->pdo->exec('
+            $this->pdo->exec("
                 PRAGMA journal_mode        = WAL;
                 PRAGMA synchronous         = NORMAL;
                 PRAGMA cache_size          = -65536;
                 PRAGMA temp_store          = MEMORY;
                 PRAGMA mmap_size           = 536870912;
                 PRAGMA case_sensitive_like = ON;
-            ');
+                PRAGMA busy_timeout        = {$busyTimeoutMs};
+            ");
         } else {
-            $this->pdo->exec('
+            $this->pdo->exec("
                 PRAGMA cache_size          = -65536;
                 PRAGMA temp_store          = MEMORY;
                 PRAGMA mmap_size           = 536870912;
                 PRAGMA case_sensitive_like = ON;
-            ');
+                PRAGMA busy_timeout        = {$busyTimeoutMs};
+            ");
         }
     }
 
