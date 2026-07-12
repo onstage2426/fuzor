@@ -5021,8 +5021,13 @@ class Index
     /**
      * Override connection pragmas for bulk-load performance.
      *
-     * - synchronous=OFF: no fsync per commit; safe because a crash during bulk load
-     *   leaves the index in a partially-written state that the caller can recreate.
+     * - synchronous=OFF (default; Config::$bulkSynchronousOff=true): no fsync per commit.
+     *   Safe against a PHP process crash — the transaction rolls back cleanly. NOT safe
+     *   against an OS crash or power loss during the write, which can corrupt the database
+     *   file rather than just roll back. Config::$bulkSynchronousOff=false keeps
+     *   synchronous=NORMAL here instead, trading load speed for that protection. See
+     *   docs/indexing.md for detail; Index::rebuild() sidesteps this entirely by writing to
+     *   a disposable temp file, so a corrupted bulk load never touches the live index.
      * - cache_size=-524288: 512 MB page cache; reduces B-tree splits during large INSERTs.
      * - wal_autocheckpoint=8000: delays WAL checkpointing until after the bulk write completes.
      *
@@ -5031,11 +5036,12 @@ class Index
     private function applyBulkPragmas(): void
     {
         assert($this->pdo instanceof \PDO);
-        $this->pdo->exec('
-            PRAGMA synchronous        = OFF;
+        $synchronous = $this->config->bulkSynchronousOff ? 'OFF' : 'NORMAL';
+        $this->pdo->exec("
+            PRAGMA synchronous        = {$synchronous};
             PRAGMA cache_size         = -524288;
             PRAGMA wal_autocheckpoint = 8000;
-        ');
+        ");
     }
 
     private function restoreNormalPragmas(): void

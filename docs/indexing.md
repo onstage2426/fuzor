@@ -123,6 +123,15 @@ $index->insert($docs, progress: function (int $done, int $total): void {
 });
 ```
 
+### Durability during bulk loads
+
+Multi-document `insert()`/`update()`/`upsert()` calls run with `PRAGMA synchronous=OFF` for speed (`Config::$bulkSynchronousOff`, default `true`). This is safe if the PHP process itself crashes mid-load — the transaction rolls back and the index is left exactly as it was before the call. It is **not** safe against an OS crash or power loss during the write: SQLite's own documentation notes that `synchronous=OFF` can leave the database file itself corrupted in that case, not just roll back the in-progress transaction.
+
+Two ways to avoid that risk:
+
+- **Prefer `Index::rebuild()`** for loading into a live, already-serving index. It writes to a disposable temp file and only `rename()`s it over the real path on success — a corrupted temp file from a power loss never touches the index readers are using.
+- **Set `Config::$bulkSynchronousOff = false`** if you bulk-load directly into a live index outside of `rebuild()` and want full durability, at the cost of bulk-load speed.
+
 ### Facet values
 
 Fields listed in `facetFields` at creation time are automatically routed to the facet index. They are never tokenised for full-text — `search()` and `searchBoolean()` will not match against their contents — unless the field is also listed in `searchableFields`.

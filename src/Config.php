@@ -74,6 +74,18 @@ final readonly class Config
          * @infection-ignore-all: default value; mutations only affect wait duration, not correctness
          */
         public int $busyTimeoutMs = 5_000,
+        /**
+         * When true (default), bulk loads (insertMany()/replaceMany(), and transitively
+         * Index::rebuild()'s populate callback) run with PRAGMA synchronous=OFF for speed.
+         * A crash of the PHP process during a bulk load is safe — the transaction rolls
+         * back cleanly. An OS crash or power loss during a bulk load is NOT safe under
+         * synchronous=OFF and can corrupt the database file being written, not just roll
+         * back the in-progress transaction. Set to false to keep synchronous=NORMAL during
+         * bulk loads, trading load speed for that protection.
+         *
+         * @infection-ignore-all: default value; mutations only affect durability, not correctness of the happy path
+         */
+        public bool $bulkSynchronousOff = true,
     ) {
     }
 }
