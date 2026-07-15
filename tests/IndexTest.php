@@ -4890,4 +4890,44 @@ class IndexTest extends TestCase
         $this->assertSame([], $rebuilt->getSynonyms());
         $this->assertContains(1, $rebuilt->search('sedan')->getIds());
     }
+
+    // --- Write-lock contention (BEGIN IMMEDIATE) ---
+
+    public function testWriteFailsFastWhenLockHeldAndBusyTimeoutZero(): void
+    {
+        $index = new Index($this->dbPath, config: new Config(busyTimeoutMs: 0));
+        $index->insert([['id' => 1, 'title' => 'sedan']]);
+
+        // A second connection takes the write lock and holds it.
+        $blocker = new \PDO('sqlite:' . $this->dbPath);
+        $blocker->exec('PRAGMA busy_timeout = 0');
+        $blocker->exec('BEGIN IMMEDIATE');
+
+        try {
+            $this->expectException(\PDOException::class);
+            $index->insert([['id' => 2, 'title' => 'coupe']]);
+        } finally {
+            $blocker->exec('ROLLBACK');
+        }
+    }
+
+    public function testWriteSucceedsAfterLockReleased(): void
+    {
+        $index = new Index($this->dbPath, config: new Config(busyTimeoutMs: 0));
+        $index->insert([['id' => 1, 'title' => 'sedan']]);
+
+        $blocker = new \PDO('sqlite:' . $this->dbPath);
+        $blocker->exec('PRAGMA busy_timeout = 0');
+        $blocker->exec('BEGIN IMMEDIATE');
+        $caught = null;
+        try {
+            $index->insert([['id' => 2, 'title' => 'coupe']]);
+        } catch (\Throwable $caught) {
+        }
+        $this->assertInstanceOf(\PDOException::class, $caught);
+        $blocker->exec('ROLLBACK');
+
+        $index->insert([['id' => 2, 'title' => 'coupe']]);
+        $this->assertContains(2, $index->search('coupe')->getIds());
+    }
 }

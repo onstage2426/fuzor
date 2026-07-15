@@ -126,6 +126,9 @@ class Index
     /** @var array<string, list<string>>|null Normalized source → list<target>; null = not loaded. Cleared on connection change. */
     private ?array $synonymCache = null;
 
+    /** Tracks the manually-issued BEGIN IMMEDIATE; PDO::inTransaction() cannot see it. */
+    private bool $inTransaction = false;
+
 
     // --- Constructor --------------------------------------------------------
 
@@ -653,6 +656,7 @@ class Index
         $this->facetKeyCache  = [];
         $this->fieldNameCache = [];
         $this->synonymCache   = null;
+        $this->inTransaction  = false;
     }
 
     // --- Public write operations --------------------------------------------
@@ -4948,6 +4952,13 @@ class Index
      * When already inside a transaction (e.g. replaceMany() calling bulkRemoveDocuments()),
      * the callback runs in the existing transaction rather than starting a nested one.
      *
+     * Uses BEGIN IMMEDIATE (issued via exec(), since PDO's transaction API only emits a
+     * deferred BEGIN) so the write lock is taken up front. A deferred transaction upgrades
+     * to writer at its first write statement; under multi-process contention that upgrade
+     * fails with an instant SQLITE_BUSY the busy handler never intercepts, making
+     * Config::$busyTimeoutMs ineffective. With IMMEDIATE, concurrent writers queue on the
+     * busy timeout as documented.
+     *
      * @param callable(): void $fn
      */
     private function wrapInTransaction(callable $fn): void
@@ -4956,18 +4967,21 @@ class Index
         if (!$pdo instanceof \PDO) {
             throw new \LogicException('Index connection is closed.');
         }
-        /** @infection-ignore-all IfNegation: inverting inTransaction() only affects nested calls; no test exercises wrapInTransaction while already in a transaction */
-        if ($pdo->inTransaction()) {
+        /** @infection-ignore-all IfNegation: inverting inTransaction only affects nested calls; no test exercises wrapInTransaction while already in a transaction */
+        if ($this->inTransaction) {
             $fn();
             return;
         }
-        $pdo->beginTransaction();
+        $pdo->exec('BEGIN IMMEDIATE');
+        $this->inTransaction = true;
         try {
             $fn();
-            $pdo->commit();
+            $pdo->exec('COMMIT');
         } catch (\Throwable $e) {
-            $pdo->rollBack();
+            $pdo->exec('ROLLBACK');
             throw $e;
+        } finally {
+            $this->inTransaction = false;
         }
     }
 
