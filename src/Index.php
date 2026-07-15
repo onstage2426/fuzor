@@ -129,6 +129,9 @@ class Index
     /** Tracks the manually-issued BEGIN IMMEDIATE; PDO::inTransaction() cannot see it. */
     private bool $inTransaction = false;
 
+    /** Last observed PRAGMA data_version; changes only when another connection commits. Null = not yet read. */
+    private ?int $dataVersion = null;
+
 
     // --- Constructor --------------------------------------------------------
 
@@ -657,6 +660,42 @@ class Index
         $this->fieldNameCache = [];
         $this->synonymCache   = null;
         $this->inTransaction  = false;
+        $this->dataVersion    = null;
+    }
+
+    /**
+     * Detect commits made by other connections and drop the caches they invalidate.
+     *
+     * PRAGMA data_version is a per-connection counter that changes only when a different
+     * connection commits to the database file — this connection's own writes never change
+     * its value. Without this check, a long-lived instance (worker-mode runtimes, or a
+     * reader sharing the file with a separate writer process) would serve stale document
+     * stats, wordlist rows, synonyms, and — after external deletes prune terms — dead
+     * term IDs, indefinitely.
+     *
+     * Called at the entry of every cache-consuming read path, and from wrapInTransaction()
+     * after the write lock is acquired (no other writer can commit between the check and
+     * this connection's own commit, so caches validated there stay valid for the whole
+     * transaction). Costs one cached-statement PRAGMA round-trip.
+     */
+    private function checkDataVersion(): void
+    {
+        $stmt = $this->stmt('dataVersion', 'PRAGMA data_version');
+        $stmt->execute();
+        $version = (int) $stmt->fetchColumn();
+        $stmt->closeCursor();
+        if ($this->dataVersion === $version) {
+            return;
+        }
+        if ($this->dataVersion !== null) {
+            $this->infoCache      = null;
+            $this->wordlistCache  = [];
+            $this->termIdCache    = [];
+            $this->facetKeyCache  = [];
+            $this->fieldNameCache = [];
+            $this->synonymCache   = null;
+        }
+        $this->dataVersion = $version;
     }
 
     // --- Public write operations --------------------------------------------
@@ -1228,6 +1267,7 @@ class Index
      */
     public function getSynonyms(): array
     {
+        $this->checkDataVersion();
         $this->loadSynonymCache();
         return $this->synonymCache ?? [];
     }
@@ -1400,6 +1440,7 @@ class Index
      */
     public function count(): int
     {
+        $this->checkDataVersion();
         /** @infection-ignore-all DecrementInteger|IncrementInteger: ?? fallback is only reached on a corrupt/missing info table row; all writes keep total_documents consistent, so this path is unreachable in tests */
         return (int) ($this->getInfoValues(['total_documents'])['total_documents'] ?? 0);
     }
@@ -1419,6 +1460,7 @@ class Index
      */
     public function inspectQuery(string $phrase, bool $asYouType = true): QueryInspection
     {
+        $this->checkDataVersion();
         $verbose = $this->filterQueryTokens($phrase, verbose: true);
         /** @var list<string> $filteredTokens */
         $filteredTokens = $verbose['filtered'];
@@ -1524,6 +1566,7 @@ class Index
         string $phrase,
         SearchOptions $options = new SearchOptions(),
     ): SearchResult {
+        $this->checkDataVersion();
         if (trim($phrase) === '') {
             return $this->browse($phrase, $options);
         }
@@ -1819,6 +1862,7 @@ class Index
         string $phrase,
         SearchOptions $options = new SearchOptions(),
     ): SearchResult {
+        $this->checkDataVersion();
         if (trim($phrase) === '') {
             return $this->browse($phrase, $options);
         }
@@ -1999,6 +2043,7 @@ class Index
      */
     public function facetSearch(FacetSearchQuery $query): FacetSearchResult
     {
+        $this->checkDataVersion();
         $keyId = $this->lookupFacetKeyId($query->facetName);
         if ($keyId === null) {
             return new FacetSearchResult([], $query->facetQuery);
@@ -4975,6 +5020,11 @@ class Index
         $pdo->exec('BEGIN IMMEDIATE');
         $this->inTransaction = true;
         try {
+            // Validate caches against external commits now that the write lock is held:
+            // no other writer can commit until this transaction ends, so a stale
+            // termIdCache entry (a term pruned by another process) cannot slip into
+            // the wordlist upsert paths below.
+            $this->checkDataVersion();
             $fn();
             $pdo->exec('COMMIT');
         } catch (\Throwable $e) {

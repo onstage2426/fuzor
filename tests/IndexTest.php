@@ -4930,4 +4930,53 @@ class IndexTest extends TestCase
         $index->insert([['id' => 2, 'title' => 'coupe']]);
         $this->assertContains(2, $index->search('coupe')->getIds());
     }
+
+    // --- Cross-connection cache invalidation (PRAGMA data_version) ---
+
+    public function testReaderSeesExternalInsertAfterWarmCaches(): void
+    {
+        $writer = new Index($this->dbPath);
+        $writer->insert([['id' => 1, 'title' => 'sedan']]);
+
+        $reader = new Index($this->dbPath, readonly: true);
+        $this->assertSame(1, $reader->count());
+        $this->assertSame(1, $reader->inspectQuery('sedan')->tokens[0]->numDocs);
+
+        $writer->insert([['id' => 2, 'title' => 'sedan coupe']]);
+
+        $this->assertSame(2, $reader->count());
+        $this->assertSame(2, $reader->inspectQuery('sedan')->tokens[0]->numDocs);
+        $this->assertSame(2, $reader->search('sedan')->getTotalHits());
+    }
+
+    public function testReaderSeesExternalSynonymChange(): void
+    {
+        $writer = new Index($this->dbPath);
+        $writer->insert([['id' => 1, 'title' => 'automobile']]);
+
+        $reader = new Index($this->dbPath, readonly: true);
+        $this->assertSame([], $reader->getSynonyms());
+        $this->assertNotContains(1, $reader->search('car')->getIds());
+
+        $writer->setSynonyms(equivalences: [['car', 'automobile']]);
+
+        $this->assertArrayHasKey('car', $reader->getSynonyms());
+        $this->assertContains(1, $reader->search('car')->getIds());
+    }
+
+    public function testWriteAfterExternalTermPruneReindexesTerm(): void
+    {
+        // B caches the term ID for 'sedan'; A then deletes the only document using
+        // it, pruning the wordlist row. B's next insert must not trust the dead
+        // cached ID, or the term would silently vanish from the index.
+        $b = new Index($this->dbPath);
+        $b->insert([['id' => 1, 'title' => 'sedan']]);
+
+        $a = new Index($this->dbPath);
+        $a->delete(1);
+
+        $b->insert([['id' => 2, 'title' => 'sedan']]);
+        $this->assertContains(2, $b->search('sedan')->getIds());
+        $this->assertContains(2, $a->search('sedan')->getIds());
+    }
 }
