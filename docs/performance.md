@@ -39,6 +39,27 @@ $results = $read->search('electric bike');
 - Lets the OS share memory-mapped pages across all PHP-FPM workers for that file
 - Skips WAL and checkpoint overhead entirely (snapshot files have no WAL)
 
+## Rebuild as publisher (no write tracking)
+
+When tracking individual writes is impractical — a CMS like WordPress, where content
+changes come from too many code paths to hook — skip the write index entirely.
+Rebuild the live index on a cron and let the rebuilt file *be* the read index:
+
+```php
+// Cron job, e.g. every 15 minutes:
+Index::rebuild('/var/db/site-search.db', function (Index $new): void {
+    foreach (loadAllPosts() as $batch) {
+        $new->insert($batch);
+    }
+});
+
+// Request handlers:
+$read = new Index('/var/db/site-search.db', readonly: true);
+```
+
+The rename is atomic: requests in flight keep reading the old file, new requests
+get the new one. A failed rebuild leaves the live index untouched.
+
 ## Restoring from a snapshot
 
 The snapshot is a plain SQLite file. To promote it to a write index — after data loss or a botched migration — rename it over the write path and open normally:
