@@ -30,6 +30,12 @@ final readonly class SearchOptions
      *                                            ['*'] for all string fields. Null = off.
      * @param int    $cropLength  Excerpt window size in characters (default 200).
      * @param string $cropMarker  Text inserted at crop boundaries (default '…').
+     * @param list<string>|null $attributesToRetrieve Document fields to include in each hit.
+     *                                                Null (default) returns whole documents; ['*'] is
+     *                                                equivalent. [] skips document hydration entirely and
+     *                                                returns ['id' => n] stubs — no store lookup, no JSON
+     *                                                decode. A field list keeps only those top-level keys
+     *                                                (plus 'id' and '_formatted', which are always kept).
      */
     public function __construct(
         public readonly bool $asYouType = true,
@@ -46,6 +52,7 @@ final readonly class SearchOptions
         public readonly ?array $attributesToCrop = null,
         public readonly int $cropLength = 200,
         public readonly string $cropMarker = '…',
+        public readonly ?array $attributesToRetrieve = null,
     ) {
     }
 }

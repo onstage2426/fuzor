@@ -4980,6 +4980,105 @@ class IndexTest extends TestCase
         $this->assertContains(2, $a->search('sedan')->getIds());
     }
 
+    // --- attributesToRetrieve ---
+
+    /** @return Index */
+    private function retrievalIndex(): Index
+    {
+        $index = new Index($this->dbPath);
+        $index->insert([
+            ['id' => 1, 'title' => 'electric sedan', 'body' => 'a quiet electric car', 'year' => 2024],
+            ['id' => 2, 'title' => 'diesel coupe', 'body' => 'a loud diesel car', 'year' => 2019],
+        ]);
+        return $index;
+    }
+
+    /** @return array<string, mixed> */
+    private function fullDocOne(): array
+    {
+        return ['id' => 1, 'title' => 'electric sedan', 'body' => 'a quiet electric car', 'year' => 2024];
+    }
+
+    public function testAttributesToRetrieveNullReturnsWholeDocument(): void
+    {
+        $hit = $this->retrievalIndex()->search('sedan')->getHit(0);
+        $this->assertSame($this->fullDocOne(), $hit);
+    }
+
+    public function testAttributesToRetrieveEmptyReturnsIdStubs(): void
+    {
+        $result = $this->retrievalIndex()->search('car', new SearchOptions(attributesToRetrieve: []));
+
+        $this->assertSame(2, $result->getTotalHits());
+        foreach ($result as $hit) {
+            $this->assertSame(['id'], array_keys($hit));
+        }
+        $this->assertSame([1, 2], $result->getIds());
+    }
+
+    public function testAttributesToRetrieveFieldListKeepsOnlyThoseFields(): void
+    {
+        $hit = $this->retrievalIndex()
+            ->search('sedan', new SearchOptions(attributesToRetrieve: ['title']))
+            ->getHit(0);
+
+        $this->assertSame(['id' => 1, 'title' => 'electric sedan'], $hit);
+    }
+
+    public function testAttributesToRetrieveWildcardReturnsWholeDocument(): void
+    {
+        $hit = $this->retrievalIndex()
+            ->search('sedan', new SearchOptions(attributesToRetrieve: ['*']))
+            ->getHit(0);
+
+        $this->assertSame($this->fullDocOne(), $hit);
+    }
+
+    public function testAttributesToRetrieveKeepsFormattedAndHighlightsFullText(): void
+    {
+        // 'body' is highlighted but not retrieved: the highlight must still be computed
+        // from the full stored value, and _formatted must survive the key filtering.
+        $hit = $this->retrievalIndex()->search('quiet', new SearchOptions(
+            attributesToHighlight: ['body'],
+            attributesToRetrieve: ['title'],
+        ))->getHit(0);
+
+        $this->assertSame(['id', 'title', '_formatted'], array_keys($hit));
+        $this->assertIsArray($hit['_formatted']);
+        $this->assertSame('a <mark>quiet</mark> electric car', $hit['_formatted']['body']);
+        $this->assertArrayNotHasKey('body', $hit);
+    }
+
+    public function testAttributesToRetrieveEmptySkipsStoreLookup(): void
+    {
+        $index = $this->retrievalIndex();
+        $index->close();
+
+        // A readonly reopen proves nothing is written; the point is that an empty
+        // retrieve list produces stubs even though the store is enabled and populated.
+        $read   = new Index($this->dbPath, readonly: true);
+        $result = $read->search('sedan', new SearchOptions(attributesToRetrieve: []));
+
+        $this->assertSame([['id' => 1]], $result->getHits());
+        $this->assertNotNull($read->get(1));
+    }
+
+    public function testAttributesToRetrieveAppliesToBooleanSearch(): void
+    {
+        $hit = $this->retrievalIndex()
+            ->searchBoolean('sedan', new SearchOptions(attributesToRetrieve: ['year']))
+            ->getHit(0);
+
+        $this->assertSame(['id' => 1, 'year' => 2024], $hit);
+    }
+
+    public function testAttributesToRetrieveAppliesToBrowse(): void
+    {
+        $result = $this->retrievalIndex()->search('', new SearchOptions(attributesToRetrieve: ['title']));
+
+        $this->assertSame(['id' => 2, 'title' => 'diesel coupe'], $result->getHit(0));
+    }
+
     // --- checkpoint ---
 
     public function testCheckpointTruncatesWal(): void

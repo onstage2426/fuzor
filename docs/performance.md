@@ -98,6 +98,33 @@ $read = new Index('/var/db/site-search.db', readonly: true);
 The rename is atomic: requests in flight keep reading the old file, new requests
 get the new one. A failed rebuild leaves the live index untouched.
 
+## Returning less per hit
+
+Every hit is fetched from the `documents` table and JSON-decoded. When the endpoint does
+not need the stored bodies — an autocomplete that only renders titles, or a search that
+hands IDs to another system — `attributesToRetrieve` skips that work:
+
+```php
+// IDs only: no documents SELECT, no json_decode. ~7% faster on a faceted request.
+$ids = $read->search($query, new SearchOptions(attributesToRetrieve: []))->getIds();
+
+// Or trim each hit to the fields the UI actually renders:
+$results = $read->search($query, new SearchOptions(attributesToRetrieve: ['title', 'price']));
+```
+
+Trimming to a field list still hydrates and decodes each document, so it saves response
+size rather than server time. The empty list is the one that removes work.
+
+Filtering happens after highlighting and cropping, so a field can drive `_formatted`
+without being returned itself:
+
+```php
+$results = $read->search($query, new SearchOptions(
+    attributesToHighlight: ['body'],   // highlight computed from the full body
+    attributesToRetrieve:  ['title'],  // but body is not in the response
+));
+```
+
 ## Writer maintenance: keeping the WAL bounded
 
 In WAL mode every commit appends to a `-wal` sidecar, which SQLite folds back into the

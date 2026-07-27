@@ -2385,17 +2385,50 @@ class Index
     /**
      * Hydrate documents for $ids and attach '_formatted' when format options are active.
      *
+     * SearchOptions::$attributesToRetrieve controls how much of each document is returned:
+     * an empty list skips the store lookup entirely (SearchResult then builds ['id' => n]
+     * stubs, exactly as it does when the store is disabled), and a field list trims the
+     * hydrated documents down to those keys. Trimming happens after formatting so crop and
+     * highlight still see the full field values they need.
+     *
      * @param  list<int>    $ids
      * @return array<int, array<string, mixed>>|null
      */
     private function hydrateAndFormat(array $ids, string $phrase, SearchOptions $options): ?array
     {
+        $retrieve = $options->attributesToRetrieve;
+        if ($retrieve === []) {
+            return null;
+        }
         $documents = $this->hydrateIds($ids);
         if (
             $documents !== null && $documents !== [] &&
             ($options->attributesToHighlight !== null || $options->attributesToCrop !== null)
         ) {
             $documents = $this->applyFormatting($documents, $phrase, $options);
+        }
+        if ($documents !== null && $retrieve !== null && $retrieve !== ['*']) {
+            $documents = $this->filterRetrievedAttributes($documents, $retrieve);
+        }
+        return $documents;
+    }
+
+    /**
+     * Reduce each document to the requested top-level keys.
+     *
+     * 'id' and '_formatted' are always kept: the former identifies the hit, the latter is
+     * generated output rather than a stored field, so requesting specific attributes should
+     * not silently discard the highlighting or cropping the caller also asked for.
+     *
+     * @param  array<int, array<string, mixed>> $documents
+     * @param  list<string>                     $attributes
+     * @return array<int, array<string, mixed>>
+     */
+    private function filterRetrievedAttributes(array $documents, array $attributes): array
+    {
+        $keep = array_flip([...$attributes, 'id', '_formatted']);
+        foreach ($documents as $id => $doc) {
+            $documents[$id] = array_intersect_key($doc, $keep);
         }
         return $documents;
     }
