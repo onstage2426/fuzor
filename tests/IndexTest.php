@@ -4980,6 +4980,59 @@ class IndexTest extends TestCase
         $this->assertContains(2, $a->search('sedan')->getIds());
     }
 
+    // --- checkpoint ---
+
+    public function testCheckpointTruncatesWal(): void
+    {
+        $index = new Index($this->dbPath);
+        $index->insert([['id' => 1, 'title' => 'sedan']]);
+        clearstatcache(true, $this->dbPath . '-wal');
+        $this->assertGreaterThan(0, filesize($this->dbPath . '-wal'));
+
+        $result = $index->checkpoint();
+
+        $this->assertSame(0, $result['busy']);
+        clearstatcache(true, $this->dbPath . '-wal');
+        $this->assertSame(0, filesize($this->dbPath . '-wal'));
+        $this->assertContains(1, $index->search('sedan')->getIds());
+    }
+
+    public function testCheckpointReturnsPageCounters(): void
+    {
+        $index = new Index($this->dbPath);
+        $index->insert([['id' => 1, 'title' => 'sedan']]);
+
+        $result = $index->checkpoint('PASSIVE');
+
+        $this->assertGreaterThan(0, $result['log']);
+        $this->assertSame($result['log'], $result['checkpointed']);
+    }
+
+    public function testCheckpointAcceptsAllModesCaseInsensitively(): void
+    {
+        $index = new Index($this->dbPath);
+        $index->insert([['id' => 1, 'title' => 'sedan']]);
+
+        foreach (['PASSIVE', 'full', 'Restart', 'TRUNCATE'] as $mode) {
+            $result = $index->checkpoint($mode);
+            $this->assertSame(0, $result['busy'], "mode {$mode}");
+        }
+    }
+
+    public function testCheckpointRejectsUnknownMode(): void
+    {
+        $index = new Index($this->dbPath);
+        $this->expectException(\InvalidArgumentException::class);
+        $index->checkpoint('SOMETHING');
+    }
+
+    public function testCheckpointThrowsOnReadonlyIndex(): void
+    {
+        new Index($this->dbPath)->close();
+        $this->expectException(IOException::class);
+        new Index($this->dbPath, readonly: true)->checkpoint();
+    }
+
     // --- cacheSizeKb / mmapSizeBytes ---
 
     /** Read a pragma value from the index's own connection. */

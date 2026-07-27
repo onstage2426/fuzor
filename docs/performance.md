@@ -98,6 +98,30 @@ $read = new Index('/var/db/site-search.db', readonly: true);
 The rename is atomic: requests in flight keep reading the old file, new requests
 get the new one. A failed rebuild leaves the live index untouched.
 
+## Writer maintenance: keeping the WAL bounded
+
+In WAL mode every commit appends to a `-wal` sidecar, which SQLite folds back into the
+database at an automatic checkpoint. That checkpoint can only reclaim space up to the
+oldest *active reader* — so on an index that is being read continuously, automatic
+checkpointing can be starved indefinitely and the `-wal` file grows without bound until
+it dwarfs the index itself.
+
+A long-running writer process should checkpoint on its own schedule:
+
+```php
+$stats = $write->checkpoint();          // TRUNCATE: empties the -wal file
+
+// Or observe pressure without blocking on readers:
+$stats = $write->checkpoint('PASSIVE');
+if ($stats['checkpointed'] < $stats['log']) {
+    // Readers are holding the checkpointer back — the WAL is still growing.
+}
+```
+
+This is not a concern for the read/write split above: the read side never writes, and
+snapshot files carry no WAL at all. It matters when one live file serves both reads and
+writes, which is also where `busyTimeoutMs` and cross-process cache invalidation apply.
+
 ## Restoring from a snapshot
 
 The snapshot is a plain SQLite file. To promote it to a write index — after data loss or a botched migration — rename it over the write path and open normally:

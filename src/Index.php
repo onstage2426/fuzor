@@ -416,6 +416,58 @@ class Index
         }
     }
 
+    /**
+     * Run a WAL checkpoint, moving committed pages from the -wal file into the database.
+     *
+     * SQLite checkpoints automatically once the WAL passes `wal_autocheckpoint` pages, but
+     * an automatic checkpoint can only reclaim WAL space up to the oldest active reader.
+     * On an index under continuous concurrent reads the WAL can therefore grow without
+     * bound. A long-running writer process should call this periodically and watch the
+     * returned counters: when `log` stays high and `checkpointed` lags behind it, readers
+     * are starving the checkpointer.
+     *
+     * Modes (SQLite semantics):
+     * - `PASSIVE`  — checkpoint what it can without blocking; never waits on readers.
+     * - `FULL`     — wait for readers, then checkpoint the entire WAL.
+     * - `RESTART`  — FULL, then ensure the next writer restarts the WAL from the beginning.
+     * - `TRUNCATE` — RESTART, then truncate the -wal file to zero bytes (default).
+     *
+     * @param  string $mode One of PASSIVE, FULL, RESTART, TRUNCATE (case-insensitive).
+     * @return array{busy: int, log: int, checkpointed: int} `busy` is 1 when the checkpoint
+     *         could not complete because of concurrent activity, `log` the WAL size in pages,
+     *         `checkpointed` how many of those pages were written back. Note that a successful
+     *         TRUNCATE leaves an empty WAL and so reports `log` and `checkpointed` as 0 — use
+     *         PASSIVE when you want to observe the actual page counts.
+     * @throws \InvalidArgumentException If $mode is not one of the four supported modes.
+     * @throws IOException If this index was opened read-only.
+     */
+    public function checkpoint(string $mode = 'TRUNCATE'): array
+    {
+        $this->assertWritable();
+        $normalized = strtoupper($mode);
+        if (!in_array($normalized, ['PASSIVE', 'FULL', 'RESTART', 'TRUNCATE'], true)) {
+            throw new \InvalidArgumentException(
+                "Invalid checkpoint mode '{$mode}'. Expected one of: PASSIVE, FULL, RESTART, TRUNCATE."
+            );
+        }
+        $pdo = $this->pdo;
+        if (!$pdo instanceof \PDO) {
+            throw new \LogicException('Index connection is closed.');
+        }
+        $stmt = $pdo->query("PRAGMA wal_checkpoint({$normalized})");
+        /** @var list<int>|false $row */
+        $row = $stmt === false ? false : $stmt->fetch(PDO::FETCH_NUM);
+        if ($row === false) {
+            return ['busy' => 0, 'log' => 0, 'checkpointed' => 0];
+        }
+
+        return [
+            'busy'         => (int) $row[0],
+            'log'          => (int) $row[1],
+            'checkpointed' => (int) $row[2],
+        ];
+    }
+
     // --- Index lifecycle (private, called by the constructor) ---------------
 
     /**
