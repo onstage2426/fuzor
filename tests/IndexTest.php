@@ -4979,4 +4979,82 @@ class IndexTest extends TestCase
         $this->assertContains(2, $b->search('sedan')->getIds());
         $this->assertContains(2, $a->search('sedan')->getIds());
     }
+
+    // --- reopenIfChanged ---
+
+    public function testReopenIfChangedReturnsFalseWhenFileUntouched(): void
+    {
+        $index = new Index($this->dbPath);
+        $index->insert([['id' => 1, 'title' => 'sedan']]);
+
+        $this->assertFalse($index->reopenIfChanged());
+        $this->assertContains(1, $index->search('sedan')->getIds());
+    }
+
+    public function testReopenIfChangedDetectsSnapshotRotation(): void
+    {
+        $srcPath = sys_get_temp_dir() . '/fuzor_test_rotsrc_' . uniqid() . '.db';
+        $writer  = new Index($this->dbPath);
+        $writer->insert([['id' => 1, 'title' => 'sedan']]);
+        $writer->close();
+
+        $reader = new Index($this->dbPath, readonly: true);
+        $this->assertSame(1, $reader->count());
+
+        try {
+            $src = new Index($srcPath);
+            $src->insert([
+                ['id' => 1, 'title' => 'sedan'],
+                ['id' => 2, 'title' => 'coupe'],
+            ]);
+            $src->snapshotTo($this->dbPath);
+            $src->close();
+
+            // The open connection still reads the old inode until it reopens.
+            $this->assertSame(1, $reader->count());
+            $this->assertTrue($reader->reopenIfChanged());
+            $this->assertSame(2, $reader->count());
+            $this->assertContains(2, $reader->search('coupe')->getIds());
+            $this->assertFalse($reader->reopenIfChanged());
+        } finally {
+            foreach ([$srcPath, $srcPath . '-wal', $srcPath . '-shm'] as $f) {
+                @unlink($f);
+            }
+        }
+    }
+
+    public function testReopenIfChangedDetectsRebuild(): void
+    {
+        $writer = new Index($this->dbPath);
+        $writer->insert([['id' => 1, 'title' => 'sedan']]);
+        $writer->close();
+
+        $reader = new Index($this->dbPath, readonly: true);
+        $this->assertSame(1, $reader->count());
+
+        Index::rebuild($this->dbPath, function (Index $new): void {
+            $new->insert([
+                ['id' => 1, 'title' => 'sedan'],
+                ['id' => 2, 'title' => 'coupe'],
+            ]);
+        })->close();
+
+        $this->assertTrue($reader->reopenIfChanged());
+        $this->assertSame(2, $reader->count());
+    }
+
+    public function testReopenIfChangedThrowsWhenFileGone(): void
+    {
+        $index = new Index($this->dbPath);
+        $index->insert([['id' => 1, 'title' => 'sedan']]);
+        $index->close();
+
+        $reopened = new Index($this->dbPath, readonly: true);
+        foreach ([$this->dbPath, $this->dbPath . '-wal', $this->dbPath . '-shm'] as $f) {
+            @unlink($f);
+        }
+
+        $this->expectException(IOException::class);
+        $reopened->reopenIfChanged();
+    }
 }

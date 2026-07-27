@@ -132,6 +132,16 @@ class Index
     /** Last observed PRAGMA data_version; changes only when another connection commits. Null = not yet read. */
     private ?int $dataVersion = null;
 
+    /**
+     * Device and inode of the index file captured at connection open; used by
+     * reopenIfChanged() to detect atomic-rename rotation. Deliberately excludes
+     * mtime/size: in-place writes keep the inode and are covered by the
+     * data_version check, so only replacement should trigger a reopen.
+     *
+     * @var array{dev: int, ino: int}|null
+     */
+    private ?array $fileIdentity = null;
+
 
     // --- Constructor --------------------------------------------------------
 
@@ -580,6 +590,7 @@ class Index
         if ($language !== null) {
             $this->applyLanguage($language);
         }
+        $this->captureFileIdentity();
 
         return $this;
     }
@@ -594,6 +605,10 @@ class Index
         if (!file_exists($this->path)) {
             throw new IOException("Index {$this->path} does not exist", 1);
         }
+        // Capture identity before opening: if a rotation lands in between, the
+        // stale identity makes the next reopenIfChanged() do one redundant reopen
+        // (harmless) instead of serving the old file until the following rotation.
+        $this->captureFileIdentity();
         $encodedPath         = implode('/', array_map(rawurlencode(...), explode('/', $this->path)));
         $dsn                 = $this->readonly
             ? 'sqlite:file://' . $encodedPath . '?mode=ro'
@@ -646,6 +661,47 @@ class Index
             $this->pdo?->exec('PRAGMA wal_checkpoint(TRUNCATE)');
         }
         $this->pdo = null;
+    }
+
+    /**
+     * Reopen the underlying connection when the index file was replaced on disk.
+     *
+     * snapshotTo() and rebuild() publish by atomically renaming a new file over the
+     * index path. An already-open connection keeps reading the old inode and would
+     * never see the new data (and keeps the old file's disk space allocated). This
+     * method compares the path's device/inode against the values captured at open
+     * and reopens the connection — same mode, fresh caches — when they differ.
+     *
+     * Intended for long-lived instances in worker-mode runtimes, called once per
+     * request: the unchanged case costs a single stat() and keeps all caches warm.
+     * In-place writes by other processes do not trigger a reopen; those are handled
+     * by the data_version cache check.
+     *
+     * @return bool True when the file had been replaced and the connection was reopened.
+     * @throws IOException If no file exists at the index path.
+     */
+    public function reopenIfChanged(): bool
+    {
+        clearstatcache(true, $this->path);
+        $stat = @stat($this->path);
+        if ($stat === false) {
+            throw new IOException("Index {$this->path} does not exist", 1);
+        }
+        if ($this->fileIdentity === ['dev' => $stat['dev'], 'ino' => $stat['ino']]) {
+            return false;
+        }
+        $this->close();
+        $this->selectIndex();
+        return true;
+    }
+
+    /** Record the index file's device and inode for rotation detection; see $fileIdentity. */
+    private function captureFileIdentity(): void
+    {
+        clearstatcache(true, $this->path);
+        $stat = @stat($this->path);
+        /** @infection-ignore-all ArrayItemRemoval,FalseValue: identity fields only affect rotation detection sensitivity, exercised in reopenIfChanged tests */
+        $this->fileIdentity = $stat === false ? null : ['dev' => $stat['dev'], 'ino' => $stat['ino']];
     }
 
     /** Reset all per-connection caches; called on every connection open or close. */

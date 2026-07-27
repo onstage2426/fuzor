@@ -39,6 +39,23 @@ $results = $read->search('electric bike');
 - Lets the OS share memory-mapped pages across all PHP-FPM workers for that file
 - Skips WAL and checkpoint overhead entirely (snapshot files have no WAL)
 
+**Long-lived readers (Swoole, FrankenPHP worker mode)** — a per-request `new Index(...)`
+picks up each new snapshot automatically, but a worker that holds one instance across
+requests keeps reading the *old* file forever: the rename swaps the inode at the path,
+not the file the connection has open. Call `reopenIfChanged()` once per request:
+
+```php
+// Worker startup:
+$read = new Index('/var/db/products-read.db', readonly: true);
+
+// Per request:
+$read->reopenIfChanged();   // one stat(); reopens only after a snapshot rotation
+$results = $read->search($query);
+```
+
+When nothing changed it costs a single `stat()` and every cache stays warm; after a
+rotation it reopens the connection and releases the old snapshot's disk space.
+
 ## Rebuild as publisher (no write tracking)
 
 When tracking individual writes is impractical — a CMS like WordPress, where content
