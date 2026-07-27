@@ -86,6 +86,25 @@ final readonly class Config
          * @infection-ignore-all: default value; mutations only affect durability, not correctness of the happy path
          */
         public bool $bulkSynchronousOff = true,
+        /**
+         * SQLite page cache per connection, in kibibytes (PRAGMA cache_size, negative form).
+         * This memory is private to each connection, so a fleet of N worker processes holding
+         * an index open allocates it N times. Deployments running many workers against one
+         * read index can lower this and raise $mmapSizeBytes instead — memory-mapped pages are
+         * shared by the OS across every process reading the same file.
+         * Not applied during bulk loads, which use their own 512 MB override.
+         *
+         * @infection-ignore-all: default value; mutations only affect cache memory, not correctness
+         */
+        public int $cacheSizeKb = 65_536,
+        /**
+         * Memory-mapped I/O window in bytes (PRAGMA mmap_size). 0 disables memory mapping.
+         * Unlike $cacheSizeKb this is shared across all processes mapping the same file, so
+         * it is the cheaper way to keep a hot read index resident in a many-worker fleet.
+         *
+         * @infection-ignore-all: default value; mutations only affect mapping size, not correctness
+         */
+        public int $mmapSizeBytes = 536_870_912,
     ) {
     }
 }

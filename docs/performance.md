@@ -56,6 +56,27 @@ $results = $read->search($query);
 When nothing changed it costs a single `stat()` and every cache stays warm; after a
 rotation it reopens the connection and releases the old snapshot's disk space.
 
+## Memory profile for many-worker fleets
+
+SQLite's page cache is **private to each connection**. The default 64 MB is sized for a
+single writer process; a fleet of 32 PHP-FPM workers holding the read index open can
+allocate 2 GB of duplicated cache for one file. Memory-mapped pages have the opposite
+property — the OS shares them across every process mapping the same file — so read
+fleets should shrink the private cache and lean on `mmap_size`:
+
+```php
+$read = new Index('/var/db/products-read.db', readonly: true, config: new Config(
+    cacheSizeKb:   8_192,          // 8 MB private per worker (default 64 MB)
+    mmapSizeBytes: 2_147_483_648,  // 2 GB shared mapping (default 512 MB)
+));
+```
+
+Size `mmapSizeBytes` at or above the index file so the whole thing can stay resident;
+it costs address space, not committed memory, and pages are only faulted in on access.
+Keep the default `cacheSizeKb` on the write side, where the private cache absorbs
+B-tree splits during indexing. Bulk loads temporarily raise `cache_size` to 512 MB
+regardless, then restore the configured value.
+
 ## Rebuild as publisher (no write tracking)
 
 When tracking individual writes is impractical — a CMS like WordPress, where content

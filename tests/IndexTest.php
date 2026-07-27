@@ -4980,6 +4980,61 @@ class IndexTest extends TestCase
         $this->assertContains(2, $a->search('sedan')->getIds());
     }
 
+    // --- cacheSizeKb / mmapSizeBytes ---
+
+    /** Read a pragma value from the index's own connection. */
+    private function pragmaOf(Index $index, string $pragma): int
+    {
+        $pdo = new \ReflectionProperty(Index::class, 'pdo')->getValue($index);
+        $this->assertInstanceOf(\PDO::class, $pdo);
+        $stmt = $pdo->query("PRAGMA {$pragma}");
+        $this->assertNotFalse($stmt);
+
+        return (int) $stmt->fetchColumn();
+    }
+
+    public function testDefaultCacheAndMmapPragmas(): void
+    {
+        $index = new Index($this->dbPath);
+        $this->assertSame(-65536, $this->pragmaOf($index, 'cache_size'));
+        $this->assertSame(536870912, $this->pragmaOf($index, 'mmap_size'));
+    }
+
+    public function testConfiguredCacheAndMmapPragmasApplied(): void
+    {
+        $index = new Index($this->dbPath, config: new Config(cacheSizeKb: 8_192, mmapSizeBytes: 1_073_741_824));
+        $this->assertSame(-8192, $this->pragmaOf($index, 'cache_size'));
+        $this->assertSame(1073741824, $this->pragmaOf($index, 'mmap_size'));
+    }
+
+    public function testConfiguredCacheAndMmapPragmasAppliedOnReadonlyOpen(): void
+    {
+        new Index($this->dbPath)->close();
+
+        $read = new Index(
+            $this->dbPath,
+            readonly: true,
+            config: new Config(cacheSizeKb: 4_096, mmapSizeBytes: 0),
+        );
+        $this->assertSame(-4096, $this->pragmaOf($read, 'cache_size'));
+        $this->assertSame(0, $this->pragmaOf($read, 'mmap_size'));
+    }
+
+    public function testBulkLoadRestoresConfiguredCacheSize(): void
+    {
+        $index = new Index($this->dbPath, config: new Config(cacheSizeKb: 8_192));
+        $docs  = [];
+        for ($i = 1; $i <= 5; $i++) {
+            $docs[] = ['id' => $i, 'title' => "sedan {$i}"];
+        }
+        $index->insert($docs);
+
+        // The bulk path overrides cache_size to 512 MB; the finally block must put
+        // the configured value back, not the library default.
+        $this->assertSame(-8192, $this->pragmaOf($index, 'cache_size'));
+        $this->assertSame(5, $index->count());
+    }
+
     // --- reopenIfChanged ---
 
     public function testReopenIfChangedReturnsFalseWhenFileUntouched(): void

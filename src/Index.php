@@ -5167,32 +5167,35 @@ class Index
     private function restoreNormalPragmas(): void
     {
         assert($this->pdo instanceof \PDO);
-        $this->pdo->exec('
+        $cacheSize = -$this->config->cacheSizeKb;
+        $this->pdo->exec("
             PRAGMA synchronous        = NORMAL;
-            PRAGMA cache_size         = -65536;
+            PRAGMA cache_size         = {$cacheSize};
             PRAGMA wal_autocheckpoint = 1000;
-        ');
+        ");
     }
 
     private function applyPragmas(): void
     {
         assert($this->pdo instanceof \PDO);
         $busyTimeoutMs = $this->config->busyTimeoutMs;
+        $cacheSize     = -$this->config->cacheSizeKb;
+        $mmapSize      = $this->config->mmapSizeBytes;
         if (!$this->readonly) {
             $this->pdo->exec("
                 PRAGMA journal_mode        = WAL;
                 PRAGMA synchronous         = NORMAL;
-                PRAGMA cache_size          = -65536;
+                PRAGMA cache_size          = {$cacheSize};
                 PRAGMA temp_store          = MEMORY;
-                PRAGMA mmap_size           = 536870912;
+                PRAGMA mmap_size           = {$mmapSize};
                 PRAGMA case_sensitive_like = ON;
                 PRAGMA busy_timeout        = {$busyTimeoutMs};
             ");
         } else {
             $this->pdo->exec("
-                PRAGMA cache_size          = -65536;
+                PRAGMA cache_size          = {$cacheSize};
                 PRAGMA temp_store          = MEMORY;
-                PRAGMA mmap_size           = 536870912;
+                PRAGMA mmap_size           = {$mmapSize};
                 PRAGMA case_sensitive_like = ON;
                 PRAGMA busy_timeout        = {$busyTimeoutMs};
             ");
