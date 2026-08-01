@@ -28,6 +28,21 @@ use PDO;
  */
 class Index
 {
+    /**
+     * On-disk schema revision written by createIndex() into info.schema_version.
+     *
+     * Independent of the library's semantic version; incremented only when the physical
+     * schema changes. Indexes created before this key existed report 1.
+     *
+     * 1 — pre-1.5.0: facet_doc_id_index is a single-column index on (doc_id).
+     * 2 — 1.5.0+:    facet_doc_id_index covers (doc_id, key_id, value, num_value), letting
+     *                the facet count join run index-only.
+     *
+     * Older revisions keep working; they just miss the optimization. Compare against
+     * $this->schemaVersion to decide whether rebuild() is worth scheduling.
+     */
+    public const int CURRENT_SCHEMA_VERSION = 2;
+
     /** Max rows per chunk when each row uses 1 bind variable (SQLite 32 766-variable ceiling). */
     private const int CHUNK_1P = 32_766;
 
@@ -104,6 +119,13 @@ class Index
 
     /** When true, strip_tags() is applied to each field value before tokenisation. */
     public private(set) bool $stripHtml = false;
+
+    /**
+     * On-disk schema revision of the open index; see CURRENT_SCHEMA_VERSION.
+     * Lower than CURRENT_SCHEMA_VERSION means the file predates a schema optimization
+     * and would benefit from rebuild(); it remains fully functional either way.
+     */
+    public private(set) int $schemaVersion = self::CURRENT_SCHEMA_VERSION;
 
     /** @var array<string, int> Maps facet key name → facet_keys.id; populated lazily; cleared on connection change. */
     private array $facetKeyCache = [];
@@ -587,11 +609,8 @@ class Index
                 PRIMARY KEY (key_id, value, doc_id)
             ) WITHOUT ROWID, STRICT"
         );
-        // Covers DELETE-by-doc_id and the GROUP BY count query path.
-        $pdo->exec(
-            "CREATE INDEX IF NOT EXISTS 'main'.'facet_doc_id_index'
-             ON facet_values (doc_id)"
-        );
+        // Covers DELETE-by-doc_id and the facet count join; see facetDocIndexDdl().
+        $pdo->exec(self::facetDocIndexDdl(self::CURRENT_SCHEMA_VERSION));
         // Covers numeric range filter queries; partial keeps the B-tree small.
         $pdo->exec(
             "CREATE INDEX IF NOT EXISTS 'main'.'facet_numeric_index'
@@ -630,6 +649,7 @@ class Index
         );
 
         $schemaStmt = $pdo->prepare("INSERT INTO info (key, value) VALUES (?, ?)");
+        $schemaStmt->execute(['schema_version',    (string) self::CURRENT_SCHEMA_VERSION]);
         $schemaStmt->execute(['facet_fields',      json_encode($facetFields)]);
         $schemaStmt->execute(['searchable_fields', $searchableFields !== null ? json_encode($searchableFields) : '']);
         $schemaStmt->execute(['strip_html',        $stripHtml ? '1' : '0']);
@@ -674,7 +694,8 @@ class Index
         $pdo   = $this->pdo;
         $stmt  = $pdo->query(
             "SELECT key, value FROM info"
-            . " WHERE key IN ('language', 'has_document_store', 'facet_fields', 'searchable_fields', 'strip_html')"
+            . " WHERE key IN ('language', 'has_document_store', 'facet_fields', 'searchable_fields',"
+            . " 'strip_html', 'schema_version')"
         );
         $infoRows = [];
         if ($stmt) {
@@ -691,6 +712,9 @@ class Index
         $this->facetFieldSet      = array_flip($this->facetFields);
         $this->searchableFieldSet = $this->searchableFields !== null ? array_flip($this->searchableFields) : null;
         $this->stripHtml          = ($infoRows['strip_html'] ?? '0') === '1';
+        // Absent key = revision 1: indexes created before schema_version existed.
+        // See docs/compatibility-debt.md before removing this fallback.
+        $this->schemaVersion      = (int) ($infoRows['schema_version'] ?? 1);
     }
 
     /**
@@ -754,6 +778,30 @@ class Index
         $stat = @stat($this->path);
         /** @infection-ignore-all ArrayItemRemoval,FalseValue: identity fields only affect rotation detection sensitivity, exercised in reopenIfChanged tests */
         $this->fileIdentity = $stat === false ? null : ['dev' => $stat['dev'], 'ino' => $stat['ino']];
+    }
+
+    /**
+     * DDL for facet_doc_id_index at a given schema revision.
+     *
+     * Revision 2 widens the index to (doc_id, key_id, value, num_value) so the facet count
+     * join in fetchAllFacetCountsJoin() is satisfied index-only. Under revision 1 the index
+     * holds doc_id alone, so reading num_value costs an extra seek into the table per row —
+     * measured at roughly 2x the join cost on a 45k-document index.
+     *
+     * doc_id leads in both revisions, so DELETE-by-doc uses the index either way.
+     *
+     * Callers must pass the revision of the file they are writing to: createIndex() uses
+     * CURRENT_SCHEMA_VERSION, while the bulk-load teardown passes $this->schemaVersion so
+     * that dropping and recreating indexes around a bulk write never silently changes the
+     * shape of an older file.
+     */
+    private static function facetDocIndexDdl(int $schemaVersion): string
+    {
+        $columns = $schemaVersion >= 2
+            ? '(doc_id, key_id, value, num_value)'
+            : '(doc_id)';
+
+        return "CREATE INDEX IF NOT EXISTS 'main'.'facet_doc_id_index' ON facet_values {$columns}";
     }
 
     /** Reset all per-connection caches; called on every connection open or close. */
@@ -965,8 +1013,10 @@ class Index
                     CREATE INDEX IF NOT EXISTS doclist_term_hitcount ON doclist (term_id, hit_count DESC);
                     CREATE INDEX IF NOT EXISTS positions_doc_id ON positions (doc_id);
                 ');
+                // Recreate at this file's own revision — a bulk load must never silently
+                // widen or narrow the index shape of an existing index.
+                $pdo->exec(self::facetDocIndexDdl($this->schemaVersion));
                 $pdo->exec('
-                    CREATE INDEX IF NOT EXISTS facet_doc_id_index ON facet_values (doc_id);
                     CREATE INDEX IF NOT EXISTS facet_numeric_index ON facet_values (key_id, num_value, doc_id)
                         WHERE num_value IS NOT NULL;
                 ');

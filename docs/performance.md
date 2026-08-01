@@ -98,6 +98,26 @@ $read = new Index('/var/db/site-search.db', readonly: true);
 The rename is atomic: requests in flight keep reading the old file, new requests
 get the new one. A failed rebuild leaves the live index untouched.
 
+## Keeping the index schema current
+
+Physical schema improvements ship as new revisions of the on-disk format. Older files
+keep working — they just miss the optimization — so upgrading the library never forces a
+migration. To check, and migrate when it pays:
+
+```php
+if ($index->schemaVersion < Index::CURRENT_SCHEMA_VERSION) {
+    Index::rebuild('/var/db/products.db');
+}
+```
+
+Revision 2 (1.5.0) widens `facet_doc_id_index` so facet counting runs index-only, worth
+~29% on a faceted search.
+
+`rebuild()` migrates; `snapshotTo()` does not. `VACUUM INTO` copies the source schema
+verbatim, so snapshots of an old write index stay on the old revision — rebuild the write
+index once and every later snapshot inherits the new shape. If you publish with cron
+`rebuild()`, the next run migrates you with no action at all.
+
 ## Returning less per hit
 
 Every hit is fetched from the `documents` table and JSON-decoded. When the endpoint does

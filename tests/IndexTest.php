@@ -5079,6 +5079,180 @@ class IndexTest extends TestCase
         $this->assertSame(['id' => 2, 'title' => 'diesel coupe'], $result->getHit(0));
     }
 
+    // --- schema version / covering facet index ---
+
+    /** Downgrade an index to schema revision 1 (narrow facet_doc_id_index, no version key). */
+    private function downgradeToSchemaV1(string $path): void
+    {
+        $pdo = new \PDO('sqlite:' . $path);
+        $pdo->exec('DROP INDEX IF EXISTS facet_doc_id_index');
+        $pdo->exec('CREATE INDEX facet_doc_id_index ON facet_values (doc_id)');
+        $pdo->exec("DELETE FROM info WHERE key = 'schema_version'");
+    }
+
+    /**
+     * @param  list<string> $params
+     * @return list<string>
+     */
+    private function indexPlanFor(string $path, string $sql, array $params): array
+    {
+        $pdo  = new \PDO('sqlite:' . $path);
+        $stmt = $pdo->prepare('EXPLAIN QUERY PLAN ' . $sql);
+        $stmt->execute($params);
+        /** @var list<array{detail: string}> $rows */
+        $rows = $stmt->fetchAll(\PDO::FETCH_ASSOC);
+
+        return array_map(static fn(array $r): string => $r['detail'], $rows);
+    }
+
+    /** Read the stored DDL for a named index, or '' when it does not exist. */
+    private function indexDdl(string $path, string $indexName): string
+    {
+        $pdo  = new \PDO('sqlite:' . $path);
+        $stmt = $pdo->prepare("SELECT sql FROM sqlite_master WHERE type='index' AND name=?");
+        $stmt->execute([$indexName]);
+        $sql = $stmt->fetchColumn();
+
+        return is_string($sql) ? $sql : '';
+    }
+
+    private function facetIndex(): Index
+    {
+        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['color', 'size']));
+        $index->insert([
+            ['id' => 1, 'title' => 'red shirt',  'color' => 'red',  'size' => 42],
+            ['id' => 2, 'title' => 'blue shirt', 'color' => 'blue', 'size' => 44],
+            ['id' => 3, 'title' => 'red pants',  'color' => 'red',  'size' => 42],
+        ]);
+        return $index;
+    }
+
+    public function testNewIndexReportsCurrentSchemaVersion(): void
+    {
+        $index = new Index($this->dbPath);
+        $this->assertSame(Index::CURRENT_SCHEMA_VERSION, $index->schemaVersion);
+        $index->close();
+
+        $this->assertSame(Index::CURRENT_SCHEMA_VERSION, new Index($this->dbPath)->schemaVersion);
+    }
+
+    public function testIndexWithoutVersionKeyReportsSchemaVersionOne(): void
+    {
+        $index = $this->facetIndex();
+        $index->close();
+        $this->downgradeToSchemaV1($this->dbPath);
+
+        $this->assertSame(1, new Index($this->dbPath)->schemaVersion);
+    }
+
+    public function testCurrentSchemaUsesCoveringIndexForFacetJoin(): void
+    {
+        $this->facetIndex()->close();
+
+        $plan = $this->indexPlanFor(
+            $this->dbPath,
+            'SELECT fv.key_id, fv.value, fv.num_value
+             FROM json_each(?) je
+             CROSS JOIN facet_values fv ON fv.doc_id = je.value
+             WHERE fv.key_id IN (SELECT value FROM json_each(?))',
+            [json_encode([1, 2, 3], JSON_THROW_ON_ERROR), json_encode([1], JSON_THROW_ON_ERROR)],
+        );
+
+        $this->assertNotEmpty(
+            array_filter($plan, static fn(string $d): bool => str_contains($d, 'COVERING INDEX facet_doc_id_index')),
+            "Expected a covering-index plan, got:\n" . implode("\n", $plan),
+        );
+    }
+
+    public function testSchemaV1IndexStillReturnsIdenticalFacetCounts(): void
+    {
+        $index    = $this->facetIndex();
+        $expected = $index->search('shirt', new SearchOptions(facets: ['color', 'size']))->getFacetDistribution();
+        $index->close();
+
+        $this->downgradeToSchemaV1($this->dbPath);
+
+        $legacy = new Index($this->dbPath);
+        $this->assertSame(1, $legacy->schemaVersion);
+        $this->assertSame(
+            $expected,
+            $legacy->search('shirt', new SearchOptions(facets: ['color', 'size']))->getFacetDistribution(),
+        );
+    }
+
+    public function testRebuildMigratesSchemaV1ToCurrent(): void
+    {
+        $this->facetIndex()->close();
+        $this->downgradeToSchemaV1($this->dbPath);
+        $this->assertSame(1, new Index($this->dbPath)->schemaVersion);
+
+        $rebuilt = Index::rebuild($this->dbPath);
+
+        $this->assertSame(Index::CURRENT_SCHEMA_VERSION, $rebuilt->schemaVersion);
+        $this->assertSame(
+            ['color' => ['red' => 1, 'blue' => 1]],
+            $rebuilt->search('shirt', new SearchOptions(facets: ['color']))->getFacetDistribution(),
+        );
+        $rebuilt->close();
+
+        $plan = $this->indexPlanFor(
+            $this->dbPath,
+            'SELECT fv.key_id, fv.value, fv.num_value FROM json_each(?) je
+             CROSS JOIN facet_values fv ON fv.doc_id = je.value',
+            [json_encode([1, 2, 3], JSON_THROW_ON_ERROR)],
+        );
+        $this->assertNotEmpty(
+            array_filter($plan, static fn(string $d): bool => str_contains($d, 'COVERING INDEX facet_doc_id_index')),
+        );
+    }
+
+    public function testBulkLoadPreservesSchemaV1IndexShape(): void
+    {
+        // insertMany drops and recreates secondary indexes; it must not silently
+        // upgrade (or downgrade) the shape of the file it is writing to.
+        $this->facetIndex()->close();
+        $this->downgradeToSchemaV1($this->dbPath);
+
+        $legacy = new Index($this->dbPath);
+        $docs   = [];
+        for ($i = 10; $i < 1_015; $i++) {
+            $docs[] = ['id' => $i, 'title' => "shirt {$i}", 'color' => 'green', 'size' => 40];
+        }
+        $legacy->insert($docs);
+        $legacy->close();
+
+        $sql = $this->indexDdl($this->dbPath, 'facet_doc_id_index');
+        $this->assertStringContainsString('(doc_id)', $sql);
+        $this->assertStringNotContainsString('num_value', $sql);
+    }
+
+    public function testBulkLoadPreservesCurrentSchemaIndexShape(): void
+    {
+        $index = $this->facetIndex();
+        $docs  = [];
+        for ($i = 10; $i < 1_015; $i++) {
+            $docs[] = ['id' => $i, 'title' => "shirt {$i}", 'color' => 'green', 'size' => 40];
+        }
+        $index->insert($docs);
+        $index->close();
+
+        $this->assertStringContainsString('num_value', $this->indexDdl($this->dbPath, 'facet_doc_id_index'));
+    }
+
+    public function testSnapshotPropagatesSourceSchemaVersion(): void
+    {
+        $snapPath = sys_get_temp_dir() . '/fuzor_test_schemasnap_' . uniqid() . '.db';
+        $index    = $this->facetIndex();
+
+        try {
+            $index->snapshotTo($snapPath);
+            $index->close();
+            $this->assertSame(Index::CURRENT_SCHEMA_VERSION, new Index($snapPath)->schemaVersion);
+        } finally {
+            @unlink($snapPath);
+        }
+    }
+
     // --- checkpoint ---
 
     public function testCheckpointTruncatesWal(): void
