@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.5.0 — 2026-09-26
+
+- `facet_doc_id_index` now covers `(doc_id, key_id, value, num_value)`, making the facet count join index-only — ~29% faster faceted search on a 45k-document index, for +0.2% file size and no measurable write cost. Existing indexes keep working at their current speed; run `rebuild()` to migrate.
+- Added `info.schema_version` and `Index::$schemaVersion` / `Index::CURRENT_SCHEMA_VERSION` so a stale index can be detected: `$index->schemaVersion < Index::CURRENT_SCHEMA_VERSION` means `rebuild()` would help. Indexes created before 1.5.0 report revision 1.
+
 ## 1.4.0 — 2026-07-28
 
 - Added `reopenIfChanged()` — reopens the connection when the index file was replaced by `snapshotTo()`/`rebuild()` rotation. One `stat()` when unchanged; lets worker-mode runtimes hold a long-lived `Index` across snapshot pushes.
