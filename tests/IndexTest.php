@@ -3729,6 +3729,41 @@ class IndexTest extends TestCase
         );
     }
 
+    public function testFacetSearchFilterWithoutQueryIsExactBeyondFilterMaxDocs(): void
+    {
+        $index = new Index(
+            $this->dbPath,
+            schema: new SchemaConfig(facetFields: ['genre', 'color']),
+            config: new Config(filterMaxDocs: 2),
+        );
+        $docs = [];
+        for ($i = 1; $i <= 7; $i++) {
+            $docs[] = ['id' => $i, 'title' => 'doc', 'genre' => $i % 2 ? 'Action' : 'Drama', 'color' => 'red'];
+        }
+        $index->insert($docs);
+
+        $result = $index->facetSearch(new FacetSearchQuery(facetName: 'genre', filter: ['color' => 'red']));
+
+        $this->assertSame(
+            [['value' => 'Action', 'count' => 4], ['value' => 'Drama', 'count' => 3]],
+            $result->facetHits,
+        );
+    }
+
+    public function testFacetSearchQueryWithNoMatchesReturnsEmptyWithFilter(): void
+    {
+        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['genre', 'color']));
+        $index->insert([['id' => 1, 'title' => 'doc', 'genre' => 'Action', 'color' => 'red']]);
+
+        $result = $index->facetSearch(new FacetSearchQuery(
+            facetName: 'genre',
+            query:     'nothingmatches',
+            filter:    ['color' => 'red'],
+        ));
+
+        $this->assertSame([], $result->facetHits);
+    }
+
     public function testFacetSearchDeclaredButUnpopulatedFieldDoesNotWarn(): void
     {
         $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['genre', 'year']));
@@ -4428,6 +4463,213 @@ class IndexTest extends TestCase
         ]);
         $result = $index->search('', new SearchOptions(filter: ['category' => 'shoes'], sort: ['price:asc']));
         $this->assertSame([3, 1], $result->getIds());
+    }
+
+    // --- Browse: exact SQL path ---
+
+    /**
+     * Twelve products; the oldest are the cheapest, so a newest-first candidate window misses them.
+     *
+     * @return list<array<string, mixed>>
+     */
+    private function browseCatalog(): array
+    {
+        $docs = [];
+        for ($i = 1; $i <= 12; $i++) {
+            $docs[] = [
+                'id'    => $i,
+                'title' => 'product',
+                'price' => $i * 10,
+                'color' => $i % 3 === 0 ? 'red' : 'blue',
+                'brand' => $i <= 4 ? 'Acme' : 'Zeta',
+            ];
+        }
+        return $docs;
+    }
+
+    public function testBrowseIsExactBeyondCandidateCaps(): void
+    {
+        $index = new Index(
+            $this->dbPath,
+            schema: new SchemaConfig(facetFields: ['price', 'color', 'brand']),
+            config: new Config(filterMaxDocs: 2, maxFacetCountDocs: 2),
+        );
+        $index->insert($this->browseCatalog());
+
+        $sorted = $index->search('', new SearchOptions(sort: ['price:asc'], limit: 3));
+        $this->assertSame([1, 2, 3], $sorted->getIds());
+        $this->assertSame(12, $sorted->totalHits);
+
+        $filtered = $index->search('', new SearchOptions(filter: ['color' => 'blue'], facets: ['color']));
+        $this->assertSame(8, $filtered->totalHits);
+        $this->assertSame([11, 10, 8, 7, 5, 4, 2, 1], $filtered->getIds());
+        // Disjunctive with no other filter: counted over the whole index, so exact at any size.
+        $this->assertSame(['blue' => 8, 'red' => 4], $filtered->facetDistribution['color']);
+
+        $unfiltered = $index->search('', new SearchOptions(facets: ['brand']));
+        $this->assertSame(['Zeta' => 8, 'Acme' => 4], $unfiltered->facetDistribution['brand']);
+    }
+
+    public function testBrowseFilteredFacetCountsUnderCapAreExact(): void
+    {
+        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['price', 'color', 'brand']));
+        $index->insert($this->browseCatalog());
+
+        $result = $index->search('', new SearchOptions(filter: ['color' => 'blue'], facets: ['brand', 'color']));
+
+        $this->assertSame(['Zeta' => 5, 'Acme' => 3], $result->facetDistribution['brand']);
+        $this->assertSame(['blue' => 8, 'red' => 4], $result->facetDistribution['color']);
+    }
+
+    public function testBrowseFilteredFacetCountsAreCappedLikeSearch(): void
+    {
+        $index = new Index(
+            $this->dbPath,
+            schema: new SchemaConfig(facetFields: ['price', 'color', 'brand']),
+            config: new Config(maxFacetCountDocs: 3),
+        );
+        $index->insert($this->browseCatalog());
+
+        $result = $index->search('', new SearchOptions(filter: ['color' => 'blue'], facets: ['brand']));
+
+        $this->assertSame(8, $result->totalHits);
+        $this->assertSame(3, array_sum($result->facetDistribution['brand']));
+    }
+
+    public function testBrowseFacetStatsWithFilter(): void
+    {
+        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['price', 'color', 'brand']));
+        $index->insert($this->browseCatalog());
+
+        $result = $index->search('', new SearchOptions(filter: ['brand' => 'Zeta'], facets: ['price', 'brand']));
+
+        $this->assertSame(['min' => 50.0, 'max' => 120.0], $result->facetStats['price']);
+        $this->assertCount(8, $result->facetDistribution['price']);
+        $this->assertArrayNotHasKey('brand', $result->facetStats);
+    }
+
+    public function testBrowseSortMatchesInMemorySortReference(): void
+    {
+        // The SQL walk must order exactly like sortDocIdsBySpecs(), which searchBoolean() uses
+        // over the same candidates: mixed types, multi-value fields, missing values, ties,
+        // secondary specs, and both filter shapes (probed for broad filters, IN for selective).
+        $schema = new SchemaConfig(facetFields: ['size', 'group', 'color', 'unused']);
+        $index  = new Index($this->dbPath, schema: $schema);
+        $sizes  = [7, 'L', [3, 40], 12, null, 'M', 7, [2.5, 'XL'], 30, null];
+        $sizes  = [...$sizes, 'S', 12, 7, [15, 1], 'L', 22, null, 9, 3, 'M'];
+        $docs   = [];
+        foreach ($sizes as $i => $size) {
+            $doc = [
+                'id'    => $i + 1,
+                'title' => 'product',
+                'group' => ['a', 'b', 'c'][$i % 3],
+                'color' => $i % 7 === 0 ? 'red' : 'blue',
+            ];
+            if ($size !== null) {
+                $doc['size'] = $size;
+            }
+            $docs[] = $doc;
+        }
+        $index->insert($docs);
+
+        $sorts   = [
+            ['size:asc'],
+            ['size:desc'],
+            ['group:asc', 'size:desc'],
+            ['group:desc', 'size:asc'],
+            ['size:asc', 'group:desc'],
+            ['unused:asc', 'size:desc'],
+        ];
+        $filters = [[], ['group' => ['a', 'b']], ['color' => 'red'], ['size' => FacetRange::between(3, 20)]];
+        $pages   = [[0, 5], [3, 4], [0, 100], [17, 5]];
+        foreach ($sorts as $sort) {
+            foreach ($filters as $filter) {
+                foreach ($pages as [$offset, $limit]) {
+                    $options  = new SearchOptions(filter: $filter, sort: $sort, offset: $offset, limit: $limit);
+                    $expected = $index->searchBoolean('product', $options);
+                    $actual   = $index->search('', $options);
+                    $label    = json_encode([$sort, $filter, $offset, $limit]);
+                    $this->assertSame($expected->getIds(), $actual->getIds(), "ids {$label}");
+                    $this->assertSame($expected->totalHits, $actual->totalHits, "totalHits {$label}");
+                }
+            }
+        }
+    }
+
+    public function testBrowseUnsortedFilterShapesAgree(): void
+    {
+        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['price', 'color', 'brand']));
+        $index->insert($this->browseCatalog());
+
+        // 'blue' matches 8/12 (probed walk); 'Acme' + 'red' matches 1/12 (materialised IN).
+        $broad     = $index->search('', new SearchOptions(filter: ['color' => 'blue'], limit: 3, offset: 2));
+        $selective = $index->search('', new SearchOptions(filter: ['color' => 'red', 'brand' => 'Acme']));
+
+        $this->assertSame([8, 7, 5], $broad->getIds());
+        $this->assertSame([3], $selective->getIds());
+        $this->assertSame(1, $selective->totalHits);
+    }
+
+    public function testBrowseEmptyFilterValueListMatchesNothing(): void
+    {
+        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['price', 'color', 'brand']));
+        $index->insert($this->browseCatalog());
+
+        $result = $index->search('', new SearchOptions(filter: ['color' => []], facets: ['brand']));
+
+        $this->assertSame(0, $result->totalHits);
+        $this->assertSame([], $result->getIds());
+        $this->assertSame([], $result->facetDistribution);
+    }
+
+    public function testBrowseLimitZeroReportsExactTotal(): void
+    {
+        $index = new Index(
+            $this->dbPath,
+            schema: new SchemaConfig(facetFields: ['price', 'color', 'brand']),
+            config: new Config(filterMaxDocs: 2, maxFacetCountDocs: 2),
+        );
+        $index->insert($this->browseCatalog());
+
+        $result = $index->search('', new SearchOptions(filter: ['brand' => 'Zeta'], limit: 0));
+
+        $this->assertSame([], $result->getIds());
+        $this->assertSame(8, $result->totalHits);
+    }
+
+    public function testBrowseDistinctIsExactBeyondCandidateCaps(): void
+    {
+        $index = new Index(
+            $this->dbPath,
+            schema: new SchemaConfig(facetFields: ['price', 'color', 'brand']),
+            config: new Config(filterMaxDocs: 2, maxFacetCountDocs: 2),
+        );
+        $index->insert($this->browseCatalog());
+
+        $result = $index->search('', new SearchOptions(sort: ['price:asc'], distinct: 'brand'));
+
+        $this->assertSame([1, 5], $result->getIds());
+        $this->assertSame(2, $result->totalHits);
+    }
+
+    public function testBrowseSortedPagesConcatenateToFullOrder(): void
+    {
+        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['price', 'color', 'brand']));
+        $index->insert($this->browseCatalog());
+
+        $full  = $index->search('', new SearchOptions(sort: ['brand:desc', 'price:desc'], limit: 100))->getIds();
+        $paged = [];
+        for ($offset = 0; $offset < 12; $offset += 5) {
+            $page  = $index->search('', new SearchOptions(
+                sort:   ['brand:desc', 'price:desc'],
+                limit:  5,
+                offset: $offset,
+            ));
+            $paged = [...$paged, ...$page->getIds()];
+        }
+
+        $this->assertSame([12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1], $full);
+        $this->assertSame($full, $paged);
     }
 
     // --- Distinct ---

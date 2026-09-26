@@ -25,6 +25,15 @@ use PDO;
  * fuzzy, boolean). One instance maps to one open SQLite file at a time.
  *
  * Requires SQLite 3.46.0+ (for STRICT tables, RETURNING, CTEs in DML, and PRAGMA optimize enhancements).
+ *
+ * @phpstan-type FacetCondition array{
+ *     name: string,
+ *     keyId: int,
+ *     sql: string,
+ *     params: list<mixed>,
+ *     impossible: bool,
+ *     multiRow: bool,
+ * }
  */
 class Index
 {
@@ -1890,7 +1899,7 @@ class Index
         }
 
         // Apply facet filters: load per-key doc ID sets and intersect with the score map.
-        $filterSets   = $this->loadFacetKeySets($filter, $this->config->filterMaxDocs, array_keys($docScores));
+        $filterSets   = $this->loadFacetKeySets($filter, array_keys($docScores));
         $rawDocScores = $docScores;
         if ($filterSets !== []) {
             $globalFilter = $this->intersectFilterSets($filterSets);
@@ -2126,7 +2135,7 @@ class Index
 
         // Apply facet filters: load per-key doc ID sets and intersect with the result.
         // array_flip($docIds) gives doc_id → position, usable as a set for array_intersect_key.
-        $filterSets = $this->loadFacetKeySets($filter, $this->config->filterMaxDocs, $docIds);
+        $filterSets = $this->loadFacetKeySets($filter, $docIds);
         $rawDocSet  = array_flip($docIds);
         if ($filterSets !== []) {
             $globalFilter = $this->intersectFilterSets($filterSets);
@@ -2242,18 +2251,22 @@ class Index
             }
         }
 
-        // --- Step 2: Facet filters, optionally constrained to FTS candidates ---
-        $candidateSet = null; // null = no restriction
-        if ($query->filter !== []) {
-            $candidateDocIds = $ftsCandidates !== null ? array_keys($ftsCandidates) : [];
-            $filterSets      = $this->loadFacetKeySets($query->filter, $this->config->filterMaxDocs, $candidateDocIds);
-            if ($filterSets !== []) {
-                $candidateSet = $this->intersectFilterSets($filterSets);
-            } else {
-                $candidateSet = $ftsCandidates;
-            }
-        } else {
-            $candidateSet = $ftsCandidates;
+        // --- Step 2: Facet filters ---
+        // With FTS candidates the filters are intersected in PHP against that (small) set; without
+        // them they go straight into the count query as exact doc_id IN (subquery) conditions.
+        if ($ftsCandidates === []) {
+            return new FacetSearchResult([], $query->facetQuery, $warnings);
+        }
+        $filterSql = ['', []];
+        if ($ftsCandidates !== null && $query->filter !== []) {
+            $filterSets    = $this->loadFacetKeySets($query->filter, array_keys($ftsCandidates));
+            $ftsCandidates = array_intersect_key($ftsCandidates, $this->intersectFilterSets($filterSets));
+        } elseif ($query->filter !== []) {
+            $conditions = $this->orderBySelectivity($this->facetFilterConditions($query->filter));
+            $filterSql  = $this->facetFilterSql($conditions, 'doc_id', false);
+        }
+        if ($filterSql === null || $ftsCandidates === []) {
+            return new FacetSearchResult([], $query->facetQuery, $warnings);
         }
 
         // --- Step 3: Query facet_values GROUP BY value ---
@@ -2269,16 +2282,16 @@ class Index
             $params[] = $escaped . '%';
         }
 
-        if ($candidateSet !== null) {
+        if ($ftsCandidates !== null) {
             $conditions[] = 'doc_id IN (SELECT value FROM json_each(?))';
-            $params[]     = json_encode(array_keys($candidateSet));
+            $params[]     = json_encode(array_keys($ftsCandidates));
         }
 
-        $params[] = $query->limit;
+        $params   = [...$params, ...$filterSql[1], $query->limit];
 
         $stmt = $this->prepare(
             'SELECT value, COUNT(*) AS count FROM facet_values'
-            . ' WHERE ' . implode(' AND ', $conditions)
+            . ' WHERE ' . implode(' AND ', $conditions) . $filterSql[0]
             . ' GROUP BY value ORDER BY count DESC LIMIT ?'
         );
         $stmt->execute($params);
@@ -2298,9 +2311,21 @@ class Index
      * Browse all documents with no FTS scoring — used when $phrase is empty.
      *
      * Fast path (no filter / sort / facets / distinct): totalHits from the info cache,
-     * page fetched with a single PK scan. General path: loads all doc IDs (capped),
-     * applies filter/sort/facets/distinct using the same helpers as searchBoolean().
-     * Default order is doc_id DESC (insertion order, newest first).
+     * page fetched with a single PK scan. Default order is doc_id DESC (insertion order,
+     * newest first).
+     *
+     * General path: everything is answered by SQL over the whole index, with no candidate
+     * cap, so totals, pages, and facet counts are exact at any index size. Like Meilisearch's
+     * sort, a sorted page walks the sort field's index in order and stops once the page is
+     * full (see browseSortedPage()). The exact filtered count comes first and picks the filter
+     * shape: a filter matching at least a quarter of the index is probed row by row along the
+     * walk, a more selective one is materialised once (see facetFilterSql()). Several filters
+     * are driven from the most selective one (see orderBySelectivity()).
+     *
+     * Facet counts are exact without a filter; with one they cover at most
+     * Config::$maxFacetCountDocs matching documents, as in search() (see browseFacetCounts()).
+     * distinct still needs every matching document in PHP to count the surviving groups, so
+     * that combination costs O(matches); it is exact too.
      */
     private function browse(string $phrase, SearchOptions $options): SearchResult
     {
@@ -2312,10 +2337,12 @@ class Index
         $distinctCount = $options->distinctCount;
         ['sort' => $sortSpecs, 'warnings' => $warnings] = $this->checkDeclaredFields($options);
 
+        $info           = $this->getInfoValues(['total_documents']);
+        $totalDocuments = (int) ($info['total_documents'] ?? 0);
+
         // Fast path: skip all PHP-side work; one PK scan for the page, total from cache.
-        if ($filter === [] && $sortSpecs === [] && $facets === [] && $distinct === null) {
-            $info  = $this->getInfoValues(['total_documents']);
-            $total = (int) ($info['total_documents'] ?? 0);
+        $plainBrowse = $filter === [] && $sortSpecs === [] && $facets === [] && $distinct === null;
+        if ($plainBrowse) {
             $stmt  = $this->stmt(
                 'browsePageIds',
                 'SELECT doc_id FROM doc_lengths ORDER BY doc_id DESC LIMIT ? OFFSET ?'
@@ -2325,7 +2352,7 @@ class Index
             $pagedIds = $stmt->fetchAll(PDO::FETCH_COLUMN);
             return new SearchResult(
                 ids: $pagedIds,
-                totalHits: $total,
+                totalHits: $totalDocuments,
                 documents: $this->hydrateAndFormat($pagedIds, $phrase, $options),
                 facetCounts: [],
                 facetStats: [],
@@ -2336,43 +2363,25 @@ class Index
             );
         }
 
-        // General path: materialise all doc IDs (capped), then reuse the boolean helpers.
-        $cap    = max($this->config->filterMaxDocs, $this->config->maxFacetCountDocs);
-        $docIds = $this->fetchBrowseDocIds($cap);
+        $conditions = $this->orderBySelectivity($this->facetFilterConditions($filter));
+        $match      = $conditions === [] ? null : $this->matchingDocsSql($conditions);
+        $total      = match (true) {
+            $conditions === [] => $totalDocuments,
+            $match === null    => 0,
+            default            => $this->countBrowseDocs($match),
+        };
+        // Probe along the walk when matches are dense; materialise the filter when they are sparse.
+        $probe = $total * 4 >= $totalDocuments;
 
-        $filterSets = $this->loadFacetKeySets($filter, $this->config->filterMaxDocs, $docIds);
-        $rawDocSet  = array_flip($docIds);
-        if ($filterSets !== []) {
-            $globalFilter = $this->intersectFilterSets($filterSets);
-            $docIds = array_keys(array_intersect_key($rawDocSet, $globalFilter));
-        }
-
-        $filteredDocSet = array_flip($docIds);
-        ['distribution' => $facetDistribution, 'stats' => $facetStats] = $this->computeFacetCounts(
-            $facets,
-            $filterSets,
-            $rawDocSet,
-            $filteredDocSet,
-            $this->config->maxFacetCountDocs,
-        );
-
-        // Use info cache for total when no filter is active (accurate even when cap < total docs).
-        $info  = $this->getInfoValues(['total_documents']);
-        $total = $filterSets !== []
-            ? count($docIds)
-            : (int) ($info['total_documents'] ?? 0);
-
-        // Sort once; used by both the distinct and non-distinct paths below.
-        $sortedDocIds = ($sortSpecs !== [] && $total > 0)
-            ? $this->sortDocIdsBySpecs($docIds, $sortSpecs, [])
-            : $docIds;
+        ['distribution' => $facetDistribution, 'stats' => $facetStats] =
+            $this->browseFacetCounts($facets, $conditions);
 
         if ($distinct !== null) {
-            $keyId    = $this->lookupFacetKeyId($distinct);
-            $valueMap = $this->fetchSortValues($sortedDocIds, $keyId);
+            $docIds = $total === 0 ? [] : $this->fetchBrowseDocIds($conditions);
+            $sortedDocIds = $sortSpecs !== [] ? $this->sortDocIdsBySpecs($docIds, $sortSpecs, []) : $docIds;
             [$pagedIds, $distinctHits] = $this->applyDistinctPagination(
                 $sortedDocIds,
-                $valueMap,
+                $this->fetchSortValues($sortedDocIds, $this->lookupFacetKeyId($distinct)),
                 $distinctCount,
                 $offset,
                 $limit,
@@ -2390,7 +2399,13 @@ class Index
             );
         }
 
-        $pagedIds = array_slice($sortedDocIds, $offset, $limit);
+        if ($total === 0 || $limit === 0) {
+            $pagedIds = [];
+        } elseif ($sortSpecs !== []) {
+            $pagedIds = $this->browseSortedPage($sortSpecs, $conditions, $probe, $offset, $limit);
+        } else {
+            $pagedIds = $this->browseUnsortedPage($conditions, $probe, $offset, $limit);
+        }
 
         return new SearchResult(
             ids: $pagedIds,
@@ -2406,17 +2421,198 @@ class Index
     }
 
     /**
-     * Fetch all doc IDs from doc_lengths ordered by doc_id DESC, capped at $cap.
+     * Count the documents matched by matchingDocsSql().
      *
+     * @param array{0: string, 1: list<mixed>} $match
+     */
+    private function countBrowseDocs(array $match): int
+    {
+        $stmt = $this->prepare("SELECT COUNT(*) FROM ({$match[0]})");
+        $stmt->execute($match[1]);
+        return (int) $stmt->fetchColumn();
+    }
+
+    /**
+     * Fetch every doc ID matching the conditions, newest first. Used by the distinct path only.
+     *
+     * @param  list<FacetCondition> $conditions
      * @return list<int>
      */
-    private function fetchBrowseDocIds(int $cap): array
+    private function fetchBrowseDocIds(array $conditions): array
     {
-        $stmt = $this->stmt(
-            'fetchBrowseDocIds',
-            'SELECT doc_id FROM doc_lengths ORDER BY doc_id DESC LIMIT ?'
+        [$sql, $params] = $this->facetFilterSql($conditions, 'd.doc_id', false) ?? ['', []];
+        $stmt = $this->prepare('SELECT d.doc_id FROM doc_lengths d WHERE 1' . $sql . ' ORDER BY d.doc_id DESC');
+        $stmt->execute($params);
+        /** @var list<int> $ids */
+        $ids = $stmt->fetchAll(PDO::FETCH_COLUMN);
+        return $ids;
+    }
+
+    /**
+     * One page of filtered documents in the default browse order (doc_id DESC).
+     *
+     * @param  list<FacetCondition> $conditions
+     * @return list<int>
+     */
+    private function browseUnsortedPage(array $conditions, bool $probe, int $offset, int $limit): array
+    {
+        [$sql, $params] = $this->facetFilterSql($conditions, 'd.doc_id', $probe) ?? ['', []];
+        $stmt = $this->prepare(
+            'SELECT d.doc_id FROM doc_lengths d WHERE 1' . $sql . ' ORDER BY d.doc_id DESC LIMIT ? OFFSET ?'
         );
-        $stmt->execute([$cap]);
+        $stmt->execute([...$params, $limit, $offset]);
+        /** @var list<int> $ids */
+        $ids = $stmt->fetchAll(PDO::FETCH_COLUMN);
+        return $ids;
+    }
+
+    /**
+     * One page of filtered documents in sort order, read by walking the primary sort field's index.
+     *
+     * The walk visits the primary field in three phases, matching compareSortValues(): numeric
+     * values along facet_numeric_index, then string values along the facet_values primary key,
+     * then documents without the field in doc_id order. Every phase orders ties by doc_id
+     * ascending, the same final tiebreaker as sortDocIdsBySpecs(). Rows are fetched lazily and
+     * the walk stops once offset + limit documents are collected, so the cost follows the page
+     * position rather than the index size.
+     *
+     * A multi-value document is kept at its first row along the walk, which is exactly the
+     * value compareSortValues() picks to represent it (smallest ascending, largest descending).
+     *
+     * With secondary sort specs the walk also finishes the tie group that straddles the page
+     * boundary, then sortDocIdsBySpecs() orders the collected prefix. Every uncollected document
+     * sorts after the boundary value, so the prefix is exactly the head of the full order.
+     *
+     * @param  list<array{field: string, asc: bool}> $specs
+     * @param  list<FacetCondition>                  $conditions
+     * @return list<int>
+     */
+    private function browseSortedPage(array $specs, array $conditions, bool $probe, int $offset, int $limit): array
+    {
+        ['field' => $field, 'asc' => $asc] = $specs[0];
+        $keyId     = $this->lookupFacetKeyId($field);
+        $direction = $asc ? 'ASC' : 'DESC';
+        $wanted    = $offset + $limit;
+        $finishTie = count($specs) > 1;
+
+        [$walkSql, $walkParams]       = $this->facetFilterSql($conditions, 's.doc_id', $probe) ?? ['', []];
+        [$missingSql, $missingParams] = $this->facetFilterSql($conditions, 'd.doc_id', $probe) ?? ['', []];
+
+        // A declared field that no document has populated has no key: every document is "missing".
+        $phases = $keyId === null
+            ? [['SELECT d.doc_id, NULL FROM doc_lengths d WHERE 1' . $missingSql . ' ORDER BY d.doc_id', $missingParams]] // phpcs:ignore Generic.Files.LineLength.TooLong
+            : [
+                [
+                    'SELECT s.doc_id, s.num_value FROM facet_values s'
+                    . ' WHERE s.key_id = ? AND s.num_value IS NOT NULL' . $walkSql
+                    . " ORDER BY s.num_value {$direction}, s.doc_id",
+                    [$keyId, ...$walkParams],
+                ],
+                [
+                    'SELECT s.doc_id, s.value FROM facet_values s'
+                    . ' WHERE s.key_id = ? AND s.num_value IS NULL' . $walkSql
+                    . " ORDER BY s.value {$direction}, s.doc_id",
+                    [$keyId, ...$walkParams],
+                ],
+                [
+                    'SELECT d.doc_id, NULL FROM doc_lengths d'
+                    . ' WHERE NOT EXISTS (SELECT 1 FROM facet_values m WHERE m.doc_id = d.doc_id AND m.key_id = ?)'
+                    . $missingSql . ' ORDER BY d.doc_id',
+                    [$keyId, ...$missingParams],
+                ],
+            ];
+
+        /** @var array<int, true> $collected  doc_id → true, in walk order */
+        $collected = [];
+        $boundary  = null;
+        foreach ($phases as [$sql, $params]) {
+            $stmt = $this->prepare($sql);
+            $stmt->execute($params);
+            $full = false;
+            while (($row = $stmt->fetch(PDO::FETCH_NUM)) !== false) {
+                /** @var array{0: int, 1: float|string|null} $row */
+                [$docId, $value] = $row;
+                if (isset($collected[$docId])) {
+                    continue;
+                }
+                if (count($collected) >= $wanted && (!$finishTie || $value !== $boundary)) {
+                    $full = true;
+                    break;
+                }
+                $collected[$docId] = true;
+                $boundary          = $value;
+            }
+            $stmt->closeCursor();
+            if ($full) {
+                break;
+            }
+        }
+
+        $ids = array_keys($collected);
+        if ($finishTie) {
+            $ids = $this->sortDocIdsBySpecs($ids, $specs, []);
+        }
+        return array_slice($ids, $offset, $limit);
+    }
+
+    /**
+     * Facet value counts for a browse.
+     *
+     * Same semantics as computeFacetCounts(): a requested key that is also an active filter is
+     * counted with every filter except its own (disjunctive), the others with all filters.
+     * With no filter to apply, a key is counted exactly over the whole index by one sequential
+     * scan of its primary-key range. Otherwise counting costs one lookup per matching document
+     * and key, so — as in search() — it runs over at most Config::$maxFacetCountDocs matching
+     * documents and is approximate beyond that.
+     *
+     * @param  list<string>         $facetKeys
+     * @param  list<FacetCondition> $conditions  Ordered by orderBySelectivity().
+     * @return array{
+     *     distribution: array<string, array<array-key, int>>,
+     *     stats: array<string, array{min: float, max: float}>
+     * }
+     */
+    private function browseFacetCounts(array $facetKeys, array $conditions): array
+    {
+        $distribution = [];
+        $stats        = [];
+        $common       = [];
+        foreach ($facetKeys as $keyName) {
+            $keyId = $this->lookupFacetKeyId($keyName);
+            if ($keyId === null) {
+                continue;
+            }
+            $others = array_values(array_filter($conditions, fn(array $c): bool => $c['name'] !== $keyName));
+            if (count($others) === count($conditions)) {
+                $common[$keyName] = $keyId;
+                continue;
+            }
+            $this->collectFacetCounts([$keyName => $keyId], $this->browseFacetDocIds($others), $distribution, $stats);
+        }
+        if ($common !== []) {
+            $this->collectFacetCounts($common, $this->browseFacetDocIds($conditions), $distribution, $stats);
+        }
+        return ['distribution' => $distribution, 'stats' => $stats];
+    }
+
+    /**
+     * Documents to count browse facets over: null (the whole index) without conditions,
+     * otherwise up to Config::$maxFacetCountDocs matching documents.
+     *
+     * @param  list<FacetCondition> $conditions
+     * @return list<int>|null
+     */
+    private function browseFacetDocIds(array $conditions): ?array
+    {
+        if ($conditions === []) {
+            return null;
+        }
+        $match = $this->matchingDocsSql($conditions);
+        if ($match === null) {
+            return [];
+        }
+        $stmt = $this->prepare($match[0] . ' LIMIT ?');
+        $stmt->execute([...$match[1], $this->config->maxFacetCountDocs]);
         /** @var list<int> $ids */
         $ids = $stmt->fetchAll(PDO::FETCH_COLUMN);
         return $ids;
@@ -4859,124 +5055,201 @@ class Index
     }
 
     /**
-     * Load per-filter-key doc ID sets from facet_values.
+     * Translate a facet filter map into SQL conditions, one per filter key.
      *
-     * Called once at the start of search(); all sets are retained in memory so
-     * disjunctive facet counting can reuse them without extra DB round-trips.
+     * Each condition is a predicate on one facet_values row, written against the alias
+     * placeholder '%1$s' so callers can embed it in any query shape. A condition that can
+     * never match — the field has no facet key yet (undeclared, or declared but unpopulated),
+     * or the value list is empty — is marked 'impossible' instead of being rendered.
      *
-     * When $candidateDocIds is non-empty the query is scoped to that set, so the
-     * result is always correct regardless of corpus size (no LIMIT truncation).
+     * 'multiRow' marks a condition one document can satisfy with several rows (a range, or more
+     * than one value), which matters when the condition drives a query (see matchingDocsSql()).
+     *
+     * @param  array<array-key, string|list<string>|FacetRange> $filter
+     * @return list<FacetCondition>
+     */
+    private function facetFilterConditions(array $filter): array
+    {
+        $conditions = [];
+        foreach ($filter as $name => $filterValue) {
+            $name  = (string) $name;
+            $keyId = $this->lookupFacetKeyId($name);
+            $sql   = '';
+            $params = [];
+            if ($filterValue instanceof FacetRange) {
+                $sql = '%1$s.num_value IS NOT NULL';
+                $bounds = [
+                    '>=' => $filterValue->gte,
+                    '>'  => $filterValue->gt,
+                    '<=' => $filterValue->lte,
+                    '<'  => $filterValue->lt,
+                ];
+                foreach ($bounds as $op => $bound) {
+                    if ($bound !== null) {
+                        $sql     .= " AND %1\$s.num_value {$op} ?";
+                        $params[] = $bound;
+                    }
+                }
+            } else {
+                $params = is_array($filterValue) ? $filterValue : [$filterValue];
+                $sql    = '%1$s.value IN (' . $this->placeholders(count($params)) . ')';
+            }
+            $conditions[] = [
+                'name'       => $name,
+                'keyId'      => $keyId ?? 0,
+                'sql'        => $sql,
+                'params'     => $params,
+                'impossible' => $keyId === null || $params === [] && !$filterValue instanceof FacetRange,
+                'multiRow'   => $filterValue instanceof FacetRange || count($params) > 1,
+            ];
+        }
+        return $conditions;
+    }
+
+    /**
+     * Order filter conditions by how many facet_values rows each matches, fewest first.
+     *
+     * One index-only COUNT per condition. The first condition then drives matchingDocsSql(),
+     * so a query over several filters starts from the most selective one and only probes the
+     * others. With fewer than two conditions there is nothing to order and no query runs.
+     *
+     * @param  list<FacetCondition> $conditions
+     * @return list<FacetCondition>
+     */
+    private function orderBySelectivity(array $conditions): array
+    {
+        if (count($conditions) < 2) {
+            return $conditions;
+        }
+        $rows = [];
+        foreach ($conditions as $i => $condition) {
+            if ($condition['impossible']) {
+                $rows[$i] = 0;
+                continue;
+            }
+            $stmt = $this->prepare(
+                'SELECT COUNT(*) FROM facet_values ff WHERE ff.key_id = ? AND ' . sprintf($condition['sql'], 'ff')
+            );
+            $stmt->execute([$condition['keyId'], ...$condition['params']]);
+            $rows[$i] = (int) $stmt->fetchColumn();
+        }
+        asort($rows);
+        return array_map(fn(int $i): array => $conditions[$i], array_keys($rows));
+    }
+
+    /**
+     * SQL selecting the IDs of all documents that satisfy every condition.
+     *
+     * Driven from the first condition's rows (order the list with orderBySelectivity() first)
+     * with a correlated probe per remaining condition, so nothing but the driver's matches is
+     * ever visited. Returns null when a condition can never match.
+     *
+     * @param  non-empty-list<FacetCondition> $conditions
+     * @return array{0: string, 1: list<mixed>}|null
+     */
+    private function matchingDocsSql(array $conditions): ?array
+    {
+        $driver = $conditions[0];
+        $probes = $this->renderFacetProbes(array_slice($conditions, 1), 'md.doc_id');
+        if ($driver['impossible'] || $probes === null) {
+            return null;
+        }
+        $distinct = $driver['multiRow'] ? 'DISTINCT ' : '';
+        return [
+            "SELECT {$distinct}md.doc_id FROM facet_values md WHERE md.key_id = ? AND "
+                . sprintf($driver['sql'], 'md') . $probes[0],
+            [$driver['keyId'], ...$driver['params'], ...$probes[1]],
+        ];
+    }
+
+    /**
+     * Render conditions as correlated EXISTS probes on the document ID expression $docExpr.
+     *
+     * Each probe is one lookup in the covering facet_doc_id_index. Returns [sql, params], where
+     * sql is empty or a series of ' AND EXISTS (…)' clauses, or null when a condition can never
+     * match.
+     *
+     * @param  list<FacetCondition> $conditions
+     * @return array{0: string, 1: list<mixed>}|null
+     */
+    private function renderFacetProbes(array $conditions, string $docExpr): ?array
+    {
+        $sql    = '';
+        $params = [];
+        foreach ($conditions as $i => $condition) {
+            if ($condition['impossible']) {
+                return null;
+            }
+            $alias  = "ff{$i}";
+            $sql   .= " AND EXISTS (SELECT 1 FROM facet_values {$alias} WHERE {$alias}.doc_id = {$docExpr}"
+                . " AND {$alias}.key_id = ? AND " . sprintf($condition['sql'], $alias) . ')';
+            array_push($params, $condition['keyId'], ...$condition['params']);
+        }
+        return [$sql, $params];
+    }
+
+    /**
+     * SQL restricting the document ID expression $docExpr to documents that satisfy every condition.
+     *
+     * Two equivalent shapes:
+     *
+     * - $probe = true: one correlated EXISTS per condition, checked per outer row. Nothing is
+     *   materialised, so a query that walks an index in the requested order stops as soon as
+     *   its page is full. Best for broad filters, where matching rows are dense along the walk.
+     * - $probe = false: `$docExpr IN (matchingDocsSql())`, materialised once and driven from the
+     *   most selective condition, so the cost follows the number of matches. Best for selective
+     *   filters.
+     *
+     * Returns [sql, params] — sql is empty or starts with ' AND' — or null when a condition can
+     * never match (the caller's result is then empty).
+     *
+     * @param  list<FacetCondition> $conditions
+     * @return array{0: string, 1: list<mixed>}|null
+     */
+    private function facetFilterSql(array $conditions, string $docExpr, bool $probe): ?array
+    {
+        if ($conditions === []) {
+            return ['', []];
+        }
+        if ($probe) {
+            return $this->renderFacetProbes($conditions, $docExpr);
+        }
+        $match = $this->matchingDocsSql($conditions);
+        return $match === null ? null : [" AND {$docExpr} IN ({$match[0]})", $match[1]];
+    }
+
+    /**
+     * Load per-filter-key doc ID sets from facet_values, scoped to a candidate set.
+     *
+     * Called once by search() and searchBoolean(); all sets are retained in memory so
+     * disjunctive facet counting can reuse them without extra DB round-trips. Each query only
+     * tests the candidate documents, so the sets are exact. With no candidates every set is
+     * empty and no query runs.
      *
      * @param  array<string, string|list<string>|FacetRange> $filter
-     * @param  int                                           $filterMaxDocs   Fallback cap when no candidates provided.
      * @param  list<int>                                     $candidateDocIds BM25/boolean candidates to scope query.
      * @return array<string, array<int, true>>               Key name → flipped doc ID set.
      */
-    private function loadFacetKeySets(array $filter, int $filterMaxDocs, array $candidateDocIds = []): array
+    private function loadFacetKeySets(array $filter, array $candidateDocIds): array
     {
-        if ($filter === []) {
-            return [];
-        }
-        $sets = [];
-        foreach ($filter as $name => $filterValue) {
-            $keyId = $this->lookupFacetKeyId($name);
-            if ($keyId === null) {
+        $sets          = [];
+        $candidateJson = json_encode($candidateDocIds);
+        foreach ($this->facetFilterConditions($filter) as $condition) {
+            $name = $condition['name'];
+            if ($condition['impossible'] || $candidateDocIds === []) {
                 $sets[$name] = [];
                 continue;
             }
-            if ($filterValue instanceof FacetRange) {
-                $sets[$name] = $this->fetchFacetDocIdsByRange($keyId, $filterValue, $filterMaxDocs, $candidateDocIds);
-            } else {
-                $values = is_array($filterValue) ? $filterValue : [$filterValue];
-                $sets[$name] = $this->fetchFacetDocIdsByValues($keyId, $values, $filterMaxDocs, $candidateDocIds);
-            }
+            $stmt = $this->prepare(
+                'SELECT ff.doc_id FROM facet_values ff WHERE ff.key_id = ? AND ' . sprintf($condition['sql'], 'ff')
+                . ' AND ff.doc_id IN (SELECT value FROM json_each(?))'
+            );
+            $stmt->execute([$condition['keyId'], ...$condition['params'], $candidateJson]);
+            /** @var list<int> $ids */
+            $ids         = $stmt->fetchAll(PDO::FETCH_COLUMN);
+            $sets[$name] = array_fill_keys($ids, true);
         }
         return $sets;
-    }
-
-    /**
-     * Fetch doc IDs matching any of the given string values for a facet key.
-     *
-     * When $candidateDocIds is non-empty the query adds AND doc_id IN (json_each),
-     * so only candidate docs are tested — no LIMIT is needed and recall is exact.
-     * Without candidates the query falls back to a LIMIT cap.
-     *
-     * @param  list<string>        $values
-     * @param  list<int>           $candidateDocIds
-     * @return array<int, true>
-     */
-    private function fetchFacetDocIdsByValues(int $keyId, array $values, int $limit, array $candidateDocIds = []): array
-    {
-        $n  = count($values);
-        $ph = $this->placeholders($n);
-        if ($candidateDocIds !== []) {
-            $candidateJson = json_encode($candidateDocIds);
-            $stmt = $this->prepare(
-                "SELECT doc_id FROM facet_values WHERE key_id = ? AND value IN ({$ph})"
-                . ' AND doc_id IN (SELECT value FROM json_each(?))'
-            );
-            $stmt->execute([$keyId, ...$values, $candidateJson]);
-        } else {
-            $stmt = $this->prepare(
-                "SELECT doc_id FROM facet_values WHERE key_id = ? AND value IN ({$ph}) LIMIT ?"
-            );
-            $stmt->execute([$keyId, ...$values, $limit]);
-        }
-        /** @var list<int> $ids */
-        $ids = $stmt->fetchAll(PDO::FETCH_COLUMN);
-        return array_fill_keys($ids, true);
-    }
-
-    /**
-     * Fetch doc IDs matching a numeric range for a facet key.
-     *
-     * When $candidateDocIds is non-empty the query adds AND doc_id IN (json_each)
-     * so only candidate docs are tested — no LIMIT is needed and recall is exact.
-     * Without candidates the query falls back to a LIMIT cap.
-     *
-     * @param  list<int>  $candidateDocIds
-     * @return array<int, true>
-     */
-    private function fetchFacetDocIdsByRange(
-        int $keyId,
-        FacetRange $range,
-        int $limit,
-        array $candidateDocIds = [],
-    ): array {
-        $conditions = ['key_id = ?', 'num_value IS NOT NULL'];
-        $params     = [$keyId];
-        if ($range->gte !== null) {
-            $conditions[] = 'num_value >= ?';
-            $params[] = $range->gte;
-        }
-        if ($range->gt  !== null) {
-            $conditions[] = 'num_value > ?';
-            $params[] = $range->gt;
-        }
-        if ($range->lte !== null) {
-            $conditions[] = 'num_value <= ?';
-            $params[] = $range->lte;
-        }
-        if ($range->lt  !== null) {
-            $conditions[] = 'num_value < ?';
-            $params[] = $range->lt;
-        }
-        if ($candidateDocIds !== []) {
-            $conditions[] = 'doc_id IN (SELECT value FROM json_each(?))';
-            $params[] = json_encode($candidateDocIds);
-            $stmt = $this->prepare(
-                'SELECT doc_id FROM facet_values WHERE ' . implode(' AND ', $conditions)
-            );
-        } else {
-            $params[] = $limit;
-            $stmt = $this->prepare(
-                'SELECT doc_id FROM facet_values WHERE ' . implode(' AND ', $conditions) . ' LIMIT ?'
-            );
-        }
-        $stmt->execute($params);
-        /** @var list<int> $ids */
-        $ids = $stmt->fetchAll(PDO::FETCH_COLUMN);
-        return array_fill_keys($ids, true);
     }
 
     /**
@@ -5004,12 +5277,6 @@ class Index
         array $filteredScores,
         int $maxDocs,
     ): array {
-        if ($facetKeys === []) {
-            return ['distribution' => [], 'stats' => []];
-        }
-
-        $maxValues = $this->config->maxValuesPerFacet;
-
         /** @var array<string, array<array-key, int>> $distribution */
         $distribution   = [];
         /** @var array<string, array{min: float, max: float}> $stats */
@@ -5031,73 +5298,61 @@ class Index
 
             // Disjunctive: count against the raw result set with all OTHER filters applied.
             $otherSets = array_diff_key($filterSets, [$keyName => true]);
-            if ($otherSets === []) {
-                $countSet = $rawDocScores;
-            } else {
-                $countBase = $this->intersectFilterSets($otherSets);
-                $countSet = array_intersect_key($rawDocScores, $countBase);
-            }
-            $docIds = array_keys($countSet);
-            if ($docIds === []) {
-                continue;
-            }
-            if (count($docIds) > $maxDocs) {
-                $docIds = array_slice($docIds, 0, $maxDocs);
-            }
-            $result = count($docIds) <= self::FACET_JOIN_THRESHOLD
-                ? $this->fetchAllFacetCountsJoin([$keyName => $keyId], $docIds)
-                : [$keyName => $this->fetchFacetCountsForKey($keyId, $docIds)];
-            foreach ($result as $k => $v) {
-                if ($v['distribution'] !== []) {
-                    $dist = $v['distribution'];
-                    $distribution[$k] = $maxValues > 0 && count($dist) > $maxValues
-                        ? array_slice($dist, 0, $maxValues, true)
-                        : $dist;
-                    if ($v['stats'] !== null) {
-                        $stats[$k] = $v['stats'];
-                    }
-                }
-            }
+            $countSet  = $otherSets === []
+                ? $rawDocScores
+                : array_intersect_key($rawDocScores, $this->intersectFilterSets($otherSets));
+            $docIds = array_slice(array_keys($countSet), 0, $maxDocs);
+            $this->collectFacetCounts([$keyName => $keyId], $docIds, $distribution, $stats);
         }
 
-        if ($commonNameToId !== []) {
-            $docIds = array_keys($filteredScores);
-            if ($docIds !== []) {
-                if (count($docIds) > $maxDocs) {
-                    $docIds = array_slice($docIds, 0, $maxDocs);
-                }
-                if (count($docIds) <= self::FACET_JOIN_THRESHOLD) {
-                    // One query for all keys driven from doc IDs — O(N × avg_facets).
-                    foreach ($this->fetchAllFacetCountsJoin($commonNameToId, $docIds) as $k => $v) {
-                        if ($v['distribution'] !== []) {
-                            $dist = $v['distribution'];
-                            $distribution[$k] = $maxValues > 0 && count($dist) > $maxValues
-                                ? array_slice($dist, 0, $maxValues, true)
-                                : $dist;
-                            if ($v['stats'] !== null) {
-                                $stats[$k] = $v['stats'];
-                            }
-                        }
-                    }
-                } else {
-                    // Per-key sequential PK scan — O(K) per key, optimal for large N.
-                    foreach ($commonNameToId as $keyName => $keyId) {
-                        $v = $this->fetchFacetCountsForKey($keyId, $docIds);
-                        if ($v['distribution'] !== []) {
-                            $dist = $v['distribution'];
-                            $distribution[$keyName] = $maxValues > 0 && count($dist) > $maxValues
-                                ? array_slice($dist, 0, $maxValues, true)
-                                : $dist;
-                            if ($v['stats'] !== null) {
-                                $stats[$keyName] = $v['stats'];
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        $docIds = array_slice(array_keys($filteredScores), 0, $maxDocs);
+        $this->collectFacetCounts($commonNameToId, $docIds, $distribution, $stats);
 
         return ['distribution' => $distribution, 'stats' => $stats];
+    }
+
+    /**
+     * Count facet values for $nameToId over a document set and merge them into $distribution / $stats.
+     *
+     * $docIds null counts over the whole index with one sequential primary-key scan per key —
+     * exact, with no membership test. Otherwise one join driven from the doc IDs counts all keys
+     * at once (O(N × keys) index lookups), or a per-key scan of the key's rows tests json_each
+     * membership (O(rows per key)). The join wins up to FACET_JOIN_THRESHOLD docs, and at any
+     * size for two or more keys once facet_doc_id_index is covering (schema revision 2): ~30%
+     * faster for three keys over 5k–20k docs on the 45k ecom set. On revision 1 each join row
+     * seeks into the table and the per-key scan stays ahead above the threshold.
+     * Distributions are capped at Config::$maxValuesPerFacet; keys with no values are omitted.
+     *
+     * @param array<string, int>                           $nameToId     Facet key name → key_id.
+     * @param list<int>|null                               $docIds
+     * @param array<string, array<array-key, int>>         $distribution Mutated in place.
+     * @param array<string, array{min: float, max: float}> $stats        Mutated in place.
+     */
+    private function collectFacetCounts(array $nameToId, ?array $docIds, array &$distribution, array &$stats): void
+    {
+        if ($nameToId === [] || $docIds === []) {
+            return;
+        }
+        $useJoin = $docIds !== null && (
+            count($docIds) <= self::FACET_JOIN_THRESHOLD
+            || $this->schemaVersion >= 2 && count($nameToId) > 1
+        );
+        $results = $useJoin
+            ? $this->fetchAllFacetCountsJoin($nameToId, $docIds)
+            : array_map(fn(int $keyId): array => $this->fetchFacetCountsForKey($keyId, $docIds), $nameToId);
+        $maxValues = $this->config->maxValuesPerFacet;
+        foreach ($results as $keyName => $counts) {
+            $dist = $counts['distribution'];
+            if ($dist === []) {
+                continue;
+            }
+            $distribution[$keyName] = $maxValues > 0 && count($dist) > $maxValues
+                ? array_slice($dist, 0, $maxValues, true)
+                : $dist;
+            if ($counts['stats'] !== null) {
+                $stats[$keyName] = $counts['stats'];
+            }
+        }
     }
 
     /**
@@ -5183,24 +5438,31 @@ class Index
      * identical execution plan to the original IN(?,?,?) but without variable-arity
      * compilation overhead.
      *
-     * @param  list<int> $docIds
+     * With $docIds null the membership test is dropped and the key is counted over the whole
+     * index — one streaming scan of its primary-key range.
+     *
+     * @param  list<int>|null $docIds
      * @return array{distribution: array<array-key, int>, stats: array{min: float, max: float}|null}
      */
-    private function fetchFacetCountsForKey(int $keyId, array $docIds): array
+    private function fetchFacetCountsForKey(int $keyId, ?array $docIds): array
     {
-        $stmt = $this->stmt(
-            'facetCountsForKey',
-            'SELECT value,
+        $select = 'SELECT value,
                     COUNT(*)                                          AS n,
                     MIN(num_value)                                    AS min_num,
                     MAX(num_value)                                    AS max_num,
                     SUM(CASE WHEN num_value IS NOT NULL THEN 1 ELSE 0 END) AS num_count
              FROM facet_values
-             WHERE key_id = ? AND doc_id IN (SELECT value FROM json_each(?))
-             GROUP BY value
-             ORDER BY n DESC'
-        );
-        $stmt->execute([$keyId, json_encode($docIds)]);
+             WHERE key_id = ?';
+        if ($docIds === null) {
+            $stmt = $this->stmt('facetCountsForKeyAll', $select . ' GROUP BY value ORDER BY n DESC');
+            $stmt->execute([$keyId]);
+        } else {
+            $stmt = $this->stmt(
+                'facetCountsForKey',
+                $select . ' AND doc_id IN (SELECT value FROM json_each(?)) GROUP BY value ORDER BY n DESC'
+            );
+            $stmt->execute([$keyId, json_encode($docIds)]);
+        }
         /** @var list<array{value: string, n: string, min_num: string|null, max_num: string|null, num_count: string}> $rows */
         $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
 

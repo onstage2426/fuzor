@@ -34,11 +34,16 @@ final readonly class Config
          * @infection-ignore-all: default value; mutations only affect ranking magnitude, not correctness
          */
         public float $proximityBoost = 1.0,
-        /** Maximum docs fetched per FTS term when a facet filter is active. Higher values improve
-         *  recall under selective filters at the cost of more BM25 scoring work. */
+        /**
+         * No effect since 1.6.0: facet filters are always evaluated exactly — against the
+         * candidate set in search() / searchBoolean(), and in SQL over the whole index for a
+         * browse or facetSearch(). Still accepted so existing configurations keep working;
+         * removed in 2.0.
+         */
         public int $filterMaxDocs = 2_000,
-        /** Maximum result-set doc IDs included in the facet count IN() clause.
-         *  Counts are approximate when the result set exceeds this cap. */
+        /** Maximum matching doc IDs included in facet counting — for search() / searchBoolean(),
+         *  a filtered browse, and facetSearch() with a query. Counts are approximate when more
+         *  documents match. Counts with no filter and no query are always exact. */
         public int $maxFacetCountDocs = 10_000,
         /**
          * Maximum number of values returned per facet field in $facetDistribution.

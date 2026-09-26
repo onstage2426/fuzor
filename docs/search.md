@@ -89,6 +89,10 @@ When no `sort` is specified, results are returned in insertion order, newest fir
 
 `searchBoolean('')` follows the same path.
 
+A browse is answered by SQL over the whole index, so `$totalHits`, the page, and the sort order are exact at any index size. As in Meilisearch, a sorted browse walks the sort field's index in order and stops once the page is full, so its cost follows the page position, not the index size. On a 45k-document index a sorted or filtered page takes well under 5 ms.
+
+Facet counts are exact when no filter applies to them. With a filter they are counted over at most `Config::$maxFacetCountDocs` matching documents, the same cap as in `search()` — see [tuning.md](tuning.md#facets). `distinct` has to look at every matching document to count the surviving groups, so a browse with `distinct` costs time proportional to the number of matches.
+
 ## As-you-type prefix
 
 When `asYouType` is `true` (the default), the last query word is matched as a prefix — `"fast se"` also matches documents containing `"sedan"`.
