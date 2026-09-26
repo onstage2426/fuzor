@@ -1733,10 +1733,9 @@ class Index
         $offset        = $options->offset;
         $filter        = $options->filter;
         $facets        = $options->facets;
-        $sort          = $options->sort;
         $distinct      = $options->distinct;
         $distinctCount = $options->distinctCount;
-        $sortSpecs     = $this->parseSortSpec($sort);
+        ['sort' => $sortSpecs, 'warnings' => $warnings] = $this->checkDeclaredFields($options);
         $parsed        = $this->filterQueryTokens($phrase);
         /** @var list<string> $keywords */
         $keywords     = $parsed['filtered'];
@@ -1920,6 +1919,7 @@ class Index
                 query: $phrase,
                 limit: $limit,
                 offset: $offset,
+                warnings: $warnings,
             );
         }
 
@@ -1957,6 +1957,7 @@ class Index
                 query: $phrase,
                 limit: $limit,
                 offset: $offset,
+                warnings: $warnings,
             );
         }
 
@@ -1970,6 +1971,7 @@ class Index
                 query: $phrase,
                 limit: $limit,
                 offset: $offset,
+                warnings: $warnings,
             );
         }
 
@@ -2004,6 +2006,7 @@ class Index
             query: $phrase,
             limit: $limit,
             offset: $offset,
+            warnings: $warnings,
         );
     }
 
@@ -2029,10 +2032,9 @@ class Index
         $offset        = $options->offset;
         $filter        = $options->filter;
         $facets        = $options->facets;
-        $sort          = $options->sort;
         $distinct      = $options->distinct;
         $distinctCount = $options->distinctCount;
-        $sortSpecs = $this->parseSortSpec($sort);
+        ['sort' => $sortSpecs, 'warnings' => $warnings] = $this->checkDeclaredFields($options);
         $parsed       = $this->filterQueryTokens($phrase);
         /** @var list<list<string>> $phraseGroups */
         $phraseGroups = $parsed['phrase_groups'];
@@ -2165,6 +2167,7 @@ class Index
                 query: $phrase,
                 limit: $limit,
                 offset: $offset,
+                warnings: $warnings,
             );
         }
 
@@ -2183,6 +2186,7 @@ class Index
             query: $phrase,
             limit: $limit,
             offset: $offset,
+            warnings: $warnings,
         );
     }
 
@@ -2202,9 +2206,16 @@ class Index
     public function facetSearch(FacetSearchQuery $query): FacetSearchResult
     {
         $this->checkDataVersion();
+        $warnings = $this->undeclaredFilterWarnings($query->filter);
+        if (!isset($this->facetFieldSet[$query->facetName])) {
+            array_unshift(
+                $warnings,
+                "Facet '{$query->facetName}' is not a declared facet field; no values returned.",
+            );
+        }
         $keyId = $this->lookupFacetKeyId($query->facetName);
         if ($keyId === null) {
-            return new FacetSearchResult([], $query->facetQuery);
+            return new FacetSearchResult([], $query->facetQuery, $warnings);
         }
 
         // --- Step 1: FTS candidate doc IDs (AND-intersection across keywords; phrases applied after) ---
@@ -2280,7 +2291,7 @@ class Index
             $rows
         );
 
-        return new FacetSearchResult($hits, $facetQuery);
+        return new FacetSearchResult($hits, $facetQuery, $warnings);
     }
 
     /**
@@ -2297,10 +2308,9 @@ class Index
         $offset        = $options->offset;
         $filter        = $options->filter;
         $facets        = $options->facets;
-        $sort          = $options->sort;
         $distinct      = $options->distinct;
         $distinctCount = $options->distinctCount;
-        $sortSpecs     = $this->parseSortSpec($sort);
+        ['sort' => $sortSpecs, 'warnings' => $warnings] = $this->checkDeclaredFields($options);
 
         // Fast path: skip all PHP-side work; one PK scan for the page, total from cache.
         if ($filter === [] && $sortSpecs === [] && $facets === [] && $distinct === null) {
@@ -2322,6 +2332,7 @@ class Index
                 query: $phrase,
                 limit: $limit,
                 offset: $offset,
+                warnings: $warnings,
             );
         }
 
@@ -2375,6 +2386,7 @@ class Index
                 query: $phrase,
                 limit: $limit,
                 offset: $offset,
+                warnings: $warnings,
             );
         }
 
@@ -2389,6 +2401,7 @@ class Index
             query: $phrase,
             limit: $limit,
             offset: $offset,
+            warnings: $warnings,
         );
     }
 
@@ -4606,17 +4619,79 @@ class Index
     }
 
     /**
+     * Check the field names in $options against the declared facetFields.
+     *
+     * Sort, filter, facets, and distinct all read from facet_values, which only declared
+     * facet fields populate. A field outside the schema therefore cannot contribute anything,
+     * so each such reference produces a warning on the result. Undeclared sort specs are also
+     * dropped, letting the query fall back to its normal order (relevance, or newest first
+     * for a browse) instead of an all-ties sort. Filter, facets, and distinct keep their
+     * current effect — an undeclared filter still matches nothing, failing closed.
+     *
+     * Checks the schema declaration, not lookupFacetKeyId(): a declared field that no document
+     * has populated yet is legitimately "no values" and does not warn.
+     *
+     * @return array{sort: list<array{field: string, asc: bool}>, warnings: list<string>}
+     * @throws \InvalidArgumentException on a malformed sort spec
+     */
+    private function checkDeclaredFields(SearchOptions $options): array
+    {
+        $specs    = [];
+        $warnings = [];
+        foreach ($this->parseSortSpec($options->sort) as $spec) {
+            if (isset($this->facetFieldSet[$spec['field']])) {
+                $specs[] = $spec;
+            } else {
+                $warnings[] = "Sort field '{$spec['field']}' is not a declared facet field; ignored.";
+            }
+        }
+        array_push($warnings, ...$this->undeclaredFilterWarnings($options->filter));
+        foreach ($options->facets as $field) {
+            if (!isset($this->facetFieldSet[$field])) {
+                $warnings[] = "Facet '{$field}' is not a declared facet field; no counts returned.";
+            }
+        }
+        $distinct = $options->distinct;
+        if ($distinct !== null && !isset($this->facetFieldSet[$distinct])) {
+            $warnings[] = "Distinct field '{$distinct}' is not a declared facet field; results were not deduplicated.";
+        }
+        return ['sort' => $specs, 'warnings' => array_values(array_unique($warnings))];
+    }
+
+    /**
+     * Warnings for filter keys that are not declared facet fields; such a filter matches no documents.
+     *
+     * @param  array<array-key, mixed> $filter
+     * @return list<string>
+     */
+    private function undeclaredFilterWarnings(array $filter): array
+    {
+        $warnings = [];
+        foreach (array_keys($filter) as $field) {
+            if (!isset($this->facetFieldSet[$field])) {
+                $warnings[] = "Filter field '{$field}' is not a declared facet field; no documents match it.";
+            }
+        }
+        return $warnings;
+    }
+
+    /**
      * Fetch sort column values for a single facet field keyed by doc ID.
      *
      * Returns float for numeric facets, string for string facets, null for docs that have
-     * no value for this field. Uses a fixed json_each-based statement (always cached as
-     * 'fetchSortValues') so no per-call prepare overhead regardless of candidate count.
+     * no value for this field. A document with several values for the field is represented
+     * by the one that places it earliest in the requested direction (see compareSortValues()):
+     * its smallest value ascending, its largest descending.
+     *
+     * Uses a fixed json_each-based statement (always cached as 'fetchSortValues') so there is
+     * no per-call prepare overhead regardless of candidate count.
      *
      * @param  list<int> $docIds
      * @param  int|null  $keyId   null = unknown field; all docs return null
+     * @param  bool      $asc     Direction used to pick the representative of a multi-value field.
      * @return array<int, float|string|null>
      */
-    private function fetchSortValues(array $docIds, ?int $keyId): array
+    private function fetchSortValues(array $docIds, ?int $keyId, bool $asc = true): array
     {
         $result = array_fill_keys($docIds, null);
         if ($keyId === null) {
@@ -4629,20 +4704,45 @@ class Index
               WHERE key_id = ? AND doc_id IN (SELECT value FROM json_each(?))'
         );
         $stmt->execute([$keyId, json_encode($docIds)]);
-        /** @var list<array{0: int, 1: float|null, 2: string|null}> $sortRows */
+        /** @var list<array{0: int, 1: float|null, 2: string}> $sortRows */
         $sortRows = $stmt->fetchAll(PDO::FETCH_NUM);
         foreach ($sortRows as [$docId, $numValue, $strValue]) {
-            $result[$docId] = $numValue !== null ? $numValue : $strValue;
+            $value   = $numValue ?? $strValue;
+            $current = $result[$docId];
+            if ($current === null || self::compareSortValues($value, $current, $asc) < 0) {
+                $result[$docId] = $value;
+            }
         }
         return $result;
     }
 
     /**
+     * Order two present sort values; negative when $a comes first.
+     *
+     * Numbers (float) always come before strings, in both directions — a field with mixed
+     * types across documents keeps its numeric values together. Numbers compare by value and
+     * strings by bytes (strcmp), so a numeric-looking string such as "10" is ordered as text,
+     * before "9". Only the order within each type flips for descending.
+     *
+     * This is a strict total order, so the result never depends on the candidates' input
+     * order. Missing values are handled by the caller: they sort last in both directions.
+     */
+    private static function compareSortValues(float|string $a, float|string $b, bool $asc): int
+    {
+        $aIsNumber = is_float($a);
+        if ($aIsNumber !== is_float($b)) {
+            return $aIsNumber ? -1 : 1;
+        }
+        $cmp = $aIsNumber ? $a <=> $b : strcmp((string) $a, (string) $b);
+        return $asc ? $cmp : -$cmp;
+    }
+
+    /**
      * Sort $docIds by the given sort specs and return the full sorted list without pagination.
      *
-     * Sort fields are primary; $scores (BM25) is the tiebreaker when provided; doc ID is the
-     * final deterministic tiebreaker. Docs missing a sort field value are sorted last in both
-     * ASC and DESC directions.
+     * Sort fields are primary, ordered by compareSortValues(); $scores (BM25) is the tiebreaker
+     * when provided; doc ID is the final deterministic tiebreaker. Docs missing a sort field
+     * value are sorted last in both ASC and DESC directions.
      *
      * @param  list<int>                             $docIds
      * @param  list<array{field: string, asc: bool}> $specs
@@ -4659,39 +4759,24 @@ class Index
         $columns = [];
 
         foreach ($specs as ['field' => $field, 'asc' => $asc]) {
-            $keyId  = $this->lookupFacetKeyId($field);
-            $values = $this->fetchSortValues($docIds, $keyId);
-
-            // Detect numeric column: any non-null float value means the whole field is numeric.
-            $isNumeric = false;
-            foreach ($values as $v) {
-                if ($v !== null) {
-                    $isNumeric = is_float($v);
-                    break;
-                }
-            }
-
-            // Apply null-last sentinels so docs without a value sort after all real values
-            // regardless of sort direction.
-            $col = [];
-            foreach ($docIds as $id) {
-                $v = $values[$id];
-                if ($v === null) {
-                    $col[$id] = $asc
-                        ? ($isNumeric ? PHP_FLOAT_MAX  : "\xFF\xFF")
-                        : ($isNumeric ? -PHP_FLOAT_MAX : '');
-                } else {
-                    $col[$id] = $v;
-                }
-            }
-            $columns[] = ['col' => $col, 'asc' => $asc];
+            $keyId     = $this->lookupFacetKeyId($field);
+            $columns[] = ['col' => $this->fetchSortValues($docIds, $keyId, $asc), 'asc' => $asc];
         }
 
         usort($docIds, function (int $a, int $b) use ($columns, $nSpecs, $scores): int {
             for ($j = 0; $j < $nSpecs; $j++) {
-                $cmp = $columns[$j]['col'][$a] <=> $columns[$j]['col'][$b];
+                $va = $columns[$j]['col'][$a];
+                $vb = $columns[$j]['col'][$b];
+                if ($va === null || $vb === null) {
+                    // Missing values sort last in both directions; two missing values tie.
+                    if ($va !== $vb) {
+                        return $va === null ? 1 : -1;
+                    }
+                    continue;
+                }
+                $cmp = self::compareSortValues($va, $vb, $columns[$j]['asc']);
                 if ($cmp !== 0) {
-                    return $columns[$j]['asc'] ? $cmp : -$cmp;
+                    return $cmp;
                 }
             }
             // BM25 tiebreaker (descending); absent on boolean path.

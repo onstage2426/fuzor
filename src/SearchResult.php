@@ -41,6 +41,15 @@ class SearchResult implements \Countable, \IteratorAggregate
      */
     public readonly array $facetStats;
 
+    /**
+     * Human-readable notices about options that were ignored or had no effect, e.g. a sort,
+     * filter, facets, or distinct field that is not a declared facet field. Meant for logs
+     * and debugging; the wording is not a stable API.
+     *
+     * @var list<string>
+     */
+    public readonly array $warnings;
+
     /** @var list<int> Document IDs in relevance order; used internally for score lookups. */
     private readonly array $ids;
 
@@ -53,6 +62,7 @@ class SearchResult implements \Countable, \IteratorAggregate
      * @param int|null                                     $limit
      * @param int|null                                     $offset
      * @param array<string, array{min: float, max: float}> $facetStats
+     * @param list<string>                                 $warnings
      */
     public function __construct(
         array $ids,
@@ -63,6 +73,7 @@ class SearchResult implements \Countable, \IteratorAggregate
         int|null $limit = null,
         int|null $offset = null,
         array $facetStats = [],
+        array $warnings = [],
     ) {
         $this->ids               = $ids;
         $this->totalHits         = $totalHits;
@@ -71,6 +82,7 @@ class SearchResult implements \Countable, \IteratorAggregate
         $this->offset            = $offset;
         $this->facetDistribution = $facetCounts;
         $this->facetStats        = $facetStats;
+        $this->warnings          = $warnings;
 
         $this->hits = $documents === null
             ? array_map(fn(int $id) => ['id' => $id], $ids)
@@ -153,6 +165,12 @@ class SearchResult implements \Countable, \IteratorAggregate
         return $this->facetStats;
     }
 
+    /** @return list<string> */
+    public function getWarnings(): array
+    {
+        return $this->warnings;
+    }
+
     /** @return array<string, mixed> */
     public function toArray(): array
     {
@@ -165,6 +183,7 @@ class SearchResult implements \Countable, \IteratorAggregate
             'offset'            => $this->offset,
             'facetDistribution' => $this->facetDistribution,
             'facetStats'        => $this->facetStats,
+            'warnings'          => $this->warnings,
         ];
     }
 

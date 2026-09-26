@@ -35,10 +35,22 @@ When the document store is disabled, `$hits` contains id-only stubs: `[['id' => 
 | `$offset` | `int\|null` | Page offset |
 | `$facetDistribution` | `array<string, array<string,int>>` | Value → count per facet field |
 | `$facetStats` | `array<string, array{min:float,max:float}>` | Numeric min/max per facet field |
+| `$warnings` | `list<string>` | Notices about options that were ignored or had no effect — see [Warnings](#warnings) |
 | `getHit(int $index, array $default = [])` | `array` | Document at position (0-based); `$default` when out of bounds |
 | `getIds()` | `list<int>` | Document IDs in relevance order |
 | `toArray()` | `array` | Full result as a plain array |
 | `toJSON(int $flags = 0)` | `string` | JSON-encoded result |
+
+### Warnings
+
+`$result->warnings` lists anything in the request that Fuzor ignored or that could not have an effect, such as a `sort`, `filter`, `facets`, or `distinct` field that is not a declared `facetField`. It is empty for a well-formed request.
+
+```php
+$result = $index->search('watch', new SearchOptions(sort: ['title:asc']));
+$result->warnings; // ["Sort field 'title' is not a declared facet field; ignored."]
+```
+
+The messages are meant for logs and debugging; their wording is not a stable API. To check a field up front, compare it against `$index->facetFields`. A declared field that no document has a value for yet does not produce a warning.
 
 ## Pagination
 
@@ -222,6 +234,8 @@ $result = $index->search('watch', new SearchOptions(
 ));
 ```
 
+Filtering on a field that is not a declared `facetField` matches no documents and adds a [warning](#warnings).
+
 ### Numeric range filters
 
 Use `FacetRange` for numeric fields:
@@ -328,6 +342,7 @@ Only values that appear on documents satisfying both the FTS query and all filte
 ```php
 $result->facetHits;        // list<array{value: string, count: int}>
 $result->facetQuery;       // the prefix that was searched
+$result->warnings;         // list<string> — e.g. an undeclared facetName or filter field
 count($result);            // number of values returned
 foreach ($result as $hit) { ... }
 $result->toArray();        // serialisable snapshot
@@ -353,9 +368,21 @@ $result = $index->search('watch', new SearchOptions(sort: ['price:asc']));
 $result = $index->search('watch', new SearchOptions(sort: ['brand:asc', 'price:asc']));
 ```
 
-Each spec is `'field:asc'` or `'field:desc'` (case-insensitive). Documents missing a sort field always appear last, regardless of direction.
+Each spec is `'field:asc'` or `'field:desc'` (case-insensitive). A malformed spec throws `\InvalidArgumentException`. A spec naming a field that is not a declared `facetField` is ignored and reported in [`$warnings`](#warnings); the remaining specs still apply, and with none left the result keeps its normal order (relevance, or newest first for a browse).
+
+Values are ordered as follows:
+
+- **Numbers before strings**, in both directions. Numbers are facet values indexed as PHP `int` or `float`.
+- **Numbers** compare by value.
+- **Strings** compare by their bytes (`strcmp`). This is case-sensitive, so `"Zebra"` sorts before `"apple"`, and accented letters sort after `z`. A numeric-looking string is still a string: `"10"` sorts before `"9"`. Index numbers as `int`/`float` to sort them numerically (range filters and `facetStats` need that too).
+- **Multi-value fields** sort by the value that places the document earliest: its smallest value ascending, its largest descending.
+- **Documents missing the field** always appear last, regardless of direction.
+
+For a human-facing A–Z order, store a normalized copy as its own facet field — e.g. `title_sort` holding `mb_strtolower($title)` — and sort on that.
 
 When two documents share the same sort value, BM25 score is used as a tiebreaker in `search()`. Boolean search breaks ties by document ID ascending.
+
+**Compared with Meilisearch:** the type order, byte order for strings, and missing-values-last rule match Meilisearch. Two differences: Meilisearch compares strings case-insensitively (planned for Fuzor 2.0), and by default Meilisearch applies `sort` only as a tiebreaker after its relevance rules, whereas in Fuzor the sort fields decide the order and relevance breaks ties.
 
 ```php
 $result = $index->searchBoolean('sedan or coupe', new SearchOptions(sort: ['price:asc']));
@@ -373,7 +400,7 @@ $result = $index->search('shirt', new SearchOptions(distinct: 'brand'));
 $result = $index->search('shirt', new SearchOptions(distinct: 'brand', distinctCount: 2));
 ```
 
-The field must be declared as a `facetField`. Unknown field names are silently ignored.
+The field must be declared as a `facetField`. An undeclared field has no effect and adds a [warning](#warnings). For a multi-value field, each document is grouped by its smallest value.
 
 When `sort` is also set, sort order determines which document wins per group instead of BM25 score:
 

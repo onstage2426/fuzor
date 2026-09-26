@@ -24,13 +24,24 @@ final class FacetSearchResult implements \Countable, \IteratorAggregate
     public readonly string $facetQuery;
 
     /**
-     * @param list<array{value: string, count: int}> $facetHits
-     * @param string $facetQuery
+     * Human-readable notices about parts of the query that were ignored or had no effect,
+     * e.g. a facetName or filter key that is not a declared facet field. Meant for logs and
+     * debugging; the wording is not a stable API.
+     *
+     * @var list<string>
      */
-    public function __construct(array $facetHits, string $facetQuery = '')
+    public readonly array $warnings;
+
+    /**
+     * @param list<array{value: string, count: int}> $facetHits
+     * @param string       $facetQuery
+     * @param list<string> $warnings
+     */
+    public function __construct(array $facetHits, string $facetQuery = '', array $warnings = [])
     {
         $this->facetHits  = $facetHits;
         $this->facetQuery = $facetQuery;
+        $this->warnings   = $warnings;
     }
 
     /** @return list<array{value: string, count: int}> */
@@ -42,6 +53,12 @@ final class FacetSearchResult implements \Countable, \IteratorAggregate
     public function getFacetQuery(): string
     {
         return $this->facetQuery;
+    }
+
+    /** @return list<string> */
+    public function getWarnings(): array
+    {
+        return $this->warnings;
     }
 
     /** Enables count($result). */
@@ -62,6 +79,7 @@ final class FacetSearchResult implements \Countable, \IteratorAggregate
         return [
             'facetHits'  => $this->facetHits,
             'facetQuery' => $this->facetQuery,
+            'warnings'   => $this->warnings,
         ];
     }
 

@@ -3723,6 +3723,35 @@ class IndexTest extends TestCase
         $result = $index->facetSearch(new FacetSearchQuery(facetName: 'nonexistent'));
 
         $this->assertSame([], $result->facetHits);
+        $this->assertSame(
+            ["Facet 'nonexistent' is not a declared facet field; no values returned."],
+            $result->getWarnings(),
+        );
+    }
+
+    public function testFacetSearchDeclaredButUnpopulatedFieldDoesNotWarn(): void
+    {
+        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['genre', 'year']));
+        $index->insert([['id' => 1, 'title' => 'doc', 'genre' => 'Action']]);
+
+        $result = $index->facetSearch(new FacetSearchQuery(facetName: 'year'));
+
+        $this->assertSame([], $result->facetHits);
+        $this->assertSame([], $result->warnings);
+    }
+
+    public function testFacetSearchUndeclaredFilterWarns(): void
+    {
+        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['genre']));
+        $index->insert([['id' => 1, 'title' => 'doc', 'genre' => 'Action']]);
+
+        $result = $index->facetSearch(new FacetSearchQuery(facetName: 'genre', filter: ['color' => 'red']));
+
+        $this->assertSame([], $result->facetHits);
+        $this->assertSame(
+            ["Filter field 'color' is not a declared facet field; no documents match it."],
+            $result->warnings,
+        );
     }
 
     public function testFacetSearchEmptyIndexReturnsEmpty(): void
@@ -3813,6 +3842,7 @@ class IndexTest extends TestCase
         $this->assertArrayHasKey('facetQuery', $arr);
         $this->assertSame('ac', $arr['facetQuery']);
         $this->assertSame([['value' => 'Action', 'count' => 1]], $arr['facetHits']);
+        $this->assertSame([], $arr['warnings']);
     }
 
     // --- facetFields / searchableFields schema persistence ---
@@ -4077,20 +4107,158 @@ class IndexTest extends TestCase
         $this->assertSame([3, 1], $page2->getIds());
     }
 
-    public function testSortUnknownFieldAllNull(): void
+    public function testSortUndeclaredFieldIsIgnoredWithWarning(): void
     {
-        // Field not in facetFields → no facet_values rows → all docs treated as null.
-        // Falls through to doc_id as final tiebreaker.
         $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['price']));
         $index->insert([
             ['id' => 1, 'title' => 'product', 'price' => 10],
-            ['id' => 2, 'title' => 'product', 'price' => 20],
+            ['id' => 2, 'title' => 'product product', 'price' => 20],
             ['id' => 3, 'title' => 'product', 'price' => 30],
         ]);
-        $sorted   = $index->search('product', new SearchOptions(sort: ['weight:asc']));
-        $unsorted = $index->search('product', new SearchOptions(sort: ['weight:desc']));
-        // Both produce the same IDs (all null → doc_id tiebreaker either way)
-        $this->assertSame($sorted->getIds(), $unsorted->getIds());
+        $relevance = $index->search('product')->getIds();
+        $result    = $index->search('product', new SearchOptions(sort: ['weight:asc']));
+
+        $this->assertSame($relevance, $result->getIds());
+        $this->assertSame(["Sort field 'weight' is not a declared facet field; ignored."], $result->warnings);
+    }
+
+    public function testSortUndeclaredFieldKeepsDeclaredSpecs(): void
+    {
+        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['price']));
+        $index->insert([
+            ['id' => 1, 'title' => 'product', 'price' => 30],
+            ['id' => 2, 'title' => 'product', 'price' => 10],
+            ['id' => 3, 'title' => 'product', 'price' => 20],
+        ]);
+        $result = $index->search('product', new SearchOptions(sort: ['title:asc', 'price:asc']));
+
+        $this->assertSame([2, 3, 1], $result->getIds());
+        $this->assertCount(1, $result->warnings);
+    }
+
+    public function testSortUndeclaredFieldOnBrowseKeepsNewestFirst(): void
+    {
+        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['price']));
+        $index->insert([
+            ['id' => 1, 'title' => 'a'],
+            ['id' => 2, 'title' => 'b'],
+            ['id' => 3, 'title' => 'c'],
+        ]);
+        $asc  = $index->search('', new SearchOptions(sort: ['title:asc']));
+        $desc = $index->searchBoolean('', new SearchOptions(sort: ['title:desc']));
+
+        $this->assertSame([3, 2, 1], $asc->getIds());
+        $this->assertSame([3, 2, 1], $desc->getIds());
+        $this->assertCount(1, $asc->warnings);
+    }
+
+    public function testSortUndeclaredFieldOnBooleanSearchWarns(): void
+    {
+        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['price']));
+        $index->insert([['id' => 1, 'title' => 'product', 'price' => 10]]);
+
+        $result = $index->searchBoolean('product', new SearchOptions(sort: ['title:asc']));
+
+        $this->assertSame([1], $result->getIds());
+        $this->assertSame(["Sort field 'title' is not a declared facet field; ignored."], $result->warnings);
+    }
+
+    public function testSortDeclaredButUnpopulatedFieldDoesNotWarn(): void
+    {
+        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['price', 'weight']));
+        $index->insert([['id' => 1, 'title' => 'product', 'price' => 10]]);
+
+        $result = $index->search('product', new SearchOptions(sort: ['weight:asc']));
+
+        $this->assertSame([1], $result->getIds());
+        $this->assertSame([], $result->warnings);
+    }
+
+    public function testSortNumbersBeforeStringsInBothDirections(): void
+    {
+        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['size']));
+        $index->insert([
+            ['id' => 1, 'title' => 'product', 'size' => 'M'],
+            ['id' => 2, 'title' => 'product', 'size' => 42],
+            ['id' => 3, 'title' => 'product', 'size' => 'L'],
+            ['id' => 4, 'title' => 'product', 'size' => 38],
+            ['id' => 5, 'title' => 'product'],
+        ]);
+
+        $asc  = $index->search('product', new SearchOptions(sort: ['size:asc']))->getIds();
+        $desc = $index->search('product', new SearchOptions(sort: ['size:desc']))->getIds();
+
+        $this->assertSame([4, 2, 3, 1, 5], $asc);
+        $this->assertSame([2, 4, 1, 3, 5], $desc);
+    }
+
+    public function testSortNumericLookingStringsCompareAsBytes(): void
+    {
+        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['code']));
+        $index->insert([
+            ['id' => 1, 'title' => 'product', 'code' => '9'],
+            ['id' => 2, 'title' => 'product', 'code' => '10'],
+            ['id' => 3, 'title' => 'product', 'code' => '100'],
+        ]);
+
+        $result = $index->search('product', new SearchOptions(sort: ['code:asc']));
+
+        $this->assertSame([2, 3, 1], $result->getIds());
+    }
+
+    public function testSortStringsAreCaseSensitiveBytes(): void
+    {
+        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['name']));
+        $index->insert([
+            ['id' => 1, 'title' => 'product', 'name' => 'apple'],
+            ['id' => 2, 'title' => 'product', 'name' => 'Zebra'],
+            ['id' => 3, 'title' => 'product', 'name' => 'Éclair'],
+        ]);
+
+        $result = $index->search('product', new SearchOptions(sort: ['name:asc']));
+
+        $this->assertSame([2, 1, 3], $result->getIds());
+    }
+
+    public function testSortMixedStringsIsIndependentOfInsertionOrder(): void
+    {
+        // Loose comparison compared '9' and '10' numerically but '10a' byte-wise, which is not
+        // a total order: the result depended on the order candidates arrived in.
+        $orders = [];
+        foreach ([['9', '10', '10a'], ['10a', '10', '9'], ['10', '10a', '9']] as $n => $codes) {
+            $index = new Index($this->dbPath, force: true, schema: new SchemaConfig(facetFields: ['code']));
+            $docs  = [];
+            foreach ($codes as $i => $code) {
+                $docs[] = ['id' => $i + 1, 'title' => 'product', 'code' => $code];
+            }
+            $index->insert($docs);
+            $hits = $index->search('product', new SearchOptions(
+                sort: ['code:asc'],
+                attributesToRetrieve: ['code'],
+            ))->hits;
+            $orders[$n] = array_column($hits, 'code');
+            $index->close();
+        }
+
+        $this->assertSame(['10', '10a', '9'], $orders[0]);
+        $this->assertSame($orders[0], $orders[1]);
+        $this->assertSame($orders[0], $orders[2]);
+    }
+
+    public function testSortMultiValueFieldUsesSmallestAscAndLargestDesc(): void
+    {
+        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['size']));
+        $index->insert([
+            ['id' => 1, 'title' => 'product', 'size' => [1, 50]],
+            ['id' => 2, 'title' => 'product', 'size' => [10]],
+            ['id' => 3, 'title' => 'product', 'size' => [20, 30]],
+        ]);
+
+        $asc  = $index->search('product', new SearchOptions(sort: ['size:asc']))->getIds();
+        $desc = $index->search('product', new SearchOptions(sort: ['size:desc']))->getIds();
+
+        $this->assertSame([1, 2, 3], $asc);
+        $this->assertSame([1, 3, 2], $desc);
     }
 
     public function testSortOnBooleanSearch(): void
@@ -4490,7 +4658,7 @@ class IndexTest extends TestCase
         $this->assertCount(1, $rating4);
     }
 
-    public function testDistinctUnknownFieldIsNoop(): void
+    public function testDistinctUnknownFieldIsNoopWithWarning(): void
     {
         $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['brand']));
         $index->insert([
@@ -4498,10 +4666,90 @@ class IndexTest extends TestCase
             ['id' => 2, 'title' => 'product', 'brand' => 'Nike'],
             ['id' => 3, 'title' => 'product', 'brand' => 'Adidas'],
         ]);
-        // 'color' is not a declared facet field — distinct is silently ignored
+        // 'color' is not a declared facet field — distinct has no effect
         $result = $index->search('product', new SearchOptions(distinct: 'color'));
         $this->assertSame(3, $result->totalHits);
         $this->assertCount(3, $result->getIds());
+        $this->assertSame(
+            ["Distinct field 'color' is not a declared facet field; results were not deduplicated."],
+            $result->warnings,
+        );
+    }
+
+    public function testDistinctMultiValueFieldIsDeterministic(): void
+    {
+        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['tag']));
+        $index->insert([
+            ['id' => 1, 'title' => 'product', 'tag' => ['b', 'a']],
+            ['id' => 2, 'title' => 'product', 'tag' => ['a']],
+            ['id' => 3, 'title' => 'product', 'tag' => ['b']],
+        ]);
+        // Doc 1 is represented by its smallest value 'a', so it collapses with doc 2, not doc 3.
+        $result = $index->searchBoolean('product', new SearchOptions(distinct: 'tag'));
+        $this->assertSame(2, $result->totalHits);
+        $this->assertContains(3, $result->getIds());
+    }
+
+    // --- Warnings ---
+
+    public function testWarningsEmptyByDefault(): void
+    {
+        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['brand']));
+        $index->insert([['id' => 1, 'title' => 'product', 'brand' => 'Nike']]);
+
+        $result = $index->search('product', new SearchOptions(
+            filter: ['brand' => 'Nike'],
+            facets: ['brand'],
+            sort: ['brand:asc'],
+            distinct: 'brand',
+        ));
+
+        $this->assertSame([], $result->warnings);
+        $this->assertSame([], $result->getWarnings());
+        $this->assertSame([], $result->toArray()['warnings']);
+    }
+
+    public function testFilterUndeclaredFieldWarnsAndMatchesNothing(): void
+    {
+        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['brand']));
+        $index->insert([['id' => 1, 'title' => 'product', 'brand' => 'Nike']]);
+
+        $search  = $index->search('product', new SearchOptions(filter: ['color' => 'red']));
+        $boolean = $index->searchBoolean('product', new SearchOptions(filter: ['color' => 'red']));
+        $browse  = $index->search('', new SearchOptions(filter: ['color' => 'red']));
+
+        $expected = ["Filter field 'color' is not a declared facet field; no documents match it."];
+        foreach ([$search, $boolean, $browse] as $result) {
+            $this->assertSame(0, $result->totalHits);
+            $this->assertSame($expected, $result->warnings);
+        }
+    }
+
+    public function testFacetsUndeclaredFieldWarns(): void
+    {
+        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['brand']));
+        $index->insert([['id' => 1, 'title' => 'product', 'brand' => 'Nike']]);
+
+        $result = $index->search('product', new SearchOptions(facets: ['brand', 'color', 'color']));
+
+        $this->assertSame(['Nike' => 1], $result->facetDistribution['brand']);
+        $this->assertArrayNotHasKey('color', $result->facetDistribution);
+        $this->assertSame(["Facet 'color' is not a declared facet field; no counts returned."], $result->warnings);
+    }
+
+    public function testWarningsCollectedAcrossOptions(): void
+    {
+        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['brand']));
+        $index->insert([['id' => 1, 'title' => 'product', 'brand' => 'Nike']]);
+
+        $result = $index->search('', new SearchOptions(
+            filter: ['size' => 'M'],
+            facets: ['color'],
+            sort: ['title:asc'],
+            distinct: 'sku',
+        ));
+
+        $this->assertCount(4, $result->warnings);
     }
 
     // --- Field boosts ---
