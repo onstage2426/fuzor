@@ -2448,47 +2448,56 @@ class Index
         ];
 
         // --- Step 2: Facet filters ---
-        // With FTS candidates the filters are intersected in PHP against that (small) set; without
-        // them they go straight into the count query as exact doc_id IN (subquery) conditions.
+        // With FTS candidates the filters are intersected in PHP against that (bounded) set;
+        // without them the matching documents come straight from SQL (matchingDocsSql()).
         if ($ftsCandidates === []) {
             return new FacetSearchResult([], $query->facetQuery, $warnings, $exhaustive);
         }
-        $filterSql = ['', []];
+        $match = null;
         if ($ftsCandidates !== null && $query->filter !== []) {
             $filterSets    = $this->loadFacetKeySets($query->filter, array_keys($ftsCandidates));
             $ftsCandidates = array_intersect_key($ftsCandidates, $this->intersectFilterSets($filterSets));
         } elseif ($query->filter !== []) {
             $conditions = $this->orderBySelectivity($this->facetFilterConditions($query->filter));
-            $filterSql  = $this->facetFilterSql($conditions, 'doc_id', false);
+            $match      = $conditions === [] ? null : $this->matchingDocsSql($conditions);
+            if ($match === null) {
+                return new FacetSearchResult([], $query->facetQuery, $warnings, $exhaustive);
+            }
         }
-        if ($filterSql === null || $ftsCandidates === []) {
+        if ($ftsCandidates === []) {
             return new FacetSearchResult([], $query->facetQuery, $warnings, $exhaustive);
         }
 
         // --- Step 3: Query facet_values GROUP BY value ---
+        // A restricted count is driven from the matching documents: one covering-index lookup
+        // per document for this key, instead of scanning every row of the key and testing
+        // membership. Measured on the 45k ecom set it is 10–20% faster for broad restrictions
+        // and far faster for narrow ones. Without any restriction the key's rows are scanned.
         $facetQuery = $query->facetQuery;
-        $hasPrefix  = $facetQuery !== '';
-        $conditions = ['key_id = ?'];
-        $params     = [$keyId];
+        $params     = [];
+        if ($ftsCandidates !== null) {
+            $from     = 'json_each(?) m CROSS JOIN facet_values fv ON fv.doc_id = m.value';
+            $params[] = json_encode(array_keys($ftsCandidates));
+        } elseif ($match !== null) {
+            $from   = "({$match[0]}) m CROSS JOIN facet_values fv ON fv.doc_id = m.doc_id";
+            $params = $match[1];
+        } else {
+            $from = 'facet_values fv';
+        }
+        $where    = 'fv.key_id = ?';
+        $params[] = $keyId;
 
-        if ($hasPrefix) {
-            $conditions[] = "LOWER(value) LIKE ? ESCAPE '\\'";
+        if ($facetQuery !== '') {
+            $where   .= " AND LOWER(fv.value) LIKE ? ESCAPE '\\'";
             // Escape LIKE special chars in the user-supplied prefix so '%' and '_' are literal.
             $escaped  = str_replace(['\\', '%', '_'], ['\\\\', '\\%', '\\_'], strtolower($facetQuery));
             $params[] = $escaped . '%';
         }
-
-        if ($ftsCandidates !== null) {
-            $conditions[] = 'doc_id IN (SELECT value FROM json_each(?))';
-            $params[]     = json_encode(array_keys($ftsCandidates));
-        }
-
-        $params   = [...$params, ...$filterSql[1], $query->limit];
+        $params[] = $query->limit;
 
         $stmt = $this->prepare(
-            'SELECT value, COUNT(*) AS count FROM facet_values'
-            . ' WHERE ' . implode(' AND ', $conditions) . $filterSql[0]
-            . ' GROUP BY value ORDER BY count DESC LIMIT ?'
+            "SELECT fv.value, COUNT(*) AS count FROM {$from} WHERE {$where}"
+            . ' GROUP BY fv.value ORDER BY count DESC LIMIT ?'
         );
         $stmt->execute($params);
 
@@ -2514,7 +2523,7 @@ class Index
      * cap, so totals, pages, and facet counts are exact at any index size. Like Meilisearch's
      * sort, a sorted page walks the sort field's index in order and stops once the page is
      * full (see browseSortedPage()). The exact filtered count comes first and picks the filter
-     * shape: a filter matching at least a quarter of the index is probed row by row along the
+     * shape: a filter matching at least a tenth of the index is probed row by row along the
      * walk, a more selective one is materialised once (see facetFilterSql()). Several filters
      * are driven from the most selective one (see orderBySelectivity()).
      *
@@ -2572,7 +2581,10 @@ class Index
             default            => $this->countBrowseDocs($match),
         };
         // Probe along the walk when matches are dense; materialise the filter when they are sparse.
-        $probe = $total * 4 >= $totalDocuments;
+        // Measured on the 45k ecom set: at 13% of the index a probed page takes 0.2 ms against
+        // 6.4 ms materialised, at 5% the order flips (0.5 ms vs 5 ms — matches cluster by
+        // insertion order, so the walk runs long). The crossover sits near 10%.
+        $probe = $total * 10 >= $totalDocuments;
 
         [
             'distribution' => $facetDistribution,
@@ -5199,6 +5211,8 @@ class Index
      *
      * This is a strict total order, so the result never depends on the candidates' input
      * order. Missing values are handled by the caller: they sort last in both directions.
+     * sortRanks() implements the same order with native sorts for whole columns; this
+     * comparison is used where single values are compared (multi-value reduction).
      */
     private static function compareSortValues(float|string $a, float|string $b, bool $asc): int
     {
@@ -5224,44 +5238,91 @@ class Index
      */
     private function sortDocIdsBySpecs(array $docIds, array $specs, array $scores): array
     {
-        if ($docIds === []) {
-            return [];
+        if ($docIds === [] || $specs === []) {
+            return $docIds;
         }
 
-        $nSpecs  = count($specs);
-        $columns = [];
-
+        // Every sort key becomes a numeric column aligned with $docIds — one rank column per
+        // spec, then the BM25 score (descending) when present, then the doc ID itself — so a
+        // single C-level array_multisort() orders the candidates with no PHP callback per
+        // comparison.
+        /** @var list<list<int>> $rankColumns */
+        $rankColumns = [];
         foreach ($specs as ['field' => $field, 'asc' => $asc]) {
-            $keyId     = $this->lookupFacetKeyId($field);
-            $columns[] = ['col' => $this->fetchSortValues($docIds, $keyId, $asc), 'asc' => $asc];
+            $ranks  = self::sortRanks($this->fetchSortValues($docIds, $this->lookupFacetKeyId($field), $asc), $asc);
+            $column = [];
+            foreach ($docIds as $id) {
+                $column[] = $ranks[$id];
+            }
+            $rankColumns[] = $column;
+        }
+        $primary = $rankColumns[0];
+        $rest    = [SORT_ASC, SORT_NUMERIC];
+        foreach (array_slice($rankColumns, 1) as $column) {
+            array_push($rest, $column, SORT_ASC, SORT_NUMERIC);
+        }
+        if ($scores !== []) {
+            $column = [];
+            foreach ($docIds as $id) {
+                $column[] = $scores[$id] ?? 0.0;
+            }
+            array_push($rest, $column, SORT_DESC, SORT_NUMERIC);
+        }
+        array_push($rest, $docIds, SORT_ASC, SORT_NUMERIC);
+        // Unpacking passes each column by reference, so $rest holds the sorted columns afterwards.
+        array_multisort($primary, ...$rest);
+
+        $sorted = $rest[count($rest) - 3];
+        /** @infection-ignore-all ReturnRemoval: unreachable — the doc ID column is always at that position */
+        if (!is_array($sorted)) {
+            return $docIds;
+        }
+        /** @var list<int> $sorted */
+        return $sorted;
+    }
+
+    /**
+     * Map each document's sort value to an integer rank in compareSortValues() order.
+     *
+     * Only the distinct values are sorted — numbers with a native numeric sort, then strings
+     * with a native byte-wise sort, each reversed for descending — so ranking costs
+     * O(distinct log distinct) with no PHP comparison callback. Missing values rank
+     * PHP_INT_MAX and so sort last in both directions.
+     *
+     * @param  array<int, float|string|null> $values Doc ID → sort value, from fetchSortValues().
+     * @return array<int, int>                       Doc ID → rank.
+     */
+    private static function sortRanks(array $values, bool $asc): array
+    {
+        // Prefixed string keys keep numbers and strings apart and floats exact (float array
+        // keys would be truncated to int).
+        $numbers = [];
+        $strings = [];
+        foreach ($values as $value) {
+            if (is_float($value)) {
+                $numbers['n' . $value] = $value;
+            } elseif ($value !== null) {
+                $strings['s' . $value] = $value;
+            }
+        }
+        if ($asc) {
+            asort($numbers, SORT_NUMERIC);
+            asort($strings, SORT_STRING);
+        } else {
+            arsort($numbers, SORT_NUMERIC);
+            arsort($strings, SORT_STRING);
         }
 
-        usort($docIds, function (int $a, int $b) use ($columns, $nSpecs, $scores): int {
-            for ($j = 0; $j < $nSpecs; $j++) {
-                $va = $columns[$j]['col'][$a];
-                $vb = $columns[$j]['col'][$b];
-                if ($va === null || $vb === null) {
-                    // Missing values sort last in both directions; two missing values tie.
-                    if ($va !== $vb) {
-                        return $va === null ? 1 : -1;
-                    }
-                    continue;
-                }
-                $cmp = self::compareSortValues($va, $vb, $columns[$j]['asc']);
-                if ($cmp !== 0) {
-                    return $cmp;
-                }
-            }
-            // BM25 tiebreaker (descending); absent on boolean path.
-            $sc = ($scores[$b] ?? 0.0) <=> ($scores[$a] ?? 0.0);
-            if ($sc !== 0) {
-                return $sc;
-            }
-            // Doc ID: stable deterministic final tiebreaker.
-            return $a <=> $b;
-        });
-
-        return $docIds;
+        $rankOf = array_flip([...array_keys($numbers), ...array_keys($strings)]);
+        $ranks  = [];
+        foreach ($values as $docId => $value) {
+            $ranks[$docId] = match (true) {
+                $value === null   => PHP_INT_MAX,
+                is_float($value)  => $rankOf['n' . $value],
+                default           => $rankOf['s' . $value],
+            };
+        }
+        return $ranks;
     }
 
     /**
