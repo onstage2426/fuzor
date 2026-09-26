@@ -406,7 +406,22 @@ Values are ordered as follows:
 - **Multi-value fields** sort by the value that places the document earliest: its smallest value ascending, its largest descending.
 - **Documents missing the field** always appear last, regardless of direction.
 
-For a human-facing A–Z order, store a normalized copy as its own facet field — e.g. `title_sort` holding `mb_strtolower($title)` — and sort on that.
+For a human-facing A–Z order, store a normalized copy as its own facet field and sort on that. `Tokenizer::sortKey()` lowercases, folds Latin accents to their base letter (`é` → `e`, `ß` → `ss`), and collapses whitespace, using a built-in table so every server produces the same key:
+
+```php
+use Fuzor\Tokenizer;
+
+$index = new Index('/path/to/products.db', schema: new SchemaConfig(
+    facetFields: ['brand', 'price', 'title_sort'],
+));
+$index->insert([[
+    'id'         => 1,
+    'title'      => 'Éclair au chocolat',
+    'title_sort' => Tokenizer::sortKey('Éclair au chocolat'), // "eclair au chocolat"
+]]);
+
+$result = $index->search('', new SearchOptions(sort: ['title_sort:asc']));
+```
 
 When two documents share the same sort value, BM25 score is used as a tiebreaker in `search()`. Boolean search breaks ties by document ID ascending.
 

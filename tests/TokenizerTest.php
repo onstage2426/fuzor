@@ -272,4 +272,38 @@ class TokenizerTest extends TestCase
         $this->assertSame('äö', $result[0][0]);
         $this->assertSame('öü', $result[1][0]);
     }
+
+    // --- sortKey ---
+
+    public function testSortKeyLowercasesAndFoldsAccents(): void
+    {
+        $this->assertSame('eclair zebra', Tokenizer::sortKey('Éclair Zebra'));
+        $this->assertSame('strasse', Tokenizer::sortKey('Straße'));
+        $this->assertSame('aero kobenhavn', Tokenizer::sortKey('Ærø København'));
+        $this->assertSame('lodz', Tokenizer::sortKey('Łódź'));
+    }
+
+    public function testSortKeyFoldsDecomposedAccents(): void
+    {
+        $this->assertSame('cafe', Tokenizer::sortKey("Cafe\u{0301}"));
+    }
+
+    public function testSortKeyCollapsesWhitespace(): void
+    {
+        $this->assertSame('a b', Tokenizer::sortKey("  A \t\n B  "));
+    }
+
+    public function testSortKeyLeavesOtherScriptsLowercasedOnly(): void
+    {
+        $this->assertSame('москва', Tokenizer::sortKey('Москва'));
+        $this->assertSame('東京', Tokenizer::sortKey('東京'));
+    }
+
+    public function testSortKeyOrdersCaseAndAccentsTogether(): void
+    {
+        $names = ['Zebra', 'apple', 'Éclair', 'eagle'];
+        usort($names, fn(string $a, string $b): int => strcmp(Tokenizer::sortKey($a), Tokenizer::sortKey($b)));
+
+        $this->assertSame(['apple', 'eagle', 'Éclair', 'Zebra'], $names);
+    }
 }

@@ -336,6 +336,33 @@ Throws `\InvalidArgumentException` if the callback is omitted and the existing i
 
 Internally, `rebuild` writes to a temporary file alongside the target, then renames it over the original — a POSIX-atomic operation on the same filesystem.
 
+### Writes during a rebuild
+
+A rebuild replaces the whole file, so any write made to the index at that path while the rebuild runs — `insert()`, `update()`, `upsert()`, `delete()` from another request or worker — is **lost** when the new file takes its place:
+
+- **With a callback**, the new index contains what your callback read from your source. A change that reached the source before the callback read that record is included; a change made after it is not, even though it was written to the old index.
+- **Without a callback**, documents are streamed from the old index's store in batches. An update to a document that was already copied is lost, and a document deleted after it was copied comes back.
+
+If you combine live writes with periodic rebuilds (for example updates on save plus a nightly rebuild), use one of these:
+
+- **Serialize them.** Run writes and rebuilds from the same queue or worker, or guard both with a lock of your own, so no write happens while a rebuild runs.
+- **Replay afterwards.** Record which IDs change while the rebuild runs and re-apply them to the new index once `rebuild()` returns:
+
+```php
+$startedAt = time();
+$index     = Index::rebuild($path, fn (Index $new) => $new->insert(loadAllProducts()));
+
+// Anything written to the old index during the rebuild: apply it again.
+foreach (productIdsChangedSince($startedAt) as $id) {
+    $product = loadProduct($id);
+    $product === null ? $index->delete($id) : $index->upsert([$product]);
+}
+```
+
+`upsert()` and `delete()` are idempotent, so replaying a change the rebuild already picked up is harmless.
+
+`snapshotTo()` has no such problem for the source index — it only reads it — but the snapshot is a point-in-time copy. Never write to a snapshot path directly: the next `snapshotTo()` replaces the file and those writes disappear.
+
 ### Temporary files
 
 `rebuild()` and `snapshotTo()` build into `{path}.tmp-{8 hex}` (plus SQLite's `-wal` / `-shm` sidecars) next to the target and remove it when they finish or fail. A process that is killed mid-build — `max_execution_time`, out of memory, a PHP-FPM or container restart — never reaches that cleanup, so its files stay behind.

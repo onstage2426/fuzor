@@ -18,6 +18,38 @@ namespace Fuzor;
  */
 final class Tokenizer
 {
+    /** Lowercase Latin letters with diacritics → base letters, for sortKey(). */
+    private const array SORT_FOLD = [
+        'à' => 'a', 'á' => 'a', 'â' => 'a', 'ã' => 'a', 'ä' => 'a', 'å' => 'a', 'ā' => 'a', 'ă' => 'a', 'ą' => 'a',
+        'ǎ' => 'a', 'ǻ' => 'a',
+        'æ' => 'ae', 'ǽ' => 'ae',
+        'ç' => 'c', 'ć' => 'c', 'ĉ' => 'c', 'ċ' => 'c', 'č' => 'c',
+        'ď' => 'd', 'đ' => 'd', 'ð' => 'd',
+        'è' => 'e', 'é' => 'e', 'ê' => 'e', 'ë' => 'e', 'ē' => 'e', 'ĕ' => 'e', 'ė' => 'e', 'ę' => 'e', 'ě' => 'e',
+        'ĝ' => 'g', 'ğ' => 'g', 'ġ' => 'g', 'ģ' => 'g',
+        'ĥ' => 'h', 'ħ' => 'h',
+        'ì' => 'i', 'í' => 'i', 'î' => 'i', 'ï' => 'i', 'ĩ' => 'i', 'ī' => 'i', 'ĭ' => 'i', 'į' => 'i', 'ı' => 'i',
+        'ǐ' => 'i',
+        'ĳ' => 'ij',
+        'ĵ' => 'j',
+        'ķ' => 'k',
+        'ĺ' => 'l', 'ļ' => 'l', 'ľ' => 'l', 'ŀ' => 'l', 'ł' => 'l',
+        'ñ' => 'n', 'ń' => 'n', 'ņ' => 'n', 'ň' => 'n', 'ŉ' => 'n',
+        'ò' => 'o', 'ó' => 'o', 'ô' => 'o', 'õ' => 'o', 'ö' => 'o', 'ø' => 'o', 'ō' => 'o', 'ŏ' => 'o', 'ő' => 'o',
+        'ǒ' => 'o', 'ǿ' => 'o',
+        'œ' => 'oe',
+        'ŕ' => 'r', 'ŗ' => 'r', 'ř' => 'r',
+        'ś' => 's', 'ŝ' => 's', 'ş' => 's', 'š' => 's', 'ș' => 's',
+        'ß' => 'ss',
+        'ţ' => 't', 'ť' => 't', 'ŧ' => 't', 'ț' => 't',
+        'þ' => 'th',
+        'ù' => 'u', 'ú' => 'u', 'û' => 'u', 'ü' => 'u', 'ũ' => 'u', 'ū' => 'u', 'ŭ' => 'u', 'ů' => 'u', 'ű' => 'u',
+        'ų' => 'u', 'ǔ' => 'u', 'ǖ' => 'u', 'ǘ' => 'u', 'ǚ' => 'u', 'ǜ' => 'u',
+        'ŵ' => 'w',
+        'ý' => 'y', 'ÿ' => 'y', 'ŷ' => 'y',
+        'ź' => 'z', 'ż' => 'z', 'ž' => 'z',
+    ];
+
     private function __construct()
     {
     }
@@ -194,6 +226,27 @@ final class Tokenizer
             '/[\x{4E00}-\x{9FFF}\x{3040}-\x{30FF}\x{AC00}-\x{D7AF}\x{0E00}-\x{0E7F}]/u',
             $token,
         );
+    }
+
+    /**
+     * Normalise a value for use as a human-facing sort key.
+     *
+     * Facet sort compares strings byte-wise, so "Zebra" sorts before "apple" and "Éclair"
+     * after every ASCII word. Store the result of this method in its own facet field (for
+     * example 'title_sort') and sort on that for an A–Z order that ignores case and accents:
+     * lowercase, Latin diacritics folded to their base letter (é → e, ß → ss, æ → ae, ø → o),
+     * combining accents removed, whitespace collapsed. Other scripts are lowercased and
+     * otherwise left as they are.
+     *
+     * The folding table is built in, not taken from ext-intl, so every server produces the
+     * same key and one index never mixes keys built under different environments.
+     */
+    public static function sortKey(string $text): string
+    {
+        $key = strtr(mb_strtolower($text, 'UTF-8'), self::SORT_FOLD);
+        // Decomposed input ("e" + U+0301) carries its accents as combining marks: drop them too.
+        $key = preg_replace('/[\x{0300}-\x{036F}]+/u', '', $key) ?? $key;
+        return trim(preg_replace('/\s+/u', ' ', $key) ?? $key);
     }
 
     // --- Private helpers ------------------------------------------------------

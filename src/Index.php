@@ -340,6 +340,11 @@ class Index
      * build (see cleanupTempFiles()), and leftovers from earlier runs that were killed before
      * they could clean up are swept first.
      *
+     * Writes made to the index at $path while the rebuild runs are lost when the new file
+     * replaces it — including with no callback, which streams the store in batches. See
+     * "Writes during a rebuild" in docs/indexing.md for patterns that combine live writes with
+     * periodic rebuilds.
+     *
      * Pass a SchemaConfig to override the schema; omit it (null) to inherit the existing
      * index's schema. When no existing index is present, null uses SchemaConfig defaults.
      *
