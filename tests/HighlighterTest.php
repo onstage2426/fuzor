@@ -185,4 +185,57 @@ class HighlighterTest extends TestCase
         $result = $hl->highlightMany('轿车', ['body' => '轿 车']);
         $this->assertSame('轿 车', $result['body']);
     }
+
+    // --- escaping ---
+
+    public function testEscapeEscapesTextAroundAndInsideMatches(): void
+    {
+        $hl = new Highlighter(escape: true);
+        $this->assertSame(
+            'a &lt;b&gt;<mark>fast</mark>&lt;/b&gt; &amp; &quot;car&quot;',
+            $hl->highlight('fast', 'a <b>fast</b> & "car"'),
+        );
+    }
+
+    public function testEscapeDoesNotMatchInsideEntities(): void
+    {
+        // Matching runs on the raw text, so "amp" never matches the "&amp;" produced for "&".
+        $hl = new Highlighter(escape: true);
+        $this->assertSame('Tom &amp; Jerry', $hl->highlight('amp', 'Tom & Jerry'));
+        $this->assertSame('x &lt; <mark>lt</mark>', $hl->highlight('lt', 'x < lt'));
+    }
+
+    public function testEscapeInsertsTagsVerbatim(): void
+    {
+        $hl = new Highlighter(open: '<em class="hit">', close: '</em>', escape: true);
+        $this->assertSame('<em class="hit">Fast</em> &amp; slow', $hl->highlight('fast', 'Fast & slow'));
+    }
+
+    public function testEscapeWithoutMatchesStillEscapes(): void
+    {
+        $hl = new Highlighter(escape: true);
+        $this->assertSame('&lt;i&gt;none&lt;/i&gt;', $hl->highlight('suv', '<i>none</i>'));
+        $this->assertSame('&lt;i&gt;x&lt;/i&gt;', $hl->highlight('', '<i>x</i>'));
+        $this->assertSame(['t' => '&lt;x&gt;'], $hl->highlightMany('', ['t' => '<x>']));
+    }
+
+    public function testEscapeHighlightMany(): void
+    {
+        $hl = new Highlighter(escape: true);
+        $this->assertSame(
+            ['title' => '<mark>Fast</mark> &amp; co', 'body' => '&lt;p&gt;so <mark>fast</mark>'],
+            $hl->highlightMany('fast', ['title' => 'Fast & co', 'body' => '<p>so fast']),
+        );
+    }
+
+    public function testEscapeHandlesMultibyteOffsets(): void
+    {
+        $hl = new Highlighter(escape: true);
+        $this->assertSame('Café &amp; <mark>crème</mark>', $hl->highlight('crème', 'Café & crème'));
+    }
+
+    public function testEscapeDefaultIsOff(): void
+    {
+        $this->assertSame('<b><mark>fast</mark></b>', (new Highlighter())->highlight('fast', '<b>fast</b>'));
+    }
 }

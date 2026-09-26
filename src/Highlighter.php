@@ -11,6 +11,10 @@ namespace Fuzor;
  * as the index. When $asYouType is true (the default) the last token is matched as
  * a word prefix — "merc" highlights the full word "Mercedes". Stemming is
  * intentionally not applied: raw query terms are highlighted, not their stems.
+ *
+ * By default the text is returned as given with tags inserted, so the output is only safe
+ * to render as HTML when the input text is trusted. With $escape the output is safe HTML:
+ * the text between and inside matches is escaped, the open/close tags are inserted verbatim.
  */
 final readonly class Highlighter
 {
@@ -22,12 +26,14 @@ final readonly class Highlighter
      * @param string  $close     Closing tag placed after each match.
      * @param bool    $asYouType When true, the last query token is matched as a word prefix.
      * @param ?string $language  BCP 47 tag; drives n-gram tokenisation. Null for whitespace-delimited languages.
+     * @param bool    $escape    Treat the input as plain text and return safe HTML (see class docblock).
      */
     public function __construct(
         private string $open = '<mark>',
         private string $close = '</mark>',
         private bool $asYouType = true,
         private ?string $language = null,
+        private bool $escape = false,
     ) {
         $this->ngramSize = Tokenizer::ngramSize($language);
     }
@@ -43,7 +49,7 @@ final readonly class Highlighter
     {
         $pattern = $this->buildPattern(Tokenizer::tokenize($phrase, $this->language, false));
         if ($pattern === null) {
-            return $text;
+            return $this->escape ? HtmlText::escape($text) : $text;
         }
         return $this->apply($pattern, $text);
     }
@@ -62,7 +68,7 @@ final readonly class Highlighter
     {
         $pattern = $this->buildPattern(Tokenizer::tokenize($phrase, $this->language, false));
         if ($pattern === null) {
-            return $fields;
+            return $this->escape ? array_map(HtmlText::escape(...), $fields) : $fields;
         }
         return array_map(fn(string $text): string => $this->apply($pattern, $text), $fields);
     }
@@ -123,13 +129,33 @@ final readonly class Highlighter
         return '/' . implode('|', $parts) . '/iu';
     }
 
-    /** Apply a compiled pattern to $text, wrapping each match in open/close tags. */
+    /**
+     * Apply a compiled pattern to $text, wrapping each match in open/close tags.
+     *
+     * When escaping, the pattern still runs on the raw text and each unmatched and matched
+     * piece is escaped on its own. Escaping first and matching afterwards would be wrong:
+     * the tokenizer drops punctuation, so a query token such as "amp" would match inside
+     * the "&amp;" produced for a literal "&".
+     */
     private function apply(string $pattern, string $text): string
     {
-        return preg_replace_callback(
-            $pattern,
-            fn(array $m): string => $this->open . $m[0] . $this->close,
-            $text
-        ) ?? $text;
+        if (!$this->escape) {
+            return preg_replace_callback(
+                $pattern,
+                fn(array $m): string => $this->open . $m[0] . $this->close,
+                $text
+            ) ?? $text;
+        }
+        if (preg_match_all($pattern, $text, $matches, PREG_OFFSET_CAPTURE) === false) {
+            return HtmlText::escape($text);
+        }
+        $html   = '';
+        $cursor = 0;
+        foreach ($matches[0] as [$match, $offset]) {
+            $html  .= HtmlText::escape(substr($text, $cursor, $offset - $cursor))
+                . $this->open . HtmlText::escape($match) . $this->close;
+            $cursor = $offset + strlen($match);
+        }
+        return $html . HtmlText::escape(substr($text, $cursor));
     }
 }

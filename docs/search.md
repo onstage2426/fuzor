@@ -474,3 +474,4 @@ Documents with no value for the distinct field are never collapsed — each pass
 | `attributesToCrop` | `null` | Fields to crop in `_formatted`; `['*']` for all |
 | `cropLength` | `200` | Excerpt window size in characters |
 | `cropMarker` | `'…'` | Inserted at crop boundaries |
+| `escapeFormatted` | `false` | Make every `_formatted` value safe HTML (stored text escaped, tags verbatim) — see [formatting.md](formatting.md#rendering-_formatted-as-html) |

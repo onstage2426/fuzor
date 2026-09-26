@@ -11,6 +11,9 @@ namespace Fuzor;
  * it as a short excerpt with ellipsis decoration. Stopword filtering is intentionally
  * not applied to the query — stopwords score zero and the fallback handles all-stopword
  * queries gracefully. Languages without a Snowball stemmer silently skip stemming.
+ *
+ * Output is plain text by default. With $escape it is escaped for HTML — including the
+ * ellipsis, which is treated as text like the excerpt around it.
  */
 final readonly class Snippeter
 {
@@ -25,12 +28,14 @@ final readonly class Snippeter
      * @param int     $maxSnippets Maximum number of non-overlapping windows to return.
      * @param string  $ellipsis    Separator placed between windows and at truncation boundaries.
      * @param ?string $language    BCP 47 tag; drives stemming and n-gram tokenisation. Null disables both.
+     * @param bool    $escape      Escape the returned excerpt for safe inclusion in HTML.
      */
     public function __construct(
         private int $windowSize = 200,
         private int $maxSnippets = 1,
         private string $ellipsis = '…',
         private ?string $language = null,
+        private bool $escape = false,
     ) {
         $this->stemmer   = $language !== null && Stemmer::supports($language) ? new Stemmer($language) : null;
         $this->ngramSize = Tokenizer::ngramSize($language);
@@ -51,7 +56,7 @@ final readonly class Snippeter
      */
     public function snippet(string $query, string $text): string
     {
-        return $this->snippetOne($text, $this->buildQuerySet($query));
+        return $this->output($this->snippetOne($text, $this->buildQuerySet($query)));
     }
 
     /**
@@ -72,13 +77,19 @@ final readonly class Snippeter
         $out      = [];
 
         foreach ($fields as $key => $text) {
-            $out[$key] = $this->snippetOne($text, $querySet);
+            $out[$key] = $this->output($this->snippetOne($text, $querySet));
         }
 
         return $out;
     }
 
     // --- Internal -----------------------------------------------------------
+
+    /** Apply the configured output encoding to a finished excerpt. */
+    private function output(string $excerpt): string
+    {
+        return $this->escape ? HtmlText::escape($excerpt) : $excerpt;
+    }
 
     /**
      * Snippet a single text field against a pre-built query set.

@@ -1703,27 +1703,41 @@ class Index
 
     /**
      * Return a Snippeter pre-configured with the index language.
+     *
+     * @param bool $escape Escape the excerpt for safe inclusion in HTML.
      */
-    public function snippeter(int $windowSize = 200, int $maxSnippets = 1, string $ellipsis = '…'): Snippeter
-    {
+    public function snippeter(
+        int $windowSize = 200,
+        int $maxSnippets = 1,
+        string $ellipsis = '…',
+        bool $escape = false,
+    ): Snippeter {
         return new Snippeter(
             windowSize: $windowSize,
             maxSnippets: $maxSnippets,
             ellipsis: $ellipsis,
             language: $this->language,
+            escape: $escape,
         );
     }
 
     /**
      * Return a Highlighter pre-configured for use with this index.
+     *
+     * @param bool $escape Treat input as plain text and return safe HTML; the tags are inserted verbatim.
      */
-    public function highlighter(string $open = '<mark>', string $close = '</mark>', bool $asYouType = true): Highlighter
-    {
+    public function highlighter(
+        string $open = '<mark>',
+        string $close = '</mark>',
+        bool $asYouType = true,
+        bool $escape = false,
+    ): Highlighter {
         return new Highlighter(
             open: $open,
             close: $close,
             asYouType: $asYouType,
             language: $this->language,
+            escape: $escape,
         );
     }
 
@@ -2790,6 +2804,12 @@ class Index
      * Cropping runs first; highlighting is applied to the (possibly cropped) text, so a field
      * in both lists gets a short, highlighted excerpt. Only string-typed fields are processed.
      *
+     * With SearchOptions::$escapeFormatted every value is safe HTML. Both steps run on plain
+     * text and escaping happens exactly once at the end: the highlighter escapes the pieces
+     * around its tags, and a field that is only cropped is escaped as a whole. On a stripHtml
+     * index the stored HTML is converted to its visible text first — the same conversion used
+     * for indexing — so markup is neither shown as escaped tags nor cut in half by cropping.
+     *
      * @param  array<int, array<string, mixed>> $documents
      * @return array<int, array<string, mixed>>
      */
@@ -2797,9 +2817,11 @@ class Index
     {
         $highlightFields = $options->attributesToHighlight;
         $cropFields      = $options->attributesToCrop;
+        $escape          = $options->escapeFormatted;
+        $toText          = $escape && $this->stripHtml;
 
         $highlighter = $highlightFields !== null
-            ? $this->highlighter($options->highlightPreTag, $options->highlightPostTag, $options->asYouType)
+            ? $this->highlighter($options->highlightPreTag, $options->highlightPostTag, $options->asYouType, $escape)
             : null;
 
         $snippeter = $cropFields !== null
@@ -2810,7 +2832,7 @@ class Index
             $stringFields = [];
             foreach ($doc as $k => $v) {
                 if (is_string($v)) {
-                    $stringFields[$k] = $v;
+                    $stringFields[$k] = $toText ? HtmlText::toText($v) : $v;
                 }
             }
 
@@ -2841,6 +2863,14 @@ class Index
                 foreach ($highlighter->highlightMany($phrase, $inputs) as $key => $value) {
                     $formatted[$key] = $value;
                 }
+                if ($escape) {
+                    // Cropped-only fields have not been through the escaping highlighter.
+                    foreach (array_diff_key($formatted, $inputs) as $key => $value) {
+                        $formatted[$key] = HtmlText::escape($value);
+                    }
+                }
+            } elseif ($escape) {
+                $formatted = array_map(HtmlText::escape(...), $formatted);
             }
 
             if ($formatted !== []) {

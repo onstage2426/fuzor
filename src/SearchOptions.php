@@ -36,6 +36,11 @@ final readonly class SearchOptions
      *                                                returns ['id' => n] stubs — no store lookup, no JSON
      *                                                decode. A field list keeps only those top-level keys
      *                                                (plus 'id' and '_formatted', which are always kept).
+     * @param bool $escapeFormatted When true, every '_formatted' value is safe HTML: stored text is
+     *                              escaped, the highlight tags are inserted verbatim, and on a
+     *                              stripHtml index the stored HTML is first converted to its visible
+     *                              text. When false (default) '_formatted' is the stored text with
+     *                              tags inserted — only safe to render as HTML if that text is trusted.
      */
     public function __construct(
         public readonly bool $asYouType = true,
@@ -53,6 +58,7 @@ final readonly class SearchOptions
         public readonly int $cropLength = 200,
         public readonly string $cropMarker = '…',
         public readonly ?array $attributesToRetrieve = null,
+        public readonly bool $escapeFormatted = false,
     ) {
     }
 }

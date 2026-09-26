@@ -8,6 +8,7 @@ use Fuzor\FacetSearchQuery;
 use Fuzor\Index;
 use Fuzor\SchemaConfig;
 use Fuzor\SearchOptions;
+use Fuzor\SearchResult;
 use Fuzor\Exceptions\IOException;
 use Fuzor\Exceptions\QueryException;
 use PHPUnit\Framework\TestCase;
@@ -3124,6 +3125,93 @@ class IndexTest extends TestCase
     }
 
     // --- _formatted (highlight / crop) ---
+
+    /** The first hit's '_formatted' value for $field, asserted to be a string. */
+    private function formattedField(SearchResult $result, string $field): string
+    {
+        $formatted = $result->getHit(0)['_formatted'] ?? null;
+        $this->assertIsArray($formatted);
+        $value = $formatted[$field] ?? null;
+        $this->assertIsString($value);
+        return $value;
+    }
+
+    public function testEscapeFormattedEscapesStoredText(): void
+    {
+        $index = new Index($this->dbPath);
+        $index->insert([['id' => 1, 'title' => 'Fast & <Furious>']]);
+
+        $hit = $index->search('fast', new SearchOptions(
+            attributesToHighlight: ['title'],
+            escapeFormatted:       true,
+        ))->getHit(0);
+
+        $this->assertSame(['title' => '<mark>Fast</mark> &amp; &lt;Furious&gt;'], $hit['_formatted']);
+        $this->assertSame('Fast & <Furious>', $hit['title'], 'the original field stays raw');
+    }
+
+    public function testEscapeFormattedEscapesExactlyOnce(): void
+    {
+        $body  = str_repeat('filler ', 40) . 'Tom & Jerry <3 needle ' . str_repeat('filler ', 40);
+        $index = new Index($this->dbPath);
+        $index->insert([['id' => 1, 'title' => 'doc', 'body' => $body, 'note' => $body]]);
+
+        $result = $index->search('needle', new SearchOptions(
+            attributesToHighlight: ['body'],
+            attributesToCrop:      ['body', 'note'],
+            cropLength:            40,
+            escapeFormatted:       true,
+        ));
+        $body = $this->formattedField($result, 'body');
+        $note = $this->formattedField($result, 'note');
+
+        // Cropped and highlighted.
+        $this->assertStringContainsString('Tom &amp; Jerry &lt;3 <mark>needle</mark>', $body);
+        $this->assertStringStartsWith('… ', $body);
+        // Cropped only: escaped by the formatter itself, not by the highlighter.
+        $this->assertStringContainsString('Tom &amp; Jerry &lt;3 needle', $note);
+        $this->assertStringNotContainsString('&amp;amp;', $body . $note);
+        $this->assertStringNotContainsString('<mark>', $note);
+    }
+
+    public function testEscapeFormattedCropOnlyIsEscaped(): void
+    {
+        $index = new Index($this->dbPath);
+        $index->insert([['id' => 1, 'title' => 'A & B needle']]);
+
+        $formatted = $index->search('needle', new SearchOptions(
+            attributesToCrop: ['title'],
+            escapeFormatted:  true,
+        ))->getHit(0)['_formatted'];
+
+        $this->assertSame(['title' => 'A &amp; B needle'], $formatted);
+    }
+
+    public function testEscapeFormattedOnStripHtmlIndexFormatsVisibleText(): void
+    {
+        $body  = '<p>fast</p><p>delivery &amp; returns</p><script>track()</script>';
+        $index = new Index($this->dbPath, schema: new SchemaConfig(stripHtml: true));
+        $index->insert([['id' => 1, 'body' => $body]]);
+
+        $escaped = $index->search('fast', new SearchOptions(attributesToHighlight: ['body'], escapeFormatted: true));
+        $raw     = $index->search('fast', new SearchOptions(attributesToHighlight: ['body']));
+
+        $this->assertSame('<mark>fast</mark> delivery &amp; returns', $this->formattedField($escaped, 'body'));
+        $this->assertSame($body, $escaped->getHit(0)['body']);
+        // Without escapeFormatted the stored HTML is highlighted as before.
+        $this->assertSame(
+            '<p><mark>fast</mark></p><p>delivery &amp; returns</p><script>track()</script>',
+            $this->formattedField($raw, 'body'),
+        );
+    }
+
+    public function testIndexHighlighterAndSnippeterAcceptEscape(): void
+    {
+        $index = new Index($this->dbPath);
+
+        $this->assertSame('<b>a</b> &amp;', $index->highlighter('<b>', '</b>', escape: true)->highlight('a', 'a &'));
+        $this->assertSame('x &lt; y', $index->snippeter(escape: true)->snippet('x', 'x < y'));
+    }
 
     public function testFormattedHighlightSingleField(): void
     {

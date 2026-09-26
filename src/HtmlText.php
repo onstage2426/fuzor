@@ -5,9 +5,9 @@ declare(strict_types=1);
 namespace Fuzor;
 
 /**
- * Converts an HTML fragment to the plain text a reader would see.
+ * Converts between HTML and plain text for indexing and result formatting.
  *
- * Used for SchemaConfig::$stripHtml. Plain strip_tags() is not enough for search: it glues
+ * toText() is used for SchemaConfig::$stripHtml. Plain strip_tags() is not enough for search: it glues
  * the words of adjacent blocks together ("<p>foo</p><p>bar</p>" → "foobar"), keeps the
  * contents of <script> and <style>, and leaves entities encoded, so "&amp;" and "&nbsp;"
  * would be indexed as the words "amp" and "nbsp".
@@ -42,5 +42,15 @@ final class HtmlText
         $text = html_entity_decode(strip_tags($text), ENT_QUOTES | ENT_HTML5, 'UTF-8');
         $text = str_replace("\u{00AD}", '', $text);
         return trim(preg_replace('/[\s\x{00A0}]+/u', ' ', $text) ?? $text);
+    }
+
+    /**
+     * Escape plain text for safe inclusion in HTML element content or a quoted attribute.
+     *
+     * Invalid UTF-8 is replaced rather than dropping the whole string (ENT_SUBSTITUTE).
+     */
+    public static function escape(string $text): string
+    {
+        return htmlspecialchars($text, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
     }
 }

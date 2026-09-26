@@ -481,4 +481,33 @@ class SnippeterTest extends TestCase
         $snip = new Snippeter(windowSize: 6);
         $this->assertSame('abc de …', $snip->snippet('fox', 'abc defgh fox'));
     }
+
+    // --- escaping ---
+
+    public function testEscapeEscapesExcerpt(): void
+    {
+        $snip = new Snippeter(escape: true);
+        $this->assertSame('Tom &amp; &lt;Jerry&gt;', $snip->snippet('jerry', 'Tom & <Jerry>'));
+    }
+
+    public function testEscapeTreatsEllipsisAsText(): void
+    {
+        $text = str_repeat('filler ', 30) . 'needle ' . str_repeat('filler ', 30);
+        $snip = new Snippeter(windowSize: 30, ellipsis: '<i>…</i>', escape: true);
+
+        $result = $snip->snippet('needle', $text);
+
+        $this->assertStringContainsString('needle', $result);
+        $this->assertStringStartsWith('&lt;i&gt;…&lt;/i&gt; ', $result);
+        $this->assertStringNotContainsString('<', $result);
+    }
+
+    public function testEscapeAppliesToFallbackAndSnippetMany(): void
+    {
+        $snip = new Snippeter(escape: true);
+        $this->assertSame(
+            ['a' => '1 &lt; 2', 'b' => '&quot;q&quot;'],
+            $snip->snippetMany('zzz', ['a' => '1 < 2', 'b' => '"q"']),
+        );
+    }
 }
