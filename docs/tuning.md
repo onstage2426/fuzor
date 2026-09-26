@@ -18,7 +18,7 @@ All properties have sensible defaults — you only need to set what differs from
 
 | Property | Default | Effect |
 |---|---|---|
-| `maxDocs` | `500` | Max documents fetched per keyword before scoring. Higher = better recall; lower = faster queries. |
+| `maxDocs` | `500` | Max documents fetched per keyword before scoring. Higher = better recall; lower = faster queries. When a keyword matches more, the result reports `exhaustive: false`. |
 | `k1` | `1.2` | Term frequency saturation. Lower values reduce the advantage of repeated terms. |
 | `b` | `0.75` | Length normalisation weight. `0` disables it; `1` fully penalises long documents. |
 | `proximityBoost` | `1.0` | How much to reward terms that appear close together. `0` disables proximity ranking. |
@@ -30,7 +30,7 @@ All properties have sensible defaults — you only need to set what differs from
 |---|---|---|
 | `fuzzyMinWordLength` | `5` | Minimum word length before Levenshtein fallback fires. Shorter words are exact/prefix only. |
 | `fuzzyPrefixLength` | `3` | Characters that must match exactly before the fuzzy scan begins. |
-| `fuzzyMaxExpansions` | `50` | Max wordlist candidates evaluated per fuzzy term. |
+| `fuzzyMaxExpansions` | `50` | Max wordlist candidates evaluated per fuzzy term, and max terms an as-you-type prefix expands to (shortest first). A capped prefix expansion reports `exhaustive: false`. |
 
 The allowed edit distance scales automatically with word length: 1 typo for 5–8 characters, 2 typos for 9+.
 
@@ -39,7 +39,7 @@ The allowed edit distance scales automatically with word length: 1 typo for 5–
 | Property | Default | Effect |
 |---|---|---|
 | `filterMaxDocs` | `2000` | No effect since 1.6.0 — facet filters are always evaluated exactly. Still accepted; removed in 2.0. |
-| `maxFacetCountDocs` | `10000` | Max matching documents included in facet counting, for `search()`, `searchBoolean()`, a filtered browse, and `facetSearch()` with a `query`. Counts are approximate above this cap. Facet counts with no filter and no query are always exact. |
+| `maxFacetCountDocs` | `10000` | Max matching documents included in facet counting, for `search()`, `searchBoolean()`, a filtered browse, and `facetSearch()` with a `query`. Counts are approximate above this cap, and the field is listed in `$approximateFacets`. Facet counts with no filter and no query are always exact. |
 | `maxValuesPerFacet` | `100` | Max values returned per facet field in `$facetDistribution`, ordered by count descending. `0` returns all values. |
 
 ## Field boosting

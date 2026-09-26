@@ -107,7 +107,9 @@ class Index
      * connection avoid redundant SQLite round-trips. Cleared on any write (adjustStats)
      * and on connection change (close / selectIndex / createIndex).
      *
-     * @var array<string, list<array{id: int, term: string, num_hits: int, num_docs: int}>>
+     * Each entry holds the rows and whether a prefix lookup hit Config::$fuzzyMaxExpansions.
+     *
+     * @var array<string, array{0: list<array{id: int, term: string, num_hits: int, num_docs: int}>, 1: bool}>
      */
     private array $wordlistCache = [];
 
@@ -1780,10 +1782,13 @@ class Index
 
         /** @var list<list<int>> $termGroups  keyword_index → matched term IDs, for proximity ranking */
         $termGroups = [];
+        // Set when a cap cut matches out: a keyword above maxDocs, or a capped prefix expansion.
+        $candidatesCapped = false;
+        $prefixCapped     = false;
 
         foreach ($keywords as $idx => $term) {
             $isLastKeyword = $asYouType && ($lastIndex === $idx);
-            $word = $this->getWordlistByKeyword($term, $isLastKeyword);
+            $word = $this->getWordlistByKeyword($term, $isLastKeyword, true, $prefixCapped);
             foreach ($this->synonymsFor($term) as $synTerm) {
                 $synRows = $this->getWordlistByKeyword($synTerm, false, false);
                 if ($synRows !== []) {
@@ -1795,6 +1800,8 @@ class Index
             }
             /** @infection-ignore-all IncrementInteger,Ternary,CastInt: numDocs feeds BM25 scoring only; for single-term prefix results array_sum equals word[0]['num_docs']; CastInt: array_sum returns int */
             $df = count($word) === 1 ? $word[0]['num_docs'] : (int) array_sum(array_column($word, 'num_docs'));
+            // $df counts this keyword's doclist rows, and fetchDocsByTermIds() returns at most maxDocs of them.
+            $candidatesCapped = $candidatesCapped || $df > $this->config->maxDocs;
             // Smoothed BM25 IDF: always ≥ 0, avoids negative weights for common terms.
             /** @infection-ignore-all IncrementInteger|Minus|Plus|Division: IDF mutations monotonically shift all per-term scores by the same factor; relative document ordering is preserved for any single-term query */
             $idf     = log(1 + ($totalDocuments - $df + 0.5) / ($df + 0.5));
@@ -1907,13 +1914,22 @@ class Index
         }
 
         // Compute disjunctive facet counts on the full filtered result set.
-        ['distribution' => $facetDistribution, 'stats' => $facetStats] = $this->computeFacetCounts(
+        [
+            'distribution' => $facetDistribution,
+            'stats'        => $facetStats,
+            'approximate'  => $approximateFacets,
+        ] = $this->computeFacetCounts(
             $facets,
             $filterSets,
             $rawDocScores,
             $docScores,
             $this->config->maxFacetCountDocs,
         );
+        $exhaustive = !$candidatesCapped && !$prefixCapped;
+        $warnings   = [
+            ...$warnings,
+            ...$this->capWarnings($candidatesCapped ? 'maxDocs' : null, $prefixCapped, $approximateFacets),
+        ];
 
         $total = count($docScores);
 
@@ -1929,6 +1945,8 @@ class Index
                 limit: $limit,
                 offset: $offset,
                 warnings: $warnings,
+                exhaustive: $exhaustive,
+                approximateFacets: $approximateFacets,
             );
         }
 
@@ -1967,6 +1985,8 @@ class Index
                 limit: $limit,
                 offset: $offset,
                 warnings: $warnings,
+                exhaustive: $exhaustive,
+                approximateFacets: $approximateFacets,
             );
         }
 
@@ -1981,6 +2001,8 @@ class Index
                 limit: $limit,
                 offset: $offset,
                 warnings: $warnings,
+                exhaustive: $exhaustive,
+                approximateFacets: $approximateFacets,
             );
         }
 
@@ -2016,6 +2038,8 @@ class Index
             limit: $limit,
             offset: $offset,
             warnings: $warnings,
+            exhaustive: $exhaustive,
+            approximateFacets: $approximateFacets,
         );
     }
 
@@ -2064,12 +2088,18 @@ class Index
 
         $maxDocs = $this->config->maxDocs;
 
+        // Set when a cap cut matches out: a keyword above maxDocs, or a capped prefix expansion.
+        $candidatesCapped = false;
+        $prefixCapped     = false;
+
         /** Fetch capped doc IDs for one keyword (resolves prefix expansion / caching). */
-        $fetchIds = fn(string $kw, bool $isLast): array =>
-            $this->fetchBooleanDocIds(
-                $this->resolveWordlistIds($kw, $isLast),
-                $maxDocs
+        $fetchIds = function (string $kw, bool $isLast) use ($maxDocs, &$candidatesCapped, &$prefixCapped): array {
+            return $this->fetchBooleanDocIds(
+                $this->resolveWordlistIds($kw, $isLast, $prefixCapped),
+                $maxDocs,
+                $candidatesCapped,
             );
+        };
 
         /**
          * Materialise a stack entry into a flat list of doc IDs.
@@ -2144,13 +2174,22 @@ class Index
 
         // Compute disjunctive facet counts on the full filtered result.
         $filteredDocSet = array_flip($docIds);
-        ['distribution' => $facetDistribution, 'stats' => $facetStats] = $this->computeFacetCounts(
+        [
+            'distribution' => $facetDistribution,
+            'stats'        => $facetStats,
+            'approximate'  => $approximateFacets,
+        ] = $this->computeFacetCounts(
             $facets,
             $filterSets,
             $rawDocSet,
             $filteredDocSet,
             $this->config->maxFacetCountDocs,
         );
+        $exhaustive = !$candidatesCapped && !$prefixCapped;
+        $warnings   = [
+            ...$warnings,
+            ...$this->capWarnings($candidatesCapped ? 'maxDocs' : null, $prefixCapped, $approximateFacets),
+        ];
 
         $total = count($docIds);
 
@@ -2177,6 +2216,8 @@ class Index
                 limit: $limit,
                 offset: $offset,
                 warnings: $warnings,
+                exhaustive: $exhaustive,
+                approximateFacets: $approximateFacets,
             );
         }
 
@@ -2196,6 +2237,8 @@ class Index
             limit: $limit,
             offset: $offset,
             warnings: $warnings,
+            exhaustive: $exhaustive,
+            approximateFacets: $approximateFacets,
         );
     }
 
@@ -2228,7 +2271,9 @@ class Index
         }
 
         // --- Step 1: FTS candidate doc IDs (AND-intersection across keywords; phrases applied after) ---
-        $ftsCandidates = null; // null = no FTS restriction
+        $ftsCandidates    = null; // null = no FTS restriction
+        $candidatesCapped = false;
+        $prefixCapped     = false;
         if (trim($query->query) !== '') {
             $parsed       = $this->filterQueryTokens($query->query);
             $keywords     = $parsed['filtered'];
@@ -2237,8 +2282,9 @@ class Index
             $maxDocs      = $this->config->maxFacetCountDocs;
             $last         = count($keywords) - 1;
             foreach ($keywords as $i => $kw) {
-                $termIds       = $this->resolveWordlistIds($kw, $i === $last);
-                $kwDocs        = array_fill_keys($this->fetchBooleanDocIds($termIds, $maxDocs), true);
+                $termIds       = $this->resolveWordlistIds($kw, $i === $last, $prefixCapped);
+                $kwIds         = $this->fetchBooleanDocIds($termIds, $maxDocs, $candidatesCapped);
+                $kwDocs        = array_fill_keys($kwIds, true);
                 $ftsCandidates = $ftsCandidates === null ? $kwDocs : array_intersect_key($ftsCandidates, $kwDocs);
                 if ($ftsCandidates === []) {
                     break;
@@ -2251,11 +2297,17 @@ class Index
             }
         }
 
+        $exhaustive = !$candidatesCapped && !$prefixCapped;
+        $warnings   = [
+            ...$warnings,
+            ...$this->capWarnings($candidatesCapped ? 'maxFacetCountDocs' : null, $prefixCapped, []),
+        ];
+
         // --- Step 2: Facet filters ---
         // With FTS candidates the filters are intersected in PHP against that (small) set; without
         // them they go straight into the count query as exact doc_id IN (subquery) conditions.
         if ($ftsCandidates === []) {
-            return new FacetSearchResult([], $query->facetQuery, $warnings);
+            return new FacetSearchResult([], $query->facetQuery, $warnings, $exhaustive);
         }
         $filterSql = ['', []];
         if ($ftsCandidates !== null && $query->filter !== []) {
@@ -2266,7 +2318,7 @@ class Index
             $filterSql  = $this->facetFilterSql($conditions, 'doc_id', false);
         }
         if ($filterSql === null || $ftsCandidates === []) {
-            return new FacetSearchResult([], $query->facetQuery, $warnings);
+            return new FacetSearchResult([], $query->facetQuery, $warnings, $exhaustive);
         }
 
         // --- Step 3: Query facet_values GROUP BY value ---
@@ -2304,7 +2356,7 @@ class Index
             $rows
         );
 
-        return new FacetSearchResult($hits, $facetQuery, $warnings);
+        return new FacetSearchResult($hits, $facetQuery, $warnings, $exhaustive);
     }
 
     /**
@@ -2336,6 +2388,9 @@ class Index
         $distinct      = $options->distinct;
         $distinctCount = $options->distinctCount;
         ['sort' => $sortSpecs, 'warnings' => $warnings] = $this->checkDeclaredFields($options);
+        // Totals, pages, and order are always exact here; only filtered facet counts can be capped.
+        $exhaustive        = true;
+        $approximateFacets = [];
 
         $info           = $this->getInfoValues(['total_documents']);
         $totalDocuments = (int) ($info['total_documents'] ?? 0);
@@ -2360,6 +2415,8 @@ class Index
                 limit: $limit,
                 offset: $offset,
                 warnings: $warnings,
+                exhaustive: $exhaustive,
+                approximateFacets: $approximateFacets,
             );
         }
 
@@ -2373,8 +2430,12 @@ class Index
         // Probe along the walk when matches are dense; materialise the filter when they are sparse.
         $probe = $total * 4 >= $totalDocuments;
 
-        ['distribution' => $facetDistribution, 'stats' => $facetStats] =
-            $this->browseFacetCounts($facets, $conditions);
+        [
+            'distribution' => $facetDistribution,
+            'stats'        => $facetStats,
+            'approximate'  => $approximateFacets,
+        ] = $this->browseFacetCounts($facets, $conditions);
+        $warnings = [...$warnings, ...$this->capWarnings(null, false, $approximateFacets)];
 
         if ($distinct !== null) {
             $docIds = $total === 0 ? [] : $this->fetchBrowseDocIds($conditions);
@@ -2396,6 +2457,8 @@ class Index
                 limit: $limit,
                 offset: $offset,
                 warnings: $warnings,
+                exhaustive: $exhaustive,
+                approximateFacets: $approximateFacets,
             );
         }
 
@@ -2417,6 +2480,8 @@ class Index
             limit: $limit,
             offset: $offset,
             warnings: $warnings,
+            exhaustive: $exhaustive,
+            approximateFacets: $approximateFacets,
         );
     }
 
@@ -2569,13 +2634,15 @@ class Index
      * @param  list<FacetCondition> $conditions  Ordered by orderBySelectivity().
      * @return array{
      *     distribution: array<string, array<array-key, int>>,
-     *     stats: array<string, array{min: float, max: float}>
+     *     stats: array<string, array{min: float, max: float}>,
+     *     approximate: list<string>
      * }
      */
     private function browseFacetCounts(array $facetKeys, array $conditions): array
     {
         $distribution = [];
         $stats        = [];
+        $approximate  = [];
         $common       = [];
         foreach ($facetKeys as $keyName) {
             $keyId = $this->lookupFacetKeyId($keyName);
@@ -2587,12 +2654,26 @@ class Index
                 $common[$keyName] = $keyId;
                 continue;
             }
-            $this->collectFacetCounts([$keyName => $keyId], $this->browseFacetDocIds($others), $distribution, $stats);
+            $capped = false;
+            $docIds = $this->browseFacetDocIds($others, $capped);
+            $this->collectFacetCounts([$keyName => $keyId], $docIds, $distribution, $stats);
+            if ($capped) {
+                $approximate[] = $keyName;
+            }
         }
         if ($common !== []) {
-            $this->collectFacetCounts($common, $this->browseFacetDocIds($conditions), $distribution, $stats);
+            $capped = false;
+            $docIds = $this->browseFacetDocIds($conditions, $capped);
+            $this->collectFacetCounts($common, $docIds, $distribution, $stats);
+            if ($capped) {
+                array_push($approximate, ...array_keys($common));
+            }
         }
-        return ['distribution' => $distribution, 'stats' => $stats];
+        return [
+            'distribution' => $distribution,
+            'stats'        => $stats,
+            'approximate'  => array_values(array_unique($approximate)),
+        ];
     }
 
     /**
@@ -2600,9 +2681,10 @@ class Index
      * otherwise up to Config::$maxFacetCountDocs matching documents.
      *
      * @param  list<FacetCondition> $conditions
+     * @param  bool                 $capped Set to true when more documents matched than the cap.
      * @return list<int>|null
      */
-    private function browseFacetDocIds(array $conditions): ?array
+    private function browseFacetDocIds(array $conditions, bool &$capped): ?array
     {
         if ($conditions === []) {
             return null;
@@ -2611,11 +2693,12 @@ class Index
         if ($match === null) {
             return [];
         }
+        $cap  = $this->config->maxFacetCountDocs;
         $stmt = $this->prepare($match[0] . ' LIMIT ?');
-        $stmt->execute([...$match[1], $this->config->maxFacetCountDocs]);
+        $stmt->execute([...$match[1], $cap + 1]);
         /** @var list<int> $ids */
         $ids = $stmt->fetchAll(PDO::FETCH_COLUMN);
-        return $ids;
+        return $this->capDocIds($ids, $cap, $capped);
     }
 
     /**
@@ -3929,9 +4012,10 @@ class Index
      *
      * @param  string $keyword       Term to resolve.
      * @param  bool   $isLastKeyword Whether this is the final token (for asYouType prefix expansion).
+     * @param  bool   $truncated     Set to true when the prefix expansion was capped.
      * @return list<int>
      */
-    private function resolveWordlistIds(string $keyword, bool $isLastKeyword): array
+    private function resolveWordlistIds(string $keyword, bool $isLastKeyword, bool &$truncated = false): array
     {
         $tokens = Tokenizer::tokenize($keyword, $this->language);
         if ($this->stemmer instanceof \Fuzor\Stemmer) {
@@ -3940,7 +4024,7 @@ class Index
         $ids  = [];
         $last = count($tokens) - 1;
         foreach ($tokens as $i => $token) {
-            foreach ($this->getWordlistByKeyword($token, $isLastKeyword && $i === $last) as $row) {
+            foreach ($this->getWordlistByKeyword($token, $isLastKeyword && $i === $last, true, $truncated) as $row) {
                 $ids[] = $row['id'];
             }
             foreach ($this->synonymsFor($token) as $synTerm) {
@@ -3956,6 +4040,8 @@ class Index
     /**
      * Fetch a capped list of doc IDs matching any of the given term IDs.
      *
+     * Sets $truncated when more than $limit rows matched (one extra row is fetched to tell).
+     *
      * Used by the boolean PHP-side evaluator; does not fetch BM25 fields.
      * Single-term path uses a cached statement. Multi-term path uses IN() —
      * boolean set operations in PHP don't require hit_count ordering.
@@ -3963,7 +4049,7 @@ class Index
      * @param  list<int> $termIds
      * @return list<int>
      */
-    private function fetchBooleanDocIds(array $termIds, int $limit): array
+    private function fetchBooleanDocIds(array $termIds, int $limit, bool &$truncated = false): array
     {
         /** @infection-ignore-all ReturnRemoval: boolean search terms always resolve to non-empty termIds in tests (all searched terms exist in the indexed docs) */
         if ($termIds === []) {
@@ -3978,11 +4064,11 @@ class Index
                 'boolDocIds1',
                 'SELECT doc_id FROM doclist WHERE term_id = ? ORDER BY hit_count DESC LIMIT ?'
             );
-            $stmt->execute([$termIds[0], $limit]);
+            $stmt->execute([$termIds[0], $limit + 1]);
             /** @var list<int> $rows */
             $rows = $stmt->fetchAll(PDO::FETCH_COLUMN);
             /** @infection-ignore-all ReturnRemoval: falling through to the IN() path for n=1 returns the same result set */
-            return $rows;
+            return $this->capDocIds($rows, $limit, $truncated);
         }
 
         $placeholders = $this->placeholders($n);
@@ -3990,11 +4076,27 @@ class Index
             "boolDocIds:{$n}",
             "SELECT doc_id FROM doclist WHERE term_id IN ({$placeholders}) ORDER BY hit_count DESC LIMIT ?"
         );
-        $stmt->execute([...$termIds, $limit]);
+        $stmt->execute([...$termIds, $limit + 1]);
         /** @var list<int> $rows */
         $rows = $stmt->fetchAll(PDO::FETCH_COLUMN);
         /** @infection-ignore-all ArrayOneItem: boolean set operations use assertContains; returning only 1 item from a multi-doc result is not caught by membership tests for single-match terms */
-        return $rows;
+        return $this->capDocIds($rows, $limit, $truncated);
+    }
+
+    /**
+     * Trim a result fetched with LIMIT $limit + 1 back to $limit, flagging $truncated when the
+     * extra row was present — i.e. when more rows matched than the cap allows.
+     *
+     * @param  list<int> $rows
+     * @return list<int>
+     */
+    private function capDocIds(array $rows, int $limit, bool &$truncated): array
+    {
+        if (count($rows) <= $limit) {
+            return $rows;
+        }
+        $truncated = true;
+        return array_slice($rows, 0, $limit);
     }
 
     /**
@@ -4391,6 +4493,8 @@ class Index
      * @param  bool   $isLastWord Whether this is the final token in the query.
      * @param  bool   $allowFuzzy Whether to fall through to Levenshtein search on no match; set to false
      *                            for phrase matching where words must be exact user intent.
+     * @param  bool   $truncated  Set to true when a prefix lookup matched more than
+     *                            Config::$fuzzyMaxExpansions terms, so only the shortest were returned.
      * @return list<array{id: int, term: string, num_hits: int, num_docs: int, distance?: int}>
      * @infection-ignore-all FalseValue: default parameter values are never exercised; callers always pass
      *   all booleans explicitly
@@ -4399,6 +4503,7 @@ class Index
         string $keyword,
         bool $isLastWord = false,
         bool $allowFuzzy = true,
+        bool &$truncated = false,
     ): array {
         // Cache exact/prefix lookups by "keyword:isLastWord" key.
         // Fuzzy results carry a distance key and are excluded from caching — Levenshtein
@@ -4407,17 +4512,22 @@ class Index
         $cacheKey = "{$keyword}:" . (int) $isLastWord;
         /** @infection-ignore-all ReturnRemoval: skipping a cache hit only causes a redundant DB query; the same result is returned */
         if (isset($this->wordlistCache[$cacheKey])) {
-            return $this->wordlistCache[$cacheKey];
+            [$cachedRows, $cachedTruncated] = $this->wordlistCache[$cacheKey];
+            $truncated = $truncated || $cachedTruncated;
+            return $cachedRows;
         }
 
-        if ($isLastWord && Tokenizer::ngramSize($this->language) === 0) {
+        $maxExpansions = $this->config->fuzzyMaxExpansions;
+        $isPrefix      = $isLastWord && Tokenizer::ngramSize($this->language) === 0;
+        if ($isPrefix) {
+            // One row past the cap tells an exactly-full expansion from a truncated one.
             $stmt = $this->stmt(
                 'wordlistPrefix',
                 'SELECT id, term, num_hits, num_docs FROM wordlist'
                 . ' WHERE term LIKE :keyword ORDER BY length(term) ASC, num_hits DESC LIMIT :maxExpansions;'
             );
             $stmt->bindValue(':keyword', $keyword . '%');
-            $stmt->bindValue(':maxExpansions', $this->config->fuzzyMaxExpansions, PDO::PARAM_INT);
+            $stmt->bindValue(':maxExpansions', $maxExpansions + 1, PDO::PARAM_INT);
         } else {
             $stmt = $this->stmt(
                 'wordlistExact',
@@ -4429,7 +4539,11 @@ class Index
         $stmt->execute();
 
         /** @var list<array{id: int, term: string, num_hits: int, num_docs: int}> $wordlistRows */
-        $wordlistRows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+        $wordlistRows    = $stmt->fetchAll(PDO::FETCH_ASSOC);
+        $prefixTruncated = $isPrefix && count($wordlistRows) > $maxExpansions;
+        if ($prefixTruncated) {
+            $wordlistRows = array_slice($wordlistRows, 0, $maxExpansions);
+        }
 
         // Fall through to Levenshtein only when: no exact/prefix match found, fuzzy is allowed
         // for this call site, and the word meets the minimum length threshold (short words have
@@ -4442,7 +4556,8 @@ class Index
             return $this->fuzzySearch($keyword);
         }
 
-        $this->wordlistCache[$cacheKey] = $wordlistRows;
+        $this->wordlistCache[$cacheKey] = [$wordlistRows, $prefixTruncated];
+        $truncated = $truncated || $prefixTruncated;
 
         return $wordlistRows;
     }
@@ -5253,6 +5368,35 @@ class Index
     }
 
     /**
+     * Warnings naming the caps that made a result approximate.
+     *
+     * @param  'maxDocs'|'maxFacetCountDocs'|null $candidateCap Setting that capped the keyword candidates, if any.
+     * @param  list<string>                       $approximateFacets
+     * @return list<string>
+     */
+    private function capWarnings(?string $candidateCap, bool $prefixCapped, array $approximateFacets): array
+    {
+        $warnings = [];
+        if ($candidateCap !== null) {
+            $cap        = $candidateCap === 'maxDocs' ? $this->config->maxDocs : $this->config->maxFacetCountDocs;
+            $warnings[] = "A keyword matched more than Config::\${$candidateCap} ({$cap}) documents; only the first "
+                . "{$cap} were considered, so results and counts are estimates.";
+        }
+        if ($prefixCapped) {
+            $cap        = $this->config->fuzzyMaxExpansions;
+            $warnings[] = "The last keyword matched more than Config::\$fuzzyMaxExpansions ({$cap}) terms as a "
+                . "prefix; only the {$cap} shortest were searched.";
+        }
+        if ($approximateFacets !== []) {
+            $cap        = $this->config->maxFacetCountDocs;
+            $fields     = implode(', ', array_map(fn(string $f): string => "'{$f}'", $approximateFacets));
+            $warnings[] = "Facet counts for {$fields} cover only {$cap} of the matching documents "
+                . '(Config::$maxFacetCountDocs).';
+        }
+        return $warnings;
+    }
+
+    /**
      * Compute disjunctive facet value counts for each requested key.
      *
      * For keys that are also active filters, counts are computed on the result set
@@ -5267,7 +5411,8 @@ class Index
      * @param  int                         $maxDocs        Cap on doc IDs sent in the IN() clause.
      * @return array{
      *     distribution: array<string, array<array-key, int>>,
-     *     stats: array<string, array{min: float, max: float}>
+     *     stats: array<string, array{min: float, max: float}>,
+     *     approximate: list<string>
      * }
      */
     private function computeFacetCounts(
@@ -5284,6 +5429,8 @@ class Index
         // Keys that use the common filteredScores doc set (non-disjunctive).
         /** @var array<string, int> $commonNameToId */
         $commonNameToId = [];
+        /** @var list<string> $approximate  Keys counted over a doc set truncated to $maxDocs. */
+        $approximate    = [];
 
         foreach ($facetKeys as $keyName) {
             $keyId = $this->lookupFacetKeyId($keyName);
@@ -5303,12 +5450,22 @@ class Index
                 : array_intersect_key($rawDocScores, $this->intersectFilterSets($otherSets));
             $docIds = array_slice(array_keys($countSet), 0, $maxDocs);
             $this->collectFacetCounts([$keyName => $keyId], $docIds, $distribution, $stats);
+            if (count($countSet) > $maxDocs) {
+                $approximate[] = $keyName;
+            }
         }
 
         $docIds = array_slice(array_keys($filteredScores), 0, $maxDocs);
         $this->collectFacetCounts($commonNameToId, $docIds, $distribution, $stats);
+        if (count($filteredScores) > $maxDocs) {
+            array_push($approximate, ...array_keys($commonNameToId));
+        }
 
-        return ['distribution' => $distribution, 'stats' => $stats];
+        return [
+            'distribution' => $distribution,
+            'stats'        => $stats,
+            'approximate'  => array_values(array_unique($approximate)),
+        ];
     }
 
     /**

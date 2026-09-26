@@ -33,15 +33,27 @@ final class FacetSearchResult implements \Countable, \IteratorAggregate
     public readonly array $warnings;
 
     /**
+     * False when the FTS query's candidate documents were capped (Config::$maxFacetCountDocs per
+     * keyword, or Config::$fuzzyMaxExpansions prefix terms), so the counts are approximate.
+     * Always true without a query.
+     */
+    public readonly bool $exhaustive;
+
+    /**
      * @param list<array{value: string, count: int}> $facetHits
      * @param string       $facetQuery
      * @param list<string> $warnings
      */
-    public function __construct(array $facetHits, string $facetQuery = '', array $warnings = [])
-    {
+    public function __construct(
+        array $facetHits,
+        string $facetQuery = '',
+        array $warnings = [],
+        bool $exhaustive = true,
+    ) {
         $this->facetHits  = $facetHits;
         $this->facetQuery = $facetQuery;
         $this->warnings   = $warnings;
+        $this->exhaustive = $exhaustive;
     }
 
     /** @return list<array{value: string, count: int}> */
@@ -59,6 +71,11 @@ final class FacetSearchResult implements \Countable, \IteratorAggregate
     public function getWarnings(): array
     {
         return $this->warnings;
+    }
+
+    public function isExhaustive(): bool
+    {
+        return $this->exhaustive;
     }
 
     /** Enables count($result). */
@@ -80,6 +97,7 @@ final class FacetSearchResult implements \Countable, \IteratorAggregate
             'facetHits'  => $this->facetHits,
             'facetQuery' => $this->facetQuery,
             'warnings'   => $this->warnings,
+            'exhaustive' => $this->exhaustive,
         ];
     }
 

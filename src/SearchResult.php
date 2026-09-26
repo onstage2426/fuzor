@@ -50,6 +50,23 @@ class SearchResult implements \Countable, \IteratorAggregate
      */
     public readonly array $warnings;
 
+    /**
+     * False when a cap may have cut matching documents out of the result: a keyword matched more
+     * than Config::$maxDocs documents, or the last keyword's prefix matched more than
+     * Config::$fuzzyMaxExpansions terms. $hits then come from the best candidates and $totalHits
+     * is an estimate. Always true for a browse (empty query). Facet counts are reported
+     * separately in $approximateFacets.
+     */
+    public readonly bool $exhaustive;
+
+    /**
+     * Facet fields whose counts in $facetDistribution / $facetStats were computed over a capped
+     * set of matching documents (Config::$maxFacetCountDocs) and are therefore approximate.
+     *
+     * @var list<string>
+     */
+    public readonly array $approximateFacets;
+
     /** @var list<int> Document IDs in relevance order; used internally for score lookups. */
     private readonly array $ids;
 
@@ -63,6 +80,7 @@ class SearchResult implements \Countable, \IteratorAggregate
      * @param int|null                                     $offset
      * @param array<string, array{min: float, max: float}> $facetStats
      * @param list<string>                                 $warnings
+     * @param list<string>                                 $approximateFacets
      */
     public function __construct(
         array $ids,
@@ -74,6 +92,8 @@ class SearchResult implements \Countable, \IteratorAggregate
         int|null $offset = null,
         array $facetStats = [],
         array $warnings = [],
+        bool $exhaustive = true,
+        array $approximateFacets = [],
     ) {
         $this->ids               = $ids;
         $this->totalHits         = $totalHits;
@@ -83,6 +103,8 @@ class SearchResult implements \Countable, \IteratorAggregate
         $this->facetDistribution = $facetCounts;
         $this->facetStats        = $facetStats;
         $this->warnings          = $warnings;
+        $this->exhaustive        = $exhaustive;
+        $this->approximateFacets = $approximateFacets;
 
         $this->hits = $documents === null
             ? array_map(fn(int $id) => ['id' => $id], $ids)
@@ -171,6 +193,17 @@ class SearchResult implements \Countable, \IteratorAggregate
         return $this->warnings;
     }
 
+    public function isExhaustive(): bool
+    {
+        return $this->exhaustive;
+    }
+
+    /** @return list<string> */
+    public function getApproximateFacets(): array
+    {
+        return $this->approximateFacets;
+    }
+
     /** @return array<string, mixed> */
     public function toArray(): array
     {
@@ -184,6 +217,8 @@ class SearchResult implements \Countable, \IteratorAggregate
             'facetDistribution' => $this->facetDistribution,
             'facetStats'        => $this->facetStats,
             'warnings'          => $this->warnings,
+            'exhaustive'        => $this->exhaustive,
+            'approximateFacets' => $this->approximateFacets,
         ];
     }
 

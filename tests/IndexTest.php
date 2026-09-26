@@ -4994,6 +4994,180 @@ class IndexTest extends TestCase
         $this->assertCount(4, $result->warnings);
     }
 
+    // --- Approximate results ---
+
+    /** @return list<array<string, mixed>> */
+    private function sameWordDocs(int $n): array
+    {
+        $docs = [];
+        for ($i = 1; $i <= $n; $i++) {
+            $docs[] = ['id' => $i, 'title' => 'widget', 'color' => $i % 2 ? 'red' : 'blue'];
+        }
+        return $docs;
+    }
+
+    public function testSearchIsExhaustiveByDefault(): void
+    {
+        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['color']));
+        $index->insert($this->sameWordDocs(3));
+
+        $result = $index->search('widget', new SearchOptions(facets: ['color']));
+
+        $this->assertTrue($result->exhaustive);
+        $this->assertTrue($result->isExhaustive());
+        $this->assertSame([], $result->approximateFacets);
+        $this->assertSame([], $result->warnings);
+        $this->assertTrue($result->toArray()['exhaustive']);
+        $this->assertSame([], $result->toArray()['approximateFacets']);
+    }
+
+    public function testSearchKeywordAboveMaxDocsIsNotExhaustive(): void
+    {
+        $index = new Index($this->dbPath, config: new Config(maxDocs: 2));
+        $index->insert($this->sameWordDocs(3));
+
+        $result = $index->search('widget');
+
+        $this->assertFalse($result->exhaustive);
+        $this->assertSame(2, $result->totalHits);
+        $this->assertCount(1, $result->warnings);
+        $this->assertStringContainsString('Config::$maxDocs (2)', $result->warnings[0]);
+    }
+
+    public function testSearchKeywordExactlyAtMaxDocsIsExhaustive(): void
+    {
+        $index = new Index($this->dbPath, config: new Config(maxDocs: 3));
+        $index->insert($this->sameWordDocs(3));
+
+        $this->assertTrue($index->search('widget')->exhaustive);
+        $this->assertTrue($index->searchBoolean('widget')->exhaustive);
+    }
+
+    public function testBooleanKeywordAboveMaxDocsIsNotExhaustive(): void
+    {
+        $index = new Index($this->dbPath, config: new Config(maxDocs: 2));
+        $index->insert($this->sameWordDocs(3));
+
+        $result = $index->searchBoolean('widget');
+
+        $this->assertFalse($result->exhaustive);
+        $this->assertSame(2, $result->totalHits);
+        $this->assertCount(1, $result->warnings);
+    }
+
+    public function testCappedPrefixExpansionIsNotExhaustive(): void
+    {
+        $index = new Index($this->dbPath, config: new Config(fuzzyMaxExpansions: 2));
+        $index->insert([
+            ['id' => 1, 'title' => 'car'],
+            ['id' => 2, 'title' => 'cart'],
+            ['id' => 3, 'title' => 'carbon'],
+        ]);
+
+        $capped = $index->search('ca');
+        $cached = $index->search('ca');
+        $bool   = $index->searchBoolean('ca');
+
+        $this->assertFalse($capped->exhaustive);
+        $ids = $capped->getIds();
+        sort($ids);
+        $this->assertSame([1, 2], $ids, 'only the two shortest completions are searched');
+        $this->assertFalse($cached->exhaustive, 'the flag must survive a wordlist cache hit');
+        $this->assertFalse($bool->exhaustive);
+        $this->assertStringContainsString('Config::$fuzzyMaxExpansions (2)', $capped->warnings[0]);
+    }
+
+    public function testPrefixExpansionExactlyAtCapIsExhaustive(): void
+    {
+        $index = new Index($this->dbPath, config: new Config(fuzzyMaxExpansions: 2));
+        $index->insert([
+            ['id' => 1, 'title' => 'car'],
+            ['id' => 2, 'title' => 'cart'],
+        ]);
+
+        $this->assertTrue($index->search('ca')->exhaustive);
+        // Without asYouType the last keyword is an exact lookup; no expansion to cap.
+        $this->assertTrue($index->search('ca', new SearchOptions(asYouType: false))->exhaustive);
+    }
+
+    public function testSearchFacetCountsAboveCapAreReportedApproximate(): void
+    {
+        $index = new Index(
+            $this->dbPath,
+            schema: new SchemaConfig(facetFields: ['color']),
+            config: new Config(maxFacetCountDocs: 2),
+        );
+        $index->insert($this->sameWordDocs(3));
+
+        $plain       = $index->search('widget', new SearchOptions(facets: ['color']));
+        $disjunctive = $index->searchBoolean('widget', new SearchOptions(
+            filter: ['color' => 'red'],
+            facets: ['color'],
+        ));
+
+        $this->assertTrue($plain->exhaustive);
+        $this->assertSame(['color'], $plain->approximateFacets);
+        $this->assertSame(['color'], $plain->getApproximateFacets());
+        $this->assertSame(['color'], $disjunctive->approximateFacets);
+        $this->assertStringContainsString("Facet counts for 'color' cover only 2", $plain->warnings[0]);
+    }
+
+    public function testSearchFacetCountsUnderCapAreNotApproximate(): void
+    {
+        $index = new Index(
+            $this->dbPath,
+            schema: new SchemaConfig(facetFields: ['color']),
+            config: new Config(maxFacetCountDocs: 3),
+        );
+        $index->insert($this->sameWordDocs(3));
+
+        $result = $index->search('widget', new SearchOptions(filter: ['color' => 'red'], facets: ['color']));
+
+        $this->assertSame([], $result->approximateFacets);
+        $this->assertSame([], $result->warnings);
+    }
+
+    public function testBrowseIsExhaustiveAndReportsOnlyCappedFilteredFacets(): void
+    {
+        $index = new Index(
+            $this->dbPath,
+            schema: new SchemaConfig(facetFields: ['price', 'color', 'brand']),
+            config: new Config(maxDocs: 1, maxFacetCountDocs: 3),
+        );
+        $index->insert($this->browseCatalog());
+
+        // color is disjunctive with no other filter → whole-index count, exact; brand uses the 8 blue docs.
+        $result = $index->search('', new SearchOptions(filter: ['color' => 'blue'], facets: ['brand', 'color']));
+        $plain  = $index->search('', new SearchOptions(sort: ['price:asc'], facets: ['brand']));
+
+        $this->assertTrue($result->exhaustive);
+        $this->assertSame(['brand'], $result->approximateFacets);
+        $this->assertCount(1, $result->warnings);
+        $this->assertTrue($plain->exhaustive);
+        $this->assertSame([], $plain->approximateFacets);
+    }
+
+    public function testFacetSearchReportsCappedQueryCandidates(): void
+    {
+        $index = new Index(
+            $this->dbPath,
+            schema: new SchemaConfig(facetFields: ['color']),
+            config: new Config(maxFacetCountDocs: 2),
+        );
+        $index->insert($this->sameWordDocs(3));
+
+        $capped  = $index->facetSearch(new FacetSearchQuery(facetName: 'color', query: 'widget'));
+        $noQuery = $index->facetSearch(new FacetSearchQuery(facetName: 'color'));
+
+        $this->assertFalse($capped->exhaustive);
+        $this->assertFalse($capped->isExhaustive());
+        $this->assertSame(2, array_sum(array_column($capped->facetHits, 'count')));
+        $this->assertStringContainsString('Config::$maxFacetCountDocs (2)', $capped->warnings[0]);
+        $this->assertTrue($noQuery->exhaustive);
+        $this->assertSame(3, array_sum(array_column($noQuery->facetHits, 'count')));
+        $this->assertFalse($capped->toArray()['exhaustive']);
+    }
+
     // --- Field boosts ---
 
     public function testFieldBoostPromotesTitleMatchOverBodyMatch(): void

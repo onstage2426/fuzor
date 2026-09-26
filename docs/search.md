@@ -36,6 +36,8 @@ When the document store is disabled, `$hits` contains id-only stubs: `[['id' => 
 | `$facetDistribution` | `array<string, array<string,int>>` | Value → count per facet field |
 | `$facetStats` | `array<string, array{min:float,max:float}>` | Numeric min/max per facet field |
 | `$warnings` | `list<string>` | Notices about options that were ignored or had no effect — see [Warnings](#warnings) |
+| `$exhaustive` | `bool` | `false` when a cap may have cut matches out of the result — see [Approximate results](#approximate-results) |
+| `$approximateFacets` | `list<string>` | Facet fields whose counts were computed over a capped document set |
 | `getHit(int $index, array $default = [])` | `array` | Document at position (0-based); `$default` when out of bounds |
 | `getIds()` | `list<int>` | Document IDs in relevance order |
 | `toArray()` | `array` | Full result as a plain array |
@@ -51,6 +53,27 @@ $result->warnings; // ["Sort field 'title' is not a declared facet field; ignore
 ```
 
 The messages are meant for logs and debugging; their wording is not a stable API. To check a field up front, compare it against `$index->facetFields`. A declared field that no document has a value for yet does not produce a warning.
+
+### Approximate results
+
+Fuzor bounds the work behind a query with a few caps (see [tuning.md](tuning.md)). When one of them cuts something off, the result says so instead of silently undercounting:
+
+| Flag | Set when | Effect |
+|---|---|---|
+| `$exhaustive === false` | A keyword matched more than `Config::$maxDocs` documents, or the last keyword's prefix matched more than `Config::$fuzzyMaxExpansions` terms | Hits come from the best candidates; `$totalHits` and facet counts are estimates |
+| `$approximateFacets` lists a field | That field's counts covered more than `Config::$maxFacetCountDocs` matching documents | Its counts in `$facetDistribution` / `$facetStats` are approximate |
+
+```php
+$result = $index->search('shoe', new SearchOptions(facets: ['brand']));
+
+if (!$result->exhaustive) {
+    // e.g. show "about {$result->totalHits} results"
+}
+```
+
+Each cap that was hit also adds a line to `$warnings`. A browse (empty query) is always exhaustive; only its filtered facet counts can be approximate. `FacetSearchResult::$exhaustive` is `false` when the `query` restricting a facet search was capped.
+
+This mirrors Meilisearch's split between `estimatedTotalHits` and an exhaustive `totalHits`: the numbers stay cheap to compute, and callers can tell when they are estimates.
 
 ## Pagination
 
@@ -347,6 +370,7 @@ Only values that appear on documents satisfying both the FTS query and all filte
 $result->facetHits;        // list<array{value: string, count: int}>
 $result->facetQuery;       // the prefix that was searched
 $result->warnings;         // list<string> — e.g. an undeclared facetName or filter field
+$result->exhaustive;       // false when the `query` candidates were capped (maxFacetCountDocs)
 count($result);            // number of values returned
 foreach ($result as $hit) { ... }
 $result->toArray();        // serialisable snapshot
