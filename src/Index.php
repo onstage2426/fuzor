@@ -2253,7 +2253,9 @@ class Index
          * @return list<int>
          */
         $ids = function (string|array|null $entry) use ($fetchIds, $lastTerm, $asYouType): array {
-            if ($entry === null) {
+            // A negation outside AND has no positive documents to subtract from (there is no
+            // "all documents" set here), so "~a" alone or "a | ~b" contributes nothing.
+            if ($entry === null || is_array($entry) && isset($entry['__not__'])) {
                 return [];
             }
             if (is_string($entry)) {
@@ -2277,13 +2279,22 @@ class Index
                 $termIds = is_string($term) ? $fetchIds($term, $term === $lastTerm) : $ids($term);
                 $stack[] = ['__not__' => $termIds];
             } elseif ($token === '&') {
-                $right = array_pop($stack);
-                $left  = array_pop($stack);
-                if (is_array($right) && isset($right['__not__'])) {
-                    // AND-NOT: subtract negated IDs from the positive side.
+                $right    = array_pop($stack);
+                $left     = array_pop($stack);
+                $rightNot = is_array($right) && isset($right['__not__']);
+                $leftNot  = is_array($left) && isset($left['__not__']);
+                if ($rightNot && $leftNot) {
+                    // ~a & ~b = ~(a | b): stays a negation for an enclosing AND to subtract.
+                    /** @var array{__not__: list<int>} $left */
                     /** @var array{__not__: list<int>} $right */
+                    $excluded = array_merge($left['__not__'], $right['__not__']);
+                    $stack[]  = ['__not__' => array_values(array_unique($excluded))];
+                } elseif ($rightNot || $leftNot) {
+                    // AND-NOT, in either order ("a ~b" or "~b a"): subtract the negated IDs.
+                    /** @var array{__not__: list<int>} $negated */
+                    [$positive, $negated] = $rightNot ? [$left, $right] : [$right, $left];
                     /** @infection-ignore-all UnwrapArrayValues: array_diff preserves keys from first arg; array_values ensures list<int> contract for downstream array_slice/assertContains; keys are integer so assertContains still passes without reindex, making this a silent correctness issue rather than a detectable test failure */
-                    $stack[] = array_values(array_diff($ids($left), $right['__not__']));
+                    $stack[] = array_values(array_diff($ids($positive), $negated['__not__']));
                 } else {
                     // AND: intersection of both sides (C-native, O(n log n)).
                     /** @infection-ignore-all UnwrapArrayValues: array_intersect preserves keys from the first arg; array_values is needed to guarantee a list<int> */

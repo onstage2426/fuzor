@@ -1823,6 +1823,80 @@ class IndexTest extends TestCase
         $this->assertNotContains(4, $result->getIds());
     }
 
+    /** @return list<int> */
+    private function booleanIds(Index $index, string $query): array
+    {
+        $ids = $index->searchBoolean($query, new SearchOptions(asYouType: false))->getIds();
+        sort($ids);
+        return $ids;
+    }
+
+    private function booleanFixture(): Index
+    {
+        $index = new Index($this->dbPath);
+        $index->insert([
+            ['id' => 1, 'title' => 'shirt'],
+            ['id' => 2, 'title' => 'jeans'],
+            ['id' => 3, 'title' => 'shirt jeans'],
+            ['id' => 4, 'title' => 'shirt blue'],
+        ]);
+        return $index;
+    }
+
+    public function testBooleanOperatorsWithSpacesWork(): void
+    {
+        $index = $this->booleanFixture();
+
+        // Spaces around '|' and '&' used to become implicit ANDs, returning no results at all.
+        $this->assertSame([1, 2, 3, 4], $this->booleanIds($index, 'shirt | jeans'));
+        $this->assertSame([3], $this->booleanIds($index, 'shirt & jeans'));
+        $this->assertSame([3], $this->booleanIds($index, 'shirt  jeans'));
+        $this->assertSame([1, 4], $this->booleanIds($index, 'shirt ~ jeans'));
+    }
+
+    public function testBooleanIgnoresTrailingSpaceAndDanglingOperators(): void
+    {
+        $index = $this->booleanFixture();
+
+        foreach (['shirt ', 'shirt |', 'shirt or', 'or shirt', '(shirt'] as $query) {
+            $this->assertSame([1, 3, 4], $this->booleanIds($index, $query), $query);
+        }
+    }
+
+    public function testBooleanNegationFirstSubtractsFromTheRest(): void
+    {
+        $index = $this->booleanFixture();
+
+        $this->assertSame([1, 4], $this->booleanIds($index, '~jeans shirt'));
+        $this->assertSame([1], $this->booleanIds($index, '-jeans -blue shirt'));
+        $this->assertSame([1], $this->booleanIds($index, 'shirt ~(jeans | blue)'));
+    }
+
+    public function testBooleanBareNegationReturnsNothingInsteadOfFailing(): void
+    {
+        $index = $this->booleanFixture();
+
+        // There is no "all documents" set to subtract from, so a lone negation matches nothing.
+        $this->assertSame([], $this->booleanIds($index, '~jeans'));
+        $this->assertSame([], $this->booleanIds($index, '~(shirt | jeans)'));
+        $this->assertSame([1, 3, 4], $this->booleanIds($index, 'shirt | ~jeans'));
+    }
+
+    public function testBooleanPunctuationRunsDoNotEmptyTheResult(): void
+    {
+        $index = $this->booleanFixture();
+
+        $this->assertSame([3], $this->booleanIds($index, 'shirt + jeans'));
+        $this->assertSame([3], $this->booleanIds($index, 'shirt - jeans'));
+    }
+
+    public function testBooleanWordFollowedByGroupIsAnd(): void
+    {
+        $index = $this->booleanFixture();
+
+        $this->assertSame([3, 4], $this->booleanIds($index, 'shirt (jeans | blue)'));
+    }
+
     // --- inspectQuery ---
 
     public function testInspectQueryRawTokensMatchTokenizer(): void

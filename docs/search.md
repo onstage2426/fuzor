@@ -167,12 +167,16 @@ $result = $index->searchBoolean('(sedan or coupe) -electric');
 | Syntax | Operator | Effect |
 |---|---|---|
 | `term1 term2` | AND | Both must be present |
-| `term1 or term2` | OR | Either present |
-| `-term` | NOT | Term must be absent |
+| `term1 or term2`, `term1 \| term2` | OR | Either present |
+| `-term`, `~term` | NOT | Term must be absent |
 | `term1 & term2` | AND | Explicit AND |
 | `(term1 or term2)` | grouping | Override default precedence |
 
 Default precedence (tightest to loosest): NOT → AND → OR. Use parentheses when OR needs to bind tighter.
+
+Spacing never changes the meaning: `a|b`, `a | b`, and `a or b` are the same query, and extra, leading, or trailing whitespace is ignored. The parser is forgiving with half-typed input — a dangling operator (`shirt |`), an unclosed parenthesis (`(shirt`), or a lone symbol such as `+` or `-` is dropped rather than emptying the result. A hyphen inside a word is part of the word (`e-mail`); only a leading one negates.
+
+NOT subtracts from the terms it is combined with by AND, in any order: `shirt -jeans` and `-jeans shirt` are the same. A query that is **only** negations (`-jeans`) matches nothing — there is no positive set to subtract from — and inside an OR a negation contributes nothing (`shirt or -jeans` behaves like `shirt`).
 
 `searchBoolean()` accepts all the same `SearchOptions` as `search()`.
 
