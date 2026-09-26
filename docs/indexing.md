@@ -56,7 +56,16 @@ $index = new Index('/path/to/watches.db', schema: new SchemaConfig(
 ));
 ```
 
-Pass `stripHtml: true` when documents contain HTML markup. Each field value is passed through `strip_tags()` before tokenisation so tag names, attributes, and entity-like fragments never enter the FTS index. The raw HTML is still stored unchanged in the document store. Ignored when opening an existing index.
+Pass `stripHtml: true` when documents contain HTML markup. Each field value is converted to the text a reader would see before tokenisation, so tag names, attributes, and entities never enter the FTS index:
+
+- block-level tags (`<p>`, `<div>`, `<li>`, `<td>`, `<h1>`–`<h6>`, `<br>`, …) separate words — `<p>foo</p><p>bar</p>` indexes `foo` and `bar`, not `foobar`;
+- inline tags (`<b>`, `<a>`, `<span>`, …) are removed without a separator, so `fo<b>o</b>` stays one word;
+- the contents of `<script>`, `<style>`, `<template>`, and `<noscript>` are dropped;
+- entities are decoded — `Fit &amp; Flare caf&eacute;` indexes `fit`, `flare`, `café`, not `amp` or `eacute`.
+
+The raw HTML is still stored unchanged in the document store. Ignored when opening an existing index.
+
+Indexes created before 1.6.0 (schema revision 2 or lower) keep the previous behaviour — plain `strip_tags()`, which glues adjacent blocks together and indexes entity names — so an index never mixes the two. Run `Index::rebuild($path)` to switch; `$index->schemaVersion < Index::CURRENT_SCHEMA_VERSION` tells you it would help.
 
 ```php
 use Fuzor\SchemaConfig;
@@ -84,7 +93,7 @@ Passing `schema:` when opening an existing file throws `QueryException`. Use `In
 | `store` | `true` | Enable the document store |
 | `facetFields` | `[]` | Fields routed to the facet index |
 | `searchableFields` | `null` | Fields tokenised for FTS; `null` = all non-facet fields |
-| `stripHtml` | `false` | Strip HTML tags before tokenisation |
+| `stripHtml` | `false` | Convert HTML field values to text before tokenisation |
 
 ## Inserting
 

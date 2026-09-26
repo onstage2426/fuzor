@@ -5791,6 +5791,70 @@ class IndexTest extends TestCase
         return $index;
     }
 
+    /** Mark an index as schema revision 2 (covering facet index, stripHtml via strip_tags()). */
+    private function downgradeToSchemaV2(string $path): void
+    {
+        $pdo = new \PDO('sqlite:' . $path);
+        $pdo->exec("UPDATE info SET value = '2' WHERE key = 'schema_version'");
+    }
+
+    private const string HTML_BODY = '<p>fast</p><p>delivery</p> <script>trackingpixel()</script> '
+        . '<p>Fit &amp; Flare caf&eacute;</p>';
+
+    public function testStripHtmlIndexesVisibleText(): void
+    {
+        $index = new Index($this->dbPath, schema: new SchemaConfig(stripHtml: true));
+        $index->insert([['id' => 1, 'body' => self::HTML_BODY]]);
+
+        $this->assertSame([1], $index->search('fast', new SearchOptions(asYouType: false))->getIds());
+        $this->assertSame([1], $index->search('delivery', new SearchOptions(asYouType: false))->getIds());
+        $this->assertSame([1], $index->search('café', new SearchOptions(asYouType: false))->getIds());
+        $this->assertSame([], $index->search('fastdelivery', new SearchOptions(asYouType: false))->getIds());
+        $this->assertSame([], $index->search('trackingpixel', new SearchOptions(asYouType: false))->getIds());
+        $this->assertSame([], $index->searchBoolean('amp', new SearchOptions(asYouType: false))->getIds());
+        // The stored document keeps the raw HTML.
+        $this->assertSame(self::HTML_BODY, $index->get(1)['body'] ?? null);
+    }
+
+    public function testRevision2StripHtmlIndexKeepsStripTagsUntilRebuild(): void
+    {
+        (new Index($this->dbPath, schema: new SchemaConfig(stripHtml: true)))->close();
+        $this->downgradeToSchemaV2($this->dbPath);
+
+        $legacy = new Index($this->dbPath);
+        $legacy->insert([['id' => 1, 'body' => self::HTML_BODY]]);
+        $this->assertSame(2, $legacy->schemaVersion);
+        // Legacy strip_tags() glues adjacent blocks and keeps script content.
+        $this->assertSame([1], $legacy->search('fastdelivery', new SearchOptions(asYouType: false))->getIds());
+        $this->assertSame([1], $legacy->search('trackingpixel', new SearchOptions(asYouType: false))->getIds());
+        $this->assertSame([1], $legacy->searchBoolean('amp', new SearchOptions(asYouType: false))->getIds());
+        $legacy->close();
+
+        $rebuilt = Index::rebuild($this->dbPath);
+
+        $this->assertSame(Index::CURRENT_SCHEMA_VERSION, $rebuilt->schemaVersion);
+        $this->assertTrue($rebuilt->stripHtml);
+        $this->assertSame([1], $rebuilt->search('fast', new SearchOptions(asYouType: false))->getIds());
+        $this->assertSame([], $rebuilt->search('fastdelivery', new SearchOptions(asYouType: false))->getIds());
+        $this->assertSame([], $rebuilt->search('trackingpixel', new SearchOptions(asYouType: false))->getIds());
+    }
+
+    public function testRevision2IndexWithoutStripHtmlIsCurrent(): void
+    {
+        (new Index($this->dbPath))->close();
+        $this->downgradeToSchemaV2($this->dbPath);
+
+        $this->assertSame(Index::CURRENT_SCHEMA_VERSION, new Index($this->dbPath)->schemaVersion);
+    }
+
+    public function testRevision1IndexWithoutStripHtmlStillNeedsRebuild(): void
+    {
+        (new Index($this->dbPath))->close();
+        $this->downgradeToSchemaV1($this->dbPath);
+
+        $this->assertSame(1, new Index($this->dbPath)->schemaVersion);
+    }
+
     public function testNewIndexReportsCurrentSchemaVersion(): void
     {
         $index = new Index($this->dbPath);

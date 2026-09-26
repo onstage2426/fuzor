@@ -41,16 +41,22 @@ class Index
      * On-disk schema revision written by createIndex() into info.schema_version.
      *
      * Independent of the library's semantic version; incremented only when the physical
-     * schema changes. Indexes created before this key existed report 1.
+     * schema or the way stored text is indexed changes. Revisions are cumulative, and
+     * rebuild() always writes the current one, so a single rebuild migrates from any older
+     * revision. Indexes created before this key existed report 1.
      *
      * 1 — pre-1.5.0: facet_doc_id_index is a single-column index on (doc_id).
      * 2 — 1.5.0+:    facet_doc_id_index covers (doc_id, key_id, value, num_value), letting
      *                the facet count join run index-only.
+     * 3 — 1.6.0+:    SchemaConfig::$stripHtml converts HTML to text with HtmlText::toText()
+     *                (block tags separate words, script/style content is dropped, entities
+     *                are decoded) instead of plain strip_tags(). Only affects stripHtml
+     *                indexes; a revision-2 file without stripHtml reports 3.
      *
-     * Older revisions keep working; they just miss the optimization. Compare against
+     * Older revisions keep working; they just miss the improvement. Compare against
      * $this->schemaVersion to decide whether rebuild() is worth scheduling.
      */
-    public const int CURRENT_SCHEMA_VERSION = 2;
+    public const int CURRENT_SCHEMA_VERSION = 3;
 
     /** Max rows per chunk when each row uses 1 bind variable (SQLite 32 766-variable ceiling). */
     private const int CHUNK_1P = 32_766;
@@ -128,7 +134,7 @@ class Index
     /** @var list<string>|null null = all non-facet fields are FTS-indexed; non-null = only these fields. */
     public private(set) ?array $searchableFields = null;
 
-    /** When true, strip_tags() is applied to each field value before tokenisation. */
+    /** When true, each field value is converted from HTML to text before tokenisation (see HtmlText). */
     public private(set) bool $stripHtml = false;
 
     /**
@@ -669,6 +675,7 @@ class Index
         $this->facetFieldSet      = array_flip($facetFields);
         $this->searchableFieldSet = $searchableFields !== null ? array_flip($searchableFields) : null;
         $this->stripHtml          = $stripHtml;
+        $this->schemaVersion      = self::CURRENT_SCHEMA_VERSION;
 
         if ($language !== null) {
             $this->applyLanguage($language);
@@ -724,8 +731,10 @@ class Index
         $this->searchableFieldSet = $this->searchableFields !== null ? array_flip($this->searchableFields) : null;
         $this->stripHtml          = ($infoRows['strip_html'] ?? '0') === '1';
         // Absent key = revision 1: indexes created before schema_version existed.
-        // See docs/compatibility-debt.md before removing this fallback.
-        $this->schemaVersion      = (int) ($infoRows['schema_version'] ?? 1);
+        // Revision 3 only changed stripHtml indexing, so a revision-2 file without stripHtml is
+        // already current. See docs/compatibility-debt.md before removing either fallback.
+        $schemaVersion            = (int) ($infoRows['schema_version'] ?? 1);
+        $this->schemaVersion      = $schemaVersion === 2 && !$this->stripHtml ? 3 : $schemaVersion;
     }
 
     /**
@@ -3073,7 +3082,9 @@ class Index
             return;
         }
         if ($this->stripHtml) {
-            $text = strip_tags($text);
+            // Files before revision 3 keep plain strip_tags() so one index never mixes both
+            // tokenisations; rebuild() migrates. See docs/compatibility-debt.md.
+            $text = $this->schemaVersion >= 3 ? HtmlText::toText($text) : strip_tags($text);
             if ($text === '') {
                 return;
             }
