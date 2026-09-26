@@ -2733,6 +2733,7 @@ class IndexTest extends TestCase
         $stale    = $readPath . '.tmp-deadbeef';
         try {
             file_put_contents($stale, 'leftover');
+            touch($stale, time() - 7200);
 
             $write = new Index($this->dbPath);
             $write->insert([['id' => 1, 'title' => 'sedan']]);
@@ -2742,6 +2743,205 @@ class IndexTest extends TestCase
         } finally {
             @unlink($readPath);
             @unlink($stale);
+        }
+    }
+
+    /**
+     * Create files next to the test index and set their mtime $ageSeconds in the past.
+     *
+     * @param  list<string> $suffixes
+     * @return list<string>
+     */
+    private function makeTempFiles(array $suffixes, int $ageSeconds): array
+    {
+        $paths = [];
+        foreach ($suffixes as $suffix) {
+            $path = $this->dbPath . $suffix;
+            file_put_contents($path, 'x');
+            touch($path, time() - $ageSeconds);
+            $paths[] = $path;
+        }
+        return $paths;
+    }
+
+    /** @param list<string> $paths */
+    private function removeFiles(array $paths): void
+    {
+        foreach ($paths as $path) {
+            @unlink($path);
+        }
+    }
+
+    public function testCleanupTempFilesRemovesStaleGroup(): void
+    {
+        $files = $this->makeTempFiles(['.tmp-aaaaaaaa', '.tmp-aaaaaaaa-wal', '.tmp-aaaaaaaa-shm'], 7200);
+        try {
+            $deleted = Index::cleanupTempFiles($this->dbPath);
+
+            $expected = $files;
+            sort($expected);
+            $this->assertSame($expected, $deleted);
+            foreach ($files as $file) {
+                $this->assertFileDoesNotExist($file);
+            }
+        } finally {
+            $this->removeFiles($files);
+        }
+    }
+
+    public function testCleanupTempFilesUsesNewestFileOfGroup(): void
+    {
+        // During a long build only the -wal may be written to; the group is live if any file is fresh.
+        $old   = $this->makeTempFiles(['.tmp-bbbbbbbb'], 7200);
+        $fresh = $this->makeTempFiles(['.tmp-bbbbbbbb-wal'], 10);
+        try {
+            $this->assertSame([], Index::cleanupTempFiles($this->dbPath));
+            $this->assertFileExists($old[0]);
+
+            $this->assertCount(2, Index::cleanupTempFiles($this->dbPath, 0));
+        } finally {
+            $this->removeFiles([...$old, ...$fresh]);
+        }
+    }
+
+    public function testCleanupTempFilesKeepsLockedGroupRegardlessOfAge(): void
+    {
+        $files = $this->makeTempFiles(['.tmp-cccccccc', '.tmp-cccccccc-wal', '.tmp-cccccccc.lock'], 7200);
+        $lock  = fopen($this->dbPath . '.tmp-cccccccc.lock', 'r');
+        $this->assertNotFalse($lock);
+        try {
+            $this->assertTrue(flock($lock, LOCK_EX));
+            $this->assertSame([], Index::cleanupTempFiles($this->dbPath, 0));
+            $this->assertFileExists($files[0]);
+
+            // Once the owner is gone the lock is free and the whole group goes, lock file included.
+            flock($lock, LOCK_UN);
+            $this->assertCount(3, Index::cleanupTempFiles($this->dbPath));
+        } finally {
+            fclose($lock);
+            $this->removeFiles($files);
+        }
+    }
+
+    public function testCleanupTempFilesIgnoresUnrelatedFiles(): void
+    {
+        $files = $this->makeTempFiles([
+            '.tmp-backup',
+            '.tmp-1234567',
+            '.tmp-ABCDEF12',
+            '.tmp-deadbeef.bak',
+            '.tmp-deadbeef-old',
+            '-wal',
+        ], 7200);
+        $other = dirname($this->dbPath) . '/other_' . uniqid() . '.db.tmp-deadbeef';
+        file_put_contents($other, 'x');
+        touch($other, time() - 7200);
+        try {
+            $this->assertSame([], Index::cleanupTempFiles($this->dbPath, 0));
+            foreach ([...$files, $other] as $file) {
+                $this->assertFileExists($file);
+            }
+        } finally {
+            $this->removeFiles([...$files, $other]);
+        }
+    }
+
+    public function testCleanupTempFilesNeverTouchesALiveRebuild(): void
+    {
+        new Index($this->dbPath)->close();
+        $seen = [];
+
+        Index::rebuild($this->dbPath, function (Index $new) use (&$seen): void {
+            $new->insert([['id' => 1, 'title' => 'sedan']]);
+            // Even with no age threshold, the build's lock protects its files.
+            $seen['deleted'] = Index::cleanupTempFiles($this->dbPath, 0);
+            $seen['files']   = glob($this->dbPath . '.tmp-*') ?: [];
+        });
+
+        $this->assertSame([], $seen['deleted']);
+        $this->assertNotSame([], $seen['files']);
+        $this->assertSame([], glob($this->dbPath . '.tmp-*'), 'no temp or lock file is left behind');
+        $this->assertSame([1], new Index($this->dbPath)->search('sedan')->getIds());
+    }
+
+    public function testCleanupTempFilesRemovesLeftoversOfAKilledRebuild(): void
+    {
+        if (!function_exists('proc_open') || PHP_OS_FAMILY === 'Windows') {
+            $this->markTestSkipped('needs proc_open and POSIX signals');
+        }
+        new Index($this->dbPath)->close();
+        $ready  = $this->dbPath . '.ready';
+        $script = sprintf(
+            'require %s; Fuzor\Index::rebuild(%s, function ($i) { $i->insert([["id" => 1, "title" => "x"]]);'
+            . ' file_put_contents(%s, "1"); sleep(30); });',
+            var_export(dirname(__DIR__) . '/vendor/autoload.php', true),
+            var_export($this->dbPath, true),
+            var_export($ready, true),
+        );
+        $child = proc_open([PHP_BINARY, '-r', $script], [], $pipes);
+        $this->assertIsResource($child);
+        try {
+            for ($i = 0; $i < 200 && !file_exists($ready); $i++) {
+                usleep(25_000);
+            }
+            $this->assertFileExists($ready, 'child rebuild did not start');
+            // While the child runs, its lock protects its files from another process's sweep.
+            $this->assertSame([], Index::cleanupTempFiles($this->dbPath, 0));
+            proc_terminate($child, 9); // SIGKILL: no catch, no finally, no cleanup.
+            proc_close($child);
+
+            $leftovers = glob($this->dbPath . '.tmp-*') ?: [];
+            $this->assertNotSame([], $leftovers, 'the killed rebuild left its temp files behind');
+            // Fresh files are kept by the default age threshold...
+            $this->assertSame([], Index::cleanupTempFiles($this->dbPath));
+            // ...but the dead process no longer holds the lock, so they are safe to remove.
+            $this->assertSame($leftovers, Index::cleanupTempFiles($this->dbPath, 0));
+            $this->assertSame([], glob($this->dbPath . '.tmp-*'));
+        } finally {
+            @unlink($ready);
+            $this->removeFiles(glob($this->dbPath . '.tmp-*') ?: []);
+        }
+    }
+
+    public function testRebuildSweepsStaleTempFiles(): void
+    {
+        new Index($this->dbPath)->close();
+        $files = $this->makeTempFiles(['.tmp-dddddddd', '.tmp-dddddddd-shm'], 7200);
+        try {
+            Index::rebuild($this->dbPath, function (Index $new): void {
+                $new->insert([['id' => 1, 'title' => 'sedan']]);
+            });
+
+            $this->assertSame([], glob($this->dbPath . '.tmp-*'));
+        } finally {
+            $this->removeFiles($files);
+        }
+    }
+
+    public function testCleanupTempFilesRejectsMissingDirectory(): void
+    {
+        $this->expectException(IOException::class);
+        Index::cleanupTempFiles('/nonexistent-dir-' . uniqid() . '/index.db');
+    }
+
+    public function testSnapshotToLeavesFreshTempFilesOfOtherRunsAlone(): void
+    {
+        // A temp file this young may belong to a snapshot or rebuild still running in another
+        // process; deleting it would break that run's final rename.
+        $readPath = sys_get_temp_dir() . '/fuzor_snap_' . uniqid() . '.db';
+        $inFlight = $readPath . '.tmp-0123abcd';
+        try {
+            file_put_contents($inFlight, 'in progress');
+
+            $write = new Index($this->dbPath);
+            $write->insert([['id' => 1, 'title' => 'sedan']]);
+            $write->snapshotTo($readPath);
+
+            $this->assertFileExists($inFlight);
+            $this->assertSame([], glob($readPath . '.tmp-*.lock'), 'the snapshot released its own lock');
+        } finally {
+            @unlink($readPath);
+            @unlink($inFlight);
         }
     }
 

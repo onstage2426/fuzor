@@ -58,6 +58,15 @@ class Index
      */
     public const int CURRENT_SCHEMA_VERSION = 3;
 
+    /**
+     * Suffix of the temp files rebuild() and snapshotTo() create next to an index path:
+     * '.tmp-' + 8 hex chars, optionally followed by a SQLite sidecar or the builder's lock file.
+     */
+    private const string TEMP_SUFFIX_PATTERN = '/^\.tmp-[0-9a-f]{8}(?:-wal|-shm|-journal|\.lock)?$/';
+
+    /** Length of a temp name's stem suffix: '.tmp-' plus 8 hex chars. */
+    private const int TEMP_STEM_SUFFIX_LENGTH = 13;
+
     /** Max rows per chunk when each row uses 1 bind variable (SQLite 32 766-variable ceiling). */
     private const int CHUNK_1P = 32_766;
 
@@ -327,7 +336,9 @@ class Index
      * a separate copy of the source data.
      *
      * If the callback throws, or if the automatic streaming path fails, the temporary file is
-     * removed and the original index is left untouched.
+     * removed and the original index is left untouched. The temp file is locked for the whole
+     * build (see cleanupTempFiles()), and leftovers from earlier runs that were killed before
+     * they could clean up are swept first.
      *
      * Pass a SchemaConfig to override the schema; omit it (null) to inherit the existing
      * index's schema. When no existing index is present, null uses SchemaConfig defaults.
@@ -376,8 +387,8 @@ class Index
             $existing = null;
         }
 
-        /** @infection-ignore-all DecrementInteger|IncrementInteger|ConcatOperandRemoval|Concat: temp path construction details; any unique path in the same directory produces identical rename semantics */
-        $tmp = $resolved . '.tmp-' . bin2hex(random_bytes(4));
+        self::cleanupTempFiles($resolved);
+        [$tmp, $tmpLock] = self::claimTempPath($resolved);
 
         try {
             $handle = new self($tmp, schema: $schema);
@@ -397,15 +408,119 @@ class Index
                 throw new IOException("Failed to atomically replace index at {$resolved}.");
             }
         } catch (\Throwable $e) {
-            @unlink($tmp);
-            @unlink($tmp . '-wal');
-            @unlink($tmp . '-shm');
+            foreach (['', '-wal', '-shm', '-journal'] as $suffix) {
+                @unlink($tmp . $suffix);
+            }
             throw $e;
         } finally {
             $existing?->close();
+            self::releaseTempPath($tmp, $tmpLock);
         }
 
         return new self($resolved);
+    }
+
+    /**
+     * Remove temp files left next to $path by a rebuild() or snapshotTo() that did not finish.
+     *
+     * Both methods build into {path}.tmp-{8 hex} (plus SQLite's -wal / -shm / -journal
+     * sidecars) and rename the result over $path. A process that is killed mid-build —
+     * max_execution_time, out of memory, a worker or container restart — never reaches its own
+     * cleanup, so its files stay behind. rebuild() and snapshotTo() call this with the default
+     * age before they start; call it from your own tooling to clean up or list leftovers.
+     *
+     * The files of one temp name are deleted together, and only when both hold:
+     *
+     * - no process holds the name's .lock file — rebuild() and snapshotTo() keep an flock() on
+     *   it for their whole run and the OS releases it when a process dies, so a build that is
+     *   still running is never touched, however long it takes;
+     * - the newest of its files is at least $minAgeSeconds old — this covers leftovers from
+     *   before 1.6.0, which have no lock file, and the instant between a builder creating its
+     *   lock file and locking it.
+     *
+     * Only names of exactly that shape are considered; other files next to $path are ignored.
+     *
+     * @param  string $path          Path of the index the temp files belong to.
+     * @param  int    $minAgeSeconds Minimum age of a group's newest file; 0 ignores age.
+     * @return list<string>          The deleted paths, sorted.
+     * @throws IOException If the parent directory of $path does not exist.
+     */
+    public static function cleanupTempFiles(string $path, int $minAgeSeconds = 3600): array
+    {
+        $resolved = self::resolvePath($path);
+        $baseLen  = strlen($resolved);
+
+        /** @var array<string, non-empty-list<string>> $groups  temp stem → its files */
+        $groups = [];
+        foreach (glob($resolved . '.tmp-*') ?: [] as $file) {
+            if (preg_match(self::TEMP_SUFFIX_PATTERN, substr($file, $baseLen)) === 1) {
+                $groups[substr($file, 0, $baseLen + self::TEMP_STEM_SUFFIX_LENGTH)][] = $file;
+            }
+        }
+
+        $deleted = [];
+        $now     = time();
+        clearstatcache();
+        foreach ($groups as $stem => $files) {
+            $newest = max(array_map(static fn(string $f): int => (int) @filemtime($f), $files));
+            if ($now - $newest < $minAgeSeconds) {
+                continue;
+            }
+            $lockPath = $stem . '.lock';
+            if (in_array($lockPath, $files, true)) {
+                $lock = @fopen($lockPath, 'r');
+                if ($lock === false) {
+                    continue; // Removed a moment ago: its builder just finished.
+                }
+                $free = flock($lock, LOCK_EX | LOCK_NB);
+                if ($free) {
+                    flock($lock, LOCK_UN);
+                }
+                fclose($lock);
+                if (!$free) {
+                    continue; // A live build owns it.
+                }
+            }
+            foreach ($files as $file) {
+                if (@unlink($file)) {
+                    $deleted[] = $file;
+                }
+            }
+        }
+
+        sort($deleted);
+        return $deleted;
+    }
+
+    /**
+     * Pick a fresh temp path next to $resolved and lock it until releaseTempPath().
+     *
+     * The lock file is what tells cleanupTempFiles() that the name belongs to a live build.
+     *
+     * @return array{0: string, 1: resource}
+     * @throws IOException If the lock file cannot be created or locked.
+     */
+    private static function claimTempPath(string $resolved): array
+    {
+        /** @infection-ignore-all DecrementInteger|IncrementInteger|ConcatOperandRemoval|Concat: temp path construction details; any unique path in the same directory produces identical rename semantics */
+        $tmp  = $resolved . '.tmp-' . bin2hex(random_bytes(4));
+        $lock = @fopen($tmp . '.lock', 'c');
+        if ($lock === false || !flock($lock, LOCK_EX)) {
+            throw new IOException("Failed to create temp lock file {$tmp}.lock.");
+        }
+        return [$tmp, $lock];
+    }
+
+    /**
+     * Release and remove the lock taken by claimTempPath().
+     *
+     * @param resource $lock
+     */
+    private static function releaseTempPath(string $tmp, mixed $lock): void
+    {
+        flock($lock, LOCK_UN);
+        fclose($lock);
+        @unlink($tmp . '.lock');
     }
 
     /**
@@ -420,9 +535,10 @@ class Index
      * consistent snapshot under a shared read transaction; WAL mode ensures writers
      * are never blocked.
      *
-     * Any stale .tmp-* files left by previous crashed snapshot attempts are removed
-     * before the new temp file is created. The new temp file is removed if the
-     * VACUUM INTO or rename fails.
+     * Temp files left by earlier rebuild() or snapshotTo() runs that were killed are swept
+     * before the new temp file is created (see cleanupTempFiles(); a run in progress in
+     * another process is never touched). The new temp file is removed if the VACUUM INTO or
+     * rename fails.
      *
      * @param  string $path Absolute or relative path for the snapshot file.
      * @throws IOException If the rename fails or the parent directory does not exist.
@@ -431,11 +547,8 @@ class Index
     {
         $resolved = self::resolvePath($path);
 
-        foreach (glob($resolved . '.tmp-*') ?: [] as $stale) {
-            @unlink($stale);
-        }
-
-        $tmp = $resolved . '.tmp-' . bin2hex(random_bytes(4));
+        self::cleanupTempFiles($resolved);
+        [$tmp, $tmpLock] = self::claimTempPath($resolved);
 
         try {
             assert($this->pdo instanceof \PDO);
@@ -445,7 +558,10 @@ class Index
             }
         } catch (\Throwable $e) {
             @unlink($tmp);
+            @unlink($tmp . '-journal');
             throw $e;
+        } finally {
+            self::releaseTempPath($tmp, $tmpLock);
         }
 
         foreach (['-wal', '-shm'] as $suffix) {

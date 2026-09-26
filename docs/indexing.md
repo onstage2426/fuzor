@@ -336,6 +336,18 @@ Throws `\InvalidArgumentException` if the callback is omitted and the existing i
 
 Internally, `rebuild` writes to a temporary file alongside the target, then renames it over the original — a POSIX-atomic operation on the same filesystem.
 
+### Temporary files
+
+`rebuild()` and `snapshotTo()` build into `{path}.tmp-{8 hex}` (plus SQLite's `-wal` / `-shm` sidecars) next to the target and remove it when they finish or fail. A process that is killed mid-build — `max_execution_time`, out of memory, a PHP-FPM or container restart — never reaches that cleanup, so its files stay behind.
+
+Both methods sweep such leftovers before they start. You can also do it from your own tooling, for example a cron job or an admin screen:
+
+```php
+$deleted = Index::cleanupTempFiles('/path/to/articles.db'); // list<string> of removed paths
+```
+
+The sweep never touches a build that is still running, in this process or another one. Each build holds an `flock()` on `{tmp}.lock` for its whole run, and the operating system releases that lock when the process dies. A group of temp files is only deleted when its lock is free **and** its newest file is older than `$minAgeSeconds` (default one hour). The age check covers leftovers from before 1.6.0, which have no lock file. Pass `0` to ignore age once you know nothing is running. Only names of exactly this shape are considered; other files next to the index are left alone.
+
 ### Synonyms and rebuild
 
 Synonyms are copied from the existing index into the rebuilt one automatically. They are seeded before the callback runs, so the callback can inspect, extend, or replace them:
