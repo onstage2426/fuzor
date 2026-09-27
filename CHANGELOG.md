@@ -1,11 +1,24 @@
 # Changelog
 
+## 1.7.0 — 2026-09-27
+
+Added:
+
+- `FacetExclude` — exclusion filters for `search()`, `searchBoolean()`, browse, and `facetSearch()`. Wrap any filter value (a value, a list of values, or a `FacetRange`) to keep only the documents that do not match it: `filter: ['visibility' => new FacetExclude('exclude-from-search')]`. Documents without the field pass, and a multi-value document is removed as soon as one of its values matches, which positive filters cannot express. Exclusions combine with other filters by AND and also apply when their own field is counted: they are constraints, not selections, so they are never counted disjunctively. An exclusion on an undeclared field matches nothing and adds a warning, like any undeclared filter. See "Excluding values" in `docs/search.md`.
+- A browse or `facetSearch()` whose only filters are exclusions is answered from the excluded documents instead of visiting every kept one, so its facet counts are exact at any index size and its cost follows the number of excluded documents. On the 44k catalog, a page with its total takes under 1 ms, and three facets take 36–52 ms with 410–4,000 products excluded (33 ms unfiltered).
+- `HtmlText::toText()` is now public: the HTML-to-visible-text conversion that `stripHtml` uses for indexing. To have the document store (and so hits, `get()`, and `stream()`) hold text instead of HTML, convert the fields with it before inserting; see "Storing text instead of HTML" in `docs/indexing.md`. The conversion is not idempotent, so convert once from the original HTML and do not combine a pre-converted field with `stripHtml`.
+- `docs/search.md` explains how to sort by the document ID: declare `id` in `facetFields`. The 1.6.0 notes below now mention that an undeclared `id:asc` was among the sort specs that stopped working.
+
+Fixed:
+
+- `facetStats` ignored a bound of exactly `0` whenever a facet field was counted with a per-field scan — always for counts over the whole index (such as an unfiltered browse), and for a single facet counted over more than 2,000 matching documents. A `price` field with free items reported the lowest non-zero price as `min`, and a field whose values are all `<= 0` reported the wrong `max`.
+
 ## 1.6.0 — 2026-09-26
 
 Behaviour changes to check when upgrading:
 
 - String facet values now sort strictly by bytes. Numeric-looking strings (`"10"`, `"9"`) used to compare as numbers against each other, which made mixed sets order inconsistently; they now sort as text like any other string, as in Meilisearch. Index numbers as `int`/`float` to sort them numerically (range filters and `facetStats` already require that).
-- A `sort` spec on a field that is not a declared facet field is now ignored (with a warning), so the query keeps its normal order. Previously every document tied on it, which on a browse replaced the documented newest-first order with oldest-first.
+- A `sort` spec on a field that is not a declared facet field is now ignored (with a warning), so the query keeps its normal order. Previously every document tied on it, which on a browse replaced the documented newest-first order with oldest-first. This includes `id`: `id:asc` only sorted by ascending ID because of that tie. To sort by the document ID, declare `id` in `facetFields`.
 - A browse with a filter now reports the exact `totalHits`; on large indexes this can be much higher than before (see the browse fix below).
 - `stripHtml` indexing changed in schema revision 3. Existing `stripHtml` indexes keep the old tokenisation until `Index::rebuild()`.
 
