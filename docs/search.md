@@ -287,6 +287,30 @@ $result = $index->search('watch', new SearchOptions(
 | `FacetRange::gt(float $gt)` | Strict lower bound |
 | `FacetRange::lt(float $lt)` | Strict upper bound |
 
+### Excluding values
+
+Wrap a filter value in `FacetExclude` to keep only documents that do **not** match it. It accepts anything a positive filter accepts — one value, a list of values, or a `FacetRange`:
+
+```php
+use Fuzor\FacetExclude;
+
+$result = $index->search('shirt', new SearchOptions(filter: [
+    'visibility' => new FacetExclude('exclude-from-search'),        // hide one value
+    'brand'      => ['Nike', 'Adidas'],                             // combined by AND, as usual
+]));
+
+new FacetExclude(['exclude-from-catalog', 'outofstock']);          // hide any of these
+new FacetExclude(FacetRange::max(0));                              // hide free or negatively priced items
+```
+
+- A document passes when **none** of its values for the field matches. A multi-value document is excluded as soon as one of its values matches, which a positive filter cannot express: listing every other category (`['shoes', 'shirts', …]`) still keeps a document tagged both `shoes` and `sale`, while `new FacetExclude('sale')` removes it.
+- A document that does not have the field at all passes — it has nothing to exclude.
+- An exclusion on a field that is not a declared `facetField` matches **no** documents and adds a [warning](#warnings), like a positive filter. A typo in a filter meant to hide something therefore hides everything rather than showing what it should hide.
+- An exclusion on a declared field that no document has a value for yet, or with an empty list, excludes nothing.
+- One key holds one condition, so a field cannot be both included and excluded in the same filter. Listing the values to include already excludes the rest.
+
+**Compared with Meilisearch:** `NOT genres = horror` / `genres NOT IN [horror, comedy]` also return documents without the field, and `NOT` applies to ranges too. Meilisearch rejects filters on attributes that are not filterable; Fuzor 1.x warns and matches nothing (2.0 will throw). Like every Fuzor filter, values match exactly, whereas Meilisearch compares strings case-insensitively.
+
 ## Facet counts
 
 Pass a `facets` list to compute per-value counts across the result set:
@@ -321,6 +345,8 @@ $result->facetDistribution['brand'];
 $result->facetDistribution['category'];
 // ['Watches' => 10, 'Accessories' => 2]
 ```
+
+An [exclusion](#excluding-values) is not a selection among alternatives, so it always applies — also when its own field is counted, and inside every other key's disjunctive count. Excluded documents never show up in `facetDistribution`.
 
 ## Facet value search
 
@@ -494,7 +520,7 @@ Documents with no value for the distinct field are never collapsed — each pass
 | `asYouType` | `true` | Match the last keyword as a prefix |
 | `limit` | `100` | Maximum hits to return |
 | `offset` | `0` | Hits to skip (pagination) |
-| `filter` | `[]` | Facet filters — `array<string, string\|list<string>\|FacetRange>` |
+| `filter` | `[]` | Facet filters — `array<string, string\|list<string>\|FacetRange\|FacetExclude>` |
 | `facets` | `[]` | Facet fields to compute value counts for |
 | `sort` | `[]` | Sort specs — `list<string>` of `'field:asc'` / `'field:desc'` |
 | `distinct` | `null` | Facet field to collapse on |

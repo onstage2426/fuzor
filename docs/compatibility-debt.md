@@ -137,7 +137,7 @@ in `SearchResult::$warnings` / `FacetSearchResult::$warnings`, and has this effe
 | Option | 1.6 behaviour |
 |---|---|
 | `sort` | Spec dropped; the remaining specs apply, otherwise the normal order |
-| `filter` | Matches nothing (fails closed) |
+| `filter` | Matches nothing (fails closed), a `FacetExclude` included |
 | `facets` | No counts for that field |
 | `distinct` | No deduplication |
 | `facetName` | No values |

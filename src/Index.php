@@ -7,6 +7,7 @@ namespace Fuzor;
 use Fuzor\BooleanParser;
 use Fuzor\Exceptions\IOException;
 use Fuzor\Exceptions\QueryException;
+use Fuzor\FacetExclude;
 use Fuzor\FacetRange;
 use Fuzor\FacetSearchQuery;
 use Fuzor\FacetSearchResult;
@@ -33,6 +34,7 @@ use PDO;
  *     params: list<mixed>,
  *     impossible: bool,
  *     multiRow: bool,
+ *     exclude: bool,
  * }
  */
 class Index
@@ -2050,7 +2052,9 @@ class Index
         }
 
         // Apply facet filters: load per-key doc ID sets and intersect with the score map.
-        $filterSets   = $this->loadFacetKeySets($filter, array_keys($docScores));
+        // Exclusions are removed first, so they also hold for disjunctive facet counts.
+        [$filterSets, $excluded] = $this->loadFacetKeySets($filter, array_keys($docScores));
+        $docScores    = array_diff_key($docScores, $excluded);
         $rawDocScores = $docScores;
         if ($filterSets !== []) {
             $globalFilter = $this->intersectFilterSets($filterSets);
@@ -2320,11 +2324,14 @@ class Index
 
         // Apply facet filters: load per-key doc ID sets and intersect with the result.
         // array_flip($docIds) gives doc_id → position, usable as a set for array_intersect_key.
-        $filterSets = $this->loadFacetKeySets($filter, $docIds);
-        $rawDocSet  = array_flip($docIds);
+        // Exclusions are removed first, so they also hold for disjunctive facet counts.
+        [$filterSets, $excluded] = $this->loadFacetKeySets($filter, $docIds);
+        $rawDocSet  = array_diff_key(array_flip($docIds), $excluded);
         if ($filterSets !== []) {
             $globalFilter = $this->intersectFilterSets($filterSets);
             $docIds = array_keys(array_intersect_key($rawDocSet, $globalFilter));
+        } elseif ($excluded !== []) {
+            $docIds = array_keys($rawDocSet);
         }
 
         // Compute disjunctive facet counts on the full filtered result.
@@ -2466,13 +2473,19 @@ class Index
         }
         $match = null;
         if ($ftsCandidates !== null && $query->filter !== []) {
-            $filterSets    = $this->loadFacetKeySets($query->filter, array_keys($ftsCandidates));
-            $ftsCandidates = array_intersect_key($ftsCandidates, $this->intersectFilterSets($filterSets));
+            [$filterSets, $excluded] = $this->loadFacetKeySets($query->filter, array_keys($ftsCandidates));
+            $ftsCandidates = array_diff_key($ftsCandidates, $excluded);
+            if ($filterSets !== []) {
+                $ftsCandidates = array_intersect_key($ftsCandidates, $this->intersectFilterSets($filterSets));
+            }
         } elseif ($query->filter !== []) {
+            // Exclusions that exclude nothing are dropped, which can leave no condition at all.
             $conditions = $this->orderBySelectivity($this->facetFilterConditions($query->filter));
-            $match      = $conditions === [] ? null : $this->matchingDocsSql($conditions);
-            if ($match === null) {
-                return new FacetSearchResult([], $query->facetQuery, $warnings, $exhaustive);
+            if ($conditions !== []) {
+                $match = $this->matchingDocsSql($conditions);
+                if ($match === null) {
+                    return new FacetSearchResult([], $query->facetQuery, $warnings, $exhaustive);
+                }
             }
         }
         if ($ftsCandidates === []) {
@@ -2816,7 +2829,10 @@ class Index
             if ($keyId === null) {
                 continue;
             }
-            $others = array_values(array_filter($conditions, fn(array $c): bool => $c['name'] !== $keyName));
+            // Only positive filters are disjunctive: an exclusion also applies to its own field.
+            $others = array_values(
+                array_filter($conditions, fn(array $c): bool => $c['exclude'] || $c['name'] !== $keyName)
+            );
             if (count($others) === count($conditions)) {
                 $common[$keyName] = $keyId;
                 continue;
@@ -5414,14 +5430,23 @@ class Index
      * 'multiRow' marks a condition one document can satisfy with several rows (a range, or more
      * than one value), which matters when the condition drives a query (see matchingDocsSql()).
      *
-     * @param  array<array-key, string|list<string>|FacetRange> $filter
+     * A FacetExclude is rendered from the filter it wraps and flagged 'exclude': a document
+     * satisfies it when none of its rows matches 'sql'. On an undeclared field it is impossible,
+     * failing closed like a positive filter; on a declared field no document has populated yet,
+     * or with an empty value list, it excludes nothing and is left out of the list.
+     *
+     * @param  array<array-key, string|list<string>|FacetRange|FacetExclude> $filter
      * @return list<FacetCondition>
      */
     private function facetFilterConditions(array $filter): array
     {
         $conditions = [];
         foreach ($filter as $name => $filterValue) {
-            $name  = (string) $name;
+            $name    = (string) $name;
+            $exclude = $filterValue instanceof FacetExclude;
+            if ($filterValue instanceof FacetExclude) {
+                $filterValue = $filterValue->filter;
+            }
             $keyId = $this->lookupFacetKeyId($name);
             $sql   = '';
             $params = [];
@@ -5443,13 +5468,18 @@ class Index
                 $params = is_array($filterValue) ? $filterValue : [$filterValue];
                 $sql    = '%1$s.value IN (' . $this->placeholders(count($params)) . ')';
             }
+            $matchesNothing = $keyId === null || $params === [] && !$filterValue instanceof FacetRange;
+            if ($exclude && $matchesNothing && isset($this->facetFieldSet[$name])) {
+                continue;
+            }
             $conditions[] = [
                 'name'       => $name,
                 'keyId'      => $keyId ?? 0,
                 'sql'        => $sql,
                 'params'     => $params,
-                'impossible' => $keyId === null || $params === [] && !$filterValue instanceof FacetRange,
+                'impossible' => $exclude ? !isset($this->facetFieldSet[$name]) : $matchesNothing,
                 'multiRow'   => $filterValue instanceof FacetRange || count($params) > 1,
+                'exclude'    => $exclude,
             ];
         }
         return $conditions;
@@ -5462,11 +5492,19 @@ class Index
      * so a query over several filters starts from the most selective one and only probes the
      * others. With fewer than two conditions there is nothing to order and no query runs.
      *
+     * Exclusions go last, uncounted: their rows are the documents they remove, so they can only
+     * ever be probed, never drive.
+     *
      * @param  list<FacetCondition> $conditions
      * @return list<FacetCondition>
      */
     private function orderBySelectivity(array $conditions): array
     {
+        $exclusions = array_values(array_filter($conditions, fn(array $c): bool => $c['exclude']));
+        if ($exclusions !== []) {
+            $positive = array_values(array_filter($conditions, fn(array $c): bool => !$c['exclude']));
+            return [...$this->orderBySelectivity($positive), ...$exclusions];
+        }
         if (count($conditions) < 2) {
             return $conditions;
         }
@@ -5491,7 +5529,9 @@ class Index
      *
      * Driven from the first condition's rows (order the list with orderBySelectivity() first)
      * with a correlated probe per remaining condition, so nothing but the driver's matches is
-     * ever visited. Returns null when a condition can never match.
+     * ever visited. An exclusion cannot drive, so when the first condition is one (the list
+     * holds only exclusions) every document is a candidate and all conditions are probed.
+     * Returns null when a condition can never match.
      *
      * @param  non-empty-list<FacetCondition> $conditions
      * @return array{0: string, 1: list<mixed>}|null
@@ -5499,6 +5539,10 @@ class Index
     private function matchingDocsSql(array $conditions): ?array
     {
         $driver = $conditions[0];
+        if ($driver['exclude']) {
+            $probes = $this->renderFacetProbes($conditions, 'md.doc_id');
+            return $probes === null ? null : ['SELECT md.doc_id FROM doc_lengths md WHERE 1' . $probes[0], $probes[1]];
+        }
         $probes = $this->renderFacetProbes(array_slice($conditions, 1), 'md.doc_id');
         if ($driver['impossible'] || $probes === null) {
             return null;
@@ -5514,9 +5558,9 @@ class Index
     /**
      * Render conditions as correlated EXISTS probes on the document ID expression $docExpr.
      *
-     * Each probe is one lookup in the covering facet_doc_id_index. Returns [sql, params], where
-     * sql is empty or a series of ' AND EXISTS (…)' clauses, or null when a condition can never
-     * match.
+     * Each probe is one lookup in the covering facet_doc_id_index; an exclusion is rendered as
+     * NOT EXISTS. Returns [sql, params], where sql is empty or a series of ' AND [NOT] EXISTS (…)'
+     * clauses, or null when a condition can never match.
      *
      * @param  list<FacetCondition> $conditions
      * @return array{0: string, 1: list<mixed>}|null
@@ -5530,7 +5574,8 @@ class Index
                 return null;
             }
             $alias  = "ff{$i}";
-            $sql   .= " AND EXISTS (SELECT 1 FROM facet_values {$alias} WHERE {$alias}.doc_id = {$docExpr}"
+            $not    = $condition['exclude'] ? 'NOT ' : '';
+            $sql   .= " AND {$not}EXISTS (SELECT 1 FROM facet_values {$alias} WHERE {$alias}.doc_id = {$docExpr}"
                 . " AND {$alias}.key_id = ? AND " . sprintf($condition['sql'], $alias) . ')';
             array_push($params, $condition['keyId'], ...$condition['params']);
         }
@@ -5570,18 +5615,25 @@ class Index
     /**
      * Load per-filter-key doc ID sets from facet_values, scoped to a candidate set.
      *
-     * Called once by search() and searchBoolean(); all sets are retained in memory so
-     * disjunctive facet counting can reuse them without extra DB round-trips. Each query only
-     * tests the candidate documents, so the sets are exact. With no candidates every set is
-     * empty and no query runs.
+     * Called once by search(), searchBoolean(), and facetSearch() with a query; all sets are
+     * retained in memory so disjunctive facet counting can reuse them without extra DB
+     * round-trips. Each query only tests the candidate documents, so the sets are exact. With
+     * no candidates every set is empty and no query runs.
      *
-     * @param  array<string, string|list<string>|FacetRange> $filter
-     * @param  list<int>                                     $candidateDocIds BM25/boolean candidates to scope query.
-     * @return array<string, array<int, true>>               Key name → flipped doc ID set.
+     * Exclusions are collected separately, as the union of the candidates they remove. Callers
+     * subtract that set before anything else, so an exclusion also applies when its own field is
+     * counted. An exclusion that can never be satisfied (an undeclared field) is returned as an
+     * empty positive set instead, which fails the whole filter closed.
+     *
+     * @param  array<string, string|list<string>|FacetRange|FacetExclude> $filter
+     * @param  list<int> $candidateDocIds BM25/boolean candidates to scope query.
+     * @return array{0: array<string, array<int, true>>, 1: array<int, true>}
+     *         Key name → flipped doc ID set for positive filters, and the excluded doc ID set.
      */
     private function loadFacetKeySets(array $filter, array $candidateDocIds): array
     {
         $sets          = [];
+        $excluded      = [];
         $candidateJson = json_encode($candidateDocIds);
         foreach ($this->facetFilterConditions($filter) as $condition) {
             $name = $condition['name'];
@@ -5595,10 +5647,14 @@ class Index
             );
             $stmt->execute([$condition['keyId'], ...$condition['params'], $candidateJson]);
             /** @var list<int> $ids */
-            $ids         = $stmt->fetchAll(PDO::FETCH_COLUMN);
-            $sets[$name] = array_fill_keys($ids, true);
+            $ids = $stmt->fetchAll(PDO::FETCH_COLUMN);
+            if ($condition['exclude']) {
+                $excluded += array_fill_keys($ids, true);
+            } else {
+                $sets[$name] = array_fill_keys($ids, true);
+            }
         }
-        return $sets;
+        return [$sets, $excluded];
     }
 
     /**

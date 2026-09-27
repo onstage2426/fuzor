@@ -3,6 +3,7 @@
 namespace Fuzor\Tests;
 
 use Fuzor\Config;
+use Fuzor\FacetExclude;
 use Fuzor\FacetRange;
 use Fuzor\FacetSearchQuery;
 use Fuzor\Index;
@@ -3706,6 +3707,245 @@ class IndexTest extends TestCase
         $this->assertNotContains(3, $result->getIds());
     }
 
+    // --- Facets: exclusion filter ---
+
+    /**
+     * Six shoes with shop-style visibility terms. Docs 3 and 6 have no visibility at all; doc 6 has no price.
+     */
+    private function exclusionIndex(?Config $config = null): Index
+    {
+        $index = new Index(
+            $this->dbPath,
+            schema: new SchemaConfig(facetFields: ['visibility', 'brand', 'price', 'unused']),
+            config: $config,
+        );
+        $index->insert([
+            ['id' => 1, 'title' => 'shoe', 'visibility' => ['exclude-from-search'], 'brand' => 'Nike', 'price' => 10],
+            [
+                'id'         => 2,
+                'title'      => 'shoe',
+                'visibility' => ['exclude-from-catalog', 'outofstock'],
+                'brand'      => 'Adidas',
+                'price'      => 20,
+            ],
+            ['id' => 3, 'title' => 'shoe', 'brand' => 'Nike', 'price' => 30],
+            ['id' => 4, 'title' => 'shoe', 'visibility' => ['featured'], 'brand' => 'Puma', 'price' => 40],
+            [
+                'id'         => 5,
+                'title'      => 'shoe',
+                'visibility' => ['exclude-from-search', 'featured'],
+                'brand'      => 'Adidas',
+                'price'      => 50,
+            ],
+            ['id' => 6, 'title' => 'shoe', 'brand' => 'Puma'],
+        ]);
+        return $index;
+    }
+
+    /**
+     * Run $options through search(), searchBoolean(), and a browse; each must match exactly $expectedIds.
+     *
+     * @param  list<int> $expectedIds
+     * @return array<string, SearchResult>
+     */
+    private function assertFilterOnEveryPath(Index $index, SearchOptions $options, array $expectedIds): array
+    {
+        $results = [
+            'search'        => $index->search('shoe', $options),
+            'searchBoolean' => $index->searchBoolean('shoe', $options),
+            'browse'        => $index->search('', $options),
+        ];
+        foreach ($results as $path => $result) {
+            $this->assertEqualsCanonicalizing($expectedIds, $result->getIds(), $path);
+            $this->assertSame(count($expectedIds), $result->totalHits, $path);
+        }
+        return $results;
+    }
+
+    public function testExcludeFilterRemovesDocsWithTheValueAndKeepsDocsWithoutTheField(): void
+    {
+        $index = $this->exclusionIndex();
+
+        $results = $this->assertFilterOnEveryPath(
+            $index,
+            new SearchOptions(filter: ['visibility' => new FacetExclude('exclude-from-search')]),
+            [2, 3, 4, 6],
+        );
+        $this->assertSame([], $results['browse']->warnings);
+    }
+
+    public function testExcludeFilterWithValueListRemovesDocsWithAnyOfThem(): void
+    {
+        $index = $this->exclusionIndex();
+
+        $this->assertFilterOnEveryPath(
+            $index,
+            new SearchOptions(filter: ['visibility' => new FacetExclude(['outofstock', 'featured'])]),
+            [1, 3, 6],
+        );
+    }
+
+    public function testExcludeFilterWithRangeKeepsDocsWithoutANumericValue(): void
+    {
+        $index = $this->exclusionIndex();
+
+        $this->assertFilterOnEveryPath(
+            $index,
+            new SearchOptions(filter: ['price' => new FacetExclude(FacetRange::between(20, 40))]),
+            [1, 5, 6],
+        );
+    }
+
+    public function testExcludeFilterCombinesWithPositiveFiltersInAnyOrder(): void
+    {
+        $index = $this->exclusionIndex();
+        $exclude = new FacetExclude('exclude-from-search');
+
+        $this->assertFilterOnEveryPath(
+            $index,
+            new SearchOptions(filter: ['brand' => ['Nike', 'Adidas'], 'visibility' => $exclude]),
+            [2, 3],
+        );
+        $this->assertFilterOnEveryPath(
+            $index,
+            new SearchOptions(filter: ['visibility' => $exclude, 'price' => FacetRange::min(30)]),
+            [3, 4],
+        );
+    }
+
+    public function testExcludeFiltersOnSeveralFieldsAllApply(): void
+    {
+        $index = $this->exclusionIndex();
+
+        $this->assertFilterOnEveryPath(
+            $index,
+            new SearchOptions(filter: [
+                'visibility' => new FacetExclude('outofstock'),
+                'brand'      => new FacetExclude('Nike'),
+            ]),
+            [4, 5, 6],
+        );
+    }
+
+    public function testExcludeFilterAppliesWhenCountingItsOwnField(): void
+    {
+        $index = $this->exclusionIndex();
+        $options = new SearchOptions(
+            filter: ['visibility' => new FacetExclude('exclude-from-search')],
+            facets: ['visibility', 'brand'],
+        );
+
+        foreach ($this->assertFilterOnEveryPath($index, $options, [2, 3, 4, 6]) as $path => $result) {
+            $visibility = $result->facetDistribution['visibility'];
+            $brand      = $result->facetDistribution['brand'];
+            ksort($visibility);
+            ksort($brand);
+            $this->assertSame(['exclude-from-catalog' => 1, 'featured' => 1, 'outofstock' => 1], $visibility, $path);
+            $this->assertSame(['Adidas' => 1, 'Nike' => 1, 'Puma' => 2], $brand, $path);
+        }
+    }
+
+    public function testExcludeFilterStillAppliesToDisjunctiveCountsOfPositiveFilters(): void
+    {
+        $index = $this->exclusionIndex();
+        $options = new SearchOptions(
+            filter: ['brand' => 'Nike', 'visibility' => new FacetExclude('exclude-from-search')],
+            facets: ['brand'],
+        );
+
+        foreach ($this->assertFilterOnEveryPath($index, $options, [3]) as $path => $result) {
+            // Brand is counted without its own filter, but never over the excluded docs 1 and 5.
+            $brand = $result->facetDistribution['brand'];
+            ksort($brand);
+            $this->assertSame(['Adidas' => 1, 'Nike' => 1, 'Puma' => 2], $brand, $path);
+        }
+    }
+
+    public function testExcludeFilterOnUndeclaredFieldMatchesNothing(): void
+    {
+        $index = $this->exclusionIndex();
+        $options = new SearchOptions(filter: ['tags' => new FacetExclude('x')], facets: ['brand']);
+
+        foreach ($this->assertFilterOnEveryPath($index, $options, []) as $path => $result) {
+            $this->assertSame([], $result->facetDistribution, $path);
+            $this->assertSame(
+                ["Filter field 'tags' is not a declared facet field; no documents match it."],
+                $result->warnings,
+                $path,
+            );
+        }
+        $query = new FacetSearchQuery(facetName: 'brand', filter: ['tags' => new FacetExclude('x')]);
+        $this->assertSame([], $index->facetSearch($query)->facetHits);
+    }
+
+    public function testExcludeFilterThatExcludesNothingKeepsEveryDoc(): void
+    {
+        $index = $this->exclusionIndex();
+
+        foreach (['unused' => new FacetExclude('x'), 'visibility' => new FacetExclude([])] as $field => $exclude) {
+            $options = new SearchOptions(filter: [$field => $exclude], facets: ['brand']);
+            foreach ($this->assertFilterOnEveryPath($index, $options, [1, 2, 3, 4, 5, 6]) as $path => $result) {
+                $this->assertSame([], $result->warnings, "{$field} {$path}");
+                $this->assertSame(6, array_sum($result->facetDistribution['brand']), "{$field} {$path}");
+            }
+            $facets = $index->facetSearch(new FacetSearchQuery(facetName: 'brand', filter: [$field => $exclude]));
+            $this->assertSame(6, array_sum(array_column($facets->facetHits, 'count')), $field);
+        }
+    }
+
+    public function testFacetSearchWithExcludeFilter(): void
+    {
+        $index = $this->exclusionIndex();
+        $filter = ['visibility' => new FacetExclude('exclude-from-search')];
+
+        foreach (['', 'shoe'] as $query) {
+            $result = $index->facetSearch(new FacetSearchQuery(facetName: 'brand', query: $query, filter: $filter));
+            $counts = array_column($result->facetHits, 'count', 'value');
+            ksort($counts);
+            $this->assertSame(['Adidas' => 1, 'Nike' => 1, 'Puma' => 2], $counts, "query '{$query}'");
+
+            $own = $index->facetSearch(new FacetSearchQuery(facetName: 'visibility', query: $query, filter: $filter));
+            $this->assertNotContains('exclude-from-search', array_column($own->facetHits, 'value'), "query '{$query}'");
+        }
+    }
+
+    public function testBrowseExcludeFilterShapesAgree(): void
+    {
+        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['price', 'color', 'brand']));
+        $index->insert($this->browseCatalog());
+
+        // Broad (probed walk): everything but red. Selective (materialised IN): 1 of 12 left, once
+        // driven by a positive filter and once by exclusions alone.
+        $broad    = $index->search('', new SearchOptions(filter: ['color' => new FacetExclude('red')], limit: 3));
+        $positive = $index->search('', new SearchOptions(
+            filter: ['color' => 'red', 'brand' => new FacetExclude('Zeta')],
+        ));
+        $onlyExclusions = $index->search('', new SearchOptions(
+            filter: ['color' => new FacetExclude('blue'), 'brand' => new FacetExclude('Zeta')],
+        ));
+
+        $this->assertSame([11, 10, 8], $broad->getIds());
+        $this->assertSame(8, $broad->totalHits);
+        $this->assertSame([3], $positive->getIds());
+        $this->assertSame([3], $onlyExclusions->getIds());
+        $this->assertSame(1, $onlyExclusions->totalHits);
+    }
+
+    public function testBrowseDistinctWithExcludeFilter(): void
+    {
+        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['price', 'color', 'brand']));
+        $index->insert($this->browseCatalog());
+
+        $result = $index->search('', new SearchOptions(
+            filter:   ['color' => new FacetExclude('blue')],
+            sort:     ['price:asc'],
+            distinct: 'brand',
+        ));
+
+        $this->assertSame([3, 6], $result->getIds());
+        $this->assertSame(2, $result->totalHits);
+    }
+
     // --- Facets: counts ---
 
     public function testSearchFacetCountsStringFacet(): void
@@ -4949,7 +5189,8 @@ class IndexTest extends TestCase
     {
         // The SQL walk must order exactly like sortDocIdsBySpecs(), which searchBoolean() uses
         // over the same candidates: mixed types, multi-value fields, missing values, ties,
-        // secondary specs, and both filter shapes (probed for broad filters, IN for selective).
+        // secondary specs, both filter shapes (probed for broad filters, IN for selective), and
+        // exclusions, which the walk probes with NOT EXISTS.
         $schema = new SchemaConfig(facetFields: ['size', 'group', 'color', 'unused']);
         $index  = new Index($this->dbPath, schema: $schema);
         $sizes  = [7, 'L', [3, 40], 12, null, 'M', 7, [2.5, 'XL'], 30, null];
@@ -4977,7 +5218,16 @@ class IndexTest extends TestCase
             ['size:asc', 'group:desc'],
             ['unused:asc', 'size:desc'],
         ];
-        $filters = [[], ['group' => ['a', 'b']], ['color' => 'red'], ['size' => FacetRange::between(3, 20)]];
+        $filters = [
+            [],
+            ['group' => ['a', 'b']],
+            ['color' => 'red'],
+            ['size' => FacetRange::between(3, 20)],
+            ['size' => new FacetExclude(['L', 'M'])],
+            ['size' => new FacetExclude(FacetRange::between(3, 20))],
+            ['color' => new FacetExclude('blue'), 'group' => ['a', 'b']],
+            ['group' => new FacetExclude('c'), 'color' => new FacetExclude('red')],
+        ];
         $pages   = [[0, 5], [3, 4], [0, 100], [17, 5]];
         foreach ($sorts as $sort) {
             foreach ($filters as $filter) {
