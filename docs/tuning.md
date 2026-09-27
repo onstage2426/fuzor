@@ -39,7 +39,7 @@ The allowed edit distance scales automatically with word length: 1 typo for 5–
 | Property | Default | Effect |
 |---|---|---|
 | `filterMaxDocs` | `2000` | No effect since 1.6.0 — facet filters are always evaluated exactly. Still accepted; removed in 2.0. |
-| `maxFacetCountDocs` | `10000` | Max matching documents included in facet counting, for `search()`, `searchBoolean()`, a filtered browse, and `facetSearch()` with a `query`. Counts are approximate above this cap, and the field is listed in `$approximateFacets`. Facet counts with no filter and no query are always exact. |
+| `maxFacetCountDocs` | `10000` | Max matching documents included in facet counting, for `search()`, `searchBoolean()`, a filtered browse, and `facetSearch()` with a `query`. Counts are approximate above this cap, and the field is listed in `$approximateFacets`. Facet counts with no filter and no query are always exact, and so are those whose only filters are `FacetExclude` exclusions. |
 | `maxValuesPerFacet` | `100` | Max values returned per facet field in `$facetDistribution`, ordered by count descending. `0` returns all values. |
 
 ## Field boosting

@@ -307,7 +307,7 @@ ecom set). Each is independent.
   `LIMIT maxFacetCountDocs + 1` and using the list length as the total whenever it stays
   under the cap measured 6.2 ms instead of 10.7 ms — about 4.5 ms, ~10% of a "2 filters +
   3 facets" browse, same results.
-- **Whole-key facet counts compute numeric stats for text fields.** `fetchFacetCountsForKey()`
+- **Whole-key facet counts compute numeric stats for text fields.** `fetchFacetCountRows()`
   always aggregates `MIN/MAX/SUM(CASE…)` over `num_value`: 11.0 ms per key against 4.9 ms
   for `COUNT(*)` only (brandName, baseColour, articleType alike). Probing
   `facet_numeric_index` for any numeric row of the key costs 0.02 ms. Skipping the stats for

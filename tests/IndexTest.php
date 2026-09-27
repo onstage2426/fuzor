@@ -3909,6 +3909,103 @@ class IndexTest extends TestCase
         }
     }
 
+    /**
+     * Facet counts from every path, keys sorted, so the browse complement paths can be compared
+     * with the search paths, which count the kept candidates directly.
+     *
+     * @param  array<string, SearchResult> $results
+     * @return array<string, array{0: array<string, array<array-key, int>>, 1: array<string, mixed>}>
+     */
+    private function sortedFacets(array $results): array
+    {
+        return array_map(function (SearchResult $result): array {
+            $distribution = $result->facetDistribution;
+            foreach ($distribution as &$counts) {
+                ksort($counts);
+            }
+            ksort($distribution);
+            return [$distribution, $result->facetStats];
+        }, $results);
+    }
+
+    public function testExclusionOnlyBrowseFacetCountsAreExactAtAnyCap(): void
+    {
+        // Two docs are excluded: cap 1 scans each key with NOT IN, caps 2 and 100 subtract the
+        // excluded docs' counts from the whole-index counts. Both must match what the search
+        // paths count over the kept candidates when nothing caps them (cap 100, run first).
+        $reference = null;
+        foreach ([100, 2, 1] as $cap) {
+            $this->tearDown();
+            $index   = $this->exclusionIndex(new Config(maxFacetCountDocs: $cap));
+            $options = new SearchOptions(
+                filter: ['brand' => new FacetExclude('Nike')],
+                facets: ['brand', 'visibility', 'price'],
+            );
+            $results   = $this->assertFilterOnEveryPath($index, $options, [2, 4, 5, 6]);
+            $facets    = $this->sortedFacets($results);
+            $reference ??= $facets['search'];
+
+            $this->assertSame([], $results['browse']->approximateFacets, "cap {$cap}");
+            $this->assertSame($reference, $facets['browse'], "cap {$cap}");
+            // Price 10 (doc 1) is gone, so the minimum moves up to 20.
+            $this->assertSame(['min' => 20.0, 'max' => 50.0], $results['browse']->facetStats['price'], "cap {$cap}");
+            $this->assertSame(['Adidas' => 2, 'Puma' => 2], $facets['browse'][0]['brand'], "cap {$cap}");
+        }
+    }
+
+    public function testExclusionOnlyBrowseStatsAppearWhenOnlyNumbersRemain(): void
+    {
+        $reference = null;
+        foreach ([100, 1] as $cap) {
+            $this->tearDown();
+            $index = new Index(
+                $this->dbPath,
+                schema: new SchemaConfig(facetFields: ['size', 'group']),
+                config: new Config(maxFacetCountDocs: $cap),
+            );
+            $index->insert([
+                ['id' => 1, 'title' => 'shoe', 'size' => 'L', 'group' => 'a'],
+                ['id' => 2, 'title' => 'shoe', 'size' => 10, 'group' => 'b'],
+                ['id' => 3, 'title' => 'shoe', 'size' => 20, 'group' => 'b'],
+                ['id' => 4, 'title' => 'shoe', 'size' => 'L', 'group' => 'a'],
+            ]);
+            $options = new SearchOptions(filter: ['group' => new FacetExclude('a')], facets: ['size']);
+            $facets     = $this->sortedFacets($this->assertFilterOnEveryPath($index, $options, [2, 3]));
+            $reference ??= $facets['search'];
+
+            $this->assertSame($reference, $facets['browse'], "cap {$cap}");
+            $this->assertSame(['size' => ['min' => 10.0, 'max' => 20.0]], $facets['browse'][1], "cap {$cap}");
+        }
+    }
+
+    public function testExclusionOnlyBrowseTotalCountsOverlappingExclusionsOnce(): void
+    {
+        $index = $this->exclusionIndex();
+
+        // Doc 1 matches both exclusions, doc 5 matches two values of the first one.
+        $this->assertFilterOnEveryPath(
+            $index,
+            new SearchOptions(filter: [
+                'visibility' => new FacetExclude(['exclude-from-search', 'featured']),
+                'brand'      => new FacetExclude('Nike'),
+            ]),
+            [2, 6],
+        );
+    }
+
+    public function testFacetSearchExclusionOnlyWithPrefix(): void
+    {
+        $index = $this->exclusionIndex();
+
+        $result = $index->facetSearch(new FacetSearchQuery(
+            facetName:  'brand',
+            facetQuery: 'a',
+            filter:     ['visibility' => new FacetExclude('exclude-from-search')],
+        ));
+
+        $this->assertSame([['value' => 'Adidas', 'count' => 1]], $result->facetHits);
+    }
+
     public function testBrowseExcludeFilterShapesAgree(): void
     {
         $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['price', 'color', 'brand']));

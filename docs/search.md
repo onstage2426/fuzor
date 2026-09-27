@@ -114,7 +114,7 @@ When no `sort` is specified, results are returned in insertion order, newest fir
 
 A browse is answered by SQL over the whole index, so `$totalHits`, the page, and the sort order are exact at any index size. As in Meilisearch, a sorted browse walks the sort field's index in order and stops once the page is full, so its cost follows the page position, not the index size. On a 45k-document index a sorted or filtered page takes well under 5 ms.
 
-Facet counts are exact when no filter applies to them. With a filter they are counted over at most `Config::$maxFacetCountDocs` matching documents, the same cap as in `search()` — see [tuning.md](tuning.md#facets). `distinct` has to look at every matching document to count the surviving groups, so a browse with `distinct` costs time proportional to the number of matches.
+Facet counts are exact when no filter applies to them, and when the only filters that apply are [exclusions](#excluding-values). With a positive filter they are counted over at most `Config::$maxFacetCountDocs` matching documents, the same cap as in `search()` — see [tuning.md](tuning.md#facets). `distinct` has to look at every matching document to count the surviving groups, so a browse with `distinct` costs time proportional to the number of matches.
 
 ## As-you-type prefix
 
@@ -308,6 +308,8 @@ new FacetExclude(FacetRange::max(0));                              // hide free 
 - An exclusion on a field that is not a declared `facetField` matches **no** documents and adds a [warning](#warnings), like a positive filter. A typo in a filter meant to hide something therefore hides everything rather than showing what it should hide.
 - An exclusion on a declared field that no document has a value for yet, or with an empty list, excludes nothing.
 - One key holds one condition, so a field cannot be both included and excluded in the same filter. Listing the values to include already excludes the rest.
+
+A browse or `facetSearch()` whose only filters are exclusions is answered from the excluded documents rather than the kept ones: the total is the index size minus the excluded documents, and facet counts are the whole index's counts minus theirs. Its cost grows with the number of excluded documents, not the kept ones, and its facet counts stay exact at any index size. On a 44k-document catalog with three facets, excluding 410 products takes 36 ms and excluding 4,000 takes 52 ms, against 33 ms unfiltered; the page and its total alone take under 1 ms.
 
 **Compared with Meilisearch:** `NOT genres = horror` / `genres NOT IN [horror, comedy]` also return documents without the field, and `NOT` applies to ranges too. Meilisearch rejects filters on attributes that are not filterable; Fuzor 1.x warns and matches nothing (2.0 will throw). Like every Fuzor filter, values match exactly, whereas Meilisearch compares strings case-insensitively.
 

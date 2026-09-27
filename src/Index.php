@@ -2471,7 +2471,8 @@ class Index
         if ($ftsCandidates === []) {
             return new FacetSearchResult([], $query->facetQuery, $warnings, $exhaustive);
         }
-        $match = null;
+        $match       = null;
+        $excludedSql = null;
         if ($ftsCandidates !== null && $query->filter !== []) {
             [$filterSets, $excluded] = $this->loadFacetKeySets($query->filter, array_keys($ftsCandidates));
             $ftsCandidates = array_diff_key($ftsCandidates, $excluded);
@@ -2481,7 +2482,11 @@ class Index
         } elseif ($query->filter !== []) {
             // Exclusions that exclude nothing are dropped, which can leave no condition at all.
             $conditions = $this->orderBySelectivity($this->facetFilterConditions($query->filter));
-            if ($conditions !== []) {
+            if ($conditions !== [] && self::isExclusionOnly($conditions)) {
+                // Scan the key and skip the excluded documents rather than probe every kept one:
+                // 13–21 ms instead of 58–103 ms for brandName on the 45k ecom set.
+                $excludedSql = $this->excludedDocsSql($conditions);
+            } elseif ($conditions !== []) {
                 $match = $this->matchingDocsSql($conditions);
                 if ($match === null) {
                     return new FacetSearchResult([], $query->facetQuery, $warnings, $exhaustive);
@@ -2510,6 +2515,10 @@ class Index
         }
         $where    = 'fv.key_id = ?';
         $params[] = $keyId;
+        if ($excludedSql !== null) {
+            $where .= " AND fv.doc_id NOT IN ({$excludedSql[0]})";
+            array_push($params, ...$excludedSql[1]);
+        }
 
         if ($facetQuery !== '') {
             $where   .= " AND LOWER(fv.value) LIKE ? ESCAPE '\\'";
@@ -2600,9 +2609,10 @@ class Index
         $conditions = $this->orderBySelectivity($this->facetFilterConditions($filter));
         $match      = $conditions === [] ? null : $this->matchingDocsSql($conditions);
         $total      = match (true) {
-            $conditions === [] => $totalDocuments,
-            $match === null    => 0,
-            default            => $this->countBrowseDocs($match),
+            $conditions === []                 => $totalDocuments,
+            $match === null                    => 0,
+            self::isExclusionOnly($conditions) => $totalDocuments - $this->countExcludedDocs($conditions),
+            default                            => $this->countBrowseDocs($match),
         };
         // Probe along the walk when matches are dense; materialise the filter when they are sparse.
         // Measured on the 45k ecom set: at 13% of the index a probed page takes 0.2 ms against
@@ -2674,6 +2684,22 @@ class Index
     {
         $stmt = $this->prepare("SELECT COUNT(*) FROM ({$match[0]})");
         $stmt->execute($match[1]);
+        return (int) $stmt->fetchColumn();
+    }
+
+    /**
+     * Count the documents an exclusion-only filter removes; the browse total is the rest.
+     *
+     * Counting the kept documents directly probes every document in the index (~31 ms on the
+     * 45k ecom set); the excluded ones sit in one index range per condition (0.06–1.7 ms).
+     *
+     * @param non-empty-list<FacetCondition> $conditions Exclusions only (see isExclusionOnly()).
+     */
+    private function countExcludedDocs(array $conditions): int
+    {
+        [$sql, $params] = $this->excludedDocsSql($conditions);
+        $stmt = $this->prepare("SELECT COUNT(DISTINCT doc_id) FROM ({$sql})");
+        $stmt->execute($params);
         return (int) $stmt->fetchColumn();
     }
 
@@ -2806,9 +2832,10 @@ class Index
      * Same semantics as computeFacetCounts(): a requested key that is also an active filter is
      * counted with every filter except its own (disjunctive), the others with all filters.
      * With no filter to apply, a key is counted exactly over the whole index by one sequential
-     * scan of its primary-key range. Otherwise counting costs one lookup per matching document
-     * and key, so — as in search() — it runs over at most Config::$maxFacetCountDocs matching
-     * documents and is approximate beyond that.
+     * scan of its primary-key range, and with only exclusions to apply, exactly as that minus the
+     * excluded documents. Otherwise counting costs one lookup per matching document and key, so
+     * — as in search() — it runs over at most Config::$maxFacetCountDocs matching documents and
+     * is approximate beyond that.
      *
      * @param  list<string>         $facetKeys
      * @param  list<FacetCondition> $conditions  Ordered by orderBySelectivity().
@@ -2837,26 +2864,45 @@ class Index
                 $common[$keyName] = $keyId;
                 continue;
             }
-            $capped = false;
-            $docIds = $this->browseFacetDocIds($others, $capped);
-            $this->collectFacetCounts([$keyName => $keyId], $docIds, $distribution, $stats);
-            if ($capped) {
+            if ($this->countBrowseFacetGroup([$keyName => $keyId], $others, $distribution, $stats)) {
                 $approximate[] = $keyName;
             }
         }
-        if ($common !== []) {
-            $capped = false;
-            $docIds = $this->browseFacetDocIds($conditions, $capped);
-            $this->collectFacetCounts($common, $docIds, $distribution, $stats);
-            if ($capped) {
-                array_push($approximate, ...array_keys($common));
-            }
+        if ($common !== [] && $this->countBrowseFacetGroup($common, $conditions, $distribution, $stats)) {
+            array_push($approximate, ...array_keys($common));
         }
         return [
             'distribution' => $distribution,
             'stats'        => $stats,
             'approximate'  => array_values(array_unique($approximate)),
         ];
+    }
+
+    /**
+     * Count one group of browse facet keys over the documents matching $conditions.
+     *
+     * Exclusion-only conditions are counted as the whole index minus the excluded documents
+     * (collectFacetCountsExcluding()), exactly; anything else over browseFacetDocIds().
+     * Returns true when the counts are approximate because the matches exceeded the cap.
+     *
+     * @param array<string, int>                           $nameToId
+     * @param list<FacetCondition>                         $conditions
+     * @param array<string, array<array-key, int>>         $distribution Mutated in place.
+     * @param array<string, array{min: float, max: float}> $stats        Mutated in place.
+     */
+    private function countBrowseFacetGroup(
+        array $nameToId,
+        array $conditions,
+        array &$distribution,
+        array &$stats,
+    ): bool {
+        if ($conditions !== [] && self::isExclusionOnly($conditions)) {
+            $this->collectFacetCountsExcluding($nameToId, $conditions, $distribution, $stats);
+            return false;
+        }
+        $capped = false;
+        $this->collectFacetCounts($nameToId, $this->browseFacetDocIds($conditions, $capped), $distribution, $stats);
+        return $capped;
     }
 
     /**
@@ -5556,6 +5602,46 @@ class Index
     }
 
     /**
+     * Whether every condition is a satisfiable exclusion, so the matching documents are "all
+     * documents except those excludedDocsSql() selects". Such filters take the complement paths
+     * (count, facet counts, facetSearch) instead of visiting every kept document.
+     *
+     * Vacuously true for no conditions; callers handle that case (no filter) first.
+     *
+     * @param list<FacetCondition> $conditions
+     */
+    private static function isExclusionOnly(array $conditions): bool
+    {
+        foreach ($conditions as $condition) {
+            if (!$condition['exclude'] || $condition['impossible']) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * SQL selecting the documents that exclusion conditions remove: every document with a row
+     * matching any of them. One index range per condition, combined with UNION ALL, so a
+     * document can appear more than once; callers apply DISTINCT or use it with NOT IN.
+     *
+     * @param  non-empty-list<FacetCondition> $conditions Exclusions only (see isExclusionOnly()).
+     * @return array{0: string, 1: list<mixed>}
+     */
+    private function excludedDocsSql(array $conditions): array
+    {
+        $parts  = [];
+        $params = [];
+        foreach ($conditions as $i => $condition) {
+            $alias   = "ex{$i}";
+            $parts[] = "SELECT {$alias}.doc_id FROM facet_values {$alias} WHERE {$alias}.key_id = ? AND "
+                . sprintf($condition['sql'], $alias);
+            array_push($params, $condition['keyId'], ...$condition['params']);
+        }
+        return [implode(' UNION ALL ', $parts), $params];
+    }
+
+    /**
      * Render conditions as correlated EXISTS probes on the document ID expression $docExpr.
      *
      * Each probe is one lookup in the covering facet_doc_id_index; an exclusion is rendered as
@@ -5786,7 +5872,94 @@ class Index
         );
         $results = $useJoin
             ? $this->fetchAllFacetCountsJoin($nameToId, $docIds)
-            : array_map(fn(int $keyId): array => $this->fetchFacetCountsForKey($keyId, $docIds), $nameToId);
+            : array_map(
+                fn(int $keyId): array => self::summarizeFacetCounts($this->fetchFacetCountRows($keyId, $docIds)),
+                $nameToId,
+            );
+        $this->mergeFacetCounts($results, $distribution, $stats);
+    }
+
+    /**
+     * Count facet values over every document except those an exclusion-only filter removes.
+     *
+     * Visiting the kept documents one by one costs O(index size), so the counts are derived
+     * instead: each key's whole-index counts (one primary-key scan, as for an unfiltered browse)
+     * minus the counts over the excluded documents, which are fetched once for all keys with
+     * the doc-driven join. Exclusions usually remove few documents, which makes this about as
+     * cheap as the unfiltered count. When they remove more than Config::$maxFacetCountDocs,
+     * each key is scanned once with doc_id NOT IN (excluded) instead. Both ways are exact.
+     *
+     * Measured on the 45k ecom set, three keys: 32 ms with 410 docs excluded, 42 ms with 4k,
+     * against 31 ms unfiltered; the NOT IN scan takes 57–74 ms at any size.
+     *
+     * @param array<string, int>                           $nameToId     Facet key name → key_id.
+     * @param non-empty-list<FacetCondition>               $conditions   Exclusions only, none impossible.
+     * @param array<string, array<array-key, int>>         $distribution Mutated in place.
+     * @param array<string, array{min: float, max: float}> $stats        Mutated in place.
+     */
+    private function collectFacetCountsExcluding(
+        array $nameToId,
+        array $conditions,
+        array &$distribution,
+        array &$stats,
+    ): void {
+        [$excludedSql, $excludedParams] = $this->excludedDocsSql($conditions);
+        $cap  = $this->config->maxFacetCountDocs;
+        $stmt = $this->prepare("SELECT DISTINCT doc_id FROM ({$excludedSql}) LIMIT ?");
+        $stmt->execute([...$excludedParams, $cap + 1]);
+        /** @var list<int> $excludedIds */
+        $excludedIds = $stmt->fetchAll(PDO::FETCH_COLUMN);
+
+        if (count($excludedIds) > $cap) {
+            $results = array_map(
+                fn(int $keyId): array => self::summarizeFacetCounts(
+                    $this->fetchFacetCountRows($keyId, null, [$excludedSql, $excludedParams])
+                ),
+                $nameToId,
+            );
+            $this->mergeFacetCounts($results, $distribution, $stats);
+            return;
+        }
+
+        /** @var array<int, array<array-key, array{0: int, 1: int}>> $removed  key_id → value → [rows, numeric rows] */
+        $removed = [];
+        foreach ($this->fetchFacetRowsForDocs($excludedIds, array_values($nameToId)) as [$keyId, $value, $num]) {
+            $removed[$keyId][$value][0] = ($removed[$keyId][$value][0] ?? 0) + 1;
+            $removed[$keyId][$value][1] = ($removed[$keyId][$value][1] ?? 0) + ($num === null ? 0 : 1);
+        }
+        $results = [];
+        foreach ($nameToId as $keyName => $keyId) {
+            $rows = $this->fetchFacetCountRows($keyId, null);
+            if (isset($removed[$keyId])) {
+                $kept = [];
+                foreach ($rows as $row) {
+                    [$n, $numCount] = $removed[$keyId][$row['value']] ?? [0, 0];
+                    if ($row['n'] > $n) {
+                        $kept[] = ['n' => $row['n'] - $n, 'num_count' => $row['num_count'] - $numCount] + $row;
+                    }
+                }
+                // Stable, so values with equal counts keep the scan's order.
+                usort($kept, fn(array $a, array $b): int => $b['n'] <=> $a['n']);
+                $rows = $kept;
+            }
+            $results[$keyName] = self::summarizeFacetCounts($rows);
+        }
+        $this->mergeFacetCounts($results, $distribution, $stats);
+    }
+
+    /**
+     * Merge per-key counts into $distribution / $stats, capping each distribution at
+     * Config::$maxValuesPerFacet and omitting keys with no values.
+     *
+     * @param array<string, array{
+     *     distribution: array<array-key, int>,
+     *     stats: array{min: float, max: float}|null
+     * }> $results
+     * @param array<string, array<array-key, int>>         $distribution Mutated in place.
+     * @param array<string, array{min: float, max: float}> $stats        Mutated in place.
+     */
+    private function mergeFacetCounts(array $results, array &$distribution, array &$stats): void
+    {
         $maxValues = $this->config->maxValuesPerFacet;
         foreach ($results as $keyName => $counts) {
             $dist = $counts['distribution'];
@@ -5818,16 +5991,7 @@ class Index
      */
     private function fetchAllFacetCountsJoin(array $nameToId, array $docIds): array
     {
-        $stmt = $this->stmt(
-            'facetCountsJoin',
-            'SELECT fv.key_id, fv.value, fv.num_value
-             FROM json_each(?) je
-             CROSS JOIN facet_values fv ON fv.doc_id = je.value
-             WHERE fv.key_id IN (SELECT value FROM json_each(?))'
-        );
-        $stmt->execute([json_encode($docIds), json_encode(array_values($nameToId))]);
-        /** @var list<array{0: int, 1: string, 2: string|null}> $rows */
-        $rows = $stmt->fetchAll(PDO::FETCH_NUM);
+        $rows = $this->fetchFacetRowsForDocs($docIds, array_values($nameToId));
 
         /** @var array<int, array<string, int>> $valueCounts */
         $valueCounts = [];
@@ -5874,10 +6038,32 @@ class Index
     }
 
     /**
-     * Fetch value counts for a single facet key over the given doc ID set.
+     * Raw (key_id, value, num_value) facet rows of the given documents for the given keys.
      *
-     * Detects numeric facets (where all matching rows have num_value set) and
-     * returns min/max/count stats instead of a value → count map.
+     * CROSS JOIN with json_each(docIds) forces SQLite to drive the join from the doc_id side via
+     * facet_doc_id_index (one lookup per document and key) and keeps the planner from flipping it.
+     *
+     * @param  list<int> $docIds
+     * @param  list<int> $keyIds
+     * @return list<array{0: int, 1: string, 2: float|null}>
+     */
+    private function fetchFacetRowsForDocs(array $docIds, array $keyIds): array
+    {
+        $stmt = $this->stmt(
+            'facetCountsJoin',
+            'SELECT fv.key_id, fv.value, fv.num_value
+             FROM json_each(?) je
+             CROSS JOIN facet_values fv ON fv.doc_id = je.value
+             WHERE fv.key_id IN (SELECT value FROM json_each(?))'
+        );
+        $stmt->execute([json_encode($docIds), json_encode($keyIds)]);
+        /** @var list<array{0: int, 1: string, 2: float|null}> $rows */
+        $rows = $stmt->fetchAll(PDO::FETCH_NUM);
+        return $rows;
+    }
+
+    /**
+     * Per-value counts of a single facet key over the given doc ID set, most frequent first.
      *
      * Uses json_each() as a WHERE IN subquery so the SQL is a fixed string (cacheable
      * via stmt()). SQLite drives from the facet_values PK (sequential scan for key_id),
@@ -5886,12 +6072,14 @@ class Index
      * compilation overhead.
      *
      * With $docIds null the membership test is dropped and the key is counted over the whole
-     * index — one streaming scan of its primary-key range.
+     * index — one streaming scan of its primary-key range — or, when $excluded is given, over
+     * every document except those it selects (doc_id NOT IN, materialised once).
      *
-     * @param  list<int>|null $docIds
-     * @return array{distribution: array<array-key, int>, stats: array{min: float, max: float}|null}
+     * @param  list<int>|null                         $docIds
+     * @param  array{0: string, 1: list<mixed>}|null $excluded SQL selecting doc IDs to skip; with $docIds null only.
+     * @return list<array{value: string, n: int, min_num: float|null, max_num: float|null, num_count: int}>
      */
-    private function fetchFacetCountsForKey(int $keyId, ?array $docIds): array
+    private function fetchFacetCountRows(int $keyId, ?array $docIds, ?array $excluded = null): array
     {
         $select = 'SELECT value,
                     COUNT(*)                                          AS n,
@@ -5900,7 +6088,12 @@ class Index
                     SUM(CASE WHEN num_value IS NOT NULL THEN 1 ELSE 0 END) AS num_count
              FROM facet_values
              WHERE key_id = ?';
-        if ($docIds === null) {
+        if ($excluded !== null) {
+            $stmt = $this->prepare(
+                $select . " AND doc_id NOT IN ({$excluded[0]}) GROUP BY value ORDER BY n DESC"
+            );
+            $stmt->execute([$keyId, ...$excluded[1]]);
+        } elseif ($docIds === null) {
             $stmt = $this->stmt('facetCountsForKeyAll', $select . ' GROUP BY value ORDER BY n DESC');
             $stmt->execute([$keyId]);
         } else {
@@ -5910,9 +6103,20 @@ class Index
             );
             $stmt->execute([$keyId, json_encode($docIds)]);
         }
-        /** @var list<array{value: string, n: string, min_num: string|null, max_num: string|null, num_count: string}> $rows */
+        /** @var list<array{value: string, n: int, min_num: float|null, max_num: float|null, num_count: int}> $rows */
         $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+        return $rows;
+    }
 
+    /**
+     * Turn fetchFacetCountRows() rows into a value → count distribution (in row order) plus
+     * min/max stats when every counted row is numeric.
+     *
+     * @param  list<array{value: string, n: int, min_num: float|null, max_num: float|null, num_count: int}> $rows
+     * @return array{distribution: array<array-key, int>, stats: array{min: float, max: float}|null}
+     */
+    private static function summarizeFacetCounts(array $rows): array
+    {
         if ($rows === []) {
             return ['distribution' => [], 'stats' => null];
         }
