@@ -63,7 +63,7 @@ Pass `stripHtml: true` when documents contain HTML markup. Each field value is c
 - the contents of `<script>`, `<style>`, `<template>`, and `<noscript>` are dropped;
 - entities are decoded — `Fit &amp; Flare caf&eacute;` indexes `fit`, `flare`, `café`, not `amp` or `eacute`.
 
-The raw HTML is still stored unchanged in the document store. Ignored when opening an existing index.
+The raw HTML is still stored unchanged in the document store, so hits, `get()`, and `stream()` return HTML. To store and return the text instead, convert the fields before inserting — see [Storing text instead of HTML](#storing-text-instead-of-html). Ignored when opening an existing index.
 
 Indexes created before 1.6.0 (schema revision 2 or lower) keep the previous behaviour — plain `strip_tags()`, which glues adjacent blocks together and indexes entity names — so an index never mixes the two. Run `Index::rebuild($path)` to switch; `$index->schemaVersion < Index::CURRENT_SCHEMA_VERSION` tells you it would help.
 
@@ -205,6 +205,32 @@ $index->insert([[
     'sku'       => 'GA-2100-1A1ER',
 ]]);
 ```
+
+### Storing text instead of HTML
+
+`stripHtml` only changes what is indexed; the document store keeps the HTML. When hits should carry the visible text, convert those fields yourself with `HtmlText::toText()` — the conversion `stripHtml` uses — and leave `stripHtml` off. Keep the original in a stored-only field if you still need it:
+
+```php
+use Fuzor\HtmlText;
+use Fuzor\SchemaConfig;
+
+$index = new Index('/path/to/posts.db', schema: new SchemaConfig(
+    searchableFields: ['title', 'content'], // content_html is stored-only
+));
+
+$index->insert([[
+    'id'           => 1,
+    'title'        => HtmlText::toText($post['title']),
+    'content'      => HtmlText::toText($post['content']),
+    'content_html' => $post['content'],
+]]);
+```
+
+Hits, `get()`, and `stream()` then return text, and `_formatted` highlights and crops that text directly; with `escapeFormatted` it only needs escaping.
+
+- **Convert once, from the original HTML.** The conversion decodes entities, so it is not idempotent: `use the &lt;b&gt; tag` becomes `use the <b> tag`, and a second pass would strip that `<b>` as a tag and leave `use the tag`. Never run stored text through it again — for example when you `get()` a document, change it, and `update()` it.
+- **Do not combine it with `stripHtml`** on the same field. `stripHtml` converts again at index time, with the same loss in the index.
+- **The result is plain text, not HTML.** Escape it before rendering it into a page.
 
 ## Updating
 

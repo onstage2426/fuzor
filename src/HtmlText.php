@@ -7,12 +7,11 @@ namespace Fuzor;
 /**
  * Converts between HTML and plain text for indexing and result formatting.
  *
- * toText() is used for SchemaConfig::$stripHtml. Plain strip_tags() is not enough for search: it glues
- * the words of adjacent blocks together ("<p>foo</p><p>bar</p>" → "foobar"), keeps the
- * contents of <script> and <style>, and leaves entities encoded, so "&amp;" and "&nbsp;"
- * would be indexed as the words "amp" and "nbsp".
- *
- * @internal
+ * toText() is used for SchemaConfig::$stripHtml, and is public so callers who want the document
+ * store to hold text rather than HTML can apply the same conversion before inserting. Plain
+ * strip_tags() is not enough for search: it glues the words of adjacent blocks together
+ * ("<p>foo</p><p>bar</p>" → "foobar"), keeps the contents of <script> and <style>, and leaves
+ * entities encoded, so "&amp;" and "&nbsp;" would be indexed as the words "amp" and "nbsp".
  */
 final class HtmlText
 {
@@ -34,6 +33,11 @@ final class HtmlText
      * spaces, removes the remaining tags, decodes entities, removes soft hyphens, and collapses
      * whitespace. Entities are decoded after the tags are removed, so encoded markup such as
      * "&lt;b&gt;" survives as the literal text "<b>".
+     *
+     * The result is plain text, not HTML: escape it before rendering. Convert once, from the
+     * original HTML. The conversion is not idempotent — a second pass would remove that literal
+     * "<b>" as a tag — so never run it on text it produced, and do not combine a pre-converted
+     * field with SchemaConfig::$stripHtml, which converts again at index time.
      */
     public static function toText(string $html): string
     {
@@ -48,6 +52,8 @@ final class HtmlText
      * Escape plain text for safe inclusion in HTML element content or a quoted attribute.
      *
      * Invalid UTF-8 is replaced rather than dropping the whole string (ENT_SUBSTITUTE).
+     *
+     * @internal Used by the escaping options of Highlighter, Snippeter, and SearchOptions.
      */
     public static function escape(string $text): string
     {
