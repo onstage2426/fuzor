@@ -402,6 +402,18 @@ $result = $index->search('watch', new SearchOptions(sort: ['brand:asc', 'price:a
 
 Each spec is `'field:asc'` or `'field:desc'` (case-insensitive). A malformed spec throws `\InvalidArgumentException`. A spec naming a field that is not a declared `facetField` is ignored and reported in [`$warnings`](#warnings); the remaining specs still apply, and with none left the result keeps its normal order (relevance, or newest first for a browse).
 
+The document ID is not a sort field by default either. To sort by it, declare `id` in `facetFields` like any other field; this stores one facet value per document and also makes the ID usable in `filter`, `facets`, and `distinct`:
+
+```php
+$index = new Index('/path/to/products.db', schema: new SchemaConfig(
+    facetFields: ['id', 'brand', 'price'],
+));
+
+$result = $index->search('', new SearchOptions(sort: ['id:asc'])); // lowest ID first
+```
+
+A browse without `sort` already returns documents by ID descending. Before 1.6.0 an undeclared `id:asc` only appeared to work: every document tied on the missing field, and the ID tiebreaker decided the order. Since 1.6.0 it is ignored with a warning, like any undeclared field.
+
 Values are ordered as follows:
 
 - **Numbers before strings**, in both directions. Numbers are facet values indexed as PHP `int` or `float`.
@@ -429,7 +441,7 @@ $result = $index->search('', new SearchOptions(sort: ['title_sort:asc']));
 
 When two documents share the same sort value, BM25 score is used as a tiebreaker in `search()`. Boolean search breaks ties by document ID ascending.
 
-**Compared with Meilisearch:** the type order, byte order for strings, and missing-values-last rule match Meilisearch. Two differences: Meilisearch compares strings case-insensitively (planned for Fuzor 2.0), and by default Meilisearch applies `sort` only as a tiebreaker after its relevance rules, whereas in Fuzor the sort fields decide the order and relevance breaks ties.
+**Compared with Meilisearch:** the type order, byte order for strings, and missing-values-last rule match Meilisearch, and so does declaring the document ID before sorting on it (Meilisearch requires the primary key in `sortableAttributes` too). Two differences: Meilisearch compares strings case-insensitively (planned for Fuzor 2.0), and by default Meilisearch applies `sort` only as a tiebreaker after its relevance rules, whereas in Fuzor the sort fields decide the order and relevance breaks ties.
 
 ```php
 $result = $index->searchBoolean('sedan or coupe', new SearchOptions(sort: ['price:asc']));

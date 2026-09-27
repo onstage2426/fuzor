@@ -4571,6 +4571,41 @@ class IndexTest extends TestCase
         $this->assertSame([], $result->warnings);
     }
 
+    public function testSortByUndeclaredIdIsIgnoredWithWarning(): void
+    {
+        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['price']));
+        $index->insert([
+            ['id' => 1, 'title' => 'product'],
+            ['id' => 2, 'title' => 'product'],
+            ['id' => 3, 'title' => 'product'],
+        ]);
+        $result = $index->search('', new SearchOptions(sort: ['id:asc']));
+
+        $this->assertSame([3, 2, 1], $result->getIds());
+        $this->assertSame(["Sort field 'id' is not a declared facet field; ignored."], $result->warnings);
+    }
+
+    public function testSortByIdWhenDeclaredAsFacetField(): void
+    {
+        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['id']));
+        $index->insert([
+            ['id' => 3, 'title' => 'product red'],
+            ['id' => 1, 'title' => 'product product'],
+            ['id' => 20, 'title' => 'product'],
+        ]);
+        $index->insert([['id' => 7, 'title' => 'product blue']]);
+
+        foreach (['search', 'searchBoolean'] as $method) {
+            foreach (['', 'product'] as $query) {
+                $asc  = $index->$method($query, new SearchOptions(sort: ['id:asc']));
+                $desc = $index->$method($query, new SearchOptions(sort: ['id:desc']));
+                $this->assertSame([1, 3, 7, 20], $asc->getIds(), "{$method}('{$query}') asc");
+                $this->assertSame([20, 7, 3, 1], $desc->getIds(), "{$method}('{$query}') desc");
+                $this->assertSame([], $asc->warnings);
+            }
+        }
+    }
+
     public function testSortNumbersBeforeStringsInBothDirections(): void
     {
         $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['size']));
