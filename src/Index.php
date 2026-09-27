@@ -5926,8 +5926,9 @@ class Index
         }
 
         if ($numCount === $totalCount && $numCount > 0) {
-            $minNums = array_filter(array_column($rows, 'min_num'));
-            $maxNums = array_filter(array_column($rows, 'max_num'));
+            // Drop only nulls: a bare array_filter() would also drop a 0.0 bound.
+            $minNums = array_filter(array_column($rows, 'min_num'), fn(mixed $v): bool => $v !== null);
+            $maxNums = array_filter(array_column($rows, 'max_num'), fn(mixed $v): bool => $v !== null);
             return [
                 'distribution' => $distribution,
                 'stats' => [

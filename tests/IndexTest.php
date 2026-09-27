@@ -3979,6 +3979,23 @@ class IndexTest extends TestCase
         $this->assertSame(['min' => 10000.0, 'max' => 30000.0], $result->facetStats['price']);
     }
 
+    public function testFacetStatsKeepAZeroMinOrMax(): void
+    {
+        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['price', 'delta']));
+        $index->insert([
+            ['id' => 1, 'title' => 'item', 'price' => 0, 'delta' => -10],
+            ['id' => 2, 'title' => 'item', 'price' => 5, 'delta' => 0],
+            ['id' => 3, 'title' => 'item', 'price' => 15.5, 'delta' => -2.5],
+        ]);
+
+        // A browse counts each key with a whole-key scan, a search with the doc-driven join.
+        foreach (['browse' => '', 'search' => 'item'] as $path => $query) {
+            $stats = $index->search($query, new SearchOptions(facets: ['price', 'delta']))->facetStats;
+            $this->assertSame(['min' => 0.0, 'max' => 15.5], $stats['price'], $path);
+            $this->assertSame(['min' => -10.0, 'max' => 0.0], $stats['delta'], $path);
+        }
+    }
+
     public function testFacetDistributionRespectMaxValuesPerFacet(): void
     {
         $index = new Index(
