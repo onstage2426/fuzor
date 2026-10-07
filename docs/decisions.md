@@ -3,6 +3,81 @@
 Records of options that were evaluated and rejected, with the evidence, so they
 are not re-attempted without new information.
 
+## Rejected: one document per variation with per-product facet counts (2026-10-07)
+
+**Proposal:** index each product variation (size, colour) as its own document and have facet
+counts count distinct products instead of documents (raised by the `fuzor-wp` review).
+
+**Why rejected:** it multiplies the index size by the number of variations, and counting
+distinct groups per facet value is O(matches) for every value without bitmaps, so every
+faceted page pays for it. Meilisearch does not document per-group facet counts either.
+Consumers can keep one document per product and add a combined facet for variation
+filtering, for example `variant: ['m|blue', 'l|blue', …]`.
+
+**When to revisit:** if a cheap distinct-count structure becomes available in SQLite, or a
+consumer shows that the combined-facet pattern cannot express its filters.
+
+## Rejected: a facet value to label map (2026-10-07)
+
+**Proposal:** store a display label per facet value (slug `rosa-clara` → `Rosa Clará`) so
+`facetDistribution` and `facetSearch()` can return and match labels (raised by the
+`fuzor-wp` review).
+
+**Why rejected:** labels are presentation data that the consumer already has. The real need
+was matching typed text against slug values; case and accent folding plus matching at the
+start of any word in `facetSearch()` (2.0) covers it without a second value per facet.
+
+**When to revisit:** if folding and word-start matching still leave common facet searches
+unanswerable.
+
+## Rejected: facet bitmaps (2026-10-07)
+
+**Proposal:** keep a bitmap of document IDs per facet value and intersect bitmaps for
+filtered facet counts (raised by the `fuzor-wp` review).
+
+**Why rejected:** SQLite has no native bitmap type. Bitmaps kept as PHP blobs would rewrite
+large values on every write and have to be loaded and decoded on every read. The measured
+cost (whole-key counts on a shop page) is solved by a maintained `facet_counts` table in
+2.0, which makes those counts O(values) instead of O(documents).
+
+**When to revisit:** if filtered (not whole-key) facet counts at the `maxFacetCountDocs` cap
+become the bottleneck on real catalogs, with measurements.
+
+## Rejected: field weights in `SchemaConfig` (2026-10-07)
+
+**Proposal:** declare per-field ranking weights in the schema at creation time (raised by the
+`fuzor-wp` review).
+
+**Why rejected:** `Config::$fieldBoosts` already does this, per open instead of per file,
+which is more flexible: weights can change without a rebuild. The consumer that raised it
+had not passed `fieldBoosts`.
+
+**When to revisit:** if weights need to be shared by every process opening a file and passing
+them per open proves error-prone.
+
+## Rejected: MariaDB and PostgreSQL drivers (2026-10-07)
+
+**Proposal:** support server databases besides SQLite.
+
+**Why rejected:** the design depends on SQLite specifics: one file per index, `VACUUM INTO`
+snapshots, publishing a new version behind a symlink, shared mmap reads, `WITHOUT ROWID`
+clustering and `json_each`. Both databases have their own full-text search, and users who
+outgrow a file are better served by a search server than by Fuzor on a network database.
+
+**When to revisit:** not planned.
+
+## Rejected: a per-index result cache keyed by revision (2026-10-07)
+
+**Proposal:** cache search results inside the library, invalidated when the index changes
+(raised by the `fuzor-wp` review).
+
+**Why rejected:** under PHP-FPM a process keeps nothing between requests, so an in-process
+cache rarely hits. Caching belongs in front of the library: `fuzor-wp` already caches
+responses by ETag keyed on the file state, which also serves CDNs.
+
+**When to revisit:** for long-running servers (Swoole, FrankenPHP worker mode) if repeat
+queries show up as a measurable share of the load.
+
 ## Rejected: `SchemaConfig::$htmlFields` — store converted text (2026-09-27)
 
 **Proposal:** a per-field `htmlFields: list<string>` schema option (raised by the `fuzor-wp`
