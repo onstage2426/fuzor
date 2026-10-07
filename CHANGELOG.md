@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.7.1 - 2026-10-07
+
+Fixed:
+
+- `rebuild()` could pair the new index file with the old file's write-ahead log. SQLite finds a database's `-wal` by file name, so when another process still had the old file open for writing, its uncheckpointed commits — and every commit it made after the swap — were read as pages of the new file: old documents showing up in the rebuilt index, or a corrupt file. `snapshotTo()` deleted the old sidecars after its rename, which left a short window for the same problem. Both now publish each new file under a name of its own, `{path}.v-{8 hex}`, and atomically swap a symlink at `{path}` to it, so two files never share a `-wal`. The previous version is kept until the next publish. Copy or back up the index with a tool that follows symlinks. See "Index files after a rebuild or snapshot" in `docs/indexing.md`.
+- `new Index($path, force: true)` over an existing index deleted the old file and its `-wal`/`-shm` and created the new file under the same name, which left a moment in which another process's connection could pair the new file with the old sidecars. It now publishes the empty index the same way as `rebuild()`.
+
 ## 1.7.0 — 2026-09-27
 
 Added:
