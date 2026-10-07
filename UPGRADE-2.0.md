@@ -48,3 +48,11 @@ It has had no effect since 1.6.0. Remove it from `new Config(...)` calls.
 `sort` on a string field now orders uppercase letters as if they were lowercase: `"apple"`
 before `"Zebra"` (1.x put `"Zebra"` first). Values that differ only in case tie. Accents are
 still not folded. Results sorted on mixed-case string fields can come back in a different order.
+
+## A leading `-` in `search()` excludes
+
+In 1.x `search('shirt -formal')` searched for both words. In 2.0 a word or quoted phrase with a
+leading `-` (at the start of the query or after a space) removes the documents that contain it,
+and a query of only such words returns all other documents. Hyphens inside words (`t-shirt`)
+are unchanged. If your users type a leading `-` meaning something else, strip it before calling
+`search()`.

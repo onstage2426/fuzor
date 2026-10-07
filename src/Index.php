@@ -2016,6 +2016,10 @@ class Index
      * 2 for 9+. Respects Config::$fuzzyPrefixLength and $fuzzyMaxExpansions.
      * Shorter words use exact + optional as-you-type prefix matching only.
      *
+     * A word or quoted phrase prefixed with '-' ("shirt -formal", 'dress -"long sleeve"') removes
+     * the documents that contain it (exact match after stemming; see extractNegations()). A query
+     * of only negations returns every document except those, like an empty query.
+     *
      * @param  string        $phrase  Raw search phrase; will be tokenised.
      * @param  SearchOptions $options Per-query options (limit, offset, filter, facets, sort, …).
      * @throws \InvalidArgumentException On a malformed sort spec.
@@ -2027,8 +2031,9 @@ class Index
         SearchOptions $options = new SearchOptions(),
     ): SearchResult {
         $this->checkDataVersion();
-        if (trim($phrase) === '') {
-            return $this->browse($phrase, $options);
+        ['phrase' => $positive, 'conditions' => $negations] = $this->extractNegations($phrase);
+        if (trim($positive) === '') {
+            return $this->browse($phrase, $options, $negations);
         }
         $asYouType     = $options->asYouType;
         $limit         = $options->limit;
@@ -2039,7 +2044,7 @@ class Index
         $distinctCount = $options->distinctCount;
         $sortSpecs     = $this->checkDeclaredFields($options);
         $warnings      = [];
-        $parsed        = $this->filterQueryTokens($phrase);
+        $parsed        = $this->filterQueryTokens($positive);
         /** @var list<string> $keywords */
         $keywords     = $parsed['filtered'];
         /** @var list<list<string>> $phraseGroups */
@@ -2199,7 +2204,7 @@ class Index
 
         // Apply facet filters: load per-key doc ID sets and intersect with the score map.
         // Exclusions are removed first, so they also hold for disjunctive facet counts.
-        [$filterSets, $excluded] = $this->loadFacetKeySets($filter, array_keys($docScores));
+        [$filterSets, $excluded] = $this->loadFacetKeySets($filter, array_keys($docScores), $negations);
         $docScores    = array_diff_key($docScores, $excluded);
         $rawDocScores = $docScores;
         if ($filterSets !== []) {
@@ -2232,7 +2237,7 @@ class Index
             return new SearchResult(
                 ids: [],
                 totalHits: 0,
-                documents: $this->hydrateAndFormat([], $phrase, $options),
+                documents: $this->hydrateAndFormat([], $positive, $options),
                 facetCounts: $facetDistribution,
                 facetStats: $facetStats,
                 query: $phrase,
@@ -2272,7 +2277,7 @@ class Index
             return new SearchResult(
                 ids: $pagedIds,
                 totalHits: $distinctHits,
-                documents: $this->hydrateAndFormat($pagedIds, $phrase, $options),
+                documents: $this->hydrateAndFormat($pagedIds, $positive, $options),
                 facetCounts: $facetDistribution,
                 facetStats: $facetStats,
                 query: $phrase,
@@ -2288,7 +2293,7 @@ class Index
             return new SearchResult(
                 ids: [],
                 totalHits: $total,
-                documents: $this->hydrateAndFormat([], $phrase, $options),
+                documents: $this->hydrateAndFormat([], $positive, $options),
                 facetCounts: $facetDistribution,
                 facetStats: $facetStats,
                 query: $phrase,
@@ -2325,7 +2330,7 @@ class Index
         return new SearchResult(
             ids: $pagedIds,
             totalHits: $total,
-            documents: $this->hydrateAndFormat($pagedIds, $phrase, $options),
+            documents: $this->hydrateAndFormat($pagedIds, $positive, $options),
             facetCounts: $facetDistribution,
             facetStats: $facetStats,
             query: $phrase,
@@ -2583,8 +2588,9 @@ class Index
         $ftsCandidates    = null; // null = no FTS restriction
         $candidatesCapped = false;
         $prefixCapped     = false;
-        if (trim($query->query) !== '') {
-            $parsed       = $this->filterQueryTokens($query->query);
+        ['phrase' => $positive, 'conditions' => $negations] = $this->extractNegations($query->query);
+        if (trim($positive) !== '') {
+            $parsed       = $this->filterQueryTokens($positive);
             $keywords     = $parsed['filtered'];
             /** @var list<list<string>> $phraseGroups */
             $phraseGroups = $parsed['phrase_groups'];
@@ -2620,15 +2626,19 @@ class Index
         }
         $match       = null;
         $excludedSql = null;
-        if ($ftsCandidates !== null && $query->filter !== []) {
-            [$filterSets, $excluded] = $this->loadFacetKeySets($query->filter, array_keys($ftsCandidates));
+        if ($ftsCandidates !== null && ($query->filter !== [] || $negations !== [])) {
+            [$filterSets, $excluded] = $this->loadFacetKeySets(
+                $query->filter,
+                array_keys($ftsCandidates),
+                $negations,
+            );
             $ftsCandidates = array_diff_key($ftsCandidates, $excluded);
             if ($filterSets !== []) {
                 $ftsCandidates = array_intersect_key($ftsCandidates, $this->intersectFilterSets($filterSets));
             }
-        } elseif ($query->filter !== []) {
+        } elseif ($query->filter !== [] || $negations !== []) {
             // Exclusions that exclude nothing are dropped, which can leave no condition at all.
-            $conditions = $this->orderBySelectivity($this->facetFilterConditions($query->filter));
+            $conditions = $this->orderBySelectivity([...$this->facetFilterConditions($query->filter), ...$negations]);
             if ($conditions !== [] && self::isExclusionOnly($conditions)) {
                 // Scan the key and skip the excluded documents rather than probe every kept one:
                 // 13–21 ms instead of 58–103 ms for brandName on the 45k ecom set.
@@ -2712,8 +2722,13 @@ class Index
      * distinct still needs every matching document in PHP to count the surviving groups, so
      * that combination costs O(matches); it is exact too.
      */
-    private function browse(string $phrase, SearchOptions $options): SearchResult
+    /**
+     * @param list<FacetCondition> $negations Exclusions from a query of only '-' words/phrases;
+     *                                        $phrase is then not highlighted.
+     */
+    private function browse(string $phrase, SearchOptions $options, array $negations = []): SearchResult
     {
+        $formatPhrase  = $negations === [] ? $phrase : '';
         $limit         = $options->limit;
         $offset        = $options->offset;
         $filter        = $options->filter;
@@ -2730,7 +2745,7 @@ class Index
         $totalDocuments = (int) ($info['total_documents'] ?? 0);
 
         // Fast path: skip all PHP-side work; one PK scan for the page, total from cache.
-        $plainBrowse = $filter === [] && $sortSpecs === [] && $facets === [] && $distinct === null;
+        $plainBrowse = $filter === [] && $negations === [] && $sortSpecs === [] && $facets === [] && $distinct === null;
         if ($plainBrowse) {
             $stmt  = $this->stmt(
                 'browsePageIds',
@@ -2742,7 +2757,7 @@ class Index
             return new SearchResult(
                 ids: $pagedIds,
                 totalHits: $totalDocuments,
-                documents: $this->hydrateAndFormat($pagedIds, $phrase, $options),
+                documents: $this->hydrateAndFormat($pagedIds, $formatPhrase, $options),
                 facetCounts: [],
                 facetStats: [],
                 query: $phrase,
@@ -2754,7 +2769,7 @@ class Index
             );
         }
 
-        $conditions = $this->orderBySelectivity($this->facetFilterConditions($filter));
+        $conditions = $this->orderBySelectivity([...$this->facetFilterConditions($filter), ...$negations]);
         $match      = $conditions === [] ? null : $this->matchingDocsSql($conditions);
         $total      = match (true) {
             $conditions === []                 => $totalDocuments,
@@ -2788,7 +2803,7 @@ class Index
             return new SearchResult(
                 ids: $pagedIds,
                 totalHits: $distinctHits,
-                documents: $this->hydrateAndFormat($pagedIds, $phrase, $options),
+                documents: $this->hydrateAndFormat($pagedIds, $formatPhrase, $options),
                 facetCounts: $facetDistribution,
                 facetStats: $facetStats,
                 query: $phrase,
@@ -2811,7 +2826,7 @@ class Index
         return new SearchResult(
             ids: $pagedIds,
             totalHits: $total,
-            documents: $this->hydrateAndFormat($pagedIds, $phrase, $options),
+            documents: $this->hydrateAndFormat($pagedIds, $formatPhrase, $options),
             facetCounts: $facetDistribution,
             facetStats: $facetStats,
             query: $phrase,
@@ -4820,21 +4835,10 @@ class Index
         // phrase should not suppress all results. The >1 guard mirrors the flat-token path.
         $phraseGroups = [];
         foreach ($rawPhraseGroups as $rawGroup) {
-            $groupTokens = Tokenizer::tokenize($rawGroup, $this->language);
-            if ($this->stopwords instanceof \Fuzor\Stopwords && count($groupTokens) > 1) {
-                $afterGroupStop = $this->stopwords->filter($groupTokens);
-                if ($afterGroupStop === []) {
-                    continue;
-                }
-                $groupTokens = $afterGroupStop;
+            $groupTokens = $this->normalizePhraseTokens($rawGroup);
+            if ($groupTokens !== []) {
+                $phraseGroups[] = $groupTokens;
             }
-            if ($groupTokens === []) {
-                continue;
-            }
-            if ($this->stemmer instanceof \Fuzor\Stemmer) {
-                $groupTokens = $this->stemmer->stemTokens($groupTokens);
-            }
-            $phraseGroups[] = $groupTokens;
         }
 
         return [
@@ -4874,6 +4878,102 @@ class Index
         ) ?? $query;
 
         return ['free' => $free, 'groups' => $groups];
+    }
+
+    /**
+     * Split '-word' and '-"phrase"' negations off a search() / facetSearch() query.
+     *
+     * A '-' counts at the start of the query or after whitespace, followed by a word or a closed
+     * quoted phrase, so "t-shirt" and an unclosed '-"red' are left alone. Each negation is
+     * normalised like a quoted phrase (tokenised, stopwords removed, stemmed) and matched
+     * exactly: no prefix, typo, or synonym expansion, also for a trailing word still being
+     * typed. One token becomes an exclusion on doclist; several must appear at consecutive
+     * positions (as in docMatchesPhrase()), checked with one positions lookup per token. A
+     * negation whose words are not all in the index excludes nothing and is dropped.
+     *
+     * @return array{phrase: string, conditions: list<FacetCondition>}
+     *         The query without the negations, and one exclusion condition per negation.
+     */
+    private function extractNegations(string $phrase): array
+    {
+        if (!str_contains($phrase, '-')) {
+            return ['phrase' => $phrase, 'conditions' => []];
+        }
+        $raw      = [];
+        $positive = preg_replace_callback(
+            '/(?<!\S)-(?:"([^"]*)"|([^\s"]+))/u',
+            function (array $m) use (&$raw): string {
+                $raw[] = ($m[2] ?? '') !== '' ? $m[2] : $m[1];
+                return ' ';
+            },
+            $phrase,
+        ) ?? $phrase;
+
+        $conditions = [];
+        foreach ($raw as $text) {
+            $termIds = [];
+            foreach ($this->normalizePhraseTokens($text) as $token) {
+                $termId = $this->lookupTermId($token);
+                if ($termId === null) {
+                    continue 2;
+                }
+                $termIds[] = $termId;
+            }
+            if ($termIds === []) {
+                continue;
+            }
+            $rows   = 'FROM ' . (count($termIds) === 1 ? 'doclist' : 'positions') . ' %1$s';
+            $params = [];
+            foreach (array_slice($termIds, 1) as $i => $termId) {
+                $at       = $i + 1;
+                $rows    .= " JOIN positions %1\$s_{$at} ON %1\$s_{$at}.term_id = ?"
+                    . " AND %1\$s_{$at}.doc_id = %1\$s.doc_id AND %1\$s_{$at}.position = %1\$s.position + {$at}";
+                $params[] = $termId;
+            }
+            $conditions[] = [
+                'name'       => '-' . $text,
+                'rows'       => $rows . ' WHERE %1$s.term_id = ?',
+                'params'     => [...$params, $termIds[0]],
+                'impossible' => false,
+                'multiRow'   => count($termIds) > 1,
+                'exclude'    => true,
+            ];
+        }
+        return ['phrase' => $positive, 'conditions' => $conditions];
+    }
+
+    /**
+     * Tokenise a quoted phrase (or negation) the way query words are: stopwords removed when
+     * more than one token remains (an all-stopword phrase yields []), then stemmed.
+     *
+     * @return list<string>
+     */
+    private function normalizePhraseTokens(string $text): array
+    {
+        $tokens = Tokenizer::tokenize($text, $this->language);
+        if ($this->stopwords instanceof \Fuzor\Stopwords && count($tokens) > 1) {
+            $tokens = $this->stopwords->filter($tokens);
+        }
+        if ($tokens !== [] && $this->stemmer instanceof \Fuzor\Stemmer) {
+            $tokens = $this->stemmer->stemTokens($tokens);
+        }
+        return $tokens;
+    }
+
+    /** wordlist ID of an exact term, or null when no document contains it. */
+    private function lookupTermId(string $term): ?int
+    {
+        if (isset($this->termIdCache[$term])) {
+            return $this->termIdCache[$term];
+        }
+        $stmt = $this->stmt('termIdLookup', 'SELECT id FROM wordlist WHERE term = ?');
+        $stmt->execute([$term]);
+        $id = $stmt->fetchColumn();
+        $stmt->closeCursor();
+        if ($id === false) {
+            return null;
+        }
+        return $this->termIdCache[$term] = (int) $id;
     }
 
     /**
@@ -5994,15 +6094,16 @@ class Index
      *
      * @param  array<string, string|list<string>|FacetRange|FacetExclude> $filter
      * @param  list<int> $candidateDocIds BM25/boolean candidates to scope query.
+     * @param  list<FacetCondition> $extra Further conditions, e.g. query negations (extractNegations()).
      * @return array{0: array<string, array<int, true>>, 1: array<int, true>}
      *         Key name → flipped doc ID set for positive filters, and the excluded doc ID set.
      */
-    private function loadFacetKeySets(array $filter, array $candidateDocIds): array
+    private function loadFacetKeySets(array $filter, array $candidateDocIds, array $extra = []): array
     {
         $sets          = [];
         $excluded      = [];
         $candidateJson = json_encode($candidateDocIds);
-        foreach ($this->facetFilterConditions($filter) as $condition) {
+        foreach ([...$this->facetFilterConditions($filter), ...$extra] as $condition) {
             $name = $condition['name'];
             if ($condition['impossible'] || $candidateDocIds === []) {
                 $sets[$name] = [];

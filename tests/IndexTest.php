@@ -7345,6 +7345,138 @@ class IndexTest extends TestCase
         }
     }
 
+    // --- negated words and phrases in search() ---
+
+    private function negationIndex(): Index
+    {
+        $index = new Index($this->dbPath, schema: new SchemaConfig(
+            language: 'en',
+            filterableFields: ['color'],
+            sortableFields: ['price'],
+        ));
+        $index->insert([
+            ['id' => 1, 'title' => 'casual shirt', 'color' => 'blue', 'price' => 30],
+            ['id' => 2, 'title' => 'formal shirt', 'color' => 'white', 'price' => 50],
+            ['id' => 3, 'title' => 'slim fit shirt', 'color' => 'blue', 'price' => 40],
+            ['id' => 4, 'title' => 'fit red slim shirt', 'color' => 'red', 'price' => 20],
+            ['id' => 5, 'title' => 'formal trousers', 'color' => 'black', 'price' => 60],
+            ['id' => 6, 'title' => 'wordy t-shirt', 'color' => 'blue', 'price' => 10],
+        ]);
+        return $index;
+    }
+
+    /** @return list<int> */
+    private function idsOf(Index $index, string $query, ?SearchOptions $options = null): array
+    {
+        $ids = $index->search($query, $options ?? new SearchOptions(asYouType: false))->getIds();
+        sort($ids);
+        return $ids;
+    }
+
+    public function testNegatedWordRemovesDocumentsContainingIt(): void
+    {
+        $index = $this->negationIndex();
+
+        $this->assertSame([1, 3, 4, 6], $this->idsOf($index, 'shirt -formal'));
+        // Stemmed like any query word: '-formals' removes 'formal'.
+        $this->assertSame([1, 3, 4, 6], $this->idsOf($index, 'shirt -formals'));
+        $this->assertSame([1, 6], $this->idsOf($index, 'shirt -formal -slim'));
+    }
+
+    public function testNegatedPhraseRemovesOnlyTheContiguousSequence(): void
+    {
+        $index = $this->negationIndex();
+
+        // Doc 3 has "slim fit"; doc 4 has both words, but not in that order next to each other.
+        $this->assertSame([1, 2, 4, 6], $this->idsOf($index, 'shirt -"slim fit"'));
+        $this->assertSame([1, 2, 3, 6], $this->idsOf($index, 'shirt -"red slim shirt"'));
+    }
+
+    public function testQueryOfOnlyNegationsReturnsEveryOtherDocument(): void
+    {
+        $index = $this->negationIndex();
+
+        $result = $index->search('-shirt', new SearchOptions(asYouType: false));
+        $this->assertSame([5], $result->getIds());
+        $this->assertSame(1, $result->totalHits);
+        $this->assertSame([1, 3, 6], $this->idsOf($index, '-formal -red', new SearchOptions(
+            filter: ['color' => 'blue'],
+        )));
+        $sorted = $index->search('-"slim fit"', new SearchOptions(sort: ['price:asc'], facets: ['color']));
+        $this->assertSame([6, 4, 1, 2, 5], $sorted->getIds());
+        $this->assertSame(5, $sorted->totalHits);
+        $this->assertSame(['blue' => 2, 'black' => 1, 'red' => 1, 'white' => 1], $sorted->facetDistribution['color']);
+    }
+
+    public function testNegationsApplyToFacetCountsOfASearch(): void
+    {
+        $result = $this->negationIndex()->search('shirt -slim', new SearchOptions(
+            asYouType: false,
+            filter: ['color' => 'blue'],
+            facets: ['color'],
+        ));
+
+        $ids = $result->getIds();
+        sort($ids);
+        $this->assertSame([1, 6], $ids);
+        $this->assertSame(['blue' => 2, 'white' => 1], $result->facetDistribution['color']);
+    }
+
+    public function testHyphenInsideAWordIsNotANegation(): void
+    {
+        $index = $this->negationIndex();
+
+        $this->assertSame($this->idsOf($index, 'wordy t shirt'), $this->idsOf($index, 'wordy t-shirt'));
+        // A lone dash is ignored; a doubled one negates the word after it.
+        $this->assertSame([1, 2, 3, 4, 6], $this->idsOf($index, 'shirt -'));
+        $this->assertSame([1, 3, 4, 6], $this->idsOf($index, 'shirt --formal'));
+    }
+
+    public function testNegatedWordIsMatchedExactlyEvenWhileTyping(): void
+    {
+        $index = $this->negationIndex();
+
+        // '-word' would prefix-match 'wordy' if it were treated like the last query word.
+        $this->assertSame([1, 2, 3, 4, 6], $this->idsOf($index, 'shirt -word', new SearchOptions()));
+        // Unknown words and stopwords exclude nothing.
+        $this->assertSame([1, 2, 3, 4, 6], $this->idsOf($index, 'shirt -zzz -the'));
+        $this->assertSame([1, 2, 3, 4, 5, 6], $this->idsOf($index, '-zzz'));
+    }
+
+    public function testNegatedWordsAreNotHighlighted(): void
+    {
+        $result = $this->negationIndex()->search('fit -red', new SearchOptions(
+            asYouType: false,
+            attributesToHighlight: ['title'],
+        ));
+
+        $this->assertSame([3], $result->getIds());
+        $this->assertSame('slim <mark>fit</mark> shirt', $this->formattedField($result, 'title'));
+        $this->assertSame('fit -red', $result->query);
+    }
+
+    public function testFacetSearchHonoursNegations(): void
+    {
+        $index = $this->negationIndex();
+
+        $this->assertSame(
+            [['value' => 'blue', 'count' => 2], ['value' => 'white', 'count' => 1]],
+            $index->facetSearch(new FacetSearchQuery(facetName: 'color', query: 'shirt -slim'))->facetHits,
+        );
+        $this->assertSame(
+            [['value' => 'blue', 'count' => 3], ['value' => 'red', 'count' => 1]],
+            $index->facetSearch(new FacetSearchQuery(facetName: 'color', query: '-formal'))->facetHits,
+        );
+    }
+
+    public function testSearchBooleanKeepsItsOwnNotOperator(): void
+    {
+        $this->assertSame(
+            [1, 3, 4, 6],
+            $this->negationIndex()->searchBoolean('shirt -formal', new SearchOptions(asYouType: false))->getIds(),
+        );
+    }
+
     // --- multi-valued facet key flag ---
 
     /** @return array<string, int> facet key name => multi_valued flag, read straight from the file */

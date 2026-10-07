@@ -142,6 +142,26 @@ $result = $index->search('"quick brown" "fast car"'); // multiple phrases
 
 Phrase words participate in BM25 scoring normally. `asYouType` applies to the last token even inside a phrase.
 
+## Excluding words and phrases
+
+Put `-` before a word or a quoted phrase to leave out the documents that contain it:
+
+```php
+$result = $index->search('shirt -formal');          // shirts, except those mentioning "formal"
+$result = $index->search('dress -"long sleeve"');    // the words must appear together to exclude
+$result = $index->search('-sale');                   // every document except those with "sale"
+```
+
+- The `-` counts at the start of the query or after a space, so `t-shirt` is an ordinary word.
+- Excluded words are matched exactly, after the same stemming as other query words (`-formals` also excludes `formal`). No typo tolerance, prefix matching, or synonyms apply, also for a last word still being typed: `shirt -wor` does not hide `word`.
+- A word that no document contains, or a stopword, excludes nothing.
+- A query of only exclusions works like an empty query: it returns every other document, with exact totals, sort, and facet counts.
+- Exclusions also apply to facet counts and to `facetSearch()`'s `query`. They are not highlighted.
+
+`searchBoolean()` has its own `-` / `~` operator; see [Boolean search](#boolean-search).
+
+**Compared with Meilisearch:** same syntax and the same result for a query of only exclusions (all documents except the excluded ones). Fuzor stems excluded words like any query word; Meilisearch has no stemming.
+
 ## Typo tolerance
 
 Automatic. When a query word has no exact or prefix match and is long enough, Fuzor scans the wordlist for candidates within edit distance.
@@ -420,7 +440,7 @@ $result->toJSON();
 |---|---|---|
 | `facetName` | _(required)_ | Field to search; must be declared in `filterableFields` at index creation |
 | `facetQuery` | `''` | Prefix matched case-insensitively against values; empty string returns all values |
-| `query` | `''` | FTS phrase to restrict candidate documents; empty string means all documents |
+| `query` | `''` | FTS phrase to restrict candidate documents (phrases and `-` exclusions as in `search()`); empty string means all documents |
 | `filter` | `[]` | Facet filters applied before counting; same type as `SearchOptions::$filter` |
 | `limit` | `100` | Maximum number of values to return, ordered by count descending |
 
