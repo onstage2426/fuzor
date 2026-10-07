@@ -25,8 +25,14 @@ class IndexTest extends TestCase
 
     protected function tearDown(): void
     {
-        foreach ([$this->dbPath, $this->dbPath . '-wal', $this->dbPath . '-shm'] as $f) {
-            if (file_exists($f)) {
+        self::removeIndexFiles($this->dbPath);
+    }
+
+    /** Remove an index path and everything published or built next to it (versions, sidecars, temp files). */
+    private static function removeIndexFiles(string $path): void
+    {
+        foreach ([$path, ...(glob($path . '[.-]*') ?: [])] as $f) {
+            if (is_link($f) || file_exists($f)) {
                 unlink($f);
             }
         }
@@ -2267,6 +2273,197 @@ class IndexTest extends TestCase
         $this->assertContains(1, $rebuilt->search('sedan')->getIds());
     }
 
+    /**
+     * Start a PHP child process holding a read-write Index on $path. Each line written to the
+     * returned stdin pipe is one JSON document the child inserts; it answers "ok" per insert.
+     *
+     * It has to be another process: SQLite's file locks are per process, so a second
+     * connection in this process would see itself as the only user of a -shm file and reset it.
+     *
+     * @return array{0: resource, 1: array<int, resource>}
+     */
+    private function startWriterProcess(string $path): array
+    {
+        if (!function_exists('proc_open') || PHP_OS_FAMILY === 'Windows') {
+            $this->markTestSkipped('needs proc_open and POSIX file locks');
+        }
+        $script = sprintf(
+            'require %s; $i = new Fuzor\Index(%s);'
+            . ' while (($l = fgets(STDIN)) !== false) { $i->insert([json_decode($l, true)]); echo "ok\n"; }',
+            var_export(dirname(__DIR__) . '/vendor/autoload.php', true),
+            var_export($path, true),
+        );
+        $child = proc_open([PHP_BINARY, '-r', $script], [0 => ['pipe', 'r'], 1 => ['pipe', 'w']], $pipes);
+        $this->assertIsResource($child);
+        return [$child, $pipes];
+    }
+
+    /**
+     * @param array<int, resource>    $pipes
+     * @param array<string, mixed>    $doc
+     */
+    private function insertInWriterProcess(array $pipes, array $doc): void
+    {
+        fwrite($pipes[0], json_encode($doc) . "\n");
+        $this->assertSame("ok\n", fgets($pipes[1]));
+    }
+
+    /**
+     * @param resource             $child
+     * @param array<int, resource> $pipes
+     */
+    private function stopWriterProcess($child, array $pipes): void
+    {
+        fclose($pipes[0]);
+        fclose($pipes[1]);
+        proc_close($child);
+    }
+
+    public function testRebuildIgnoresTheReplacedFilesWal(): void
+    {
+        new Index($this->dbPath)->close();
+        // Another process's open writer keeps its commits in the -wal (no checkpoint before 1000 pages).
+        [$child, $pipes] = $this->startWriterProcess($this->dbPath);
+        try {
+            $this->insertInWriterProcess($pipes, ['id' => 1, 'title' => 'old sedan']);
+            $this->insertInWriterProcess($pipes, ['id' => 2, 'title' => 'old coupe']);
+
+            Index::rebuild($this->dbPath, function (Index $new): void {
+                $new->insert([['id' => 10, 'title' => 'new wagon']]);
+            })->close();
+
+            $fresh = new Index($this->dbPath, readonly: true);
+            $this->assertSame(1, $fresh->count());
+            $this->assertSame([10], $fresh->search('wagon')->getIds());
+            $this->assertSame([], $fresh->search('sedan')->getIds());
+
+            // A commit through the connection still open on the old file must not reach the new one.
+            $this->insertInWriterProcess($pipes, ['id' => 3, 'title' => 'late hatchback']);
+            $late = new Index($this->dbPath, readonly: true);
+            $this->assertSame([], $late->search('hatchback')->getIds());
+            $this->assertSame([10], $late->search('wagon')->getIds());
+            $late->close();
+            $fresh->close();
+        } finally {
+            $this->stopWriterProcess($child, $pipes);
+        }
+    }
+
+    public function testSnapshotToIgnoresTheReplacedFilesWal(): void
+    {
+        $readPath = sys_get_temp_dir() . '/fuzor_snap_' . uniqid() . '.db';
+        new Index($readPath)->close();
+        // Another process with a read-write connection on the snapshot path and commits in its -wal.
+        [$child, $pipes] = $this->startWriterProcess($readPath);
+        try {
+            $this->insertInWriterProcess($pipes, ['id' => 1, 'title' => 'old sedan']);
+
+            $write = new Index($this->dbPath);
+            $write->insert([['id' => 10, 'title' => 'new wagon']]);
+            $write->snapshotTo($readPath);
+            $write->close();
+
+            // Commits through the old connection after the swap must not reach the snapshot.
+            $this->insertInWriterProcess($pipes, ['id' => 2, 'title' => 'late coupe']);
+
+            $read = new Index($readPath, readonly: true);
+            $this->assertSame(1, $read->count());
+            $this->assertSame([10], $read->search('wagon')->getIds());
+            $this->assertSame([], $read->search('coupe')->getIds());
+            $read->close();
+        } finally {
+            $this->stopWriterProcess($child, $pipes);
+            self::removeIndexFiles($readPath);
+        }
+    }
+
+    public function testRebuildPublishesAVersionBehindASymlink(): void
+    {
+        new Index($this->dbPath)->close();
+
+        Index::rebuild($this->dbPath, function (Index $new): void {
+            $new->insert([['id' => 1, 'title' => 'sedan']]);
+        })->close();
+
+        $this->assertTrue(is_link($this->dbPath));
+        $target = (string) readlink($this->dbPath);
+        $pattern = '/^' . preg_quote(basename($this->dbPath), '/') . '\.v-[0-9a-f]{8}$/';
+        $this->assertMatchesRegularExpression($pattern, $target);
+
+        // SQLite names the sidecars after the version, never after the link.
+        $index = new Index($this->dbPath);
+        $index->insert([['id' => 2, 'title' => 'coupe']]);
+        $this->assertFileExists(dirname($this->dbPath) . '/' . $target . '-wal');
+        $this->assertFileDoesNotExist($this->dbPath . '-wal');
+        $index->close();
+    }
+
+    public function testPublishKeepsOnlyTheCurrentAndPreviousVersion(): void
+    {
+        $build = function (int $id): void {
+            Index::rebuild($this->dbPath, function (Index $new) use ($id): void {
+                $new->insert([['id' => $id, 'title' => 'sedan']]);
+            })->close();
+        };
+
+        $build(1);
+        $first = dirname($this->dbPath) . '/' . readlink($this->dbPath);
+        $build(2);
+        $second = dirname($this->dbPath) . '/' . readlink($this->dbPath);
+        $this->assertFileExists($first, 'the previous version stays for connections still opening it');
+        $build(3);
+
+        $this->assertFileDoesNotExist($first);
+        $this->assertFileExists($second);
+        $this->assertCount(2, glob($this->dbPath . '.v-*[0-9a-f]') ?: []);
+        $this->assertSame([3], new Index($this->dbPath)->search('sedan')->getIds());
+    }
+
+    public function testPublishRemovesSidecarsOfAPlainFileOnePublishLater(): void
+    {
+        $plain = new Index($this->dbPath);
+        $plain->insert([['id' => 1, 'title' => 'sedan']]);
+
+        Index::rebuild($this->dbPath, fn (Index $new) => $new->insert([['id' => 2, 'title' => 'sedan']]))->close();
+        $this->assertFileExists($this->dbPath . '-wal', 'still in use by the open plain-file connection');
+
+        $plain->close();
+        Index::rebuild($this->dbPath, fn (Index $new) => $new->insert([['id' => 3, 'title' => 'sedan']]))->close();
+        $this->assertFileDoesNotExist($this->dbPath . '-wal');
+        $this->assertFileDoesNotExist($this->dbPath . '-shm');
+    }
+
+    public function testPublishNeverRemovesAVersionOfALiveBuild(): void
+    {
+        $other = $this->dbPath . '.v-0badc0de';
+        $lock  = fopen($this->dbPath . '.tmp-0badc0de.lock', 'c');
+        $this->assertNotFalse($lock);
+        flock($lock, LOCK_EX);
+        try {
+            file_put_contents($other, 'another rebuild, between its rename and its symlink swap');
+            Index::rebuild($this->dbPath, fn (Index $new) => $new->insert([['id' => 1, 'title' => 'a']]))->close();
+            Index::rebuild($this->dbPath, fn (Index $new) => $new->insert([['id' => 2, 'title' => 'b']]))->close();
+            $this->assertFileExists($other);
+        } finally {
+            flock($lock, LOCK_UN);
+            fclose($lock);
+        }
+    }
+
+    public function testRebuildAfterForceCreateOverASymlinkedPath(): void
+    {
+        Index::rebuild($this->dbPath, fn (Index $new) => $new->insert([['id' => 1, 'title' => 'sedan']]))->close();
+
+        $forced = new Index($this->dbPath, force: true);
+        $forced->insert([['id' => 2, 'title' => 'coupe']]);
+        $forced->close();
+        $this->assertFalse(is_link($this->dbPath));
+
+        $rebuilt = Index::rebuild($this->dbPath);
+        $this->assertSame([2], $rebuilt->search('coupe')->getIds());
+        $rebuilt->close();
+    }
+
     public function testRebuildCountReflectsNewDocuments(): void
     {
         $index = new Index($this->dbPath);
@@ -2741,7 +2938,7 @@ class IndexTest extends TestCase
             $write->snapshotTo($readPath);
             $this->assertFileExists($readPath);
         } finally {
-            @unlink($readPath);
+            self::removeIndexFiles($readPath);
         }
     }
 
@@ -2761,9 +2958,7 @@ class IndexTest extends TestCase
             $this->assertContains(2, $read->search('suv')->getIds());
             $read->close();
         } finally {
-            foreach ([$readPath, $readPath . '-wal', $readPath . '-shm'] as $f) {
-                @unlink($f);
-            }
+            self::removeIndexFiles($readPath);
         }
     }
 
@@ -2779,7 +2974,7 @@ class IndexTest extends TestCase
             $this->assertContains(1, $read->search('sedan')->getIds());
             $read->close();
         } finally {
-            @unlink($readPath);
+            self::removeIndexFiles($readPath);
         }
     }
 
@@ -2798,7 +2993,7 @@ class IndexTest extends TestCase
             $this->assertContains(2, $read->search('second')->getIds());
             $read->close();
         } finally {
-            @unlink($readPath);
+            self::removeIndexFiles($readPath);
         }
     }
 
@@ -2816,7 +3011,7 @@ class IndexTest extends TestCase
 
             $this->assertFileDoesNotExist($stale);
         } finally {
-            @unlink($readPath);
+            self::removeIndexFiles($readPath);
             @unlink($stale);
         }
     }
@@ -3015,7 +3210,7 @@ class IndexTest extends TestCase
             $this->assertFileExists($inFlight);
             $this->assertSame([], glob($readPath . '.tmp-*.lock'), 'the snapshot released its own lock');
         } finally {
-            @unlink($readPath);
+            self::removeIndexFiles($readPath);
             @unlink($inFlight);
         }
     }
@@ -3032,7 +3227,7 @@ class IndexTest extends TestCase
             $this->assertSame('en', $read->language);
             $read->close();
         } finally {
-            @unlink($readPath);
+            self::removeIndexFiles($readPath);
         }
     }
 
@@ -3395,7 +3590,7 @@ class IndexTest extends TestCase
             $this->assertSame($doc, $snap->get(1));
             $snap->close();
         } finally {
-            @unlink($snapPath);
+            self::removeIndexFiles($snapPath);
         }
     }
 
@@ -6738,7 +6933,7 @@ class IndexTest extends TestCase
             $index->close();
             $this->assertSame(Index::CURRENT_SCHEMA_VERSION, new Index($snapPath)->schemaVersion);
         } finally {
-            @unlink($snapPath);
+            self::removeIndexFiles($snapPath);
         }
     }
 
@@ -6887,9 +7082,7 @@ class IndexTest extends TestCase
             $this->assertContains(2, $reader->search('coupe')->getIds());
             $this->assertFalse($reader->reopenIfChanged());
         } finally {
-            foreach ([$srcPath, $srcPath . '-wal', $srcPath . '-shm'] as $f) {
-                @unlink($f);
-            }
+            self::removeIndexFiles($srcPath);
         }
     }
 

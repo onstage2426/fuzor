@@ -62,9 +62,16 @@ class Index
 
     /**
      * Suffix of the temp files rebuild() and snapshotTo() create next to an index path:
-     * '.tmp-' + 8 hex chars, optionally followed by a SQLite sidecar or the builder's lock file.
+     * '.tmp-' + 8 hex chars, optionally followed by a SQLite sidecar, the builder's lock file,
+     * or the symlink publishVersion() swaps into place.
      */
-    private const string TEMP_SUFFIX_PATTERN = '/^\.tmp-[0-9a-f]{8}(?:-wal|-shm|-journal|\.lock)?$/';
+    private const string TEMP_SUFFIX_PATTERN = '/^\.tmp-[0-9a-f]{8}(?:-wal|-shm|-journal|\.lock|\.link)?$/';
+
+    /**
+     * Suffix of a published version next to an index path ('.v-' + the 8 hex chars of the temp
+     * name it was built under), optionally followed by a SQLite sidecar; see publishVersion().
+     */
+    private const string VERSION_SUFFIX_PATTERN = '/^\.v-([0-9a-f]{8})(?:-wal|-shm|-journal)?$/';
 
     /** Length of a temp name's stem suffix: '.tmp-' plus 8 hex chars. */
     private const int TEMP_STEM_SUFFIX_LENGTH = 13;
@@ -328,7 +335,7 @@ class Index
     }
 
     /**
-     * Atomically rebuild an index by writing to a temporary file and renaming it over the target.
+     * Atomically rebuild an index by writing to a temporary file and publishing it at the target.
      *
      * When $callback is provided it receives a fresh, empty Index to populate.
      *
@@ -346,6 +353,9 @@ class Index
      * replaces it — including with no callback, which streams the store in batches. See
      * "Writes during a rebuild" in docs/indexing.md for patterns that combine live writes with
      * periodic rebuilds.
+     *
+     * The new file is published as {path}.v-{8 hex} and $path becomes a symlink to it, so it
+     * never shares a -wal with the file it replaces; see publishVersion().
      *
      * Pass a SchemaConfig to override the schema; omit it (null) to inherit the existing
      * index's schema. When no existing index is present, null uses SchemaConfig defaults.
@@ -410,10 +420,7 @@ class Index
             }
             $handle->close();
 
-            /** @infection-ignore-all Throw_: rename() returns false only on OS-level failure (cross-device, permissions); not reproducible in unit tests without filesystem mocking */
-            if (!rename($tmp, $resolved)) {
-                throw new IOException("Failed to atomically replace index at {$resolved}.");
-            }
+            self::publishVersion($tmp, $resolved);
         } catch (\Throwable $e) {
             foreach (['', '-wal', '-shm', '-journal'] as $suffix) {
                 @unlink($tmp . $suffix);
@@ -531,12 +538,116 @@ class Index
     }
 
     /**
+     * Publish a finished, closed build at $resolved without pairing it with another file's -wal.
+     *
+     * SQLite finds a database's -wal and -shm by name only. Renaming a new file over a path
+     * that a connection in another process still has open pairs the new file with that
+     * connection's -wal: its frames not yet checkpointed, and every commit it makes afterwards,
+     * are read as pages of the new file. So each build gets a name of its own,
+     * {path}.v-{8 hex}, and $resolved becomes a relative symlink to it, swapped atomically.
+     * SQLite resolves the link and names the sidecars after the version, so two files never
+     * share a -wal, and connections on the old version keep reading it until they reopen.
+     *
+     * The version that was current before the swap is kept for a connection that resolved
+     * the link a moment earlier and is still opening it; older ones are deleted by
+     * removeSupersededVersions(). Where symlinks are unavailable, the build is renamed over
+     * $resolved and the path's sidecars are deleted, as before.
+     *
+     * @param  string $tmp      Temp path from claimTempPath(); its lock must still be held.
+     * @param  string $resolved Index path.
+     * @throws IOException If the build cannot be moved into place.
+     */
+    private static function publishVersion(string $tmp, string $resolved): void
+    {
+        $version  = $resolved . '.v-' . substr($tmp, -8);
+        $previous = is_link($resolved) ? readlink($resolved) : false;
+
+        // The build is closed (rebuild() checkpoints it to an empty -wal on close; VACUUM INTO
+        // writes none), so its sidecars hold nothing and must not follow it under a new name.
+        foreach (['-wal', '-shm', '-journal'] as $suffix) {
+            @unlink($tmp . $suffix);
+        }
+        /** @infection-ignore-all Throw_: rename() returns false only on OS-level failure (permissions); not reproducible in unit tests without filesystem mocking */
+        if (!rename($tmp, $version)) {
+            throw new IOException("Failed to move the new index into place at {$version}.");
+        }
+
+        $link = $tmp . '.link';
+        @unlink($link);
+        if (@symlink(basename($version), $link) && rename($link, $resolved)) {
+            self::removeSupersededVersions($resolved, $version, $previous);
+            return;
+        }
+
+        // No symlinks on this filesystem: replace the file itself. Not safe against a writer
+        // in another process that still has the old file open (see docs/indexing.md).
+        /** @infection-ignore-all MethodCallRemoval,Throw_: only reached where symlink() fails (Windows, some network mounts); not reproducible in the Linux test suite */
+        @unlink($link);
+        /** @infection-ignore-all Throw_: see above */
+        if (!rename($version, $resolved)) {
+            throw new IOException("Failed to atomically replace index at {$resolved}.");
+        }
+        foreach (['-wal', '-shm'] as $suffix) {
+            @unlink($resolved . $suffix);
+        }
+    }
+
+    /**
+     * Delete versions published at $resolved before the previous one, with their sidecars.
+     *
+     * Kept: $current, the version $previous pointed to, and any version whose build still
+     * holds its temp lock (a concurrent rebuild()/snapshotTo() between its rename and its
+     * swap). When $resolved was already a symlink, the -wal/-shm named after the path belong
+     * to a plain file replaced at least one publish ago, so they go too; while it was still a
+     * plain file they are left for the connections that may still have it open.
+     *
+     * @param string       $resolved Index path, now a symlink to $current.
+     * @param string       $current  Version just published.
+     * @param string|false $previous Link target before the swap; false if $resolved was no symlink.
+     */
+    private static function removeSupersededVersions(string $resolved, string $current, string|false $previous): void
+    {
+        $keep    = [basename($current) => true];
+        $baseLen = strlen($resolved);
+        if ($previous !== false) {
+            $keep[basename($previous)] = true;
+            @unlink($resolved . '-wal');
+            @unlink($resolved . '-shm');
+        }
+        foreach (glob($resolved . '.v-*') ?: [] as $file) {
+            if (preg_match(self::VERSION_SUFFIX_PATTERN, substr($file, $baseLen), $m) !== 1) {
+                continue;
+            }
+            $live = self::isLockHeld($resolved . '.tmp-' . $m[1] . '.lock');
+            if ($live || isset($keep[basename($resolved) . '.v-' . $m[1]])) {
+                continue;
+            }
+            @unlink($file);
+        }
+    }
+
+    /** True when a process holds flock() on $lockPath; false when it is free or does not exist. */
+    private static function isLockHeld(string $lockPath): bool
+    {
+        $lock = @fopen($lockPath, 'r');
+        if ($lock === false) {
+            return false;
+        }
+        $free = flock($lock, LOCK_EX | LOCK_NB);
+        if ($free) {
+            flock($lock, LOCK_UN);
+        }
+        fclose($lock);
+        return !$free;
+    }
+
+    /**
      * Write an atomic snapshot of this index to $path.
      *
      * Uses VACUUM INTO to copy the current state to a uniquely-named temp file on the
-     * same filesystem, then renames it over $path in a single POSIX-atomic operation.
-     * Concurrent readers of the old file at $path are unaffected — the inode stays
-     * alive until their last open file descriptor is closed.
+     * same filesystem, then publishes it as {path}.v-{8 hex} and atomically swaps the
+     * symlink at $path to it (see publishVersion()). Concurrent readers of the old file
+     * are unaffected — they keep reading it until they reopen.
      *
      * Safe to call while writes are in progress on this index: VACUUM INTO reads a
      * consistent snapshot under a shared read transaction; WAL mode ensures writers
@@ -560,21 +671,13 @@ class Index
         try {
             assert($this->pdo instanceof \PDO);
             $this->pdo->exec('VACUUM INTO ' . $this->pdo->quote($tmp));
-            if (!rename($tmp, $resolved)) {
-                throw new IOException("Failed to atomically write snapshot to {$resolved}.");
-            }
+            self::publishVersion($tmp, $resolved);
         } catch (\Throwable $e) {
             @unlink($tmp);
             @unlink($tmp . '-journal');
             throw $e;
         } finally {
             self::releaseTempPath($tmp, $tmpLock);
-        }
-
-        foreach (['-wal', '-shm'] as $suffix) {
-            if (file_exists($resolved . $suffix)) {
-                @unlink($resolved . $suffix);
-            }
         }
     }
 

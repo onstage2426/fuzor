@@ -138,7 +138,7 @@ Multi-document `insert()`/`update()`/`upsert()` calls run with `PRAGMA synchrono
 
 Two ways to avoid that risk:
 
-- **Prefer `Index::rebuild()`** for loading into a live, already-serving index. It writes to a disposable temp file and only `rename()`s it over the real path on success — a corrupted temp file from a power loss never touches the index readers are using.
+- **Prefer `Index::rebuild()`** for loading into a live, already-serving index. It writes to a disposable temp file and only swaps it in at the real path on success — a corrupted temp file from a power loss never touches the index readers are using.
 - **Set `Config::$bulkSynchronousOff = false`** if you bulk-load directly into a live index outside of `rebuild()` and want full durability, at the cost of bulk-load speed.
 
 ### Facet values
@@ -330,6 +330,8 @@ Writes an atomic point-in-time copy of the index to a new path. Safe to call whi
 $index->snapshotTo('/path/to/articles-snapshot.db');
 ```
 
+The snapshot is published the same way as a rebuild: see [Index files after a rebuild or snapshot](#index-files-after-a-rebuild-or-snapshot).
+
 ## Atomic rebuild
 
 Replaces the entire contents of an index in one atomic operation. If anything throws, the original file is left completely untouched.
@@ -360,7 +362,27 @@ Index::rebuild('/path/to/articles.db', schema: new SchemaConfig(
 
 Throws `\InvalidArgumentException` if the callback is omitted and the existing index has no document store.
 
-Internally, `rebuild` writes to a temporary file alongside the target, then renames it over the original — a POSIX-atomic operation on the same filesystem.
+Internally, `rebuild` writes to a temporary file alongside the target, then publishes it with an atomic swap — see below.
+
+### Index files after a rebuild or snapshot
+
+`rebuild()` and `snapshotTo()` publish each new file under a name of its own, `{path}.v-{8 hex}`, and turn `{path}` into a symlink to it, swapped atomically:
+
+```
+articles.db          -> articles.db.v-3f9a01c2      (symlink, relative)
+articles.db.v-3f9a01c2                              current
+articles.db.v-77d0e4b1                              previous, kept until the next publish
+```
+
+Open `{path}` as always; `new Index()`, `Index::exists()`, `lastModified()`, and `reopenIfChanged()` all follow the link. The previous version stays for connections that are still opening it and is deleted by the next publish, together with its `-wal`/`-shm`.
+
+Replacing the file itself (a `rename()` over the path) is not safe while another process has the old file open read-write: SQLite pairs a database with its `-wal` by name, so the new file would be read through the old file's write-ahead log — including commits made through the old connection after the swap. With one file name per version, two files never share a `-wal`.
+
+Things to know about the layout:
+
+- Copy or back up `{path}` with a tool that follows symlinks (`cp`, `copy()`, `rsync -L`); `rsync -a` alone copies the link, not the data.
+- Moving `{path}` to another directory breaks the relative link; move the version file with it, or copy instead.
+- On a filesystem without symlinks (Windows without the privilege, some network mounts), both methods fall back to renaming the new file over `{path}` and deleting its sidecars, which is only safe when no other process writes the old file.
 
 ### Writes during a rebuild
 
@@ -391,7 +413,7 @@ foreach (productIdsChangedSince($startedAt) as $id) {
 
 ### Temporary files
 
-`rebuild()` and `snapshotTo()` build into `{path}.tmp-{8 hex}` (plus SQLite's `-wal` / `-shm` sidecars) next to the target and remove it when they finish or fail. A process that is killed mid-build — `max_execution_time`, out of memory, a PHP-FPM or container restart — never reaches that cleanup, so its files stay behind.
+`rebuild()` and `snapshotTo()` build into `{path}.tmp-{8 hex}` (plus SQLite's `-wal` / `-shm` sidecars) next to the target, then publish it as `{path}.v-{8 hex}`, or remove it when they fail. A process that is killed mid-build — `max_execution_time`, out of memory, a PHP-FPM or container restart — never reaches that cleanup, so its files stay behind.
 
 Both methods sweep such leftovers before they start. You can also do it from your own tooling, for example a cron job or an admin screen:
 

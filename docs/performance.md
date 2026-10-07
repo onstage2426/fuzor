@@ -95,8 +95,10 @@ Index::rebuild('/var/db/site-search.db', function (Index $new): void {
 $read = new Index('/var/db/site-search.db', readonly: true);
 ```
 
-The rename is atomic: requests in flight keep reading the old file, new requests
-get the new one. A failed rebuild leaves the live index untouched.
+The swap is atomic: requests in flight keep reading the old file, new requests
+get the new one. A failed rebuild leaves the live index untouched. See
+[Index files after a rebuild or snapshot](indexing.md#index-files-after-a-rebuild-or-snapshot)
+for the file layout this creates.
 
 ## Keeping the index schema current
 
@@ -171,10 +173,10 @@ writes, which is also where `busyTimeoutMs` and cross-process cache invalidation
 
 ## Restoring from a snapshot
 
-The snapshot is a plain SQLite file. To promote it to a write index — after data loss or a botched migration — rename it over the write path and open normally:
+The snapshot is a plain SQLite file behind a symlink. To promote it to a write index — after data loss or a botched migration — stop every process that writes the old index, then copy it over the write path and open normally:
 
 ```php
-rename('/var/db/products-read.db', '/var/db/products.db');
+copy('/var/db/products-read.db', '/var/db/products.db');   // follows the symlink
 $write = new Index('/var/db/products.db');
 ```
 
