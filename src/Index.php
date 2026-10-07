@@ -870,6 +870,18 @@ class Index
              ON facet_values (key_id, num_value, doc_id)
              WHERE num_value IS NOT NULL"
         );
+        // sort_keys: case-folded string values of sortable fields (see sortKey()), clustered so a
+        // sorted browse walks one key's values in sort order. Numbers sort via facet_numeric_index.
+        $pdo->exec(
+            "CREATE TABLE IF NOT EXISTS sort_keys (
+                key_id   INTEGER NOT NULL,
+                sort_key TEXT    NOT NULL,
+                doc_id   INTEGER NOT NULL,
+                PRIMARY KEY (key_id, sort_key, doc_id)
+            ) WITHOUT ROWID, STRICT"
+        );
+        /** @infection-ignore-all MethodCallRemoval: sort_keys_doc_id is a performance index; DELETE-by-doc_id still works via full scan */
+        $pdo->exec("CREATE INDEX IF NOT EXISTS 'main'.'sort_keys_doc_id' ON sort_keys (doc_id)");
         // field_names: one row per searchable field name (~2–10 entries; fully cached in PHP).
         $pdo->exec(
             "CREATE TABLE IF NOT EXISTS field_names (
@@ -1220,6 +1232,7 @@ class Index
                 DROP INDEX IF EXISTS facet_doc_id_index;
                 DROP INDEX IF EXISTS facet_numeric_index;
                 DROP INDEX IF EXISTS field_hits_doc_id;
+                DROP INDEX IF EXISTS sort_keys_doc_id;
             ');
         }
         /** @infection-ignore-all UnwrapFinally: removing the try-finally wrapper only affects exception safety of the pragma restore; on the success path the behaviour is identical */
@@ -1289,6 +1302,7 @@ class Index
                 ');
                 /** @infection-ignore-all MethodCallRemoval: rebuilding field_hits_doc_id is a performance step; correctness is unaffected */
                 $pdo->exec('CREATE INDEX IF NOT EXISTS field_hits_doc_id ON field_hits (doc_id);');
+                $pdo->exec('CREATE INDEX IF NOT EXISTS sort_keys_doc_id ON sort_keys (doc_id);');
             }
             /** @infection-ignore-all MethodCallRemoval: restoring pragmas after bulk load is a performance step; the next connection will re-apply from applyPragmas() */
             $this->restoreNormalPragmas();
@@ -1568,6 +1582,7 @@ class Index
                 $pdo->exec('DELETE FROM documents');
             }
             $pdo->exec('DELETE FROM facet_values');
+            $pdo->exec('DELETE FROM sort_keys');
             $pdo->exec('UPDATE facet_keys SET multi_valued = 0 WHERE multi_valued = 1');
             $pdo->exec('DELETE FROM field_hits');
 
@@ -2875,7 +2890,7 @@ class Index
      * One page of filtered documents in sort order, read by walking the primary sort field's index.
      *
      * The walk visits the primary field in three phases, matching compareSortValues(): numeric
-     * values along facet_numeric_index, then string values along the facet_values primary key,
+     * values along facet_numeric_index, then string values along the sort_keys primary key,
      * then documents without the field in doc_id order. Every phase orders ties by doc_id
      * ascending, the same final tiebreaker as sortDocIdsBySpecs(). Rows are fetched lazily and
      * the walk stops once offset + limit documents are collected, so the cost follows the page
@@ -2914,9 +2929,9 @@ class Index
                     [$keyId, ...$walkParams],
                 ],
                 [
-                    'SELECT s.doc_id, s.value FROM facet_values s'
-                    . ' WHERE s.key_id = ? AND s.num_value IS NULL' . $walkSql
-                    . " ORDER BY s.value {$direction}, s.doc_id",
+                    'SELECT s.doc_id, s.sort_key FROM sort_keys s'
+                    . ' WHERE s.key_id = ?' . $walkSql
+                    . " ORDER BY s.sort_key {$direction}, s.doc_id",
                     [$keyId, ...$walkParams],
                 ],
                 [
@@ -3271,6 +3286,7 @@ class Index
                 $this->prepare("DELETE FROM documents WHERE doc_id IN ({$placeholders})")->execute($chunk);
             }
             $this->prepare("DELETE FROM facet_values WHERE doc_id IN ({$placeholders})")->execute($chunk);
+            $this->prepare("DELETE FROM sort_keys    WHERE doc_id IN ({$placeholders})")->execute($chunk);
             $this->prepare("DELETE FROM field_hits WHERE doc_id IN ({$placeholders})")->execute($chunk);
 
             // Prune orphan terms scoped to the affected set; avoids a full wordlist table scan.
@@ -3335,6 +3351,8 @@ class Index
 
         // 5. Remove facet rows for this document.
         $this->stmt('facetValuesDeleteByDoc', 'DELETE FROM facet_values WHERE doc_id = :documentId')
+            ->execute([':documentId' => $documentId]);
+        $this->stmt('sortKeysDeleteByDoc', 'DELETE FROM sort_keys WHERE doc_id = :documentId')
             ->execute([':documentId' => $documentId]);
 
         // 6. Remove field_hits rows for this document.
@@ -5212,6 +5230,13 @@ class Index
             $keyId = $this->resolveFacetKeyId($row['name']);
             $stmt->execute([$keyId, $row['value'], $documentId, $row['numValue']]);
             $valuesPerKey[$keyId][$row['value']] = true;
+            if ($row['numValue'] === null && isset($this->sortableFieldSet[$row['name']])) {
+                $this->stmt(
+                    'sortKeySave',
+                    'INSERT INTO sort_keys (key_id, sort_key, doc_id) VALUES (?,?,?)
+                     ON CONFLICT(key_id, sort_key, doc_id) DO NOTHING'
+                )->execute([$keyId, self::sortKey($row['value']), $documentId]);
+            }
         }
         if (count($rows) > count($valuesPerKey)) {
             $multi = array_keys(array_filter($valuesPerKey, static fn(array $values): bool => count($values) > 1));
@@ -5323,6 +5348,75 @@ class Index
                 . implode(',', array_fill(0, $rowCount, '(?,?,?,?)'))
             ))->execute($params);
         }
+
+        $this->bulkFlushSortKeys($kvdMap, array_intersect_key($facetBuffer, $this->sortableFieldSet));
+    }
+
+    /**
+     * Insert sort_keys rows for the string values of sortable fields, in (key_id, sort_key,
+     * doc_id) PK order. Values that fold to the same key for one document collapse into one row.
+     *
+     * @param array<int, array<int|string, array<int, float|null>>>    $kvdMap    key_id → value → docId → numValue
+     * @param array<string, array<int|string, array<int, float|null>>> $sortable  sortable fields' part of the buffer
+     */
+    private function bulkFlushSortKeys(array $kvdMap, array $sortable): void
+    {
+        if ($sortable === []) {
+            return;
+        }
+        $pdo = $this->pdo;
+        assert($pdo instanceof \PDO);
+        /** @var array<int, array<string, array<int, true>>> $keyMap key_id → sort key → docId */
+        $keyMap = [];
+        foreach (array_keys($sortable) as $name) {
+            $keyId = $this->facetKeyCache[$name];
+            foreach ($kvdMap[$keyId] as $value => $docs) {
+                foreach ($docs as $docId => $numValue) {
+                    if ($numValue === null) {
+                        $keyMap[$keyId][self::sortKey((string) $value)][$docId] = true;
+                    }
+                }
+            }
+        }
+        ksort($keyMap);
+        $rowCount = 0;
+        $params   = [];
+        foreach ($keyMap as $keyId => $keys) {
+            ksort($keys, SORT_STRING);
+            foreach ($keys as $sortKey => $docs) {
+                ksort($docs);
+                foreach (array_keys($docs) as $docId) {
+                    $params[] = $keyId;
+                    $params[] = (string) $sortKey;
+                    $params[] = $docId;
+                    if (++$rowCount === self::CHUNK_3P) {
+                        ($this->bulkStmtCache['sortKeysChunk:' . self::CHUNK_3P] ??= $pdo->prepare(
+                            'INSERT INTO sort_keys (key_id, sort_key, doc_id) VALUES '
+                            . implode(',', array_fill(0, self::CHUNK_3P, '(?,?,?)'))
+                        ))->execute($params);
+                        $params   = [];
+                        $rowCount = 0;
+                    }
+                }
+            }
+        }
+        if ($rowCount > 0) {
+            ($this->bulkStmtCache["sortKeysChunk:{$rowCount}"] ??= $pdo->prepare(
+                'INSERT INTO sort_keys (key_id, sort_key, doc_id) VALUES '
+                . implode(',', array_fill(0, $rowCount, '(?,?,?)'))
+            ))->execute($params);
+        }
+    }
+
+    /**
+     * The key a string sort value is ordered by: the value lowercased (Unicode), so uppercase
+     * letters sort as if they were lowercase. Accents are not folded: 'é' still sorts after 'z'
+     * (use Tokenizer::sortKey() in a separate field for that). Compared byte-wise, in SQL
+     * (sort_keys) and in PHP (sortRanks()) alike.
+     */
+    private static function sortKey(string $value): string
+    {
+        return mb_strtolower($value, 'UTF-8');
     }
 
     /**
@@ -5429,12 +5523,15 @@ class Index
      * Uses a fixed json_each-based statement (always cached as 'fetchSortValues') so there is
      * no per-call prepare overhead regardless of candidate count.
      *
+     * With $fold, strings are returned as their sortKey(), the form sorting compares; without
+     * it (distinct grouping) as stored.
+     *
      * @param  list<int> $docIds
      * @param  int|null  $keyId   null = unknown field; all docs return null
      * @param  bool      $asc     Direction used to pick the representative of a multi-value field.
      * @return array<int, float|string|null>
      */
-    private function fetchSortValues(array $docIds, ?int $keyId, bool $asc = true): array
+    private function fetchSortValues(array $docIds, ?int $keyId, bool $asc = true, bool $fold = false): array
     {
         $result = array_fill_keys($docIds, null);
         if ($keyId === null) {
@@ -5449,8 +5546,9 @@ class Index
         $stmt->execute([$keyId, json_encode($docIds)]);
         /** @var list<array{0: int, 1: float|null, 2: string}> $sortRows */
         $sortRows = $stmt->fetchAll(PDO::FETCH_NUM);
+        $folded = [];
         foreach ($sortRows as [$docId, $numValue, $strValue]) {
-            $value   = $numValue ?? $strValue;
+            $value   = $numValue ?? ($fold ? $folded[$strValue] ??= self::sortKey($strValue) : $strValue);
             $current = $result[$docId];
             if ($current === null || self::compareSortValues($value, $current, $asc) < 0) {
                 $result[$docId] = $value;
@@ -5464,8 +5562,9 @@ class Index
      *
      * Numbers (float) always come before strings, in both directions — a field with mixed
      * types across documents keeps its numeric values together. Numbers compare by value and
-     * strings by bytes (strcmp), so a numeric-looking string such as "10" is ordered as text,
-     * before "9". Only the order within each type flips for descending.
+     * strings by the bytes of their sortKey() (callers pass folded strings), so a
+     * numeric-looking string such as "10" is ordered as text, before "9". Only the order within
+     * each type flips for descending.
      *
      * This is a strict total order, so the result never depends on the candidates' input
      * order. Missing values are handled by the caller: they sort last in both directions.
@@ -5507,7 +5606,8 @@ class Index
         /** @var list<list<int>> $rankColumns */
         $rankColumns = [];
         foreach ($specs as ['field' => $field, 'asc' => $asc]) {
-            $ranks  = self::sortRanks($this->fetchSortValues($docIds, $this->lookupFacetKeyId($field), $asc), $asc);
+            $values = $this->fetchSortValues($docIds, $this->lookupFacetKeyId($field), $asc, fold: true);
+            $ranks  = self::sortRanks($values, $asc);
             $column = [];
             foreach ($docIds as $id) {
                 $column[] = $ranks[$id];

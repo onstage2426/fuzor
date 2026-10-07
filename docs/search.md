@@ -316,7 +316,7 @@ new FacetExclude(FacetRange::max(0));                              // hide free 
 
 A browse or `facetSearch()` whose only filters are exclusions is answered from the excluded documents rather than the kept ones: the total is the index size minus the excluded documents, and facet counts are the whole index's counts minus theirs. Its cost grows with the number of excluded documents, not the kept ones, and its facet counts stay exact at any index size. On a 44k-document catalog with three facets, excluding 410 products takes 36 ms and excluding 4,000 takes 52 ms, against 33 ms unfiltered; the page and its total alone take under 1 ms.
 
-**Compared with Meilisearch:** `NOT genres = horror` / `genres NOT IN [horror, comedy]` also return documents without the field, and `NOT` applies to ranges too. Meilisearch rejects filters on attributes that are not filterable; Fuzor 1.x warns and matches nothing (2.0 will throw). Like every Fuzor filter, values match exactly, whereas Meilisearch compares strings case-insensitively.
+**Compared with Meilisearch:** `NOT genres = horror` / `genres NOT IN [horror, comedy]` also return documents without the field, and `NOT` applies to ranges too. Both reject filters on attributes that are not filterable. Like every Fuzor filter, values match exactly, whereas Meilisearch compares strings case-insensitively.
 
 ## Facet counts
 
@@ -452,11 +452,11 @@ Values are ordered as follows:
 
 - **Numbers before strings**, in both directions. Numbers are facet values indexed as PHP `int` or `float`.
 - **Numbers** compare by value.
-- **Strings** compare by their bytes (`strcmp`). This is case-sensitive, so `"Zebra"` sorts before `"apple"`, and accented letters sort after `z`. A numeric-looking string is still a string: `"10"` sorts before `"9"`. Index numbers as `int`/`float` to sort them numerically (range filters and `facetStats` need that too).
+- **Strings** compare case-insensitively: uppercase letters sort as if they were lowercase (Unicode lowercasing), then by bytes. So `"apple"` sorts before `"Zebra"`, and values that differ only in case (`"Apple"`, `"apple"`) tie and fall through to the next sort spec. Accents are not folded: accented letters sort after `z`. A numeric-looking string is still a string: `"10"` sorts before `"9"`. Index numbers as `int`/`float` to sort them numerically (range filters and `facetStats` need that too).
 - **Multi-value fields** sort by the value that places the document earliest: its smallest value ascending, its largest descending.
 - **Documents missing the field** always appear last, regardless of direction.
 
-For a human-facing A–Z order, store a normalized copy as its own sortable field and sort on that. `Tokenizer::sortKey()` lowercases, folds Latin accents to their base letter (`é` → `e`, `ß` → `ss`), and collapses whitespace, using a built-in table so every server produces the same key:
+To also fold accents, store a normalized copy as its own sortable field and sort on that. `Tokenizer::sortKey()` lowercases, folds Latin accents to their base letter (`é` → `e`, `ß` → `ss`), and collapses whitespace, using a built-in table so every server produces the same key:
 
 ```php
 use Fuzor\Tokenizer;
@@ -476,7 +476,7 @@ $result = $index->search('', new SearchOptions(sort: ['title_sort:asc']));
 
 When two documents share the same sort value, BM25 score is used as a tiebreaker in `search()`. Boolean search breaks ties by document ID ascending.
 
-**Compared with Meilisearch:** the type order, byte order for strings, and missing-values-last rule match Meilisearch, and so does declaring sort fields up front (`sortableFields` is Meilisearch's `sortableAttributes`, which also requires the primary key to be listed before sorting on it). Two differences: Meilisearch compares strings case-insensitively (planned for Fuzor 2.0), and by default Meilisearch applies `sort` only as a tiebreaker after its relevance rules, whereas in Fuzor the sort fields decide the order and relevance breaks ties.
+**Compared with Meilisearch:** the type order, case-insensitive string order without accent folding, and missing-values-last rule match Meilisearch, and so does declaring sort fields up front (`sortableFields` is Meilisearch's `sortableAttributes`, which also requires the primary key to be listed before sorting on it). One difference: by default Meilisearch applies `sort` only as a tiebreaker after its relevance rules, whereas in Fuzor the sort fields decide the order and relevance breaks ties.
 
 ```php
 $result = $index->searchBoolean('sedan or coupe', new SearchOptions(sort: ['price:asc']));

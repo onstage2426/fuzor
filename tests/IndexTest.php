@@ -5459,21 +5459,147 @@ class IndexTest extends TestCase
         $this->assertSame([2, 3, 1], $result->getIds());
     }
 
-    public function testSortStringsAreCaseSensitiveBytes(): void
+    /** @return iterable<string, array{0: string}> */
+    public static function sortPaths(): iterable
     {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(
-            filterableFields: ['name'],
-            sortableFields: ['name'],
-        ));
+        yield 'search' => ['search'];
+        yield 'searchBoolean' => ['boolean'];
+        yield 'browse' => ['browse'];
+    }
+
+    /** @return list<int> */
+    private function sortedIds(Index $index, string $path, SearchOptions $options): array
+    {
+        $result = match ($path) {
+            'search'  => $index->search('product', $options),
+            'boolean' => $index->searchBoolean('product', $options),
+            default   => $index->search('', $options),
+        };
+        return $result->getIds();
+    }
+
+    #[DataProvider('sortPaths')]
+    public function testSortStringsIgnoreCaseButNotAccents(string $path): void
+    {
+        $index = new Index($this->dbPath, schema: new SchemaConfig(sortableFields: ['name']));
         $index->insert([
             ['id' => 1, 'title' => 'product', 'name' => 'apple'],
             ['id' => 2, 'title' => 'product', 'name' => 'Zebra'],
             ['id' => 3, 'title' => 'product', 'name' => 'Éclair'],
+            ['id' => 4, 'title' => 'product', 'name' => 'Banana'],
+            ['id' => 5, 'title' => 'product', 'name' => 'ÖL'],
+            ['id' => 6, 'title' => 'product', 'name' => 'öko'],
         ]);
 
-        $result = $index->search('product', new SearchOptions(sort: ['name:asc']));
+        // 'é' and 'ö' sort after 'z' (accents are not folded); 'ÖL' folds to 'öl', after 'öko'.
+        $this->assertSame([1, 4, 2, 3, 6, 5], $this->sortedIds($index, $path, new SearchOptions(sort: ['name:asc'])));
+        $this->assertSame([5, 6, 3, 2, 4, 1], $this->sortedIds($index, $path, new SearchOptions(sort: ['name:desc'])));
+    }
 
-        $this->assertSame([2, 1, 3], $result->getIds());
+    #[DataProvider('sortPaths')]
+    public function testSortValuesDifferingOnlyInCaseTie(string $path): void
+    {
+        $index = new Index($this->dbPath, schema: new SchemaConfig(sortableFields: ['name', 'rank']));
+        $index->insert([
+            ['id' => 1, 'title' => 'product', 'name' => 'apple', 'rank' => 2],
+            ['id' => 2, 'title' => 'product', 'name' => 'APPLE', 'rank' => 1],
+            ['id' => 3, 'title' => 'product', 'name' => 'Apple', 'rank' => 3],
+            ['id' => 4, 'title' => 'product', 'name' => 'apricot', 'rank' => 0],
+        ]);
+
+        $asc  = new SearchOptions(sort: ['name:asc', 'rank:asc']);
+        $desc = new SearchOptions(sort: ['name:desc', 'rank:desc']);
+
+        $this->assertSame([2, 1, 3, 4], $this->sortedIds($index, $path, $asc));
+        $this->assertSame([4, 3, 1, 2], $this->sortedIds($index, $path, $desc));
+    }
+
+    #[DataProvider('sortPaths')]
+    public function testMultiValueSortUsesFoldedExtremes(string $path): void
+    {
+        $index = new Index($this->dbPath, schema: new SchemaConfig(sortableFields: ['tags']));
+        $index->insert([
+            ['id' => 1, 'title' => 'product', 'tags' => ['banana', 'Zulu']],
+            ['id' => 2, 'title' => 'product', 'tags' => ['Apple', 'mango']],
+            ['id' => 3, 'title' => 'product', 'tags' => ['cherry', 'CHERRY']],
+        ]);
+
+        // Ascending by the smallest folded value, descending by the largest.
+        $this->assertSame([2, 1, 3], $this->sortedIds($index, $path, new SearchOptions(sort: ['tags:asc'])));
+        $this->assertSame([1, 2, 3], $this->sortedIds($index, $path, new SearchOptions(sort: ['tags:desc'])));
+    }
+
+    /** @return list<array{0: int, 1: string, 2: int}> rows of sort_keys, read straight from the file */
+    private function sortKeyRows(): array
+    {
+        $stmt = new \PDO('sqlite:' . $this->dbPath)
+            ->query('SELECT key_id, sort_key, doc_id FROM sort_keys ORDER BY 1, 2, 3');
+        $this->assertNotFalse($stmt);
+        /** @var list<array{0: int, 1: string, 2: int}> $rows */
+        $rows = $stmt->fetchAll(\PDO::FETCH_NUM);
+        return $rows;
+    }
+
+    public function testSortKeysAreKeptOnlyForSortableStrings(): void
+    {
+        $index = new Index($this->dbPath, schema: new SchemaConfig(
+            filterableFields: ['brand', 'color'],
+            sortableFields: ['brand', 'price'],
+        ));
+        $index->insert([['id' => 1, 'title' => 'a', 'brand' => 'Nike', 'color' => 'Red', 'price' => 5]]);
+        $index->insert([
+            ['id' => 2, 'title' => 'b', 'brand' => ['ACME', 'acme', 'Zeta'], 'color' => 'Blue', 'price' => 7],
+            ['id' => 3, 'title' => 'c', 'brand' => 'Óscar'],
+        ]);
+        // Only brand (a sortable string field): no color (filterable only), no price (numeric).
+        $rows = $this->sortKeyRows();
+
+        $this->assertCount(1, array_unique(array_column($rows, 0)));
+        $this->assertSame(
+            [['acme', 2], ['nike', 1], ['zeta', 2], ['óscar', 3]],
+            array_map(static fn(array $r): array => [$r[1], $r[2]], $rows),
+        );
+    }
+
+    public function testSortKeysFollowUpdatesDeletesAndClear(): void
+    {
+        $index = new Index($this->dbPath, schema: new SchemaConfig(sortableFields: ['brand']));
+        $index->insert([
+            ['id' => 1, 'title' => 'a', 'brand' => 'Nike'],
+            ['id' => 2, 'title' => 'b', 'brand' => 'Puma'],
+            ['id' => 3, 'title' => 'c', 'brand' => 'Fila'],
+        ]);
+
+        $index->update([['id' => 1, 'title' => 'a', 'brand' => 'Asics']]);
+        $index->upsert([['id' => 2, 'title' => 'b']]);
+        $index->delete(3);
+        $this->assertSame([[1, 'asics', 1]], $this->sortKeyRows());
+
+        $index->upsert([
+            ['id' => 4, 'title' => 'd', 'brand' => 'Umbro'],
+            ['id' => 5, 'title' => 'e', 'brand' => 'Kappa'],
+        ]);
+        $index->delete(1, 4);
+        $this->assertSame([[1, 'kappa', 5]], $this->sortKeyRows());
+
+        $index->clear();
+        $this->assertSame([], $this->sortKeyRows());
+    }
+
+    public function testDistinctGroupsByExactValueNotSortKey(): void
+    {
+        $index = new Index($this->dbPath, schema: new SchemaConfig(
+            filterableFields: ['brand'],
+            sortableFields: ['brand'],
+        ));
+        $index->insert([
+            ['id' => 1, 'title' => 'product', 'brand' => 'Nike'],
+            ['id' => 2, 'title' => 'product', 'brand' => 'nike'],
+        ]);
+
+        $result = $index->search('', new SearchOptions(sort: ['brand:asc'], distinct: 'brand'));
+
+        $this->assertSame([1, 2], $result->getIds());
     }
 
     public function testSortMixedStringsIsIndependentOfInsertionOrder(): void
@@ -5830,6 +5956,8 @@ class IndexTest extends TestCase
         $index  = new Index($this->dbPath, schema: $schema);
         $sizes  = [7, 'L', [3, 40], 12, null, 'M', 7, [2.5, 'XL'], 30, null];
         $sizes  = [...$sizes, 'S', 12, 7, [15, 1], 'L', 22, null, 9, 3, 'M'];
+        // Mixed case: 'l' ties with 'L', 'xs' sorts between 'S'/'s' and 'XL'; 'Ä' after all ASCII.
+        $sizes  = [...$sizes, 'l', 's', ['xs', 'M'], 'Ä', ['m', 'Xl'], 'ä'];
         $docs   = [];
         foreach ($sizes as $i => $size) {
             $doc = [
@@ -5859,6 +5987,7 @@ class IndexTest extends TestCase
             ['color' => 'red'],
             ['size' => FacetRange::between(3, 20)],
             ['size' => new FacetExclude(['L', 'M'])],
+            ['size' => ['l', 'L', 'Ä']],
             ['size' => new FacetExclude(FacetRange::between(3, 20))],
             ['color' => new FacetExclude('blue'), 'group' => ['a', 'b']],
             ['group' => new FacetExclude('c'), 'color' => new FacetExclude('red')],

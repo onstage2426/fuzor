@@ -42,3 +42,9 @@ these options come from user input, check them against `$index->sortableFields` 
 ## `Config::$filterMaxDocs` is removed
 
 It has had no effect since 1.6.0. Remove it from `new Config(...)` calls.
+
+## String sort ignores case
+
+`sort` on a string field now orders uppercase letters as if they were lowercase: `"apple"`
+before `"Zebra"` (1.x put `"Zebra"` first). Values that differ only in case tie. Accents are
+still not folded. Results sorted on mixed-case string fields can come back in a different order.
