@@ -2450,18 +2450,47 @@ class IndexTest extends TestCase
         }
     }
 
-    public function testRebuildAfterForceCreateOverASymlinkedPath(): void
+    public function testForceCreatePublishesAnEmptyVersion(): void
     {
-        Index::rebuild($this->dbPath, fn (Index $new) => $new->insert([['id' => 1, 'title' => 'sedan']]))->close();
+        $plain = new Index($this->dbPath);
+        $plain->insert([['id' => 1, 'title' => 'sedan']]);
+        $plain->close();
 
-        $forced = new Index($this->dbPath, force: true);
+        $forced = new Index($this->dbPath, force: true, schema: new SchemaConfig(language: 'en'));
+        $this->assertTrue(is_link($this->dbPath));
+        $this->assertSame(0, $forced->count());
+        $this->assertSame('en', $forced->language);
         $forced->insert([['id' => 2, 'title' => 'coupe']]);
         $forced->close();
-        $this->assertFalse(is_link($this->dbPath));
 
         $rebuilt = Index::rebuild($this->dbPath);
         $this->assertSame([2], $rebuilt->search('coupe')->getIds());
+        $this->assertSame([], $rebuilt->search('sedan')->getIds());
         $rebuilt->close();
+    }
+
+    public function testForceCreateIgnoresWritesToTheReplacedFile(): void
+    {
+        new Index($this->dbPath)->close();
+        [$child, $pipes] = $this->startWriterProcess($this->dbPath);
+        try {
+            $this->insertInWriterProcess($pipes, ['id' => 1, 'title' => 'old sedan']);
+
+            $forced = new Index($this->dbPath, force: true);
+            $forced->insert([['id' => 10, 'title' => 'new wagon']]);
+
+            // A commit through the connection still open on the old file must not reach the new one.
+            $this->insertInWriterProcess($pipes, ['id' => 2, 'title' => 'late coupe']);
+
+            $fresh = new Index($this->dbPath, readonly: true);
+            $this->assertSame(1, $fresh->count());
+            $this->assertSame([10], $fresh->search('wagon')->getIds());
+            $this->assertSame([], $fresh->search('coupe')->getIds());
+            $fresh->close();
+            $forced->close();
+        } finally {
+            $this->stopWriterProcess($child, $pipes);
+        }
     }
 
     public function testRebuildCountReflectsNewDocuments(): void

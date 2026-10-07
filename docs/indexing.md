@@ -18,6 +18,8 @@ Pass `force: true` to overwrite an existing index file:
 $index = new Index('/path/to/articles.db', force: true);
 ```
 
+The empty index is published the same way as a rebuild, so processes that still have the old file open are not affected: see [Index files after a rebuild or snapshot](#index-files-after-a-rebuild-or-snapshot).
+
 Pass a BCP 47 `language` tag to enable stopword filtering and stemming at creation time:
 
 ```php
@@ -366,7 +368,7 @@ Internally, `rebuild` writes to a temporary file alongside the target, then publ
 
 ### Index files after a rebuild or snapshot
 
-`rebuild()` and `snapshotTo()` publish each new file under a name of its own, `{path}.v-{8 hex}`, and turn `{path}` into a symlink to it, swapped atomically:
+`rebuild()`, `snapshotTo()`, and `new Index($path, force: true)` over an existing index publish each new file under a name of its own, `{path}.v-{8 hex}`, and turn `{path}` into a symlink to it, swapped atomically:
 
 ```
 articles.db          -> articles.db.v-3f9a01c2      (symlink, relative)

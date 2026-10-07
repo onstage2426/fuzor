@@ -247,8 +247,10 @@ class Index
                 );
             }
             $this->selectIndex();
+        } elseif (file_exists($resolved)) {
+            $this->replaceWithEmptyIndex($schema);
         } else {
-            $this->createIndex($force, $schema);
+            $this->createIndex($schema);
         }
     }
 
@@ -742,26 +744,20 @@ class Index
      * type safety. doclist is WITHOUT ROWID (clustered on term_id, doc_id), replacing
      * the old term_id secondary index with a zero-heap-fetch primary scan.
      *
-     * @param  bool         $force  When true, any existing file is deleted before creation.
+     * Only called when no file exists at the path; replaceWithEmptyIndex() handles force: true
+     * over an existing one.
+     *
      * @param  SchemaConfig $schema Schema options persisted at creation time.
      * @return static
-     * @throws IOException    If the index file already exists and $force is false.
      * @throws QueryException If schema->language is set but has no stopword list or stemmer.
-     * @infection-ignore-all FalseValue: default $force=false is never exercised; callers always pass force explicitly
      */
-    private function createIndex(bool $force, SchemaConfig $schema): static
+    private function createIndex(SchemaConfig $schema): static
     {
         $language         = $schema->language;
         $store            = $schema->store;
         $facetFields      = $schema->facetFields;
         $searchableFields = $schema->searchableFields;
         $stripHtml        = $schema->stripHtml;
-        if (!$force && file_exists($this->path)) {
-            throw new IOException(
-                "Index already exists: {$this->path}. Pass force: true to overwrite."
-            );
-        }
-        $this->flushIndex();
 
         $pdo = new PDO('sqlite:' . $this->path);
         $this->pdo = $pdo;
@@ -6498,24 +6494,34 @@ class Index
     }
 
     /**
-     * Delete an index file and its WAL sidecar files from disk.
+     * force: true over an existing file: build an empty index under a temp name and publish
+     * it like rebuild() does, then open it.
      *
-     * Removes the main file plus the `-wal` and `-shm` companions created by
-     * WAL journal mode. No-ops silently for any file that does not exist.
+     * Deleting the old file and its -wal/-shm and creating a new one under the same name would
+     * leave a moment in which another process's connection pairs the new file with the old
+     * file's sidecars; see publishVersion().
+     *
+     * @throws IOException    If the existing file is not a Fuzor index, or the new one cannot be published.
+     * @throws QueryException If schema->language is set but has no stopword list or stemmer.
      */
-    private function flushIndex(): void
+    private function replaceWithEmptyIndex(SchemaConfig $schema): void
     {
-        if (file_exists($this->path)) {
-            if (!self::exists($this->path)) {
-                throw new IOException("Refusing to overwrite non-Fuzor file: {$this->path}");
-            }
-            unlink($this->path);
-            /** @infection-ignore-all Concat,ConcatOperandRemoval: WAL/SHM suffixes are cleanup artefacts; omitting them only leaves journal files on disk */
-            foreach ([$this->path . '-wal', $this->path . '-shm'] as $journal) {
-                if (file_exists($journal)) {
-                    unlink($journal);
-                }
-            }
+        if (!self::exists($this->path)) {
+            throw new IOException("Refusing to overwrite non-Fuzor file: {$this->path}");
         }
+        self::cleanupTempFiles($this->path);
+        [$tmp, $tmpLock] = self::claimTempPath($this->path);
+        try {
+            new self($tmp, config: $this->config, schema: $schema)->close();
+            self::publishVersion($tmp, $this->path);
+        } catch (\Throwable $e) {
+            foreach (['', '-wal', '-shm', '-journal'] as $suffix) {
+                @unlink($tmp . $suffix);
+            }
+            throw $e;
+        } finally {
+            self::releaseTempPath($tmp, $tmpLock);
+        }
+        $this->selectIndex();
     }
 }
