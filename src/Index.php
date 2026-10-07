@@ -29,8 +29,7 @@ use PDO;
  *
  * @phpstan-type FacetCondition array{
  *     name: string,
- *     keyId: int,
- *     sql: string,
+ *     rows: string,
  *     params: list<mixed>,
  *     impossible: bool,
  *     multiRow: bool,
@@ -5753,18 +5752,20 @@ class Index
     /**
      * Translate a facet filter map into SQL conditions, one per filter key.
      *
-     * Each condition is a predicate on one facet_values row, written against the alias
-     * placeholder '%1$s' so callers can embed it in any query shape. A condition that can
-     * never match — the field has no facet key yet (undeclared, or declared but unpopulated),
-     * or the value list is empty — is marked 'impossible' instead of being rendered.
+     * Each condition's 'rows' is the FROM … WHERE … clause selecting the rows that satisfy it,
+     * written against the alias placeholder '%1$s' (every row source has a doc_id column), with
+     * 'params' bound in order, so callers can embed it in any query shape: a COUNT, a driving
+     * SELECT, a correlated EXISTS probe, or a UNION of excluded documents. Facet filters select
+     * facet_values rows of one key. A condition that can never match — the field has no facet
+     * key yet (declared but unpopulated), or the value list is empty — is marked 'impossible'.
      *
      * 'multiRow' marks a condition one document can satisfy with several rows (a range, or more
      * than one value), which matters when the condition drives a query (see matchingDocsSql()).
      *
      * A FacetExclude is rendered from the filter it wraps and flagged 'exclude': a document
-     * satisfies it when none of its rows matches 'sql'. On an undeclared field it is impossible,
-     * failing closed like a positive filter; on a declared field no document has populated yet,
-     * or with an empty value list, it excludes nothing and is left out of the list.
+     * satisfies it when it has none of the rows 'rows' selects. On a declared field no document
+     * has populated yet, or with an empty value list, it excludes nothing and is left out of the
+     * list.
      *
      * @param  array<array-key, string|list<string>|FacetRange|FacetExclude> $filter
      * @return list<FacetCondition>
@@ -5805,9 +5806,8 @@ class Index
             }
             $conditions[] = [
                 'name'       => $name,
-                'keyId'      => $keyId ?? 0,
-                'sql'        => $sql,
-                'params'     => $params,
+                'rows'       => 'FROM facet_values %1$s WHERE %1$s.key_id = ? AND ' . $sql,
+                'params'     => [$keyId ?? 0, ...$params],
                 'impossible' => !$exclude && $matchesNothing,
                 'multiRow'   => $filterValue instanceof FacetRange || count($params) > 1,
                 'exclude'    => $exclude,
@@ -5817,7 +5817,7 @@ class Index
     }
 
     /**
-     * Order filter conditions by how many facet_values rows each matches, fewest first.
+     * Order filter conditions by how many rows each matches, fewest first.
      *
      * One index-only COUNT per condition. The first condition then drives matchingDocsSql(),
      * so a query over several filters starts from the most selective one and only probes the
@@ -5845,10 +5845,8 @@ class Index
                 $rows[$i] = 0;
                 continue;
             }
-            $stmt = $this->prepare(
-                'SELECT COUNT(*) FROM facet_values ff WHERE ff.key_id = ? AND ' . sprintf($condition['sql'], 'ff')
-            );
-            $stmt->execute([$condition['keyId'], ...$condition['params']]);
+            $stmt = $this->prepare('SELECT COUNT(*) ' . sprintf($condition['rows'], 'ff'));
+            $stmt->execute($condition['params']);
             $rows[$i] = (int) $stmt->fetchColumn();
         }
         asort($rows);
@@ -5880,9 +5878,8 @@ class Index
         }
         $distinct = $driver['multiRow'] ? 'DISTINCT ' : '';
         return [
-            "SELECT {$distinct}md.doc_id FROM facet_values md WHERE md.key_id = ? AND "
-                . sprintf($driver['sql'], 'md') . $probes[0],
-            [$driver['keyId'], ...$driver['params'], ...$probes[1]],
+            "SELECT {$distinct}md.doc_id " . sprintf($driver['rows'], 'md') . $probes[0],
+            [...$driver['params'], ...$probes[1]],
         ];
     }
 
@@ -5919,9 +5916,8 @@ class Index
         $params = [];
         foreach ($conditions as $i => $condition) {
             $alias   = "ex{$i}";
-            $parts[] = "SELECT {$alias}.doc_id FROM facet_values {$alias} WHERE {$alias}.key_id = ? AND "
-                . sprintf($condition['sql'], $alias);
-            array_push($params, $condition['keyId'], ...$condition['params']);
+            $parts[] = "SELECT {$alias}.doc_id " . sprintf($condition['rows'], $alias);
+            array_push($params, ...$condition['params']);
         }
         return [implode(' UNION ALL ', $parts), $params];
     }
@@ -5929,8 +5925,8 @@ class Index
     /**
      * Render conditions as correlated EXISTS probes on the document ID expression $docExpr.
      *
-     * Each probe is one lookup in the covering facet_doc_id_index; an exclusion is rendered as
-     * NOT EXISTS. Returns [sql, params], where sql is empty or a series of ' AND [NOT] EXISTS (…)'
+     * Each facet probe is one lookup in the covering facet_doc_id_index; an exclusion is rendered
+     * as NOT EXISTS. Returns [sql, params], where sql is empty or a series of ' AND [NOT] EXISTS (…)'
      * clauses, or null when a condition can never match.
      *
      * @param  list<FacetCondition> $conditions
@@ -5946,9 +5942,9 @@ class Index
             }
             $alias  = "ff{$i}";
             $not    = $condition['exclude'] ? 'NOT ' : '';
-            $sql   .= " AND {$not}EXISTS (SELECT 1 FROM facet_values {$alias} WHERE {$alias}.doc_id = {$docExpr}"
-                . " AND {$alias}.key_id = ? AND " . sprintf($condition['sql'], $alias) . ')';
-            array_push($params, $condition['keyId'], ...$condition['params']);
+            $sql   .= " AND {$not}EXISTS (SELECT 1 " . sprintf($condition['rows'], $alias)
+                . " AND {$alias}.doc_id = {$docExpr})";
+            array_push($params, ...$condition['params']);
         }
         return [$sql, $params];
     }
@@ -6013,10 +6009,10 @@ class Index
                 continue;
             }
             $stmt = $this->prepare(
-                'SELECT ff.doc_id FROM facet_values ff WHERE ff.key_id = ? AND ' . sprintf($condition['sql'], 'ff')
+                'SELECT ff.doc_id ' . sprintf($condition['rows'], 'ff')
                 . ' AND ff.doc_id IN (SELECT value FROM json_each(?))'
             );
-            $stmt->execute([$condition['keyId'], ...$condition['params'], $candidateJson]);
+            $stmt->execute([...$condition['params'], $candidateJson]);
             /** @var list<int> $ids */
             $ids = $stmt->fetchAll(PDO::FETCH_COLUMN);
             if ($condition['exclude']) {
