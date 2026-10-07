@@ -176,7 +176,25 @@ $result = $index->search('economi'); // matches 'economy'
 | 5–8 characters | 1 |
 | 9+ characters | 2 |
 
-Control the behaviour via `Config` — see [tuning.md](tuning.md).
+A typo is one inserted, deleted, or replaced character, or two neighbouring characters swapped (`casaul` finds `casual`). The first three characters must be right (`Config::$fuzzyPrefixLength`).
+
+Change the word sizes, turn typos off for numbers or for specific words, or switch typo tolerance off with `Config::$typoTolerance`:
+
+```php
+use Fuzor\Config;
+use Fuzor\TypoTolerance;
+
+$index = new Index('/path/to/products.db', config: new Config(typoTolerance: new TypoTolerance(
+    minWordSizeForOneTypo:  4,
+    minWordSizeForTwoTypos: 8,
+    disableOnNumbers:       true,         // "fz04218" no longer finds "fz04217"
+    disableOnWords:         ['ikea'],     // brand names that must be spelled right
+)));
+```
+
+See [tuning.md](tuning.md) for the other settings.
+
+**Compared with Meilisearch:** the same settings (`typoTolerance`: `enabled`, `minWordSizeForTypos.oneTypo` / `twoTypos`, `disableOnWords`, `disableOnNumbers`) with the same defaults. Differences: Fuzor requires the first three characters to match instead of counting a typo on the first character as two; a swap of neighbouring characters is one typo; `disableOnAttributes` is not available (the term dictionary is shared by all fields).
 
 ## Boolean search
 

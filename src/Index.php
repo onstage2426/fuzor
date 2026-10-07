@@ -170,6 +170,9 @@ class Index
      */
     private array $multiValuedKeys = [];
 
+    /** @var array<string, true>|null TypoTolerance::$disableOnWords as normalised query terms; built on first use. */
+    private ?array $typoExactWords = null;
+
     /** @var array<string, int> Maps searchable field name → field_names.id; populated lazily; cleared on connection change. */
     private array $fieldNameCache = [];
 
@@ -5061,15 +5064,13 @@ class Index
             $wordlistRows = array_slice($wordlistRows, 0, $maxExpansions);
         }
 
-        // Fall through to Levenshtein only when: no exact/prefix match found, fuzzy is allowed
-        // for this call site, and the word meets the minimum length threshold (short words have
-        // too many false-positive fuzzy matches to be useful).
-        if (
-            $allowFuzzy
-            && !isset($wordlistRows[0])
-            && mb_strlen($keyword) >= $this->config->fuzzyMinWordLength
-        ) {
-            return $this->fuzzySearch($keyword);
+        // Fall through to typo matching only when no exact/prefix match was found, typos are
+        // allowed at this call site, and TypoTolerance allows at least one for this word.
+        if ($allowFuzzy && !isset($wordlistRows[0])) {
+            $maxTypos = $this->typoBudget($keyword);
+            if ($maxTypos > 0) {
+                return $this->fuzzySearch($keyword, $maxTypos);
+            }
         }
 
         $this->wordlistCache[$cacheKey] = [$wordlistRows, $prefixTruncated];
@@ -5170,41 +5171,80 @@ class Index
     }
 
     /**
-     * Find wordlist candidates within Levenshtein edit distance of the keyword.
+     * How many typos a query word may have under Config::$typoTolerance: 0, 1, or 2.
      *
-     * Queries the wordlist for all terms sharing the same prefix
-     * ($fuzzyPrefixLength chars), then filters by the effective edit distance and sorts
-     * by edit distance ascending, then num_hits descending.
+     * 0 when typo tolerance is off, the word is shorter than minWordSizeForOneTypo codepoints,
+     * contains a digit while disableOnNumbers is set, or is one of disableOnWords; else 2 from
+     * minWordSizeForTwoTypos codepoints, else 1.
+     */
+    private function typoBudget(string $keyword): int
+    {
+        $typo   = $this->config->typoTolerance;
+        $length = mb_strlen($keyword);
+        if (
+            !$typo->enabled
+            || $length < $typo->minWordSizeForOneTypo
+            || $typo->disableOnNumbers && strpbrk($keyword, '0123456789') !== false
+            || $typo->disableOnWords !== [] && isset($this->typoExactWords()[$keyword])
+        ) {
+            return 0;
+        }
+        return $length >= $typo->minWordSizeForTwoTypos ? 2 : 1;
+    }
+
+    /**
+     * TypoTolerance::$disableOnWords as the terms query words are compared in: lowercased
+     * tokens, plus their stems when the index has a stemmer, so "Running" also covers "run".
      *
-     * The effective distance scales with word length: 1 for words of 5–8 codepoints,
-     * 2 typos for words of 9+ codepoints. This mirrors the standard typo-tolerance tiers
-     * and avoids false positives on shorter words.
+     * @return array<string, true>
+     */
+    private function typoExactWords(): array
+    {
+        if ($this->typoExactWords === null) {
+            $set = [];
+            foreach ($this->config->typoTolerance->disableOnWords as $word) {
+                $tokens = Tokenizer::tokenize($word, $this->language);
+                $stems  = $this->stemmer instanceof \Fuzor\Stemmer ? $this->stemmer->stemTokens($tokens) : [];
+                foreach ([...$tokens, ...$stems] as $token) {
+                    $set[$token] = true;
+                }
+            }
+            $this->typoExactWords = $set;
+        }
+        return $this->typoExactWords;
+    }
+
+    /**
+     * Find wordlist candidates within $maxTypos edits of the keyword.
      *
-     * @param  string                    $keyword Search term to find fuzzy matches for (must already be lowercased).
+     * Queries the wordlist for terms sharing the same prefix ($fuzzyPrefixLength chars) and a
+     * length within $maxTypos, keeps those within $maxTypos edits (Levenshtein::distance(), where
+     * an adjacent swap counts as one), sorts by distance ascending, then num_hits descending, and
+     * returns the first Config::$fuzzyMaxExpansions. The cap applies after the distance check: a
+     * cap on the candidates (the earlier shape) let frequent but distant terms crowd out the
+     * match on a common prefix.
+     *
+     * @param  string $keyword  Search term to find fuzzy matches for (must already be lowercased).
+     * @param  int    $maxTypos 1 or 2, from typoBudget().
      * @return list<array{id: int, term: string, num_hits: int, num_docs: int, distance: int}>
      */
-    private function fuzzySearch(string $keyword): array
+    private function fuzzySearch(string $keyword, int $maxTypos): array
     {
         /** @infection-ignore-all MBString,CastInt: ASCII fuzzy tests are unaffected by mb_ vs byte strlen; CastInt: mb_strlen returns int already */
-        $keywordLength = mb_strlen($keyword);
-        // 5–8 codepoints → 1 typo; 9+ codepoints → configured max (default 2).
-        /** @infection-ignore-all GreaterThan,IncrementInteger: threshold boundary only widens/narrows which tier applies; Levenshtein post-filter corrects the result set */
-        $effectiveDistance = $keywordLength >= 9 ? 2 : 1;
+        $keywordLength     = mb_strlen($keyword);
+        $effectiveDistance = $maxTypos;
 
         $stmt = $this->stmt(
             'fuzzyWordlistLookup',
             "SELECT id, term, num_hits, num_docs FROM wordlist
              WHERE term LIKE :keyword
-               AND length(term) BETWEEN :min AND :max
-             ORDER BY num_hits DESC
-             LIMIT :maxExpansions"
+               AND length(term) BETWEEN :min AND :max"
         );
         /** @infection-ignore-all MBString,ConcatOperandRemoval: ASCII fuzzy tests are unaffected by mb_ vs byte substr; removing the prefix still produces correct candidates after Levenshtein filtering (just with more candidates) */
         $stmt->bindValue(':keyword', mb_substr($keyword, 0, $this->config->fuzzyPrefixLength) . '%');
         /** @infection-ignore-all DecrementInteger,IncrementInteger: adjusting the min length boundary by 1 only broadens or narrows the candidate set; Levenshtein filtering corrects the result */
         $stmt->bindValue(':min', max(1, $keywordLength - $effectiveDistance), PDO::PARAM_INT);
         $stmt->bindValue(':max', $keywordLength + $effectiveDistance, PDO::PARAM_INT);
-        $stmt->bindValue(':maxExpansions', $this->config->fuzzyMaxExpansions, PDO::PARAM_INT);
         $stmt->execute();
 
         /** @var list<array{id: int, term: string, num_hits: int, num_docs: int, distance: int}> $resultSet */
@@ -5212,7 +5252,7 @@ class Index
         /** @var list<array{id: int, term: string, num_hits: int, num_docs: int}> $candidates */
         $candidates = $stmt->fetchAll(PDO::FETCH_ASSOC);
         foreach ($candidates as $match) {
-            $distance = Levenshtein::distance($match['term'], $keyword);
+            $distance = Levenshtein::distance($match['term'], $keyword, $effectiveDistance);
             if ($distance <= $effectiveDistance) {
                 $resultSet[] = [...$match, 'distance' => $distance];
             }
@@ -5221,7 +5261,7 @@ class Index
         /** @infection-ignore-all Spaceship: swapping secondary sort (num_hits) DESC→ASC only reorders equally-distant candidates; assertContains tests are order-agnostic */
         usort($resultSet, fn(array $a, array $b): int => $a['distance'] <=> $b['distance'] ?: $b['num_hits'] <=> $a['num_hits']); // phpcs:ignore Generic.Files.LineLength.TooLong
 
-        return $resultSet;
+        return array_slice($resultSet, 0, $this->config->fuzzyMaxExpansions);
     }
 
     // --- Facet helpers -------------------------------------------------------
@@ -6652,6 +6692,7 @@ class Index
         $this->language  = $language;
         $this->stopwords = $language !== null && Language::hasStopwords($language) ? new Stopwords($language) : null;
         $this->stemmer   = $language !== null && Language::hasStemmer($language) ? new Stemmer($language) : null;
+        $this->typoExactWords = null;
     }
 
     /**

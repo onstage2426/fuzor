@@ -18,13 +18,8 @@ final readonly class Config
         public int $fuzzyPrefixLength = 3,
         /** @infection-ignore-all DecrementInteger,IncrementInteger: default value; exact number only affects how many candidates are evaluated, not correctness */
         public int $fuzzyMaxExpansions = 50,
-        /**
-         * Minimum word length (in Unicode codepoints) before the Levenshtein fallback fires.
-         * Words shorter than this threshold are matched by exact / prefix only.
-         *
-         * @infection-ignore-all: default value; mutations only affect the length gate, not correctness
-         */
-        public int $fuzzyMinWordLength = 5,
+        /** When and how far query words are matched with typos; see TypoTolerance. */
+        public TypoTolerance $typoTolerance = new TypoTolerance(),
         /**
          * Proximity ranking weight applied to queries with ≥2 terms.
          * Each document's BM25 score is multiplied by 1 / (1 + proximityBoost * minSpan), where

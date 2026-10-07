@@ -10,6 +10,7 @@ use Fuzor\Index;
 use Fuzor\SchemaConfig;
 use Fuzor\SearchOptions;
 use Fuzor\SearchResult;
+use Fuzor\TypoTolerance;
 use Fuzor\Exceptions\IOException;
 use Fuzor\Exceptions\QueryException;
 use PHPUnit\Framework\Attributes\DataProvider;
@@ -366,7 +367,7 @@ class IndexTest extends TestCase
 
     public function testShortWordsSkipFuzzyGate(): void
     {
-        // 'helo' is 4 codepoints — below the default fuzzyMinWordLength of 5.
+        // 'helo' is 4 codepoints — below the default minWordSizeForOneTypo of 5.
         // It must not trigger the Levenshtein fallback and must return no results.
         $index = new Index($this->dbPath);
         $index->insert([['id' => 1, 'title' => 'hello']]);
@@ -376,7 +377,7 @@ class IndexTest extends TestCase
 
     public function testLongWordTypoFuzzyFires(): void
     {
-        // 'hellow' is 6 codepoints — above the default fuzzyMinWordLength of 5.
+        // 'hellow' is 6 codepoints — above the default minWordSizeForOneTypo of 5.
         // The Levenshtein fallback should fire and match 'hello'.
         $index = new Index($this->dbPath);
         $index->insert([['id' => 1, 'title' => 'hello']]);
@@ -1405,7 +1406,7 @@ class IndexTest extends TestCase
 
     public function testFuzzyMinWordLengthGateBlocksShortWords(): void
     {
-        // Default fuzzyMinWordLength = 5. 'sedn' is 4 codepoints — gate blocks the fallback.
+        // Default minWordSizeForOneTypo = 5. 'sedn' is 4 codepoints — gate blocks the fallback.
         $index = new Index($this->dbPath);
         $index->insert([['id' => 1, 'title' => 'sedan']]);
 
@@ -1421,15 +1422,124 @@ class IndexTest extends TestCase
         $this->assertContains(1, $index->search('sedaan', new SearchOptions(asYouType: false))->getIds());
     }
 
-    public function testFuzzyMinWordLengthConfigurable(): void
+    public function testMinWordSizeForOneTypoConfigurable(): void
     {
-        // With minWordLength=3, even 'sedn' (4 chars) triggers the fuzzy fallback.
+        // With minWordSizeForOneTypo=3, even 'sedn' (4 chars) triggers the fuzzy fallback.
         // 'sedn' shares the 'sed' prefix with 'sedan' (required by fuzzyPrefixLength=3)
         // and is at Levenshtein distance=1 → matched by the 5–8 char tier (1 typo allowed).
-        $index = new Index($this->dbPath, config: new \Fuzor\Config(fuzzyMinWordLength: 3));
+        $config = new Config(typoTolerance: new TypoTolerance(minWordSizeForOneTypo: 3));
+        $index  = new Index($this->dbPath, config: $config);
         $index->insert([['id' => 1, 'title' => 'sedan']]);
 
         $this->assertContains(1, $index->search('sedn', new SearchOptions(asYouType: false))->getIds());
+    }
+
+    public function testSwappedLettersCountAsOneTypo(): void
+    {
+        $index = new Index($this->dbPath);
+        $index->insert([['id' => 1, 'title' => 'casual shirt'], ['id' => 2, 'title' => 'formal shirt']]);
+
+        $this->assertSame([1], $index->search('casaul', new SearchOptions(asYouType: false))->getIds());
+    }
+
+    /** @param list<int> $expected */
+    private function assertTypoMatch(
+        TypoTolerance $typo,
+        string $query,
+        array $expected,
+        string $title = 'sedan',
+    ): void {
+        $index = new Index($this->dbPath, force: true, config: new Config(typoTolerance: $typo));
+        $index->insert([['id' => 1, 'title' => $title]]);
+        $result = $index->search($query, new SearchOptions(asYouType: false));
+
+        $this->assertSame($expected, $result->getIds(), $query);
+    }
+
+    public function testTypoToleranceWordSizes(): void
+    {
+        $this->assertTypoMatch(new TypoTolerance(), 'sedn', []);
+        $this->assertTypoMatch(new TypoTolerance(minWordSizeForOneTypo: 4), 'sedn', [1]);
+        // 'seddaan' is two typos away: only allowed from minWordSizeForTwoTypos (7 codepoints here).
+        $this->assertTypoMatch(new TypoTolerance(), 'seddaan', []);
+        $this->assertTypoMatch(new TypoTolerance(minWordSizeForTwoTypos: 7), 'seddaan', [1]);
+        $this->assertTypoMatch(new TypoTolerance(minWordSizeForTwoTypos: 8), 'seddaan', []);
+    }
+
+    public function testTypoToleranceCanBeDisabled(): void
+    {
+        $this->assertTypoMatch(new TypoTolerance(), 'sedaan', [1]);
+        $this->assertTypoMatch(new TypoTolerance(enabled: false), 'sedaan', []);
+        // Exact and prefix matching are unaffected.
+        $this->assertTypoMatch(new TypoTolerance(enabled: false), 'sedan', [1]);
+    }
+
+    public function testTypoToleranceDisableOnNumbers(): void
+    {
+        $this->assertTypoMatch(new TypoTolerance(), 'fz04218', [1], 'fz04217');
+        $this->assertTypoMatch(new TypoTolerance(disableOnNumbers: true), 'fz04218', [], 'fz04217');
+        $this->assertTypoMatch(new TypoTolerance(disableOnNumbers: true), 'fz04217', [1], 'fz04217');
+        $this->assertTypoMatch(new TypoTolerance(disableOnNumbers: true), 'sedaan', [1]);
+    }
+
+    public function testTypoToleranceDisableOnWords(): void
+    {
+        $this->assertTypoMatch(new TypoTolerance(disableOnWords: ['Sedaan']), 'sedaan', []);
+        $this->assertTypoMatch(new TypoTolerance(disableOnWords: ['Sedaan']), 'seddan', [1]);
+    }
+
+    public function testTypoToleranceDisableOnWordsIsStemmed(): void
+    {
+        $config = new Config(typoTolerance: new TypoTolerance(disableOnWords: ['Shirtz']));
+        $index  = new Index($this->dbPath, config: $config, schema: new SchemaConfig(language: 'en'));
+        $index->insert([['id' => 1, 'title' => 'shirts']]);
+
+        // 'shirtzs' stems to the listed 'shirtz', so it gets no typo either.
+        $this->assertSame([], $index->search('shirtz', new SearchOptions(asYouType: false))->getIds());
+        $this->assertSame([], $index->search('shirtzs', new SearchOptions(asYouType: false))->getIds());
+        $this->assertSame([1], $index->search('shirst', new SearchOptions(asYouType: false))->getIds());
+    }
+
+    public function testTypoMatchIsFoundBehindMoreFrequentTermsWithTheSamePrefix(): void
+    {
+        // The candidates sharing the prefix used to be cut to fuzzyMaxExpansions by hit count
+        // before the distance check, so frequent but distant terms crowded out the right one.
+        $index = new Index($this->dbPath, config: new Config(fuzzyMaxExpansions: 2));
+        $index->insert([
+            ['id' => 1, 'title' => 'sedxx sedxx sedxx'],
+            ['id' => 2, 'title' => 'sedyy sedyy sedyy'],
+            ['id' => 3, 'title' => 'sedzz sedzz'],
+            ['id' => 4, 'title' => 'sedan'],
+        ]);
+
+        $this->assertSame([4], $index->search('sedaan', new SearchOptions(asYouType: false))->getIds());
+    }
+
+    public function testTypoMatchesAreCappedAfterRankingByDistance(): void
+    {
+        $index = new Index($this->dbPath, config: new Config(fuzzyMaxExpansions: 1));
+        $index->insert([
+            ['id' => 1, 'title' => 'sedans sedans sedans'],
+            ['id' => 2, 'title' => 'sedan'],
+        ]);
+
+        // 'sedam' is one typo from 'sedan' and two from the more frequent 'sedans'.
+        $this->assertSame([2], $index->search('sedam', new SearchOptions(asYouType: false))->getIds());
+    }
+
+    /** @return iterable<string, array{0: int, 1: int}> */
+    public static function invalidTypoWordSizes(): iterable
+    {
+        yield 'negative' => [-1, 9];
+        yield 'one above two' => [6, 5];
+        yield 'above 255' => [5, 256];
+    }
+
+    #[DataProvider('invalidTypoWordSizes')]
+    public function testTypoToleranceRejectsInvalidWordSizes(int $one, int $two): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+        new TypoTolerance(minWordSizeForOneTypo: $one, minWordSizeForTwoTypos: $two);
     }
 
     public function testFuzzyAutoTierShortWordCappedAtOneTypo(): void
@@ -2129,7 +2239,7 @@ class IndexTest extends TestCase
         $index = new Index($this->dbPath);
         $index->insert([['id' => 1, 'title' => 'sedan']]);
 
-        // 'sedn' is 4 codepoints — below fuzzyMinWordLength=5.
+        // 'sedn' is 4 codepoints — below minWordSizeForOneTypo=5.
         // Mutation TrueValue: gate removed → fuzzy fires → 'sedn' matches 'sedan' → 'fuzzy'.
         // Original: gate blocks → no match → 'none'.
         $result = $index->inspectQuery('sedn', asYouType: false);

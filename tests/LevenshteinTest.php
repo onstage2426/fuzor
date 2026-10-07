@@ -40,11 +40,40 @@ class LevenshteinTest extends TestCase
         $this->assertSame(1, Levenshtein::distance('sedan', 'secan'));
     }
 
-    // Standard Levenshtein counts a transposition as two edits (not one as in
-    // Damerau-Levenshtein), because it models only insert/delete/substitute.
-    public function testTranspositionCountsAsTwo(): void
+    // Optimal string alignment: a swap of two adjacent characters is one edit.
+    public function testAdjacentTranspositionCountsAsOne(): void
     {
-        $this->assertSame(2, Levenshtein::distance('ab', 'ba'));
+        $this->assertSame(1, Levenshtein::distance('ab', 'ba'));
+        $this->assertSame(1, Levenshtein::distance('casaul', 'casual'));
+        $this->assertSame(1, Levenshtein::distance('teh', 'the'));
+    }
+
+    public function testTranspositionCombinesWithOtherEdits(): void
+    {
+        $this->assertSame(2, Levenshtein::distance('casaulx', 'casualy'));
+        $this->assertSame(2, Levenshtein::distance('abdc', 'bacd'));
+        $this->assertSame(3, Levenshtein::distance('abcdef', 'badcfe'));
+    }
+
+    // OSA never edits a substring twice, unlike unrestricted Damerau-Levenshtein ('ca' → 'abc' is 2 there).
+    public function testTransposedCharactersAreNotEditedAgain(): void
+    {
+        $this->assertSame(3, Levenshtein::distance('ca', 'abc'));
+    }
+
+    public function testUnicodeTranspositionCountsAsOne(): void
+    {
+        $this->assertSame(1, Levenshtein::distance('éa', 'aé'));
+        $this->assertSame(1, Levenshtein::distance('crème', 'crèem'));
+    }
+
+    public function testMaxCapsTheReportedDistance(): void
+    {
+        $this->assertSame(2, Levenshtein::distance('abcdef', 'ghijkl', 1));
+        $this->assertSame(3, Levenshtein::distance('abcdefgh', 'a', 2));
+        $this->assertSame(1, Levenshtein::distance('casaul', 'casual', 1));
+        // Distances within the cap are exact.
+        $this->assertSame(2, Levenshtein::distance('casaulx', 'casualy', 5));
     }
 
     // --- Unicode ---

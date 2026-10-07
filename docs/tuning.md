@@ -28,11 +28,21 @@ All properties have sensible defaults — you only need to set what differs from
 
 | Property | Default | Effect |
 |---|---|---|
-| `fuzzyMinWordLength` | `5` | Minimum word length before Levenshtein fallback fires. Shorter words are exact/prefix only. |
+| `typoTolerance` | `new TypoTolerance()` | When typos are allowed; see the table below. |
 | `fuzzyPrefixLength` | `3` | Characters that must match exactly before the fuzzy scan begins. |
-| `fuzzyMaxExpansions` | `50` | Max wordlist candidates evaluated per fuzzy term, and max terms an as-you-type prefix expands to (shortest first). A capped prefix expansion reports `exhaustive: false`. |
+| `fuzzyMaxExpansions` | `50` | Max terms a typo'd word expands to (closest first, then most frequent), and max terms an as-you-type prefix expands to (shortest first). A capped prefix expansion reports `exhaustive: false`. |
 
-The allowed edit distance scales automatically with word length: 1 typo for 5–8 characters, 2 typos for 9+.
+`TypoTolerance` properties:
+
+| Property | Default | Effect |
+|---|---|---|
+| `enabled` | `true` | `false`: words match exactly or by prefix only. |
+| `minWordSizeForOneTypo` | `5` | Shortest query word (codepoints) that may have one typo. |
+| `minWordSizeForTwoTypos` | `9` | Shortest query word that may have two typos. Must be at least `minWordSizeForOneTypo` and at most 255. |
+| `disableOnNumbers` | `false` | `true`: words containing a digit (SKUs, model numbers, years) match exactly. |
+| `disableOnWords` | `[]` | Query words that always match exactly; case-insensitive, stemmed like query words. |
+
+A typo is an inserted, deleted, or replaced character, or two neighbouring characters swapped.
 
 ## Facets
 

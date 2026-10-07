@@ -56,3 +56,16 @@ leading `-` (at the start of the query or after a space) removes the documents t
 and a query of only such words returns all other documents. Hyphens inside words (`t-shirt`)
 are unchanged. If your users type a leading `-` meaning something else, strip it before calling
 `search()`.
+
+## `Config::$fuzzyMinWordLength` is replaced by `TypoTolerance`
+
+```php
+// 1.x
+new Config(fuzzyMinWordLength: 4);
+
+// 2.0
+new Config(typoTolerance: new TypoTolerance(minWordSizeForOneTypo: 4));
+```
+
+The two-typo threshold (9) is now configurable as `minWordSizeForTwoTypos`. A swap of two
+neighbouring characters now counts as one typo instead of two, so slightly more words match.
