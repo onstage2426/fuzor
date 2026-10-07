@@ -35,7 +35,7 @@ When the document store is disabled, `$hits` contains id-only stubs: `[['id' => 
 | `$offset` | `int\|null` | Page offset |
 | `$facetDistribution` | `array<string, array<string,int>>` | Value → count per facet field |
 | `$facetStats` | `array<string, array{min:float,max:float}>` | Numeric min/max per facet field |
-| `$warnings` | `list<string>` | Notices about options that were ignored or had no effect — see [Warnings](#warnings) |
+| `$warnings` | `list<string>` | Notices about limits that made the result approximate — see [Warnings](#warnings) |
 | `$exhaustive` | `bool` | `false` when a cap may have cut matches out of the result — see [Approximate results](#approximate-results) |
 | `$approximateFacets` | `list<string>` | Facet fields whose counts were computed over a capped document set |
 | `getHit(int $index, array $default = [])` | `array` | Document at position (0-based); `$default` when out of bounds |
@@ -45,14 +45,19 @@ When the document store is disabled, `$hits` contains id-only stubs: `[['id' => 
 
 ### Warnings
 
-`$result->warnings` lists anything in the request that Fuzor ignored or that could not have an effect, such as a `sort`, `filter`, `facets`, or `distinct` field that is not a declared `facetField`. It is empty for a well-formed request.
+`$result->warnings` lists the caps that made a result approximate (see [Exhaustive results](#exhaustive-results)). The messages are meant for logs and debugging; their wording is not a stable API.
+
+### Undeclared fields
+
+`sort` only accepts fields declared in `sortableFields`; `filter`, `facets`, `distinct`, and `facetSearch()`'s `facetName` and `filter` only accept fields declared in `filterableFields`. Any other field throws a `QueryException` naming the field and the declared list:
 
 ```php
-$result = $index->search('watch', new SearchOptions(sort: ['title:asc']));
-$result->warnings; // ["Sort field 'title' is not a declared facet field; ignored."]
+$index->search('watch', new SearchOptions(sort: ['title:asc']));
+// QueryException: Sort field 'title' is not sortable. Declare it in SchemaConfig::$sortableFields
+// when creating the index (declared: price).
 ```
 
-The messages are meant for logs and debugging; their wording is not a stable API. To check a field up front, compare it against `$index->facetFields`. A declared field that no document has a value for yet does not produce a warning.
+When these options come from user input (a `sort=` query parameter), check them against `$index->sortableFields` and `$index->filterableFields` first, or catch the exception. A declared field that no document has a value for yet is not an error: it simply has no values.
 
 ### Approximate results
 
@@ -246,7 +251,7 @@ See [formatting.md](formatting.md) for the full option reference and standalone 
 
 ## Facet filtering
 
-Pass a `filter` map to restrict results to documents matching specific facet values. Fields must be declared as `facetFields` at index creation — see [indexing.md](indexing.md).
+Pass a `filter` map to restrict results to documents matching specific facet values. Fields must be declared in `filterableFields` at index creation — see [indexing.md](indexing.md).
 
 ```php
 // Single value
@@ -265,7 +270,7 @@ $result = $index->search('watch', new SearchOptions(
 ));
 ```
 
-Filtering on a field that is not a declared `facetField` matches no documents and adds a [warning](#warnings).
+Filtering on a field that is not declared in `filterableFields` throws a `QueryException` (see [Undeclared fields](#undeclared-fields)).
 
 ### Numeric range filters
 
@@ -305,7 +310,7 @@ new FacetExclude(FacetRange::max(0));                              // hide free 
 
 - A document passes when **none** of its values for the field matches. A multi-value document is excluded as soon as one of its values matches, which a positive filter cannot express: listing every other category (`['shoes', 'shirts', …]`) still keeps a document tagged both `shoes` and `sale`, while `new FacetExclude('sale')` removes it.
 - A document that does not have the field at all passes — it has nothing to exclude.
-- An exclusion on a field that is not a declared `facetField` matches **no** documents and adds a [warning](#warnings), like a positive filter. A typo in a filter meant to hide something therefore hides everything rather than showing what it should hide.
+- An exclusion on a field that is not declared in `filterableFields` throws a `QueryException`, like a positive filter, so a typo in a filter meant to hide something cannot pass silently.
 - An exclusion on a declared field that no document has a value for yet, or with an empty list, excludes nothing.
 - One key holds one condition, so a field cannot be both included and excluded in the same filter. Listing the values to include already excludes the rest.
 
@@ -401,7 +406,7 @@ Only values that appear on documents satisfying both the FTS query and all filte
 ```php
 $result->facetHits;        // list<array{value: string, count: int}>
 $result->facetQuery;       // the prefix that was searched
-$result->warnings;         // list<string> — e.g. an undeclared facetName or filter field
+$result->warnings;         // list<string> — limits that made the result approximate
 $result->exhaustive;       // false when the `query` candidates were capped (maxFacetCountDocs)
 count($result);            // number of values returned
 foreach ($result as $hit) { ... }
@@ -413,7 +418,7 @@ $result->toJSON();
 
 | Property | Default | Description |
 |---|---|---|
-| `facetName` | _(required)_ | Facet field to search; must be declared as a `facetField` at index creation |
+| `facetName` | _(required)_ | Field to search; must be declared in `filterableFields` at index creation |
 | `facetQuery` | `''` | Prefix matched case-insensitively against values; empty string returns all values |
 | `query` | `''` | FTS phrase to restrict candidate documents; empty string means all documents |
 | `filter` | `[]` | Facet filters applied before counting; same type as `SearchOptions::$filter` |
@@ -421,26 +426,27 @@ $result->toJSON();
 
 ## Custom sort
 
-Override relevance order with one or more field values. Fields must be declared as `facetFields` at index creation.
+Override relevance order with one or more field values. Fields must be declared in `sortableFields` at index creation.
 
 ```php
 $result = $index->search('watch', new SearchOptions(sort: ['price:asc']));
 $result = $index->search('watch', new SearchOptions(sort: ['brand:asc', 'price:asc']));
 ```
 
-Each spec is `'field:asc'` or `'field:desc'` (case-insensitive). A malformed spec throws `\InvalidArgumentException`. A spec naming a field that is not a declared `facetField` is ignored and reported in [`$warnings`](#warnings); the remaining specs still apply, and with none left the result keeps its normal order (relevance, or newest first for a browse).
+Each spec is `'field:asc'` or `'field:desc'` (case-insensitive). A malformed spec throws `\InvalidArgumentException`. A spec naming a field that is not declared in `sortableFields` throws a `QueryException` (see [Undeclared fields](#undeclared-fields)).
 
-The document ID is not a sort field by default either. To sort by it, declare `id` in `facetFields` like any other field; this stores one facet value per document and also makes the ID usable in `filter`, `facets`, and `distinct`:
+The document ID is not a sort field by default either. To sort by it, declare `id` in `sortableFields` like any other field; this stores one facet value per document:
 
 ```php
 $index = new Index('/path/to/products.db', schema: new SchemaConfig(
-    facetFields: ['id', 'brand', 'price'],
+    filterableFields: ['brand'],
+    sortableFields:   ['id', 'price'],
 ));
 
 $result = $index->search('', new SearchOptions(sort: ['id:asc'])); // lowest ID first
 ```
 
-A browse without `sort` already returns documents by ID descending. Before 1.6.0 an undeclared `id:asc` only appeared to work: every document tied on the missing field, and the ID tiebreaker decided the order. Since 1.6.0 it is ignored with a warning, like any undeclared field.
+A browse without `sort` already returns documents by ID descending.
 
 Values are ordered as follows:
 
@@ -450,13 +456,14 @@ Values are ordered as follows:
 - **Multi-value fields** sort by the value that places the document earliest: its smallest value ascending, its largest descending.
 - **Documents missing the field** always appear last, regardless of direction.
 
-For a human-facing A–Z order, store a normalized copy as its own facet field and sort on that. `Tokenizer::sortKey()` lowercases, folds Latin accents to their base letter (`é` → `e`, `ß` → `ss`), and collapses whitespace, using a built-in table so every server produces the same key:
+For a human-facing A–Z order, store a normalized copy as its own sortable field and sort on that. `Tokenizer::sortKey()` lowercases, folds Latin accents to their base letter (`é` → `e`, `ß` → `ss`), and collapses whitespace, using a built-in table so every server produces the same key:
 
 ```php
 use Fuzor\Tokenizer;
 
 $index = new Index('/path/to/products.db', schema: new SchemaConfig(
-    facetFields: ['brand', 'price', 'title_sort'],
+    filterableFields: ['brand'],
+    sortableFields:   ['price', 'title_sort'],
 ));
 $index->insert([[
     'id'         => 1,
@@ -469,7 +476,7 @@ $result = $index->search('', new SearchOptions(sort: ['title_sort:asc']));
 
 When two documents share the same sort value, BM25 score is used as a tiebreaker in `search()`. Boolean search breaks ties by document ID ascending.
 
-**Compared with Meilisearch:** the type order, byte order for strings, and missing-values-last rule match Meilisearch, and so does declaring the document ID before sorting on it (Meilisearch requires the primary key in `sortableAttributes` too). Two differences: Meilisearch compares strings case-insensitively (planned for Fuzor 2.0), and by default Meilisearch applies `sort` only as a tiebreaker after its relevance rules, whereas in Fuzor the sort fields decide the order and relevance breaks ties.
+**Compared with Meilisearch:** the type order, byte order for strings, and missing-values-last rule match Meilisearch, and so does declaring sort fields up front (`sortableFields` is Meilisearch's `sortableAttributes`, which also requires the primary key to be listed before sorting on it). Two differences: Meilisearch compares strings case-insensitively (planned for Fuzor 2.0), and by default Meilisearch applies `sort` only as a tiebreaker after its relevance rules, whereas in Fuzor the sort fields decide the order and relevance breaks ties.
 
 ```php
 $result = $index->searchBoolean('sedan or coupe', new SearchOptions(sort: ['price:asc']));
@@ -487,7 +494,7 @@ $result = $index->search('shirt', new SearchOptions(distinct: 'brand'));
 $result = $index->search('shirt', new SearchOptions(distinct: 'brand', distinctCount: 2));
 ```
 
-The field must be declared as a `facetField`. An undeclared field has no effect and adds a [warning](#warnings). For a multi-value field, each document is grouped by its smallest value.
+The field must be declared in `filterableFields` (as in Meilisearch); any other field throws a `QueryException`. For a multi-value field, each document is grouped by its smallest value.
 
 When `sort` is also set, sort order determines which document wins per group instead of BM25 score:
 
@@ -523,9 +530,9 @@ Documents with no value for the distinct field are never collapsed — each pass
 | `limit` | `100` | Maximum hits to return |
 | `offset` | `0` | Hits to skip (pagination) |
 | `filter` | `[]` | Facet filters — `array<string, string\|list<string>\|FacetRange\|FacetExclude>` |
-| `facets` | `[]` | Facet fields to compute value counts for |
+| `facets` | `[]` | Filterable fields to compute value counts for |
 | `sort` | `[]` | Sort specs — `list<string>` of `'field:asc'` / `'field:desc'` |
-| `distinct` | `null` | Facet field to collapse on |
+| `distinct` | `null` | Filterable field to collapse on |
 | `distinctCount` | `1` | Max hits per distinct value |
 | `attributesToHighlight` | `null` | Fields to highlight in `_formatted`; `['*']` for all |
 | `highlightPreTag` | `'<mark>'` | Opening highlight tag |

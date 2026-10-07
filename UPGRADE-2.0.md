@@ -15,3 +15,30 @@ $index->insert($documentsFromYourSource);
 written by a newer Fuzor are rejected the same way.
 
 The sections below list every change that needs a change in calling code.
+
+## `facetFields` is split into `filterableFields` and `sortableFields`
+
+`SchemaConfig::$facetFields` and `$index->facetFields` are gone. Declare fields used in `filter`,
+`facets`, `distinct`, and `facetSearch()` in `filterableFields`, and fields used in `sort` in
+`sortableFields`. A field may be in both. Neither kind is tokenised for full-text search unless
+it is also in `searchableFields`.
+
+```php
+// 1.x
+new SchemaConfig(facetFields: ['brand', 'color', 'price']);
+
+// 2.0
+new SchemaConfig(filterableFields: ['brand', 'color', 'price'], sortableFields: ['price']);
+```
+
+## Undeclared fields throw instead of warning
+
+A `sort` field that is not in `sortableFields`, or a `filter`, `facets`, `distinct`, or
+`FacetSearchQuery` `facetName`/`filter` field that is not in `filterableFields`, now throws a
+`QueryException`. In 1.x it was ignored (or matched nothing) and reported in `$warnings`. When
+these options come from user input, check them against `$index->sortableFields` /
+`$index->filterableFields` or catch `QueryException`. `$warnings` now only reports caps.
+
+## `Config::$filterMaxDocs` is removed
+
+It has had no effect since 1.6.0. Remove it from `new Config(...)` calls.

@@ -13,14 +13,22 @@ final readonly class SchemaConfig
         /** Enable the document store so raw documents can be retrieved by ID. */
         public bool $store = true,
         /**
-         * Field names routed to the facet index; not FTS-indexed unless also in $searchableFields.
+         * Fields usable in `filter`, `facets`, `distinct`, and facetSearch(). Stored in the facet
+         * index; not FTS-indexed unless also in $searchableFields.
          *
          * @var list<string>
          */
-        public array $facetFields = [],
+        public array $filterableFields = [],
+        /**
+         * Fields usable in `sort`. Stored in the facet index like filterable fields; a field may be
+         * in both lists. Not FTS-indexed unless also in $searchableFields.
+         *
+         * @var list<string>
+         */
+        public array $sortableFields = [],
         /**
          * Whitelist of fields to tokenise for FTS.
-         * null (default) tokenises all fields not in $facetFields.
+         * null (default) tokenises all fields that are neither filterable nor sortable.
          * Pass [] to disable FTS entirely.
          *
          * @var list<string>|null

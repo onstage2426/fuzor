@@ -66,11 +66,11 @@ foreach ($index->stream(batchSize: 500) as $id => $doc) {
 
 ## Stored-only fields
 
-A field that is not in `facetFields` and not in `searchableFields` is stored but never indexed — it won't appear in search or filter results, but it will be present in every hit and every `get()` response. Use this for URLs, image paths, timestamps, internal IDs, and anything you need at render time but not at search time.
+A field that is in none of `filterableFields`, `sortableFields`, and `searchableFields` is stored but never indexed — it won't appear in search or filter results, but it will be present in every hit and every `get()` response. Use this for URLs, image paths, timestamps, internal IDs, and anything you need at render time but not at search time.
 
 ```php
 $index = new Index('/path/to/watches.db', schema: new SchemaConfig(
-    facetFields:      ['brand', 'price'],
+    filterableFields: ['brand', 'price'],
     searchableFields: ['title', 'body'],
     // image_url and sku are stored-only automatically
 ));
@@ -97,8 +97,9 @@ As long as the store is enabled, you can rebuild the index without keeping a sep
 ```php
 // Re-index with a new schema — Fuzor streams from the store automatically
 Index::rebuild('/path/to/articles.db', schema: new SchemaConfig(
-    language:    'en',
-    facetFields: ['category', 'price'],
+    language:         'en',
+    filterableFields: ['category', 'price'],
+    sortableFields:   ['price'],
 ));
 ```
 

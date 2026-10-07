@@ -31,10 +31,11 @@ use Fuzor\SearchOptions;
 use Fuzor\FacetRange;
 use Fuzor\FacetSearchQuery;
 
-// Create an index — declare facetable fields at creation time
+// Create an index — declare filterable and sortable fields at creation time
 $index = new Index('/path/to/products.db', schema: new SchemaConfig(
-    language:    'en',
-    facetFields: ['type', 'price'],
+    language:         'en',
+    filterableFields: ['type', 'price'],
+    sortableFields:   ['price'],
 ));
 
 $index->insert([

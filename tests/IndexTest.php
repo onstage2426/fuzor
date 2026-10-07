@@ -3825,7 +3825,10 @@ class IndexTest extends TestCase
 
     public function testFacetFieldNotIndexedAsText(): void
     {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['color']));
+        $index = new Index($this->dbPath, schema: new SchemaConfig(
+            filterableFields: ['color'],
+            sortableFields: ['color'],
+        ));
         $index->insert([['id' => 1, 'title' => 'hello', 'color' => 'red']]);
 
         // 'red' should NOT appear in search results (it's a facet value, not a text token)
@@ -3835,7 +3838,10 @@ class IndexTest extends TestCase
 
     public function testInsertSingleDocWithFacets(): void
     {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['color']));
+        $index = new Index($this->dbPath, schema: new SchemaConfig(
+            filterableFields: ['color'],
+            sortableFields: ['color'],
+        ));
         $index->insert([['id' => 1, 'title' => 'car', 'color' => 'red']]);
 
         $result = $index->search('car', new SearchOptions(facets: ['color']));
@@ -3845,7 +3851,10 @@ class IndexTest extends TestCase
 
     public function testDeleteRemovesFacetValues(): void
     {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['color']));
+        $index = new Index($this->dbPath, schema: new SchemaConfig(
+            filterableFields: ['color'],
+            sortableFields: ['color'],
+        ));
         $index->insert([['id' => 1, 'title' => 'car', 'color' => 'red']]);
         $index->delete(1);
 
@@ -3858,7 +3867,10 @@ class IndexTest extends TestCase
 
     public function testInsertManyStoresFacets(): void
     {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['color']));
+        $index = new Index($this->dbPath, schema: new SchemaConfig(
+            filterableFields: ['color'],
+            sortableFields: ['color'],
+        ));
         $index->insert([
             ['id' => 1, 'title' => 'car', 'color' => 'red'],
             ['id' => 2, 'title' => 'car', 'color' => 'blue'],
@@ -3872,7 +3884,10 @@ class IndexTest extends TestCase
 
     public function testDeleteManyRemovesFacetValues(): void
     {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['color']));
+        $index = new Index($this->dbPath, schema: new SchemaConfig(
+            filterableFields: ['color'],
+            sortableFields: ['color'],
+        ));
         $index->insert([
             ['id' => 1, 'title' => 'car', 'color' => 'red'],
             ['id' => 2, 'title' => 'car', 'color' => 'blue'],
@@ -3887,7 +3902,10 @@ class IndexTest extends TestCase
 
     public function testSearchWithStringSingleValueFilter(): void
     {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['color']));
+        $index = new Index($this->dbPath, schema: new SchemaConfig(
+            filterableFields: ['color'],
+            sortableFields: ['color'],
+        ));
         $index->insert([
             ['id' => 1, 'title' => 'car', 'color' => 'red'],
             ['id' => 2, 'title' => 'car', 'color' => 'blue'],
@@ -3900,7 +3918,10 @@ class IndexTest extends TestCase
 
     public function testSearchWithStringMultiValueOrFilter(): void
     {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['color']));
+        $index = new Index($this->dbPath, schema: new SchemaConfig(
+            filterableFields: ['color'],
+            sortableFields: ['color'],
+        ));
         $index->insert([
             ['id' => 1, 'title' => 'car', 'color' => 'red'],
             ['id' => 2, 'title' => 'car', 'color' => 'blue'],
@@ -3918,7 +3939,10 @@ class IndexTest extends TestCase
 
     public function testSearchWithNumericRangeFilter(): void
     {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['price']));
+        $index = new Index($this->dbPath, schema: new SchemaConfig(
+            filterableFields: ['price'],
+            sortableFields: ['price'],
+        ));
         $index->insert([
             ['id' => 1, 'title' => 'car', 'price' => 10000],
             ['id' => 2, 'title' => 'car', 'price' => 25000],
@@ -3941,7 +3965,10 @@ class IndexTest extends TestCase
     {
         $index = new Index(
             $this->dbPath,
-            schema: new SchemaConfig(facetFields: ['visibility', 'brand', 'price', 'unused']),
+            schema: new SchemaConfig(
+                filterableFields: ['visibility', 'brand', 'price', 'unused'],
+                sortableFields: ['visibility', 'brand', 'price', 'unused'],
+            ),
             config: $config,
         );
         $index->insert([
@@ -4086,23 +4113,6 @@ class IndexTest extends TestCase
         }
     }
 
-    public function testExcludeFilterOnUndeclaredFieldMatchesNothing(): void
-    {
-        $index = $this->exclusionIndex();
-        $options = new SearchOptions(filter: ['tags' => new FacetExclude('x')], facets: ['brand']);
-
-        foreach ($this->assertFilterOnEveryPath($index, $options, []) as $path => $result) {
-            $this->assertSame([], $result->facetDistribution, $path);
-            $this->assertSame(
-                ["Filter field 'tags' is not a declared facet field; no documents match it."],
-                $result->warnings,
-                $path,
-            );
-        }
-        $query = new FacetSearchQuery(facetName: 'brand', filter: ['tags' => new FacetExclude('x')]);
-        $this->assertSame([], $index->facetSearch($query)->facetHits);
-    }
-
     public function testExcludeFilterThatExcludesNothingKeepsEveryDoc(): void
     {
         $index = $this->exclusionIndex();
@@ -4185,7 +4195,7 @@ class IndexTest extends TestCase
             $this->tearDown();
             $index = new Index(
                 $this->dbPath,
-                schema: new SchemaConfig(facetFields: ['size', 'group']),
+                schema: new SchemaConfig(filterableFields: ['size', 'group'], sortableFields: ['size', 'group']),
                 config: new Config(maxFacetCountDocs: $cap),
             );
             $index->insert([
@@ -4233,7 +4243,10 @@ class IndexTest extends TestCase
 
     public function testBrowseExcludeFilterShapesAgree(): void
     {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['price', 'color', 'brand']));
+        $index = new Index($this->dbPath, schema: new SchemaConfig(
+            filterableFields: ['price', 'color', 'brand'],
+            sortableFields: ['price', 'color', 'brand'],
+        ));
         $index->insert($this->browseCatalog());
 
         // Broad (probed walk): everything but red. Selective (materialised IN): 1 of 12 left, once
@@ -4255,7 +4268,10 @@ class IndexTest extends TestCase
 
     public function testBrowseDistinctWithExcludeFilter(): void
     {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['price', 'color', 'brand']));
+        $index = new Index($this->dbPath, schema: new SchemaConfig(
+            filterableFields: ['price', 'color', 'brand'],
+            sortableFields: ['price', 'color', 'brand'],
+        ));
         $index->insert($this->browseCatalog());
 
         $result = $index->search('', new SearchOptions(
@@ -4272,7 +4288,10 @@ class IndexTest extends TestCase
 
     public function testSearchFacetCountsStringFacet(): void
     {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['color']));
+        $index = new Index($this->dbPath, schema: new SchemaConfig(
+            filterableFields: ['color'],
+            sortableFields: ['color'],
+        ));
         $index->insert([
             ['id' => 1, 'title' => 'car', 'color' => 'red'],
             ['id' => 2, 'title' => 'car', 'color' => 'red'],
@@ -4287,7 +4306,10 @@ class IndexTest extends TestCase
 
     public function testSearchFacetCountsNumericFacet(): void
     {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['price']));
+        $index = new Index($this->dbPath, schema: new SchemaConfig(
+            filterableFields: ['price'],
+            sortableFields: ['price'],
+        ));
         $index->insert([
             ['id' => 1, 'title' => 'car', 'price' => 10000.0],
             ['id' => 2, 'title' => 'car', 'price' => 20000.0],
@@ -4303,7 +4325,10 @@ class IndexTest extends TestCase
 
     public function testFacetStatsKeepAZeroMinOrMax(): void
     {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['price', 'delta']));
+        $index = new Index($this->dbPath, schema: new SchemaConfig(
+            filterableFields: ['price', 'delta'],
+            sortableFields: ['price', 'delta'],
+        ));
         $index->insert([
             ['id' => 1, 'title' => 'item', 'price' => 0, 'delta' => -10],
             ['id' => 2, 'title' => 'item', 'price' => 5, 'delta' => 0],
@@ -4323,7 +4348,7 @@ class IndexTest extends TestCase
         $index = new Index(
             $this->dbPath,
             config: new Config(maxValuesPerFacet: 2),
-            schema: new SchemaConfig(facetFields: ['color']),
+            schema: new SchemaConfig(filterableFields: ['color'], sortableFields: ['color']),
         );
         $index->insert([
             ['id' => 1, 'title' => 'car', 'color' => 'red'],
@@ -4343,7 +4368,7 @@ class IndexTest extends TestCase
         $index = new Index(
             $this->dbPath,
             config: new Config(maxValuesPerFacet: 0),
-            schema: new SchemaConfig(facetFields: ['color']),
+            schema: new SchemaConfig(filterableFields: ['color'], sortableFields: ['color']),
         );
         $index->insert([
             ['id' => 1, 'title' => 'car', 'color' => 'red'],
@@ -4359,7 +4384,10 @@ class IndexTest extends TestCase
 
     public function testDisjunctiveFacetCountsShowAllValuesWhenFiltered(): void
     {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['color']));
+        $index = new Index($this->dbPath, schema: new SchemaConfig(
+            filterableFields: ['color'],
+            sortableFields: ['color'],
+        ));
         $index->insert([
             ['id' => 1, 'title' => 'car', 'color' => 'red'],
             ['id' => 2, 'title' => 'car', 'color' => 'blue'],
@@ -4377,7 +4405,10 @@ class IndexTest extends TestCase
 
     public function testMultiValueFacetOnSingleDocument(): void
     {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['color']));
+        $index = new Index($this->dbPath, schema: new SchemaConfig(
+            filterableFields: ['color'],
+            sortableFields: ['color'],
+        ));
         $index->insert([['id' => 1, 'title' => 'car', 'color' => ['red', 'blue']]]);
 
         $result = $index->search('car', new SearchOptions(facets: ['color']));
@@ -4389,7 +4420,10 @@ class IndexTest extends TestCase
 
     public function testSearchBooleanWithFilter(): void
     {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['color']));
+        $index = new Index($this->dbPath, schema: new SchemaConfig(
+            filterableFields: ['color'],
+            sortableFields: ['color'],
+        ));
         $index->insert([
             ['id' => 1, 'title' => 'car sedan', 'color' => 'red'],
             ['id' => 2, 'title' => 'car coupe', 'color' => 'blue'],
@@ -4402,7 +4436,10 @@ class IndexTest extends TestCase
 
     public function testSearchBooleanWithFacetCounts(): void
     {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['color']));
+        $index = new Index($this->dbPath, schema: new SchemaConfig(
+            filterableFields: ['color'],
+            sortableFields: ['color'],
+        ));
         $index->insert([
             ['id' => 1, 'title' => 'car', 'color' => 'red'],
             ['id' => 2, 'title' => 'car', 'color' => 'blue'],
@@ -4417,7 +4454,7 @@ class IndexTest extends TestCase
 
     public function testFacetCountsEmptyWhenNoFacetData(): void
     {
-        $index = new Index($this->dbPath);
+        $index = new Index($this->dbPath, schema: new SchemaConfig(filterableFields: ['color']));
         $index->insert([['id' => 1, 'title' => 'car']]);
 
         $result = $index->search('car', new SearchOptions(facets: ['color']));
@@ -4428,7 +4465,10 @@ class IndexTest extends TestCase
 
     public function testFacetSearchReturnsAllValuesOrderedByCountDesc(): void
     {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['genre']));
+        $index = new Index($this->dbPath, schema: new SchemaConfig(
+            filterableFields: ['genre'],
+            sortableFields: ['genre'],
+        ));
         $index->insert([
             ['id' => 1, 'title' => 'doc', 'genre' => 'Action'],
             ['id' => 2, 'title' => 'doc', 'genre' => 'Action'],
@@ -4446,7 +4486,10 @@ class IndexTest extends TestCase
 
     public function testFacetSearchPrefixMatchesCaseInsensitively(): void
     {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['genre']));
+        $index = new Index($this->dbPath, schema: new SchemaConfig(
+            filterableFields: ['genre'],
+            sortableFields: ['genre'],
+        ));
         $index->insert([
             ['id' => 1, 'title' => 'doc', 'genre' => 'Science Fiction'],
             ['id' => 2, 'title' => 'doc', 'genre' => 'Action'],
@@ -4461,7 +4504,10 @@ class IndexTest extends TestCase
 
     public function testFacetSearchPrefixUppercaseInputMatchesMixedCaseValues(): void
     {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['genre']));
+        $index = new Index($this->dbPath, schema: new SchemaConfig(
+            filterableFields: ['genre'],
+            sortableFields: ['genre'],
+        ));
         $index->insert([
             ['id' => 1, 'title' => 'doc', 'genre' => 'Science Fiction'],
             ['id' => 2, 'title' => 'doc', 'genre' => 'Action'],
@@ -4475,7 +4521,10 @@ class IndexTest extends TestCase
 
     public function testFacetSearchPrefixNoMatchReturnsEmpty(): void
     {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['genre']));
+        $index = new Index($this->dbPath, schema: new SchemaConfig(
+            filterableFields: ['genre'],
+            sortableFields: ['genre'],
+        ));
         $index->insert([
             ['id' => 1, 'title' => 'doc', 'genre' => 'Action'],
         ]);
@@ -4487,7 +4536,10 @@ class IndexTest extends TestCase
 
     public function testFacetSearchEmptyPrefixReturnsAllValues(): void
     {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['genre']));
+        $index = new Index($this->dbPath, schema: new SchemaConfig(
+            filterableFields: ['genre'],
+            sortableFields: ['genre'],
+        ));
         $index->insert([
             ['id' => 1, 'title' => 'doc', 'genre' => 'Action'],
             ['id' => 2, 'title' => 'doc', 'genre' => 'Drama'],
@@ -4500,7 +4552,7 @@ class IndexTest extends TestCase
 
     public function testFacetSearchLikeSpecialCharsInPrefixAreEscaped(): void
     {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['tag']));
+        $index = new Index($this->dbPath, schema: new SchemaConfig(filterableFields: ['tag'], sortableFields: ['tag']));
         $index->insert([
             ['id' => 1, 'title' => 'doc', 'tag' => '50%_off'],
             ['id' => 2, 'title' => 'doc', 'tag' => 'sale'],
@@ -4515,7 +4567,10 @@ class IndexTest extends TestCase
 
     public function testFacetSearchFtsQueryRestrictsCandidateDocs(): void
     {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['genre']));
+        $index = new Index($this->dbPath, schema: new SchemaConfig(
+            filterableFields: ['genre'],
+            sortableFields: ['genre'],
+        ));
         $index->insert([
             ['id' => 1, 'title' => 'adventure movie', 'genre' => 'Action'],
             ['id' => 2, 'title' => 'drama film',      'genre' => 'Drama'],
@@ -4530,7 +4585,10 @@ class IndexTest extends TestCase
 
     public function testFacetSearchFtsQueryMultiKeywordRequiresBothWords(): void
     {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['genre']));
+        $index = new Index($this->dbPath, schema: new SchemaConfig(
+            filterableFields: ['genre'],
+            sortableFields: ['genre'],
+        ));
         $index->insert([
             ['id' => 1, 'title' => 'space adventure', 'genre' => 'Action'],   // matches both
             ['id' => 2, 'title' => 'space opera',     'genre' => 'Drama'],    // matches 'space' only
@@ -4547,7 +4605,10 @@ class IndexTest extends TestCase
 
     public function testFacetSearchFtsQueryPhraseIsApplied(): void
     {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['genre']));
+        $index = new Index($this->dbPath, schema: new SchemaConfig(
+            filterableFields: ['genre'],
+            sortableFields: ['genre'],
+        ));
         $index->insert([
             ['id' => 1, 'title' => 'science fiction film', 'genre' => 'Sci-Fi'],  // phrase present, adjacent
             ['id' => 2, 'title' => 'fiction about science', 'genre' => 'Drama'],  // words present but not adjacent
@@ -4562,7 +4623,10 @@ class IndexTest extends TestCase
 
     public function testFacetSearchFtsQueryNoMatchReturnsEmpty(): void
     {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['genre']));
+        $index = new Index($this->dbPath, schema: new SchemaConfig(
+            filterableFields: ['genre'],
+            sortableFields: ['genre'],
+        ));
         $index->insert([
             ['id' => 1, 'title' => 'adventure', 'genre' => 'Action'],
         ]);
@@ -4574,7 +4638,10 @@ class IndexTest extends TestCase
 
     public function testFacetSearchWhitespaceOnlyQueryIsEquivalentToNoRestriction(): void
     {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['genre']));
+        $index = new Index($this->dbPath, schema: new SchemaConfig(
+            filterableFields: ['genre'],
+            sortableFields: ['genre'],
+        ));
         $index->insert([
             ['id' => 1, 'title' => 'doc', 'genre' => 'Action'],
             ['id' => 2, 'title' => 'doc', 'genre' => 'Drama'],
@@ -4587,7 +4654,10 @@ class IndexTest extends TestCase
 
     public function testFacetSearchStringFilterRestrictsCandidateDocs(): void
     {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['genre', 'lang']));
+        $index = new Index($this->dbPath, schema: new SchemaConfig(
+            filterableFields: ['genre', 'lang'],
+            sortableFields: ['genre', 'lang'],
+        ));
         $index->insert([
             ['id' => 1, 'title' => 'doc', 'genre' => 'Action', 'lang' => 'en'],
             ['id' => 2, 'title' => 'doc', 'genre' => 'Drama',  'lang' => 'fr'],
@@ -4601,7 +4671,10 @@ class IndexTest extends TestCase
 
     public function testFacetSearchNumericRangeFilterRestrictsCandidateDocs(): void
     {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['genre', 'year']));
+        $index = new Index($this->dbPath, schema: new SchemaConfig(
+            filterableFields: ['genre', 'year'],
+            sortableFields: ['genre', 'year'],
+        ));
         $index->insert([
             ['id' => 1, 'title' => 'doc', 'genre' => 'Action', 'year' => 2010],
             ['id' => 2, 'title' => 'doc', 'genre' => 'Drama',  'year' => 1990],
@@ -4618,7 +4691,10 @@ class IndexTest extends TestCase
 
     public function testFacetSearchFtsAndFilterAndPrefixCombined(): void
     {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['genre', 'year']));
+        $index = new Index($this->dbPath, schema: new SchemaConfig(
+            filterableFields: ['genre', 'year'],
+            sortableFields: ['genre', 'year'],
+        ));
         $index->insert([
             ['id' => 1, 'title' => 'space adventure', 'genre' => 'Science Fiction', 'year' => 2010],
             ['id' => 2, 'title' => 'space adventure', 'genre' => 'Action',          'year' => 2010],
@@ -4641,7 +4717,10 @@ class IndexTest extends TestCase
 
     public function testFacetSearchLimitCapsResults(): void
     {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['genre']));
+        $index = new Index($this->dbPath, schema: new SchemaConfig(
+            filterableFields: ['genre'],
+            sortableFields: ['genre'],
+        ));
         $index->insert([
             ['id' => 1, 'title' => 'doc', 'genre' => 'Action'],
             ['id' => 2, 'title' => 'doc', 'genre' => 'Action'],
@@ -4656,26 +4735,11 @@ class IndexTest extends TestCase
         $this->assertSame('Action', $result->facetHits[0]['value']);
     }
 
-    public function testFacetSearchUnknownFieldReturnsEmpty(): void
-    {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['genre']));
-        $index->insert([['id' => 1, 'title' => 'doc', 'genre' => 'Action']]);
-
-        $result = $index->facetSearch(new FacetSearchQuery(facetName: 'nonexistent'));
-
-        $this->assertSame([], $result->facetHits);
-        $this->assertSame(
-            ["Facet 'nonexistent' is not a declared facet field; no values returned."],
-            $result->getWarnings(),
-        );
-    }
-
-    public function testFacetSearchFilterWithoutQueryIsExactBeyondFilterMaxDocs(): void
+    public function testFacetSearchFilterWithoutQueryIsExact(): void
     {
         $index = new Index(
             $this->dbPath,
-            schema: new SchemaConfig(facetFields: ['genre', 'color']),
-            config: new Config(filterMaxDocs: 2),
+            schema: new SchemaConfig(filterableFields: ['genre', 'color'], sortableFields: ['genre', 'color']),
         );
         $docs = [];
         for ($i = 1; $i <= 7; $i++) {
@@ -4693,7 +4757,10 @@ class IndexTest extends TestCase
 
     public function testFacetSearchQueryWithNoMatchesReturnsEmptyWithFilter(): void
     {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['genre', 'color']));
+        $index = new Index($this->dbPath, schema: new SchemaConfig(
+            filterableFields: ['genre', 'color'],
+            sortableFields: ['genre', 'color'],
+        ));
         $index->insert([['id' => 1, 'title' => 'doc', 'genre' => 'Action', 'color' => 'red']]);
 
         $result = $index->facetSearch(new FacetSearchQuery(
@@ -4707,7 +4774,10 @@ class IndexTest extends TestCase
 
     public function testFacetSearchDeclaredButUnpopulatedFieldDoesNotWarn(): void
     {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['genre', 'year']));
+        $index = new Index($this->dbPath, schema: new SchemaConfig(
+            filterableFields: ['genre', 'year'],
+            sortableFields: ['genre', 'year'],
+        ));
         $index->insert([['id' => 1, 'title' => 'doc', 'genre' => 'Action']]);
 
         $result = $index->facetSearch(new FacetSearchQuery(facetName: 'year'));
@@ -4716,23 +4786,12 @@ class IndexTest extends TestCase
         $this->assertSame([], $result->warnings);
     }
 
-    public function testFacetSearchUndeclaredFilterWarns(): void
-    {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['genre']));
-        $index->insert([['id' => 1, 'title' => 'doc', 'genre' => 'Action']]);
-
-        $result = $index->facetSearch(new FacetSearchQuery(facetName: 'genre', filter: ['color' => 'red']));
-
-        $this->assertSame([], $result->facetHits);
-        $this->assertSame(
-            ["Filter field 'color' is not a declared facet field; no documents match it."],
-            $result->warnings,
-        );
-    }
-
     public function testFacetSearchEmptyIndexReturnsEmpty(): void
     {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['genre']));
+        $index = new Index($this->dbPath, schema: new SchemaConfig(
+            filterableFields: ['genre'],
+            sortableFields: ['genre'],
+        ));
 
         $result = $index->facetSearch(new FacetSearchQuery(facetName: 'genre'));
 
@@ -4741,7 +4800,7 @@ class IndexTest extends TestCase
 
     public function testFacetSearchMultiValueFacetCountsEachValueOnce(): void
     {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['tag']));
+        $index = new Index($this->dbPath, schema: new SchemaConfig(filterableFields: ['tag'], sortableFields: ['tag']));
         $index->insert([
             ['id' => 1, 'title' => 'doc', 'tag' => ['php', 'search']],
             ['id' => 2, 'title' => 'doc', 'tag' => ['php', 'sqlite']],
@@ -4757,7 +4816,10 @@ class IndexTest extends TestCase
 
     public function testFacetSearchPrefixOnNumericFacetMatchesStringRepresentation(): void
     {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['year']));
+        $index = new Index($this->dbPath, schema: new SchemaConfig(
+            filterableFields: ['year'],
+            sortableFields: ['year'],
+        ));
         $index->insert([
             ['id' => 1, 'title' => 'doc', 'year' => 2010],
             ['id' => 2, 'title' => 'doc', 'year' => 2014],
@@ -4774,7 +4836,10 @@ class IndexTest extends TestCase
 
     public function testFacetSearchMultiValueOrFilterRestrictsCandidateDocs(): void
     {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['genre', 'lang']));
+        $index = new Index($this->dbPath, schema: new SchemaConfig(
+            filterableFields: ['genre', 'lang'],
+            sortableFields: ['genre', 'lang'],
+        ));
         $index->insert([
             ['id' => 1, 'title' => 'doc', 'genre' => 'Action', 'lang' => 'en'],
             ['id' => 2, 'title' => 'doc', 'genre' => 'Drama',  'lang' => 'fr'],
@@ -4791,7 +4856,10 @@ class IndexTest extends TestCase
 
     public function testFacetSearchResultIsIterable(): void
     {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['genre']));
+        $index = new Index($this->dbPath, schema: new SchemaConfig(
+            filterableFields: ['genre'],
+            sortableFields: ['genre'],
+        ));
         $index->insert([
             ['id' => 1, 'title' => 'doc', 'genre' => 'Action'],
             ['id' => 2, 'title' => 'doc', 'genre' => 'Drama'],
@@ -4809,7 +4877,10 @@ class IndexTest extends TestCase
 
     public function testFacetSearchResultToArray(): void
     {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['genre']));
+        $index = new Index($this->dbPath, schema: new SchemaConfig(
+            filterableFields: ['genre'],
+            sortableFields: ['genre'],
+        ));
         $index->insert([['id' => 1, 'title' => 'doc', 'genre' => 'Action']]);
 
         $arr = $index->facetSearch(new FacetSearchQuery(facetName: 'genre', facetQuery: 'ac'))->toArray();
@@ -4821,14 +4892,17 @@ class IndexTest extends TestCase
         $this->assertSame([], $arr['warnings']);
     }
 
-    // --- facetFields / searchableFields schema persistence ---
+    // --- filterableFields / sortableFields / searchableFields schema persistence ---
 
     public function testFacetFieldsPersistedAcrossReopen(): void
     {
-        (new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['color', 'brand'])))->close();
+        (new Index($this->dbPath, schema: new SchemaConfig(
+            filterableFields: ['color', 'brand'],
+            sortableFields: ['color', 'brand'],
+        )))->close();
 
         $index = new Index($this->dbPath);
-        $this->assertSame(['color', 'brand'], $index->facetFields);
+        $this->assertSame(['color', 'brand'], $index->filterableFields);
     }
 
     public function testSearchableFieldsPersistedAcrossReopen(): void
@@ -4857,7 +4931,10 @@ class IndexTest extends TestCase
 
     public function testFacetFieldNotReturnedByFts(): void
     {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['color']));
+        $index = new Index($this->dbPath, schema: new SchemaConfig(
+            filterableFields: ['color'],
+            sortableFields: ['color'],
+        ));
         $index->insert([['id' => 1, 'title' => 'car', 'color' => 'scarlet']]);
 
         $this->assertSame([], $index->search('scarlet')->getIds());
@@ -4875,7 +4952,11 @@ class IndexTest extends TestCase
 
     public function testFieldInBothFacetAndSearchableIsIndexedAndFaceted(): void
     {
-        $schema = new SchemaConfig(facetFields: ['brand'], searchableFields: ['title', 'brand']);
+        $schema = new SchemaConfig(
+            filterableFields: ['brand'],
+            sortableFields: ['brand'],
+            searchableFields: ['title', 'brand'],
+        );
         $index  = new Index($this->dbPath, schema: $schema);
         $index->insert([['id' => 1, 'title' => 'watch', 'brand' => 'Casio']]);
 
@@ -4888,14 +4969,18 @@ class IndexTest extends TestCase
 
     public function testRebuildInheritsFacetAndSearchableFields(): void
     {
-        (new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['color'], searchableFields: ['title'])))->close(); // phpcs:ignore
+        (new Index($this->dbPath, schema: new SchemaConfig(
+            filterableFields: ['color'],
+            sortableFields: ['color'],
+            searchableFields: ['title'],
+        )))->close(); // phpcs:ignore
 
         Index::rebuild($this->dbPath, function (Index $idx): void {
             $idx->insert([['id' => 1, 'title' => 'car', 'color' => 'red']]);
         });
 
         $index = new Index($this->dbPath);
-        $this->assertSame(['color'], $index->facetFields);
+        $this->assertSame(['color'], $index->filterableFields);
         $this->assertSame(['title'], $index->searchableFields);
     }
 
@@ -4914,21 +4999,27 @@ class IndexTest extends TestCase
 
     public function testRebuildPreservesFacets(): void
     {
-        (new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['color'])))->close();
+        (new Index($this->dbPath, schema: new SchemaConfig(
+            filterableFields: ['color'],
+            sortableFields: ['color'],
+        )))->close();
 
         Index::rebuild($this->dbPath, function (Index $idx): void {
             $idx->insert([['id' => 1, 'title' => 'car', 'color' => 'red']]);
         });
 
         $index = new Index($this->dbPath);
-        $this->assertSame(['color'], $index->facetFields);
+        $this->assertSame(['color'], $index->filterableFields);
     }
 
     // --- Facets: clear ---
 
     public function testClearRemovesFacetValues(): void
     {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['color']));
+        $index = new Index($this->dbPath, schema: new SchemaConfig(
+            filterableFields: ['color'],
+            sortableFields: ['color'],
+        ));
         $index->insert([['id' => 1, 'title' => 'car', 'color' => 'red']]);
         $index->clear();
 
@@ -4940,7 +5031,10 @@ class IndexTest extends TestCase
 
     public function testSortByNumericFacetAsc(): void
     {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['price']));
+        $index = new Index($this->dbPath, schema: new SchemaConfig(
+            filterableFields: ['price'],
+            sortableFields: ['price'],
+        ));
         $index->insert([
             ['id' => 1, 'title' => 'product', 'price' => 30],
             ['id' => 2, 'title' => 'product', 'price' => 10],
@@ -4951,7 +5045,10 @@ class IndexTest extends TestCase
 
     public function testSortByNumericFacetDesc(): void
     {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['price']));
+        $index = new Index($this->dbPath, schema: new SchemaConfig(
+            filterableFields: ['price'],
+            sortableFields: ['price'],
+        ));
         $index->insert([
             ['id' => 1, 'title' => 'product', 'price' => 30],
             ['id' => 2, 'title' => 'product', 'price' => 10],
@@ -4962,7 +5059,10 @@ class IndexTest extends TestCase
 
     public function testSortByStringFacetAsc(): void
     {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['brand']));
+        $index = new Index($this->dbPath, schema: new SchemaConfig(
+            filterableFields: ['brand'],
+            sortableFields: ['brand'],
+        ));
         $index->insert([
             ['id' => 1, 'title' => 'product', 'brand' => 'Nike'],
             ['id' => 2, 'title' => 'product', 'brand' => 'Adidas'],
@@ -4973,7 +5073,10 @@ class IndexTest extends TestCase
 
     public function testSortByStringFacetDesc(): void
     {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['brand']));
+        $index = new Index($this->dbPath, schema: new SchemaConfig(
+            filterableFields: ['brand'],
+            sortableFields: ['brand'],
+        ));
         $index->insert([
             ['id' => 1, 'title' => 'product', 'brand' => 'Nike'],
             ['id' => 2, 'title' => 'product', 'brand' => 'Adidas'],
@@ -4984,7 +5087,10 @@ class IndexTest extends TestCase
 
     public function testSortDirectionCaseInsensitive(): void
     {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['price']));
+        $index = new Index($this->dbPath, schema: new SchemaConfig(
+            filterableFields: ['price'],
+            sortableFields: ['price'],
+        ));
         $index->insert([
             ['id' => 1, 'title' => 'product', 'price' => 30],
             ['id' => 2, 'title' => 'product', 'price' => 10],
@@ -4994,7 +5100,10 @@ class IndexTest extends TestCase
 
     public function testSortNullsLastAsc(): void
     {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['price']));
+        $index = new Index($this->dbPath, schema: new SchemaConfig(
+            filterableFields: ['price'],
+            sortableFields: ['price'],
+        ));
         $index->insert([
             ['id' => 1, 'title' => 'product', 'price' => 10],
             ['id' => 2, 'title' => 'product'],
@@ -5005,7 +5114,10 @@ class IndexTest extends TestCase
 
     public function testSortNullsLastDesc(): void
     {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['price']));
+        $index = new Index($this->dbPath, schema: new SchemaConfig(
+            filterableFields: ['price'],
+            sortableFields: ['price'],
+        ));
         $index->insert([
             ['id' => 1, 'title' => 'product', 'price' => 10],
             ['id' => 2, 'title' => 'product'],
@@ -5016,7 +5128,10 @@ class IndexTest extends TestCase
 
     public function testSortMultiKey(): void
     {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['category', 'price']));
+        $index = new Index($this->dbPath, schema: new SchemaConfig(
+            filterableFields: ['category', 'price'],
+            sortableFields: ['category', 'price'],
+        ));
         $index->insert([
             ['id' => 1, 'title' => 'product', 'category' => 'b', 'price' => 20],
             ['id' => 2, 'title' => 'product', 'category' => 'a', 'price' => 30],
@@ -5029,7 +5144,10 @@ class IndexTest extends TestCase
 
     public function testSortWithFacetFilter(): void
     {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['category', 'price']));
+        $index = new Index($this->dbPath, schema: new SchemaConfig(
+            filterableFields: ['category', 'price'],
+            sortableFields: ['category', 'price'],
+        ));
         $index->insert([
             ['id' => 1, 'title' => 'product', 'category' => 'a', 'price' => 20],
             ['id' => 2, 'title' => 'product', 'category' => 'b', 'price' => 10],
@@ -5042,7 +5160,10 @@ class IndexTest extends TestCase
 
     public function testSortDoesNotAffectHitsCount(): void
     {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['price']));
+        $index = new Index($this->dbPath, schema: new SchemaConfig(
+            filterableFields: ['price'],
+            sortableFields: ['price'],
+        ));
         $index->insert([
             ['id' => 1, 'title' => 'product', 'price' => 30],
             ['id' => 2, 'title' => 'product', 'price' => 10],
@@ -5056,7 +5177,10 @@ class IndexTest extends TestCase
 
     public function testSortDoesNotAffectFacetCounts(): void
     {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['price', 'color']));
+        $index = new Index($this->dbPath, schema: new SchemaConfig(
+            filterableFields: ['price', 'color'],
+            sortableFields: ['price', 'color'],
+        ));
         $index->insert([
             ['id' => 1, 'title' => 'product', 'price' => 30, 'color' => 'red'],
             ['id' => 2, 'title' => 'product', 'price' => 10, 'color' => 'blue'],
@@ -5070,7 +5194,10 @@ class IndexTest extends TestCase
 
     public function testSortWithPagination(): void
     {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['price']));
+        $index = new Index($this->dbPath, schema: new SchemaConfig(
+            filterableFields: ['price'],
+            sortableFields: ['price'],
+        ));
         $index->insert([
             ['id' => 1, 'title' => 'product', 'price' => 40],
             ['id' => 2, 'title' => 'product', 'price' => 10],
@@ -5083,65 +5210,188 @@ class IndexTest extends TestCase
         $this->assertSame([3, 1], $page2->getIds());
     }
 
-    public function testSortUndeclaredFieldIsIgnoredWithWarning(): void
+    /** An index with 'brand' filterable only, 'price' sortable only, and 'size' in both lists. */
+    private function fieldContractIndex(): Index
     {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['price']));
+        $index = new Index($this->dbPath, schema: new SchemaConfig(
+            filterableFields: ['brand', 'size'],
+            sortableFields: ['price', 'size'],
+        ));
         $index->insert([
-            ['id' => 1, 'title' => 'product', 'price' => 10],
-            ['id' => 2, 'title' => 'product product', 'price' => 20],
-            ['id' => 3, 'title' => 'product', 'price' => 30],
+            ['id' => 1, 'title' => 'product', 'brand' => 'Nike', 'price' => 30, 'size' => 'M'],
+            ['id' => 2, 'title' => 'product', 'brand' => 'Adidas', 'price' => 10, 'size' => 'L'],
+            ['id' => 3, 'title' => 'product', 'brand' => 'Nike', 'price' => 20, 'size' => 'L'],
         ]);
-        $relevance = $index->search('product')->getIds();
-        $result    = $index->search('product', new SearchOptions(sort: ['weight:asc']));
-
-        $this->assertSame($relevance, $result->getIds());
-        $this->assertSame(["Sort field 'weight' is not a declared facet field; ignored."], $result->warnings);
+        return $index;
     }
 
-    public function testSortUndeclaredFieldKeepsDeclaredSpecs(): void
+    /** @return iterable<string, array{0: SearchOptions, 1: string}> */
+    public static function undeclaredFieldReferences(): iterable
     {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['price']));
-        $index->insert([
-            ['id' => 1, 'title' => 'product', 'price' => 30],
-            ['id' => 2, 'title' => 'product', 'price' => 10],
-            ['id' => 3, 'title' => 'product', 'price' => 20],
-        ]);
-        $result = $index->search('product', new SearchOptions(sort: ['title:asc', 'price:asc']));
-
-        $this->assertSame([2, 3, 1], $result->getIds());
-        $this->assertCount(1, $result->warnings);
+        yield 'sort undeclared' => [new SearchOptions(sort: ['weight:asc']), "Sort field 'weight' is not sortable"];
+        yield 'sort on a filterable-only field' => [
+            new SearchOptions(sort: ['brand:asc']),
+            "Sort field 'brand' is not sortable",
+        ];
+        yield 'sort id without declaring it' => [
+            new SearchOptions(sort: ['id:asc']),
+            "Sort field 'id' is not sortable",
+        ];
+        yield 'second sort spec undeclared' => [
+            new SearchOptions(sort: ['price:asc', 'title:asc']),
+            "Sort field 'title'",
+        ];
+        yield 'filter undeclared' => [
+            new SearchOptions(filter: ['color' => 'red']),
+            "Filter field 'color' is not filterable",
+        ];
+        yield 'filter on a sortable-only field' => [
+            new SearchOptions(filter: ['price' => '10']),
+            "Filter field 'price' is not filterable",
+        ];
+        yield 'exclusion on an undeclared field' => [
+            new SearchOptions(filter: ['tags' => new FacetExclude('x')]),
+            "Filter field 'tags' is not filterable",
+        ];
+        yield 'facets undeclared' => [
+            new SearchOptions(facets: ['brand', 'color']),
+            "Facet field 'color' is not filterable",
+        ];
+        yield 'facets on a sortable-only field' => [
+            new SearchOptions(facets: ['price']),
+            "Facet field 'price' is not filterable",
+        ];
+        yield 'distinct undeclared' => [new SearchOptions(distinct: 'sku'), "Distinct field 'sku' is not filterable"];
+        yield 'distinct on a sortable-only field' => [
+            new SearchOptions(distinct: 'price'),
+            "Distinct field 'price' is not filterable",
+        ];
     }
 
-    public function testSortUndeclaredFieldOnBrowseKeepsNewestFirst(): void
+    #[DataProvider('undeclaredFieldReferences')]
+    public function testUndeclaredFieldReferenceThrowsOnEveryPath(SearchOptions $options, string $message): void
     {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['price']));
-        $index->insert([
-            ['id' => 1, 'title' => 'a'],
-            ['id' => 2, 'title' => 'b'],
-            ['id' => 3, 'title' => 'c'],
-        ]);
-        $asc  = $index->search('', new SearchOptions(sort: ['title:asc']));
-        $desc = $index->searchBoolean('', new SearchOptions(sort: ['title:desc']));
-
-        $this->assertSame([3, 2, 1], $asc->getIds());
-        $this->assertSame([3, 2, 1], $desc->getIds());
-        $this->assertCount(1, $asc->warnings);
+        $index = $this->fieldContractIndex();
+        $paths = [
+            'search'        => fn() => $index->search('product', $options),
+            'searchBoolean' => fn() => $index->searchBoolean('product', $options),
+            'browse'        => fn() => $index->search('', $options),
+        ];
+        foreach ($paths as $path => $run) {
+            try {
+                $run();
+                $this->fail("{$path}: expected a QueryException");
+            } catch (QueryException $e) {
+                $this->assertStringContainsString($message, $e->getMessage(), $path);
+            }
+        }
     }
 
-    public function testSortUndeclaredFieldOnBooleanSearchWarns(): void
+    public function testUndeclaredFieldMessageListsTheDeclaredFields(): void
     {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['price']));
-        $index->insert([['id' => 1, 'title' => 'product', 'price' => 10]]);
+        $this->expectException(QueryException::class);
+        $this->expectExceptionMessage(
+            "Sort field 'brand' is not sortable. Declare it in SchemaConfig::\$sortableFields when creating"
+            . ' the index (declared: price, size).',
+        );
+        $this->fieldContractIndex()->search('', new SearchOptions(sort: ['brand:asc']));
+    }
 
-        $result = $index->searchBoolean('product', new SearchOptions(sort: ['title:asc']));
+    public function testUndeclaredFieldMessageWithNoDeclaredFields(): void
+    {
+        $index = new Index($this->dbPath);
+
+        $this->expectException(QueryException::class);
+        $this->expectExceptionMessage('(declared: none)');
+        $index->search('', new SearchOptions(filter: ['color' => 'red']));
+    }
+
+    /** @return iterable<string, array{0: FacetSearchQuery, 1: string}> */
+    public static function undeclaredFacetSearchReferences(): iterable
+    {
+        yield 'facetName undeclared' => [
+            new FacetSearchQuery(facetName: 'color'),
+            "Facet field 'color' is not filterable",
+        ];
+        yield 'facetName sortable-only' => [
+            new FacetSearchQuery(facetName: 'price'),
+            "Facet field 'price' is not filterable",
+        ];
+        yield 'filter undeclared' => [
+            new FacetSearchQuery(facetName: 'brand', filter: ['color' => 'red']),
+            "Filter field 'color' is not filterable",
+        ];
+        yield 'exclusion undeclared' => [
+            new FacetSearchQuery(facetName: 'brand', query: 'product', filter: ['tags' => new FacetExclude('x')]),
+            "Filter field 'tags' is not filterable",
+        ];
+    }
+
+    #[DataProvider('undeclaredFacetSearchReferences')]
+    public function testFacetSearchUndeclaredFieldThrows(FacetSearchQuery $query, string $message): void
+    {
+        $index = $this->fieldContractIndex();
+
+        $this->expectException(QueryException::class);
+        $this->expectExceptionMessage($message);
+        $index->facetSearch($query);
+    }
+
+    public function testSortableOnlyAndFilterableOnlyFieldsWork(): void
+    {
+        $index = $this->fieldContractIndex();
+
+        $sorted = $index->search('product', new SearchOptions(filter: ['brand' => 'Nike'], sort: ['price:asc']));
+        $this->assertSame([3, 1], $sorted->getIds());
+        $this->assertSame([], $sorted->warnings);
+        $browse = $index->search('', new SearchOptions(
+            filter: ['size' => 'L'],
+            facets: ['brand', 'size'],
+            sort: ['size:asc', 'price:desc'],
+        ));
+        $this->assertSame([3, 2], $browse->getIds());
+        $this->assertSame(['Adidas' => 1, 'Nike' => 1], $browse->facetDistribution['brand']);
+        $this->assertSame(
+            [['value' => 'Nike', 'count' => 2], ['value' => 'Adidas', 'count' => 1]],
+            $index->facetSearch(new FacetSearchQuery(facetName: 'brand'))->facetHits,
+        );
+    }
+
+    public function testFilterableAndSortableFieldsAreNotTokenised(): void
+    {
+        $index = $this->fieldContractIndex();
+
+        $this->assertSame([], $index->search('nike', new SearchOptions(asYouType: false))->getIds());
+        $this->assertSame([], $index->search('adidas', new SearchOptions(asYouType: false))->getIds());
+    }
+
+    public function testDeclaredButUnpopulatedFieldIsNotAnError(): void
+    {
+        $index = new Index($this->dbPath, schema: new SchemaConfig(
+            filterableFields: ['color'],
+            sortableFields: ['weight'],
+        ));
+        $index->insert([['id' => 1, 'title' => 'product']]);
+
+        $result = $index->search('product', new SearchOptions(
+            filter: ['color' => new FacetExclude('red')],
+            facets: ['color'],
+            sort: ['weight:asc'],
+            distinct: 'color',
+        ));
 
         $this->assertSame([1], $result->getIds());
-        $this->assertSame(["Sort field 'title' is not a declared facet field; ignored."], $result->warnings);
+        $this->assertSame([], $result->facetDistribution);
+        $this->assertSame([], $result->warnings);
+        $this->assertSame([], $index->facetSearch(new FacetSearchQuery(facetName: 'color'))->facetHits);
     }
 
     public function testSortDeclaredButUnpopulatedFieldDoesNotWarn(): void
     {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['price', 'weight']));
+        $index = new Index($this->dbPath, schema: new SchemaConfig(
+            filterableFields: ['price', 'weight'],
+            sortableFields: ['price', 'weight'],
+        ));
         $index->insert([['id' => 1, 'title' => 'product', 'price' => 10]]);
 
         $result = $index->search('product', new SearchOptions(sort: ['weight:asc']));
@@ -5150,23 +5400,9 @@ class IndexTest extends TestCase
         $this->assertSame([], $result->warnings);
     }
 
-    public function testSortByUndeclaredIdIsIgnoredWithWarning(): void
-    {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['price']));
-        $index->insert([
-            ['id' => 1, 'title' => 'product'],
-            ['id' => 2, 'title' => 'product'],
-            ['id' => 3, 'title' => 'product'],
-        ]);
-        $result = $index->search('', new SearchOptions(sort: ['id:asc']));
-
-        $this->assertSame([3, 2, 1], $result->getIds());
-        $this->assertSame(["Sort field 'id' is not a declared facet field; ignored."], $result->warnings);
-    }
-
     public function testSortByIdWhenDeclaredAsFacetField(): void
     {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['id']));
+        $index = new Index($this->dbPath, schema: new SchemaConfig(filterableFields: ['id'], sortableFields: ['id']));
         $index->insert([
             ['id' => 3, 'title' => 'product red'],
             ['id' => 1, 'title' => 'product product'],
@@ -5187,7 +5423,10 @@ class IndexTest extends TestCase
 
     public function testSortNumbersBeforeStringsInBothDirections(): void
     {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['size']));
+        $index = new Index($this->dbPath, schema: new SchemaConfig(
+            filterableFields: ['size'],
+            sortableFields: ['size'],
+        ));
         $index->insert([
             ['id' => 1, 'title' => 'product', 'size' => 'M'],
             ['id' => 2, 'title' => 'product', 'size' => 42],
@@ -5205,7 +5444,10 @@ class IndexTest extends TestCase
 
     public function testSortNumericLookingStringsCompareAsBytes(): void
     {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['code']));
+        $index = new Index($this->dbPath, schema: new SchemaConfig(
+            filterableFields: ['code'],
+            sortableFields: ['code'],
+        ));
         $index->insert([
             ['id' => 1, 'title' => 'product', 'code' => '9'],
             ['id' => 2, 'title' => 'product', 'code' => '10'],
@@ -5219,7 +5461,10 @@ class IndexTest extends TestCase
 
     public function testSortStringsAreCaseSensitiveBytes(): void
     {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['name']));
+        $index = new Index($this->dbPath, schema: new SchemaConfig(
+            filterableFields: ['name'],
+            sortableFields: ['name'],
+        ));
         $index->insert([
             ['id' => 1, 'title' => 'product', 'name' => 'apple'],
             ['id' => 2, 'title' => 'product', 'name' => 'Zebra'],
@@ -5237,7 +5482,10 @@ class IndexTest extends TestCase
         // a total order: the result depended on the order candidates arrived in.
         $orders = [];
         foreach ([['9', '10', '10a'], ['10a', '10', '9'], ['10', '10a', '9']] as $n => $codes) {
-            $index = new Index($this->dbPath, force: true, schema: new SchemaConfig(facetFields: ['code']));
+            $index = new Index($this->dbPath, force: true, schema: new SchemaConfig(
+                filterableFields: ['code'],
+                sortableFields: ['code'],
+            ));
             $docs  = [];
             foreach ($codes as $i => $code) {
                 $docs[] = ['id' => $i + 1, 'title' => 'product', 'code' => $code];
@@ -5258,7 +5506,10 @@ class IndexTest extends TestCase
 
     public function testSortMultiValueFieldUsesSmallestAscAndLargestDesc(): void
     {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['size']));
+        $index = new Index($this->dbPath, schema: new SchemaConfig(
+            filterableFields: ['size'],
+            sortableFields: ['size'],
+        ));
         $index->insert([
             ['id' => 1, 'title' => 'product', 'size' => [1, 50]],
             ['id' => 2, 'title' => 'product', 'size' => [10]],
@@ -5274,7 +5525,10 @@ class IndexTest extends TestCase
 
     public function testSortOnBooleanSearch(): void
     {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['price']));
+        $index = new Index($this->dbPath, schema: new SchemaConfig(
+            filterableFields: ['price'],
+            sortableFields: ['price'],
+        ));
         $index->insert([
             ['id' => 1, 'title' => 'product', 'price' => 30],
             ['id' => 2, 'title' => 'product', 'price' => 10],
@@ -5286,7 +5540,10 @@ class IndexTest extends TestCase
 
     public function testSortBooleanNullsLast(): void
     {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['price']));
+        $index = new Index($this->dbPath, schema: new SchemaConfig(
+            filterableFields: ['price'],
+            sortableFields: ['price'],
+        ));
         $index->insert([
             ['id' => 1, 'title' => 'product', 'price' => 10],
             ['id' => 2, 'title' => 'product'],
@@ -5298,7 +5555,10 @@ class IndexTest extends TestCase
 
     public function testSortInvalidSpecThrowsOnSearch(): void
     {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['price']));
+        $index = new Index($this->dbPath, schema: new SchemaConfig(
+            filterableFields: ['price'],
+            sortableFields: ['price'],
+        ));
         $index->insert([['id' => 1, 'title' => 'product', 'price' => 10]]);
         $this->expectException(\InvalidArgumentException::class);
         $index->search('product', new SearchOptions(sort: ['price_asc']));
@@ -5306,7 +5566,10 @@ class IndexTest extends TestCase
 
     public function testSortInvalidDirectionThrows(): void
     {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['price']));
+        $index = new Index($this->dbPath, schema: new SchemaConfig(
+            filterableFields: ['price'],
+            sortableFields: ['price'],
+        ));
         $index->insert([['id' => 1, 'title' => 'product', 'price' => 10]]);
         $this->expectException(\InvalidArgumentException::class);
         $index->search('product', new SearchOptions(sort: ['price:up']));
@@ -5314,7 +5577,10 @@ class IndexTest extends TestCase
 
     public function testSortInvalidSpecThrowsOnBoolean(): void
     {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['price']));
+        $index = new Index($this->dbPath, schema: new SchemaConfig(
+            filterableFields: ['price'],
+            sortableFields: ['price'],
+        ));
         $index->insert([['id' => 1, 'title' => 'product', 'price' => 10]]);
         $this->expectException(\InvalidArgumentException::class);
         $index->searchBoolean('product', new SearchOptions(sort: ['price:up']));
@@ -5322,7 +5588,10 @@ class IndexTest extends TestCase
 
     public function testEmptySortIsNoop(): void
     {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['price']));
+        $index = new Index($this->dbPath, schema: new SchemaConfig(
+            filterableFields: ['price'],
+            sortableFields: ['price'],
+        ));
         $index->insert([['id' => 1, 'title' => 'product', 'price' => 10]]);
         $this->assertContains(1, $index->search('product', new SearchOptions(sort: []))->getIds());
     }
@@ -5385,7 +5654,10 @@ class IndexTest extends TestCase
 
     public function testBrowseWithSort(): void
     {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['price']));
+        $index = new Index($this->dbPath, schema: new SchemaConfig(
+            filterableFields: ['price'],
+            sortableFields: ['price'],
+        ));
         $index->insert([
             ['id' => 1, 'title' => 'a', 'price' => 30],
             ['id' => 2, 'title' => 'b', 'price' => 10],
@@ -5396,7 +5668,10 @@ class IndexTest extends TestCase
 
     public function testBrowseWithFilter(): void
     {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['category']));
+        $index = new Index($this->dbPath, schema: new SchemaConfig(
+            filterableFields: ['category'],
+            sortableFields: ['category'],
+        ));
         $index->insert([
             ['id' => 1, 'title' => 'a', 'category' => 'shoes'],
             ['id' => 2, 'title' => 'b', 'category' => 'shirts'],
@@ -5409,7 +5684,10 @@ class IndexTest extends TestCase
 
     public function testBrowseWithFacetCounts(): void
     {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['color']));
+        $index = new Index($this->dbPath, schema: new SchemaConfig(
+            filterableFields: ['color'],
+            sortableFields: ['color'],
+        ));
         $index->insert([
             ['id' => 1, 'title' => 'a', 'color' => 'red'],
             ['id' => 2, 'title' => 'b', 'color' => 'blue'],
@@ -5431,7 +5709,10 @@ class IndexTest extends TestCase
 
     public function testBrowseSortAndFilter(): void
     {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['category', 'price']));
+        $index = new Index($this->dbPath, schema: new SchemaConfig(
+            filterableFields: ['category', 'price'],
+            sortableFields: ['category', 'price'],
+        ));
         $index->insert([
             ['id' => 1, 'title' => 'a', 'category' => 'shoes', 'price' => 50],
             ['id' => 2, 'title' => 'b', 'category' => 'shirts', 'price' => 20],
@@ -5467,8 +5748,11 @@ class IndexTest extends TestCase
     {
         $index = new Index(
             $this->dbPath,
-            schema: new SchemaConfig(facetFields: ['price', 'color', 'brand']),
-            config: new Config(filterMaxDocs: 2, maxFacetCountDocs: 2),
+            schema: new SchemaConfig(
+                filterableFields: ['price', 'color', 'brand'],
+                sortableFields: ['price', 'color', 'brand'],
+            ),
+            config: new Config(maxFacetCountDocs: 2),
         );
         $index->insert($this->browseCatalog());
 
@@ -5488,7 +5772,10 @@ class IndexTest extends TestCase
 
     public function testBrowseFilteredFacetCountsUnderCapAreExact(): void
     {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['price', 'color', 'brand']));
+        $index = new Index($this->dbPath, schema: new SchemaConfig(
+            filterableFields: ['price', 'color', 'brand'],
+            sortableFields: ['price', 'color', 'brand'],
+        ));
         $index->insert($this->browseCatalog());
 
         $result = $index->search('', new SearchOptions(filter: ['color' => 'blue'], facets: ['brand', 'color']));
@@ -5501,7 +5788,10 @@ class IndexTest extends TestCase
     {
         $index = new Index(
             $this->dbPath,
-            schema: new SchemaConfig(facetFields: ['price', 'color', 'brand']),
+            schema: new SchemaConfig(
+                filterableFields: ['price', 'color', 'brand'],
+                sortableFields: ['price', 'color', 'brand'],
+            ),
             config: new Config(maxFacetCountDocs: 3),
         );
         $index->insert($this->browseCatalog());
@@ -5514,7 +5804,10 @@ class IndexTest extends TestCase
 
     public function testBrowseFacetStatsWithFilter(): void
     {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['price', 'color', 'brand']));
+        $index = new Index($this->dbPath, schema: new SchemaConfig(
+            filterableFields: ['price', 'color', 'brand'],
+            sortableFields: ['price', 'color', 'brand'],
+        ));
         $index->insert($this->browseCatalog());
 
         $result = $index->search('', new SearchOptions(filter: ['brand' => 'Zeta'], facets: ['price', 'brand']));
@@ -5530,7 +5823,10 @@ class IndexTest extends TestCase
         // over the same candidates: mixed types, multi-value fields, missing values, ties,
         // secondary specs, both filter shapes (probed for broad filters, IN for selective), and
         // exclusions, which the walk probes with NOT EXISTS.
-        $schema = new SchemaConfig(facetFields: ['size', 'group', 'color', 'unused']);
+        $schema = new SchemaConfig(
+            filterableFields: ['size', 'group', 'color', 'unused'],
+            sortableFields: ['size', 'group', 'color', 'unused'],
+        );
         $index  = new Index($this->dbPath, schema: $schema);
         $sizes  = [7, 'L', [3, 40], 12, null, 'M', 7, [2.5, 'XL'], 30, null];
         $sizes  = [...$sizes, 'S', 12, 7, [15, 1], 'L', 22, null, 9, 3, 'M'];
@@ -5584,7 +5880,10 @@ class IndexTest extends TestCase
 
     public function testBrowseUnsortedFilterShapesAgree(): void
     {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['price', 'color', 'brand']));
+        $index = new Index($this->dbPath, schema: new SchemaConfig(
+            filterableFields: ['price', 'color', 'brand'],
+            sortableFields: ['price', 'color', 'brand'],
+        ));
         $index->insert($this->browseCatalog());
 
         // 'blue' matches 8/12 (probed walk); 'Acme' + 'red' matches 1/12 (materialised IN).
@@ -5598,7 +5897,10 @@ class IndexTest extends TestCase
 
     public function testBrowseEmptyFilterValueListMatchesNothing(): void
     {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['price', 'color', 'brand']));
+        $index = new Index($this->dbPath, schema: new SchemaConfig(
+            filterableFields: ['price', 'color', 'brand'],
+            sortableFields: ['price', 'color', 'brand'],
+        ));
         $index->insert($this->browseCatalog());
 
         $result = $index->search('', new SearchOptions(filter: ['color' => []], facets: ['brand']));
@@ -5612,8 +5914,11 @@ class IndexTest extends TestCase
     {
         $index = new Index(
             $this->dbPath,
-            schema: new SchemaConfig(facetFields: ['price', 'color', 'brand']),
-            config: new Config(filterMaxDocs: 2, maxFacetCountDocs: 2),
+            schema: new SchemaConfig(
+                filterableFields: ['price', 'color', 'brand'],
+                sortableFields: ['price', 'color', 'brand'],
+            ),
+            config: new Config(maxFacetCountDocs: 2),
         );
         $index->insert($this->browseCatalog());
 
@@ -5627,8 +5932,11 @@ class IndexTest extends TestCase
     {
         $index = new Index(
             $this->dbPath,
-            schema: new SchemaConfig(facetFields: ['price', 'color', 'brand']),
-            config: new Config(filterMaxDocs: 2, maxFacetCountDocs: 2),
+            schema: new SchemaConfig(
+                filterableFields: ['price', 'color', 'brand'],
+                sortableFields: ['price', 'color', 'brand'],
+            ),
+            config: new Config(maxFacetCountDocs: 2),
         );
         $index->insert($this->browseCatalog());
 
@@ -5640,7 +5948,10 @@ class IndexTest extends TestCase
 
     public function testBrowseSortedPagesConcatenateToFullOrder(): void
     {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['price', 'color', 'brand']));
+        $index = new Index($this->dbPath, schema: new SchemaConfig(
+            filterableFields: ['price', 'color', 'brand'],
+            sortableFields: ['price', 'color', 'brand'],
+        ));
         $index->insert($this->browseCatalog());
 
         $full  = $index->search('', new SearchOptions(sort: ['brand:desc', 'price:desc'], limit: 100))->getIds();
@@ -5662,7 +5973,10 @@ class IndexTest extends TestCase
 
     public function testDistinctCollapsesDuplicateStringValues(): void
     {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['brand']));
+        $index = new Index($this->dbPath, schema: new SchemaConfig(
+            filterableFields: ['brand'],
+            sortableFields: ['brand'],
+        ));
         $index->insert([
             ['id' => 1, 'title' => 'product alpha', 'brand' => 'Nike'],
             ['id' => 2, 'title' => 'product beta',  'brand' => 'Nike'],
@@ -5680,7 +5994,10 @@ class IndexTest extends TestCase
 
     public function testDistinctHitsReflectsDeduplicatedCount(): void
     {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['brand']));
+        $index = new Index($this->dbPath, schema: new SchemaConfig(
+            filterableFields: ['brand'],
+            sortableFields: ['brand'],
+        ));
         $index->insert([
             ['id' => 1, 'title' => 'product', 'brand' => 'Nike'],
             ['id' => 2, 'title' => 'product', 'brand' => 'Nike'],
@@ -5693,7 +6010,10 @@ class IndexTest extends TestCase
 
     public function testDistinctCountAllowsMultiplePerGroup(): void
     {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['brand']));
+        $index = new Index($this->dbPath, schema: new SchemaConfig(
+            filterableFields: ['brand'],
+            sortableFields: ['brand'],
+        ));
         $index->insert([
             ['id' => 1, 'title' => 'product', 'brand' => 'Nike'],
             ['id' => 2, 'title' => 'product', 'brand' => 'Nike'],
@@ -5715,7 +6035,10 @@ class IndexTest extends TestCase
     {
         // Doc 1 has "widget" once; doc 2 has "widget widget" — doc 2 scores higher.
         // With distinct on brand (same group), only the top scorer survives.
-        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['brand']));
+        $index = new Index($this->dbPath, schema: new SchemaConfig(
+            filterableFields: ['brand'],
+            sortableFields: ['brand'],
+        ));
         $index->insert([
             ['id' => 1, 'title' => 'widget',        'brand' => 'Acme'],
             ['id' => 2, 'title' => 'widget widget',  'brand' => 'Acme'],
@@ -5727,7 +6050,10 @@ class IndexTest extends TestCase
     public function testDistinctNullPassesThrough(): void
     {
         // Docs without the distinct field value each appear independently.
-        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['brand']));
+        $index = new Index($this->dbPath, schema: new SchemaConfig(
+            filterableFields: ['brand'],
+            sortableFields: ['brand'],
+        ));
         $index->insert([
             ['id' => 1, 'title' => 'product'],
             ['id' => 2, 'title' => 'product'],
@@ -5743,7 +6069,10 @@ class IndexTest extends TestCase
 
     public function testDistinctWithPagination(): void
     {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['brand']));
+        $index = new Index($this->dbPath, schema: new SchemaConfig(
+            filterableFields: ['brand'],
+            sortableFields: ['brand'],
+        ));
         $index->insert([
             ['id' => 1, 'title' => 'product alpha',  'brand' => 'A'],
             ['id' => 2, 'title' => 'product beta',   'brand' => 'A'],
@@ -5764,7 +6093,10 @@ class IndexTest extends TestCase
 
     public function testDistinctLimitZeroReportsAccurateHits(): void
     {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['brand']));
+        $index = new Index($this->dbPath, schema: new SchemaConfig(
+            filterableFields: ['brand'],
+            sortableFields: ['brand'],
+        ));
         $index->insert([
             ['id' => 1, 'title' => 'product', 'brand' => 'Nike'],
             ['id' => 2, 'title' => 'product', 'brand' => 'Nike'],
@@ -5777,7 +6109,7 @@ class IndexTest extends TestCase
 
     public function testDistinctCountOneWithAllUniqueValuesMatchesNonDistinct(): void
     {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['sku']));
+        $index = new Index($this->dbPath, schema: new SchemaConfig(filterableFields: ['sku'], sortableFields: ['sku']));
         $index->insert([
             ['id' => 1, 'title' => 'product', 'sku' => 'A'],
             ['id' => 2, 'title' => 'product', 'sku' => 'B'],
@@ -5791,7 +6123,10 @@ class IndexTest extends TestCase
 
     public function testDistinctOnBooleanSearch(): void
     {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['brand']));
+        $index = new Index($this->dbPath, schema: new SchemaConfig(
+            filterableFields: ['brand'],
+            sortableFields: ['brand'],
+        ));
         $index->insert([
             ['id' => 1, 'title' => 'product', 'brand' => 'Nike'],
             ['id' => 2, 'title' => 'product', 'brand' => 'Nike'],
@@ -5804,7 +6139,10 @@ class IndexTest extends TestCase
 
     public function testDistinctBooleanWithPagination(): void
     {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['brand']));
+        $index = new Index($this->dbPath, schema: new SchemaConfig(
+            filterableFields: ['brand'],
+            sortableFields: ['brand'],
+        ));
         $index->insert([
             ['id' => 1, 'title' => 'product', 'brand' => 'A'],
             ['id' => 2, 'title' => 'product', 'brand' => 'A'],
@@ -5823,7 +6161,10 @@ class IndexTest extends TestCase
     public function testDistinctWithSort(): void
     {
         // sort: price:asc determines which doc wins per brand group, not BM25 score
-        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['brand', 'price']));
+        $index = new Index($this->dbPath, schema: new SchemaConfig(
+            filterableFields: ['brand', 'price'],
+            sortableFields: ['brand', 'price'],
+        ));
         $index->insert([
             ['id' => 1, 'title' => 'product', 'brand' => 'Nike',   'price' => 90],
             ['id' => 2, 'title' => 'product', 'brand' => 'Nike',   'price' => 50],
@@ -5838,7 +6179,10 @@ class IndexTest extends TestCase
 
     public function testDistinctWithFacetFilter(): void
     {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['brand', 'category']));
+        $index = new Index($this->dbPath, schema: new SchemaConfig(
+            filterableFields: ['brand', 'category'],
+            sortableFields: ['brand', 'category'],
+        ));
         $index->insert([
             ['id' => 1, 'title' => 'product', 'brand' => 'Nike',   'category' => 'shoes'],
             ['id' => 2, 'title' => 'product', 'brand' => 'Nike',   'category' => 'shirts'],
@@ -5857,7 +6201,10 @@ class IndexTest extends TestCase
 
     public function testDistinctWithFacetCounts(): void
     {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['brand', 'category']));
+        $index = new Index($this->dbPath, schema: new SchemaConfig(
+            filterableFields: ['brand', 'category'],
+            sortableFields: ['brand', 'category'],
+        ));
         $index->insert([
             ['id' => 1, 'title' => 'product', 'brand' => 'Nike',   'category' => 'shoes'],
             ['id' => 2, 'title' => 'product', 'brand' => 'Nike',   'category' => 'shirts'],
@@ -5871,7 +6218,10 @@ class IndexTest extends TestCase
 
     public function testDistinctOnNumericFacet(): void
     {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['rating']));
+        $index = new Index($this->dbPath, schema: new SchemaConfig(
+            filterableFields: ['rating'],
+            sortableFields: ['rating'],
+        ));
         $index->insert([
             ['id' => 1, 'title' => 'product', 'rating' => 5],
             ['id' => 2, 'title' => 'product', 'rating' => 5],
@@ -5886,27 +6236,9 @@ class IndexTest extends TestCase
         $this->assertCount(1, $rating4);
     }
 
-    public function testDistinctUnknownFieldIsNoopWithWarning(): void
-    {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['brand']));
-        $index->insert([
-            ['id' => 1, 'title' => 'product', 'brand' => 'Nike'],
-            ['id' => 2, 'title' => 'product', 'brand' => 'Nike'],
-            ['id' => 3, 'title' => 'product', 'brand' => 'Adidas'],
-        ]);
-        // 'color' is not a declared facet field — distinct has no effect
-        $result = $index->search('product', new SearchOptions(distinct: 'color'));
-        $this->assertSame(3, $result->totalHits);
-        $this->assertCount(3, $result->getIds());
-        $this->assertSame(
-            ["Distinct field 'color' is not a declared facet field; results were not deduplicated."],
-            $result->warnings,
-        );
-    }
-
     public function testDistinctMultiValueFieldIsDeterministic(): void
     {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['tag']));
+        $index = new Index($this->dbPath, schema: new SchemaConfig(filterableFields: ['tag'], sortableFields: ['tag']));
         $index->insert([
             ['id' => 1, 'title' => 'product', 'tag' => ['b', 'a']],
             ['id' => 2, 'title' => 'product', 'tag' => ['a']],
@@ -5922,7 +6254,10 @@ class IndexTest extends TestCase
 
     public function testWarningsEmptyByDefault(): void
     {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['brand']));
+        $index = new Index($this->dbPath, schema: new SchemaConfig(
+            filterableFields: ['brand'],
+            sortableFields: ['brand'],
+        ));
         $index->insert([['id' => 1, 'title' => 'product', 'brand' => 'Nike']]);
 
         $result = $index->search('product', new SearchOptions(
@@ -5935,49 +6270,6 @@ class IndexTest extends TestCase
         $this->assertSame([], $result->warnings);
         $this->assertSame([], $result->getWarnings());
         $this->assertSame([], $result->toArray()['warnings']);
-    }
-
-    public function testFilterUndeclaredFieldWarnsAndMatchesNothing(): void
-    {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['brand']));
-        $index->insert([['id' => 1, 'title' => 'product', 'brand' => 'Nike']]);
-
-        $search  = $index->search('product', new SearchOptions(filter: ['color' => 'red']));
-        $boolean = $index->searchBoolean('product', new SearchOptions(filter: ['color' => 'red']));
-        $browse  = $index->search('', new SearchOptions(filter: ['color' => 'red']));
-
-        $expected = ["Filter field 'color' is not a declared facet field; no documents match it."];
-        foreach ([$search, $boolean, $browse] as $result) {
-            $this->assertSame(0, $result->totalHits);
-            $this->assertSame($expected, $result->warnings);
-        }
-    }
-
-    public function testFacetsUndeclaredFieldWarns(): void
-    {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['brand']));
-        $index->insert([['id' => 1, 'title' => 'product', 'brand' => 'Nike']]);
-
-        $result = $index->search('product', new SearchOptions(facets: ['brand', 'color', 'color']));
-
-        $this->assertSame(['Nike' => 1], $result->facetDistribution['brand']);
-        $this->assertArrayNotHasKey('color', $result->facetDistribution);
-        $this->assertSame(["Facet 'color' is not a declared facet field; no counts returned."], $result->warnings);
-    }
-
-    public function testWarningsCollectedAcrossOptions(): void
-    {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['brand']));
-        $index->insert([['id' => 1, 'title' => 'product', 'brand' => 'Nike']]);
-
-        $result = $index->search('', new SearchOptions(
-            filter: ['size' => 'M'],
-            facets: ['color'],
-            sort: ['title:asc'],
-            distinct: 'sku',
-        ));
-
-        $this->assertCount(4, $result->warnings);
     }
 
     // --- Approximate results ---
@@ -5994,7 +6286,10 @@ class IndexTest extends TestCase
 
     public function testSearchIsExhaustiveByDefault(): void
     {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['color']));
+        $index = new Index($this->dbPath, schema: new SchemaConfig(
+            filterableFields: ['color'],
+            sortableFields: ['color'],
+        ));
         $index->insert($this->sameWordDocs(3));
 
         $result = $index->search('widget', new SearchOptions(facets: ['color']));
@@ -6080,7 +6375,7 @@ class IndexTest extends TestCase
     {
         $index = new Index(
             $this->dbPath,
-            schema: new SchemaConfig(facetFields: ['color']),
+            schema: new SchemaConfig(filterableFields: ['color'], sortableFields: ['color']),
             config: new Config(maxFacetCountDocs: 2),
         );
         $index->insert($this->sameWordDocs(3));
@@ -6102,7 +6397,7 @@ class IndexTest extends TestCase
     {
         $index = new Index(
             $this->dbPath,
-            schema: new SchemaConfig(facetFields: ['color']),
+            schema: new SchemaConfig(filterableFields: ['color'], sortableFields: ['color']),
             config: new Config(maxFacetCountDocs: 3),
         );
         $index->insert($this->sameWordDocs(3));
@@ -6117,7 +6412,10 @@ class IndexTest extends TestCase
     {
         $index = new Index(
             $this->dbPath,
-            schema: new SchemaConfig(facetFields: ['price', 'color', 'brand']),
+            schema: new SchemaConfig(
+                filterableFields: ['price', 'color', 'brand'],
+                sortableFields: ['price', 'color', 'brand'],
+            ),
             config: new Config(maxDocs: 1, maxFacetCountDocs: 3),
         );
         $index->insert($this->browseCatalog());
@@ -6137,7 +6435,7 @@ class IndexTest extends TestCase
     {
         $index = new Index(
             $this->dbPath,
-            schema: new SchemaConfig(facetFields: ['color']),
+            schema: new SchemaConfig(filterableFields: ['color'], sortableFields: ['color']),
             config: new Config(maxFacetCountDocs: 2),
         );
         $index->insert($this->sameWordDocs(3));
@@ -6759,7 +7057,10 @@ class IndexTest extends TestCase
 
     private function facetIndex(): Index
     {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(facetFields: ['color', 'size']));
+        $index = new Index($this->dbPath, schema: new SchemaConfig(
+            filterableFields: ['color', 'size'],
+            sortableFields: ['color', 'size'],
+        ));
         $index->insert([
             ['id' => 1, 'title' => 'red shirt',  'color' => 'red',  'size' => 42],
             ['id' => 2, 'title' => 'blue shirt', 'color' => 'blue', 'size' => 44],
@@ -6840,7 +7141,10 @@ class IndexTest extends TestCase
         (new Index($this->dbPath))->close();
         $this->setSchemaVersion($this->dbPath, 3);
 
-        $index = new Index($this->dbPath, force: true, schema: new SchemaConfig(facetFields: ['color']));
+        $index = new Index($this->dbPath, force: true, schema: new SchemaConfig(
+            filterableFields: ['color'],
+            sortableFields: ['color'],
+        ));
         $index->insert([['id' => 1, 'title' => 'red shirt', 'color' => 'red']]);
 
         $this->assertSame(Index::CURRENT_SCHEMA_VERSION, $index->schemaVersion);

@@ -43,17 +43,18 @@ use Fuzor\SchemaConfig;
 $index = new Index('/path/to/articles.db', schema: new SchemaConfig(store: false));
 ```
 
-The facet index is always enabled. Declare which fields are facet fields at creation time using `facetFields`. Their values are stored in a separate index table and can be used to filter results and compute per-value counts at search time. See [search.md](search.md) for querying and filtering by facets.
+The facet index is always enabled. Declare at creation time which fields can be used to filter (`filterableFields`: `filter`, `facets`, `distinct`, `facetSearch()`) and which to sort by (`sortableFields`). A field may be in both lists. Their values are stored in a separate index table; using any other field in those options throws a `QueryException`. See [search.md](search.md) for querying and filtering by facets.
 
-By default every field (except `id` and any declared `facetFields`) is tokenised for full-text. Pass `searchableFields` to restrict FTS to an explicit list of fields — any field not in either list is stored but not indexed.
+By default every field except `id` and the filterable and sortable fields is tokenised for full-text. Pass `searchableFields` to restrict FTS to an explicit list of fields — any field not in either list is stored but not indexed.
 
 ```php
 use Fuzor\SchemaConfig;
 
-// Watches index: two facetable fields, two searchable fields,
+// Watches index: four filterable fields, two of them also sortable, two searchable fields;
 // image_url and sku are stored-only automatically.
 $index = new Index('/path/to/watches.db', schema: new SchemaConfig(
-    facetFields:      ['brand', 'price', 'category', 'gender'],
+    filterableFields: ['brand', 'price', 'category', 'gender'],
+    sortableFields:   ['price', 'brand'],
     searchableFields: ['title', 'body'],
 ));
 ```
@@ -91,8 +92,9 @@ Passing `schema:` when opening an existing file throws `QueryException`. Use `In
 |-------------------------|---------|--------|
 | `language` | `null` | BCP 47 language tag; `null` disables stopwords and stemming |
 | `store` | `true` | Enable the document store |
-| `facetFields` | `[]` | Fields routed to the facet index |
-| `searchableFields` | `null` | Fields tokenised for FTS; `null` = all non-facet fields |
+| `filterableFields` | `[]` | Fields usable in `filter`, `facets`, `distinct`, and `facetSearch()` |
+| `sortableFields` | `[]` | Fields usable in `sort` |
+| `searchableFields` | `null` | Fields tokenised for FTS; `null` = all fields that are neither filterable nor sortable |
 | `stripHtml` | `false` | Convert HTML field values to text before tokenisation |
 
 ## Inserting
@@ -143,13 +145,14 @@ Two ways to avoid that risk:
 
 ### Facet values
 
-Fields listed in `facetFields` at creation time are automatically routed to the facet index. They are never tokenised for full-text — `search()` and `searchBoolean()` will not match against their contents — unless the field is also listed in `searchableFields`.
+Fields listed in `filterableFields` or `sortableFields` at creation time are automatically routed to the facet index. They are never tokenised for full-text — `search()` and `searchBoolean()` will not match against their contents — unless the field is also listed in `searchableFields`.
 
 ```php
 use Fuzor\SchemaConfig;
 
 $index = new Index('/path/to/watches.db', schema: new SchemaConfig(
-    facetFields: ['brand', 'gender', 'category', 'price'],
+    filterableFields: ['brand', 'gender', 'category', 'price'],
+    sortableFields:   ['price'],
 ));
 
 $index->insert([
@@ -180,17 +183,17 @@ $index->insert([
 | Array of strings | `'gender' => ['men', 'unisex']` | Multi-value; contributes one count per value |
 | Integer or float | `'price' => 129.99` | Numeric facet; per-value counts in `$facetDistribution` (stringified keys) + min/max in `$facetStats` |
 
-Documents that omit a declared facet field are indexed normally for full-text but contribute nothing to the facet index for that field.
+Documents that omit a filterable or sortable field are indexed normally for full-text but contribute nothing to the facet index for that field.
 
 ### Stored-only fields
 
-A field that is not in `facetFields` and not in `searchableFields` (when `searchableFields` is set) is stored in the document store but never indexed — neither for full-text nor for facets. This is the right place for URLs, image paths, internal SKUs, and timestamps you want to retrieve but not search on.
+A field that is in none of `filterableFields`, `sortableFields`, and `searchableFields` (when `searchableFields` is set) is stored in the document store but never indexed — neither for full-text nor for facets. This is the right place for URLs, image paths, internal SKUs, and timestamps you want to retrieve but not search on.
 
 ```php
 use Fuzor\SchemaConfig;
 
 $index = new Index('/path/to/watches.db', schema: new SchemaConfig(
-    facetFields:      ['brand', 'price'],
+    filterableFields: ['brand', 'price'],
     searchableFields: ['title', 'body'],
     // image_url and sku are stored-only automatically
 ));
@@ -350,12 +353,13 @@ When the existing index has the **document store enabled**, the callback can be 
 // Re-index with the same schema — no callback, no external data needed
 Index::rebuild('/path/to/articles.db');
 
-// Re-index with new facet fields
+// Re-index with new filterable and sortable fields
 use Fuzor\SchemaConfig;
 
 Index::rebuild('/path/to/articles.db', schema: new SchemaConfig(
     language:         'en',
-    facetFields:      ['brand', 'price', 'category'],
+    filterableFields: ['brand', 'price', 'category'],
+    sortableFields:   ['price'],
     searchableFields: ['title', 'body'],
 ));
 ```

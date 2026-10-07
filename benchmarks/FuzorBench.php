@@ -104,7 +104,8 @@ class FuzorBench
         $genres = ['Action', 'Drama', 'Comedy', 'Thriller', 'Horror', 'Romance', 'Science Fiction', 'Documentary'];
         $idx    = new Index(self::FACET_DB, force: true, schema: new SchemaConfig(
             language:    'en',
-            facetFields: ['genre', 'year'],
+            filterableFields: ['genre', 'year'],
+            sortableFields: ['year'],
         ));
         $docs = array_map(function (array $doc) use ($genres): array {
             return [

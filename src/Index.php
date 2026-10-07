@@ -145,8 +145,11 @@ class Index
     /** Whether the optional document store is active on this index. */
     public private(set) bool $documentStoreEnabled = false;
 
-    /** @var list<string> Field names routed to the facet index; not FTS-indexed unless also in searchableFields. */
-    public private(set) array $facetFields = [];
+    /** @var list<string> Fields usable in filter, facets, distinct, and facetSearch(); see SchemaConfig. */
+    public private(set) array $filterableFields = [];
+
+    /** @var list<string> Fields usable in sort; see SchemaConfig. */
+    public private(set) array $sortableFields = [];
 
     /** @var list<string>|null null = all non-facet fields are FTS-indexed; non-null = only these fields. */
     public private(set) ?array $searchableFields = null;
@@ -163,8 +166,14 @@ class Index
     /** @var array<string, int> Maps searchable field name → field_names.id; populated lazily; cleared on connection change. */
     private array $fieldNameCache = [];
 
-    /** @var array<string, int> Pre-computed isset-lookup set derived from facetFields (array_flip); rebuilt whenever facetFields is assigned. */
+    /** @var array<string, int> isset-lookup set of every field stored in the facet index (filterable ∪ sortable). */
     private array $facetFieldSet = [];
+
+    /** @var array<string, int> isset-lookup set of $filterableFields. */
+    private array $filterableFieldSet = [];
+
+    /** @var array<string, int> isset-lookup set of $sortableFields. */
+    private array $sortableFieldSet = [];
 
     /** @var array<string, int>|null Pre-computed isset-lookup set derived from searchableFields (array_flip); null means all non-facet fields. */
     private ?array $searchableFieldSet = null;
@@ -338,7 +347,7 @@ class Index
      *
      * When $callback is omitted (null), the existing index must have the document store enabled;
      * all stored documents are streamed into the new index automatically. This lets you re-index
-     * with a different SchemaConfig (e.g. new searchableFields or facetFields) without maintaining
+     * with a different SchemaConfig (e.g. new searchableFields or filterableFields) without maintaining
      * a separate copy of the source data.
      *
      * If the callback throws, or if the automatic streaming path fails, the temporary file is
@@ -384,7 +393,8 @@ class Index
             $schema = new SchemaConfig(
                 language:         $existing->language,
                 store:            $existing->documentStoreEnabled,
-                facetFields:      $existing->facetFields,
+                filterableFields: $existing->filterableFields,
+                sortableFields:   $existing->sortableFields,
                 searchableFields: $existing->searchableFields,
                 stripHtml:        $existing->stripHtml,
             );
@@ -750,7 +760,6 @@ class Index
     {
         $language         = $schema->language;
         $store            = $schema->store;
-        $facetFields      = $schema->facetFields;
         $searchableFields = $schema->searchableFields;
         $stripHtml        = $schema->stripHtml;
 
@@ -885,12 +894,12 @@ class Index
 
         $schemaStmt = $pdo->prepare("INSERT INTO info (key, value) VALUES (?, ?)");
         $schemaStmt->execute(['schema_version',    (string) self::CURRENT_SCHEMA_VERSION]);
-        $schemaStmt->execute(['facet_fields',      json_encode($facetFields)]);
+        $schemaStmt->execute(['filterable_fields', json_encode($schema->filterableFields)]);
+        $schemaStmt->execute(['sortable_fields',   json_encode($schema->sortableFields)]);
         $schemaStmt->execute(['searchable_fields', $searchableFields !== null ? json_encode($searchableFields) : '']);
         $schemaStmt->execute(['strip_html',        $stripHtml ? '1' : '0']);
-        $this->facetFields        = $facetFields;
+        $this->applyFieldLists($schema->filterableFields, $schema->sortableFields);
         $this->searchableFields   = $searchableFields;
-        $this->facetFieldSet      = array_flip($facetFields);
         $this->searchableFieldSet = $searchableFields !== null ? array_flip($searchableFields) : null;
         $this->stripHtml          = $stripHtml;
         $this->schemaVersion      = self::CURRENT_SCHEMA_VERSION;
@@ -931,8 +940,8 @@ class Index
         $pdo   = $this->pdo;
         $stmt  = $pdo->query(
             "SELECT key, value FROM info"
-            . " WHERE key IN ('language', 'has_document_store', 'facet_fields', 'searchable_fields',"
-            . " 'strip_html', 'schema_version')"
+            . " WHERE key IN ('language', 'has_document_store', 'filterable_fields', 'sortable_fields',"
+            . " 'searchable_fields', 'strip_html', 'schema_version')"
         );
         $infoRows = [];
         if ($stmt) {
@@ -949,13 +958,31 @@ class Index
         $this->schemaVersion        = $schemaVersion;
         $this->applyLanguage($infoRows['language'] !== '' ? $infoRows['language'] : null);
         $this->documentStoreEnabled = $infoRows['has_document_store'] === '1';
-        $this->facetFields          = self::decodeStringList($infoRows['facet_fields']);
+        $this->applyFieldLists(
+            self::decodeStringList($infoRows['filterable_fields']),
+            self::decodeStringList($infoRows['sortable_fields']),
+        );
         $this->searchableFields     = $infoRows['searchable_fields'] === ''
             ? null
             : self::decodeStringList($infoRows['searchable_fields']);
-        $this->facetFieldSet        = array_flip($this->facetFields);
         $this->searchableFieldSet   = $this->searchableFields !== null ? array_flip($this->searchableFields) : null;
         $this->stripHtml            = $infoRows['strip_html'] === '1';
+    }
+
+    /**
+     * Set the filterable and sortable field lists and their lookup sets. Both kinds are stored
+     * in the facet index, so $facetFieldSet is their union.
+     *
+     * @param list<string> $filterable
+     * @param list<string> $sortable
+     */
+    private function applyFieldLists(array $filterable, array $sortable): void
+    {
+        $this->filterableFields   = $filterable;
+        $this->sortableFields     = $sortable;
+        $this->filterableFieldSet = array_flip($filterable);
+        $this->sortableFieldSet   = array_flip($sortable);
+        $this->facetFieldSet      = $this->filterableFieldSet + $this->sortableFieldSet;
     }
 
     /** Why a file cannot be opened, and how to get a usable index again. */
@@ -1960,6 +1987,9 @@ class Index
      *
      * @param  string        $phrase  Raw search phrase; will be tokenised.
      * @param  SearchOptions $options Per-query options (limit, offset, filter, facets, sort, …).
+     * @throws \InvalidArgumentException On a malformed sort spec.
+     * @throws QueryException            When a sort field is not sortable, or a filter, facet, or
+     *                                   distinct field is not filterable (see SchemaConfig).
      */
     public function search(
         string $phrase,
@@ -1976,7 +2006,8 @@ class Index
         $facets        = $options->facets;
         $distinct      = $options->distinct;
         $distinctCount = $options->distinctCount;
-        ['sort' => $sortSpecs, 'warnings' => $warnings] = $this->checkDeclaredFields($options);
+        $sortSpecs     = $this->checkDeclaredFields($options);
+        $warnings      = [];
         $parsed        = $this->filterQueryTokens($phrase);
         /** @var list<string> $keywords */
         $keywords     = $parsed['filtered'];
@@ -2283,6 +2314,9 @@ class Index
      *
      * @param  string        $phrase  Boolean query string.
      * @param  SearchOptions $options Per-query options (limit, offset, filter, facets, sort, …).
+     * @throws \InvalidArgumentException On a malformed sort spec.
+     * @throws QueryException            When a sort field is not sortable, or a filter, facet, or
+     *                                   distinct field is not filterable (see SchemaConfig).
      */
     public function searchBoolean(
         string $phrase,
@@ -2299,7 +2333,8 @@ class Index
         $facets        = $options->facets;
         $distinct      = $options->distinct;
         $distinctCount = $options->distinctCount;
-        ['sort' => $sortSpecs, 'warnings' => $warnings] = $this->checkDeclaredFields($options);
+        $sortSpecs     = $this->checkDeclaredFields($options);
+        $warnings      = [];
         $parsed       = $this->filterQueryTokens($phrase);
         /** @var list<list<string>> $phraseGroups */
         $phraseGroups = $parsed['phrase_groups'];
@@ -2500,17 +2535,14 @@ class Index
      *
      * @param FacetSearchQuery $query  Query parameters; only $facetName is required.
      * @return FacetSearchResult       Matching values with counts, ordered by count descending.
+     * @throws QueryException          When $facetName or a filter field is not filterable.
      */
     public function facetSearch(FacetSearchQuery $query): FacetSearchResult
     {
         $this->checkDataVersion();
-        $warnings = $this->undeclaredFilterWarnings($query->filter);
-        if (!isset($this->facetFieldSet[$query->facetName])) {
-            array_unshift(
-                $warnings,
-                "Facet '{$query->facetName}' is not a declared facet field; no values returned.",
-            );
-        }
+        $this->checkFilterableFields('Facet', [$query->facetName]);
+        $this->checkFilterableFields('Filter', array_keys($query->filter));
+        $warnings = [];
         $keyId = $this->lookupFacetKeyId($query->facetName);
         if ($keyId === null) {
             return new FacetSearchResult([], $query->facetQuery, $warnings);
@@ -2657,7 +2689,8 @@ class Index
         $facets        = $options->facets;
         $distinct      = $options->distinct;
         $distinctCount = $options->distinctCount;
-        ['sort' => $sortSpecs, 'warnings' => $warnings] = $this->checkDeclaredFields($options);
+        $sortSpecs     = $this->checkDeclaredFields($options);
+        $warnings      = [];
         // Totals, pages, and order are always exact here; only filtered facet counts can be capped.
         $exhaustive        = true;
         $approximateFacets = [];
@@ -5259,60 +5292,57 @@ class Index
     }
 
     /**
-     * Check the field names in $options against the declared facetFields.
+     * Check the field names in $options against the schema and return the parsed sort specs.
      *
-     * Sort, filter, facets, and distinct all read from facet_values, which only declared
-     * facet fields populate. A field outside the schema therefore cannot contribute anything,
-     * so each such reference produces a warning on the result. Undeclared sort specs are also
-     * dropped, letting the query fall back to its normal order (relevance, or newest first
-     * for a browse) instead of an all-ties sort. Filter, facets, and distinct keep their
-     * current effect — an undeclared filter still matches nothing, failing closed.
+     * Sort, filter, facets, and distinct all read from facet_values, which only declared fields
+     * populate, so a reference to an undeclared field is a caller error. Checks the schema
+     * declaration, not lookupFacetKeyId(): a declared field that no document has populated yet
+     * is legitimately "no values".
      *
-     * Checks the schema declaration, not lookupFacetKeyId(): a declared field that no document
-     * has populated yet is legitimately "no values" and does not warn.
-     *
-     * @return array{sort: list<array{field: string, asc: bool}>, warnings: list<string>}
+     * @return list<array{field: string, asc: bool}>
      * @throws \InvalidArgumentException on a malformed sort spec
+     * @throws QueryException             on a sort field that is not sortable, or a filter, facet,
+     *                                    or distinct field that is not filterable
      */
     private function checkDeclaredFields(SearchOptions $options): array
     {
-        $specs    = [];
-        $warnings = [];
-        foreach ($this->parseSortSpec($options->sort) as $spec) {
-            if (isset($this->facetFieldSet[$spec['field']])) {
-                $specs[] = $spec;
-            } else {
-                $warnings[] = "Sort field '{$spec['field']}' is not a declared facet field; ignored.";
+        $specs = $this->parseSortSpec($options->sort);
+        foreach ($specs as $spec) {
+            if (!isset($this->sortableFieldSet[$spec['field']])) {
+                throw new QueryException(
+                    self::undeclaredFieldMessage('Sort', $spec['field'], 'sortable', $this->sortableFields),
+                );
             }
         }
-        array_push($warnings, ...$this->undeclaredFilterWarnings($options->filter));
-        foreach ($options->facets as $field) {
-            if (!isset($this->facetFieldSet[$field])) {
-                $warnings[] = "Facet '{$field}' is not a declared facet field; no counts returned.";
-            }
+        $this->checkFilterableFields('Filter', array_keys($options->filter));
+        $this->checkFilterableFields('Facet', $options->facets);
+        if ($options->distinct !== null) {
+            $this->checkFilterableFields('Distinct', [$options->distinct]);
         }
-        $distinct = $options->distinct;
-        if ($distinct !== null && !isset($this->facetFieldSet[$distinct])) {
-            $warnings[] = "Distinct field '{$distinct}' is not a declared facet field; results were not deduplicated.";
-        }
-        return ['sort' => $specs, 'warnings' => array_values(array_unique($warnings))];
+        return $specs;
     }
 
     /**
-     * Warnings for filter keys that are not declared facet fields; such a filter matches no documents.
-     *
-     * @param  array<array-key, mixed> $filter
-     * @return list<string>
+     * @param  list<array-key> $fields Field names (filter keys may be integers).
+     * @throws QueryException on the first field that is not filterable
      */
-    private function undeclaredFilterWarnings(array $filter): array
+    private function checkFilterableFields(string $option, array $fields): void
     {
-        $warnings = [];
-        foreach (array_keys($filter) as $field) {
-            if (!isset($this->facetFieldSet[$field])) {
-                $warnings[] = "Filter field '{$field}' is not a declared facet field; no documents match it.";
+        foreach ($fields as $field) {
+            if (!isset($this->filterableFieldSet[$field])) {
+                throw new QueryException(
+                    self::undeclaredFieldMessage($option, (string) $field, 'filterable', $this->filterableFields),
+                );
             }
         }
-        return $warnings;
+    }
+
+    /** @param list<string> $declared */
+    private static function undeclaredFieldMessage(string $option, string $field, string $kind, array $declared): string
+    {
+        $list = $declared === [] ? 'none' : implode(', ', $declared);
+        return "{$option} field '{$field}' is not {$kind}. Declare it in SchemaConfig::\${$kind}Fields"
+            . " when creating the index (declared: {$list}).";
     }
 
     /**
@@ -5597,7 +5627,7 @@ class Index
                 $sql    = '%1$s.value IN (' . $this->placeholders(count($params)) . ')';
             }
             $matchesNothing = $keyId === null || $params === [] && !$filterValue instanceof FacetRange;
-            if ($exclude && $matchesNothing && isset($this->facetFieldSet[$name])) {
+            if ($exclude && $matchesNothing) {
                 continue;
             }
             $conditions[] = [
@@ -5605,7 +5635,7 @@ class Index
                 'keyId'      => $keyId ?? 0,
                 'sql'        => $sql,
                 'params'     => $params,
-                'impossible' => $exclude ? !isset($this->facetFieldSet[$name]) : $matchesNothing,
+                'impossible' => !$exclude && $matchesNothing,
                 'multiRow'   => $filterValue instanceof FacetRange || count($params) > 1,
                 'exclude'    => $exclude,
             ];
