@@ -12,6 +12,7 @@ use Fuzor\SearchOptions;
 use Fuzor\SearchResult;
 use Fuzor\Exceptions\IOException;
 use Fuzor\Exceptions\QueryException;
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 
 class IndexTest extends TestCase
@@ -6730,15 +6731,6 @@ class IndexTest extends TestCase
 
     // --- schema version / covering facet index ---
 
-    /** Downgrade an index to schema revision 1 (narrow facet_doc_id_index, no version key). */
-    private function downgradeToSchemaV1(string $path): void
-    {
-        $pdo = new \PDO('sqlite:' . $path);
-        $pdo->exec('DROP INDEX IF EXISTS facet_doc_id_index');
-        $pdo->exec('CREATE INDEX facet_doc_id_index ON facet_values (doc_id)');
-        $pdo->exec("DELETE FROM info WHERE key = 'schema_version'");
-    }
-
     /**
      * @param  list<string> $params
      * @return list<string>
@@ -6776,13 +6768,6 @@ class IndexTest extends TestCase
         return $index;
     }
 
-    /** Mark an index as schema revision 2 (covering facet index, stripHtml via strip_tags()). */
-    private function downgradeToSchemaV2(string $path): void
-    {
-        $pdo = new \PDO('sqlite:' . $path);
-        $pdo->exec("UPDATE info SET value = '2' WHERE key = 'schema_version'");
-    }
-
     private const string HTML_BODY = '<p>fast</p><p>delivery</p> <script>trackingpixel()</script> '
         . '<p>Fit &amp; Flare caf&eacute;</p>';
 
@@ -6801,43 +6786,75 @@ class IndexTest extends TestCase
         $this->assertSame(self::HTML_BODY, $index->get(1)['body'] ?? null);
     }
 
-    public function testRevision2StripHtmlIndexKeepsStripTagsUntilRebuild(): void
+    /** Set the schema_version key of a closed index file; null deletes it (files before 1.5.0). */
+    private function setSchemaVersion(string $path, ?int $revision): void
     {
-        (new Index($this->dbPath, schema: new SchemaConfig(stripHtml: true)))->close();
-        $this->downgradeToSchemaV2($this->dbPath);
-
-        $legacy = new Index($this->dbPath);
-        $legacy->insert([['id' => 1, 'body' => self::HTML_BODY]]);
-        $this->assertSame(2, $legacy->schemaVersion);
-        // Legacy strip_tags() glues adjacent blocks and keeps script content.
-        $this->assertSame([1], $legacy->search('fastdelivery', new SearchOptions(asYouType: false))->getIds());
-        $this->assertSame([1], $legacy->search('trackingpixel', new SearchOptions(asYouType: false))->getIds());
-        $this->assertSame([1], $legacy->searchBoolean('amp', new SearchOptions(asYouType: false))->getIds());
-        $legacy->close();
-
-        $rebuilt = Index::rebuild($this->dbPath);
-
-        $this->assertSame(Index::CURRENT_SCHEMA_VERSION, $rebuilt->schemaVersion);
-        $this->assertTrue($rebuilt->stripHtml);
-        $this->assertSame([1], $rebuilt->search('fast', new SearchOptions(asYouType: false))->getIds());
-        $this->assertSame([], $rebuilt->search('fastdelivery', new SearchOptions(asYouType: false))->getIds());
-        $this->assertSame([], $rebuilt->search('trackingpixel', new SearchOptions(asYouType: false))->getIds());
+        $pdo = new \PDO('sqlite:' . $path);
+        $revision === null
+            ? $pdo->exec("DELETE FROM info WHERE key = 'schema_version'")
+            : $pdo->exec("UPDATE info SET value = '{$revision}' WHERE key = 'schema_version'");
     }
 
-    public function testRevision2IndexWithoutStripHtmlIsCurrent(): void
+    /** @return iterable<string, array{0: int|null}> */
+    public static function oneXRevisions(): iterable
     {
-        (new Index($this->dbPath))->close();
-        $this->downgradeToSchemaV2($this->dbPath);
-
-        $this->assertSame(Index::CURRENT_SCHEMA_VERSION, new Index($this->dbPath)->schemaVersion);
+        yield 'no version key (before 1.5.0)' => [null];
+        yield 'revision 1' => [1];
+        yield 'revision 2' => [2];
+        yield 'revision 3 (1.6.0 to 1.7.x)' => [3];
     }
 
-    public function testRevision1IndexWithoutStripHtmlStillNeedsRebuild(): void
+    #[DataProvider('oneXRevisions')]
+    public function testOpeningA1xIndexThrowsWithRecreateHint(?int $revision): void
     {
         (new Index($this->dbPath))->close();
-        $this->downgradeToSchemaV1($this->dbPath);
+        $this->setSchemaVersion($this->dbPath, $revision);
 
-        $this->assertSame(1, new Index($this->dbPath)->schemaVersion);
+        $this->expectException(QueryException::class);
+        $this->expectExceptionMessage('written by Fuzor 1.x');
+        $this->expectExceptionMessage('force: true');
+        new Index($this->dbPath);
+    }
+
+    public function testOpeningA1xIndexReadonlyThrows(): void
+    {
+        (new Index($this->dbPath))->close();
+        $this->setSchemaVersion($this->dbPath, 3);
+
+        $this->expectException(QueryException::class);
+        new Index($this->dbPath, readonly: true);
+    }
+
+    public function testOpeningAnIndexFromANewerVersionThrows(): void
+    {
+        (new Index($this->dbPath))->close();
+        $this->setSchemaVersion($this->dbPath, Index::CURRENT_SCHEMA_VERSION + 1);
+
+        $this->expectException(QueryException::class);
+        $this->expectExceptionMessage('newer version of Fuzor');
+        new Index($this->dbPath);
+    }
+
+    public function testForceRecreatesA1xIndex(): void
+    {
+        (new Index($this->dbPath))->close();
+        $this->setSchemaVersion($this->dbPath, 3);
+
+        $index = new Index($this->dbPath, force: true, schema: new SchemaConfig(facetFields: ['color']));
+        $index->insert([['id' => 1, 'title' => 'red shirt', 'color' => 'red']]);
+
+        $this->assertSame(Index::CURRENT_SCHEMA_VERSION, $index->schemaVersion);
+        $this->assertSame([1], $index->search('shirt', new SearchOptions(filter: ['color' => 'red']))->getIds());
+    }
+
+    public function testDocumentStoreFlagIsWrittenEitherWay(): void
+    {
+        (new Index($this->dbPath, schema: new SchemaConfig(store: false)))->close();
+        $stmt = new \PDO('sqlite:' . $this->dbPath)->query("SELECT value FROM info WHERE key = 'has_document_store'");
+
+        $this->assertNotFalse($stmt);
+        $this->assertSame('0', $stmt->fetchColumn());
+        $this->assertFalse(new Index($this->dbPath)->documentStoreEnabled);
     }
 
     public function testNewIndexReportsCurrentSchemaVersion(): void
@@ -6847,15 +6864,6 @@ class IndexTest extends TestCase
         $index->close();
 
         $this->assertSame(Index::CURRENT_SCHEMA_VERSION, new Index($this->dbPath)->schemaVersion);
-    }
-
-    public function testIndexWithoutVersionKeyReportsSchemaVersionOne(): void
-    {
-        $index = $this->facetIndex();
-        $index->close();
-        $this->downgradeToSchemaV1($this->dbPath);
-
-        $this->assertSame(1, new Index($this->dbPath)->schemaVersion);
     }
 
     public function testCurrentSchemaUsesCoveringIndexForFacetJoin(): void
@@ -6875,68 +6883,6 @@ class IndexTest extends TestCase
             array_filter($plan, static fn(string $d): bool => str_contains($d, 'COVERING INDEX facet_doc_id_index')),
             "Expected a covering-index plan, got:\n" . implode("\n", $plan),
         );
-    }
-
-    public function testSchemaV1IndexStillReturnsIdenticalFacetCounts(): void
-    {
-        $index    = $this->facetIndex();
-        $expected = $index->search('shirt', new SearchOptions(facets: ['color', 'size']))->getFacetDistribution();
-        $index->close();
-
-        $this->downgradeToSchemaV1($this->dbPath);
-
-        $legacy = new Index($this->dbPath);
-        $this->assertSame(1, $legacy->schemaVersion);
-        $this->assertSame(
-            $expected,
-            $legacy->search('shirt', new SearchOptions(facets: ['color', 'size']))->getFacetDistribution(),
-        );
-    }
-
-    public function testRebuildMigratesSchemaV1ToCurrent(): void
-    {
-        $this->facetIndex()->close();
-        $this->downgradeToSchemaV1($this->dbPath);
-        $this->assertSame(1, new Index($this->dbPath)->schemaVersion);
-
-        $rebuilt = Index::rebuild($this->dbPath);
-
-        $this->assertSame(Index::CURRENT_SCHEMA_VERSION, $rebuilt->schemaVersion);
-        $this->assertSame(
-            ['color' => ['red' => 1, 'blue' => 1]],
-            $rebuilt->search('shirt', new SearchOptions(facets: ['color']))->getFacetDistribution(),
-        );
-        $rebuilt->close();
-
-        $plan = $this->indexPlanFor(
-            $this->dbPath,
-            'SELECT fv.key_id, fv.value, fv.num_value FROM json_each(?) je
-             CROSS JOIN facet_values fv ON fv.doc_id = je.value',
-            [json_encode([1, 2, 3], JSON_THROW_ON_ERROR)],
-        );
-        $this->assertNotEmpty(
-            array_filter($plan, static fn(string $d): bool => str_contains($d, 'COVERING INDEX facet_doc_id_index')),
-        );
-    }
-
-    public function testBulkLoadPreservesSchemaV1IndexShape(): void
-    {
-        // insertMany drops and recreates secondary indexes; it must not silently
-        // upgrade (or downgrade) the shape of the file it is writing to.
-        $this->facetIndex()->close();
-        $this->downgradeToSchemaV1($this->dbPath);
-
-        $legacy = new Index($this->dbPath);
-        $docs   = [];
-        for ($i = 10; $i < 1_015; $i++) {
-            $docs[] = ['id' => $i, 'title' => "shirt {$i}", 'color' => 'green', 'size' => 40];
-        }
-        $legacy->insert($docs);
-        $legacy->close();
-
-        $sql = $this->indexDdl($this->dbPath, 'facet_doc_id_index');
-        $this->assertStringContainsString('(doc_id)', $sql);
-        $this->assertStringNotContainsString('num_value', $sql);
     }
 
     public function testBulkLoadPreservesCurrentSchemaIndexShape(): void

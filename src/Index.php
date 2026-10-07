@@ -43,22 +43,21 @@ class Index
      * On-disk schema revision written by createIndex() into info.schema_version.
      *
      * Independent of the library's semantic version; incremented only when the physical
-     * schema or the way stored text is indexed changes. Revisions are cumulative, and
-     * rebuild() always writes the current one, so a single rebuild migrates from any older
-     * revision. Indexes created before this key existed report 1.
-     *
-     * 1 — pre-1.5.0: facet_doc_id_index is a single-column index on (doc_id).
-     * 2 — 1.5.0+:    facet_doc_id_index covers (doc_id, key_id, value, num_value), letting
-     *                the facet count join run index-only.
-     * 3 — 1.6.0+:    SchemaConfig::$stripHtml converts HTML to text with HtmlText::toText()
-     *                (block tags separate words, script/style content is dropped, entities
-     *                are decoded) instead of plain strip_tags(). Only affects stripHtml
-     *                indexes; a revision-2 file without stripHtml reports 3.
-     *
-     * Older revisions keep working; they just miss the improvement. Compare against
-     * $this->schemaVersion to decide whether rebuild() is worth scheduling.
+     * schema or the way stored text is indexed changes. Revisions 1–3 were written by
+     * Fuzor 1.x; 2.0 starts at 4 and opens no file below MIN_SCHEMA_VERSION (see
+     * selectIndex()), so such files must be rebuilt from the source data.
      */
-    public const int CURRENT_SCHEMA_VERSION = 3;
+    public const int CURRENT_SCHEMA_VERSION = 4;
+
+    /** Lowest on-disk revision this version opens; older files are rejected at open. */
+    private const int MIN_SCHEMA_VERSION = 4;
+
+    /**
+     * facet_doc_id_index: leads with doc_id for DELETE-by-doc, and covers key_id, value and
+     * num_value so the facet count join in fetchAllFacetCountsJoin() runs index-only.
+     */
+    private const string FACET_DOC_INDEX_DDL
+        = "CREATE INDEX IF NOT EXISTS 'main'.'facet_doc_id_index' ON facet_values (doc_id, key_id, value, num_value)";
 
     /**
      * Suffix of the temp files rebuild() and snapshotTo() create next to an index path:
@@ -155,11 +154,7 @@ class Index
     /** When true, each field value is converted from HTML to text before tokenisation (see HtmlText). */
     public private(set) bool $stripHtml = false;
 
-    /**
-     * On-disk schema revision of the open index; see CURRENT_SCHEMA_VERSION.
-     * Lower than CURRENT_SCHEMA_VERSION means the file predates a schema optimization
-     * and would benefit from rebuild(); it remains fully functional either way.
-     */
+    /** On-disk schema revision of the open index; see CURRENT_SCHEMA_VERSION. */
     public private(set) int $schemaVersion = self::CURRENT_SCHEMA_VERSION;
 
     /** @var array<string, int> Maps facet key name → facet_keys.id; populated lazily; cleared on connection change. */
@@ -826,9 +821,10 @@ class Index
                     data   TEXT NOT NULL
                 ) STRICT"
             );
-            $pdo->exec("INSERT INTO info (key, value) VALUES ('has_document_store', '1')");
-            $this->documentStoreEnabled = true;
         }
+        $stmt = $pdo->prepare("INSERT INTO info (key, value) VALUES ('has_document_store', ?)");
+        $stmt->execute([$store ? '1' : '0']);
+        $this->documentStoreEnabled = $store;
 
         // facet_keys: one row per unique facet field name (~10–100 entries; fully cached in PHP).
         $pdo->exec(
@@ -848,8 +844,8 @@ class Index
                 PRIMARY KEY (key_id, value, doc_id)
             ) WITHOUT ROWID, STRICT"
         );
-        // Covers DELETE-by-doc_id and the facet count join; see facetDocIndexDdl().
-        $pdo->exec(self::facetDocIndexDdl(self::CURRENT_SCHEMA_VERSION));
+        // Covers DELETE-by-doc_id and the facet count join; see FACET_DOC_INDEX_DDL.
+        $pdo->exec(self::FACET_DOC_INDEX_DDL);
         // Covers numeric range filter queries; partial keeps the B-tree small.
         $pdo->exec(
             "CREATE INDEX IF NOT EXISTS 'main'.'facet_numeric_index'
@@ -910,7 +906,8 @@ class Index
     /**
      * Open an existing index file.
      *
-     * @throws IOException If the index file does not exist.
+     * @throws IOException    If the index file does not exist.
+     * @throws QueryException If the file's schema revision is not one this version can open.
      */
     private function selectIndex(): void
     {
@@ -943,20 +940,34 @@ class Index
             $fetched  = $stmt->fetchAll(PDO::FETCH_KEY_PAIR);
             $infoRows = $fetched;
         }
-        $lang = ($infoRows['language'] ?? '') !== '' ? $infoRows['language'] : null;
-        $this->applyLanguage($lang);
-        $this->documentStoreEnabled = ($infoRows['has_document_store'] ?? '0') === '1';
-        $this->facetFields        = self::decodeStringList($infoRows['facet_fields'] ?? '[]');
-        $sfRaw                    = $infoRows['searchable_fields'] ?? '';
-        $this->searchableFields   = $sfRaw === '' ? null : self::decodeStringList($sfRaw);
-        $this->facetFieldSet      = array_flip($this->facetFields);
-        $this->searchableFieldSet = $this->searchableFields !== null ? array_flip($this->searchableFields) : null;
-        $this->stripHtml          = ($infoRows['strip_html'] ?? '0') === '1';
-        // Absent key = revision 1: indexes created before schema_version existed.
-        // Revision 3 only changed stripHtml indexing, so a revision-2 file without stripHtml is
-        // already current. See docs/compatibility-debt.md before removing either fallback.
-        $schemaVersion            = (int) ($infoRows['schema_version'] ?? 1);
-        $this->schemaVersion      = $schemaVersion === 2 && !$this->stripHtml ? 3 : $schemaVersion;
+        // Files before 1.5.0 have no schema_version key; they are revision 1.
+        $schemaVersion = (int) ($infoRows['schema_version'] ?? 1);
+        if ($schemaVersion < self::MIN_SCHEMA_VERSION || $schemaVersion > self::CURRENT_SCHEMA_VERSION) {
+            $this->pdo = null;
+            throw new QueryException(self::unsupportedRevisionMessage($this->path, $schemaVersion));
+        }
+        $this->schemaVersion        = $schemaVersion;
+        $this->applyLanguage($infoRows['language'] !== '' ? $infoRows['language'] : null);
+        $this->documentStoreEnabled = $infoRows['has_document_store'] === '1';
+        $this->facetFields          = self::decodeStringList($infoRows['facet_fields']);
+        $this->searchableFields     = $infoRows['searchable_fields'] === ''
+            ? null
+            : self::decodeStringList($infoRows['searchable_fields']);
+        $this->facetFieldSet        = array_flip($this->facetFields);
+        $this->searchableFieldSet   = $this->searchableFields !== null ? array_flip($this->searchableFields) : null;
+        $this->stripHtml            = $infoRows['strip_html'] === '1';
+    }
+
+    /** Why a file cannot be opened, and how to get a usable index again. */
+    private static function unsupportedRevisionMessage(string $path, int $revision): string
+    {
+        if ($revision > self::CURRENT_SCHEMA_VERSION) {
+            return "Index {$path} has schema revision {$revision}, written by a newer version of Fuzor;"
+                . ' this version reads revision ' . self::CURRENT_SCHEMA_VERSION . '. Upgrade Fuzor to open it.';
+        }
+        return "Index {$path} has schema revision {$revision}, written by Fuzor 1.x; this version opens"
+            . ' revision ' . self::MIN_SCHEMA_VERSION . ' and later. Recreate it from your source data:'
+            . ' new Index($path, schema: ..., force: true), then insert the documents again.';
     }
 
     /**
@@ -1020,30 +1031,6 @@ class Index
         $stat = @stat($this->path);
         /** @infection-ignore-all ArrayItemRemoval,FalseValue: identity fields only affect rotation detection sensitivity, exercised in reopenIfChanged tests */
         $this->fileIdentity = $stat === false ? null : ['dev' => $stat['dev'], 'ino' => $stat['ino']];
-    }
-
-    /**
-     * DDL for facet_doc_id_index at a given schema revision.
-     *
-     * Revision 2 widens the index to (doc_id, key_id, value, num_value) so the facet count
-     * join in fetchAllFacetCountsJoin() is satisfied index-only. Under revision 1 the index
-     * holds doc_id alone, so reading num_value costs an extra seek into the table per row —
-     * measured at roughly 2x the join cost on a 45k-document index.
-     *
-     * doc_id leads in both revisions, so DELETE-by-doc uses the index either way.
-     *
-     * Callers must pass the revision of the file they are writing to: createIndex() uses
-     * CURRENT_SCHEMA_VERSION, while the bulk-load teardown passes $this->schemaVersion so
-     * that dropping and recreating indexes around a bulk write never silently changes the
-     * shape of an older file.
-     */
-    private static function facetDocIndexDdl(int $schemaVersion): string
-    {
-        $columns = $schemaVersion >= 2
-            ? '(doc_id, key_id, value, num_value)'
-            : '(doc_id)';
-
-        return "CREATE INDEX IF NOT EXISTS 'main'.'facet_doc_id_index' ON facet_values {$columns}";
     }
 
     /** Reset all per-connection caches; called on every connection open or close. */
@@ -1255,9 +1242,7 @@ class Index
                     CREATE INDEX IF NOT EXISTS doclist_term_hitcount ON doclist (term_id, hit_count DESC);
                     CREATE INDEX IF NOT EXISTS positions_doc_id ON positions (doc_id);
                 ');
-                // Recreate at this file's own revision — a bulk load must never silently
-                // widen or narrow the index shape of an existing index.
-                $pdo->exec(self::facetDocIndexDdl($this->schemaVersion));
+                $pdo->exec(self::FACET_DOC_INDEX_DDL);
                 $pdo->exec('
                     CREATE INDEX IF NOT EXISTS facet_numeric_index ON facet_values (key_id, num_value, doc_id)
                         WHERE num_value IS NOT NULL;
@@ -3417,9 +3402,7 @@ class Index
             return;
         }
         if ($this->stripHtml) {
-            // Files before revision 3 keep plain strip_tags() so one index never mixes both
-            // tokenisations; rebuild() migrates. See docs/compatibility-debt.md.
-            $text = $this->schemaVersion >= 3 ? HtmlText::toText($text) : strip_tags($text);
+            $text = HtmlText::toText($text);
             if ($text === '') {
                 return;
             }
@@ -5967,7 +5950,7 @@ class Index
         }
         $useJoin = $docIds !== null && (
             count($docIds) <= self::FACET_JOIN_THRESHOLD
-            || $this->schemaVersion >= 2 && count($nameToId) > 1
+            || count($nameToId) > 1
         );
         $results = $useJoin
             ? $this->fetchAllFacetCountsJoin($nameToId, $docIds)

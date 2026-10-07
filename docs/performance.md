@@ -100,25 +100,14 @@ get the new one. A failed rebuild leaves the live index untouched. See
 [Index files after a rebuild or snapshot](indexing.md#index-files-after-a-rebuild-or-snapshot)
 for the file layout this creates.
 
-## Keeping the index schema current
+## Index files from another version
 
-Physical schema improvements ship as new revisions of the on-disk format. Older files
-keep working — they just miss the optimization — so upgrading the library never forces a
-migration. To check, and migrate when it pays:
-
-```php
-if ($index->schemaVersion < Index::CURRENT_SCHEMA_VERSION) {
-    Index::rebuild('/var/db/products.db');
-}
-```
-
-Revision 2 (1.5.0) widens `facet_doc_id_index` so facet counting runs index-only, worth
-~29% on a faceted search.
-
-`rebuild()` migrates; `snapshotTo()` does not. `VACUUM INTO` copies the source schema
-verbatim, so snapshots of an old write index stay on the old revision — rebuild the write
-index once and every later snapshot inherits the new shape. If you publish with cron
-`rebuild()`, the next run migrates you with no action at all.
+The on-disk format has a revision (`Index::CURRENT_SCHEMA_VERSION`, stored in each file and
+exposed as `$index->schemaVersion`). Fuzor 2.0 writes revision 4 and does not open files
+written by 1.x (revisions 1–3) or by a newer version: opening one throws a `QueryException`.
+Recreate such an index from your source data with `new Index($path, schema: ..., force: true)`
+and insert the documents again. `snapshotTo()` copies the file as it is, so a snapshot keeps
+its source's revision.
 
 ## Returning less per hit
 

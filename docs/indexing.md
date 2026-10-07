@@ -67,8 +67,6 @@ Pass `stripHtml: true` when documents contain HTML markup. Each field value is c
 
 The raw HTML is still stored unchanged in the document store, so hits, `get()`, and `stream()` return HTML. To store and return the text instead, convert the fields before inserting — see [Storing text instead of HTML](#storing-text-instead-of-html). Ignored when opening an existing index.
 
-Indexes created before 1.6.0 (schema revision 2 or lower) keep the previous behaviour — plain `strip_tags()`, which glues adjacent blocks together and indexes entity names — so an index never mixes the two. Run `Index::rebuild($path)` to switch; `$index->schemaVersion < Index::CURRENT_SCHEMA_VERSION` tells you it would help.
-
 ```php
 use Fuzor\SchemaConfig;
 
