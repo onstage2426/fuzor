@@ -163,6 +163,14 @@ class Index
     /** @var array<string, int> Maps facet key name → facet_keys.id; populated lazily; cleared on connection change. */
     private array $facetKeyCache = [];
 
+    /**
+     * @var array<int, true> facet key IDs this connection has seen flagged multi_valued (or
+     * flagged itself), so each key costs at most one UPDATE per connection. Only ever a subset
+     * of the flagged keys; cleared with the other caches (another connection's clear() can
+     * reset the flags).
+     */
+    private array $multiValuedKeys = [];
+
     /** @var array<string, int> Maps searchable field name → field_names.id; populated lazily; cleared on connection change. */
     private array $fieldNameCache = [];
 
@@ -838,8 +846,9 @@ class Index
         // facet_keys: one row per unique facet field name (~10–100 entries; fully cached in PHP).
         $pdo->exec(
             "CREATE TABLE IF NOT EXISTS facet_keys (
-                id   INTEGER PRIMARY KEY,
-                name TEXT NOT NULL UNIQUE
+                id           INTEGER PRIMARY KEY,
+                name         TEXT NOT NULL UNIQUE,
+                multi_valued INTEGER NOT NULL DEFAULT 0
             ) STRICT"
         );
         // facet_values: inverted index clustered on (key_id, value, doc_id).
@@ -1068,10 +1077,11 @@ class Index
         $this->infoCache      = null;
         $this->termIdCache    = [];
         $this->wordlistCache  = [];
-        $this->facetKeyCache  = [];
-        $this->fieldNameCache = [];
-        $this->synonymCache   = null;
-        $this->inTransaction  = false;
+        $this->facetKeyCache   = [];
+        $this->multiValuedKeys = [];
+        $this->fieldNameCache  = [];
+        $this->synonymCache    = null;
+        $this->inTransaction   = false;
         $this->dataVersion    = null;
     }
 
@@ -1103,9 +1113,10 @@ class Index
             $this->infoCache      = null;
             $this->wordlistCache  = [];
             $this->termIdCache    = [];
-            $this->facetKeyCache  = [];
-            $this->fieldNameCache = [];
-            $this->synonymCache   = null;
+            $this->facetKeyCache   = [];
+            $this->multiValuedKeys = [];
+            $this->fieldNameCache  = [];
+            $this->synonymCache    = null;
         }
         $this->dataVersion = $version;
     }
@@ -1242,6 +1253,7 @@ class Index
                  'docLengthBuffer'   => $docLengthBuffer,
                  'docPositionBuffer' => $docPositionBuffer,
                  'facetBuffer'       => $facetBuffer,
+                 'multiValuedFacets' => $multiValuedFacets,
                  'rawDocuments'      => $rawDocuments,
                  'fieldTermBuffer'   => $fieldTermBuffer] = $this->buildBatchBuffer($documents, $progress);
 
@@ -1254,6 +1266,7 @@ class Index
                     $rawDocuments,
                     $facetBuffer,
                     $fieldTermBuffer,
+                    $multiValuedFacets,
                 );
 
                 $this->adjustStats(count($documents), $totalLength);
@@ -1449,6 +1462,7 @@ class Index
                  'docLengthBuffer'   => $docLengthBuffer,
                  'docPositionBuffer' => $docPositionBuffer,
                  'facetBuffer'       => $facetBuffer,
+                 'multiValuedFacets' => $multiValuedFacets,
                  'rawDocuments'      => $rawDocuments,
                  'fieldTermBuffer'   => $fieldTermBuffer] = $this->buildBatchBuffer($documents);
 
@@ -1461,6 +1475,7 @@ class Index
                     $rawDocuments,
                     $facetBuffer,
                     $fieldTermBuffer,
+                    $multiValuedFacets,
                 );
 
                 // 5. Update stats: only truly new documents change the document count.
@@ -1553,6 +1568,7 @@ class Index
                 $pdo->exec('DELETE FROM documents');
             }
             $pdo->exec('DELETE FROM facet_values');
+            $pdo->exec('UPDATE facet_keys SET multi_valued = 0 WHERE multi_valued = 1');
             $pdo->exec('DELETE FROM field_hits');
 
             $this->stmt(
@@ -1567,8 +1583,9 @@ class Index
         $this->infoCache      = ['total_documents' => '0', 'avg_doc_length' => '0'];
         $this->termIdCache    = [];
         $this->wordlistCache  = [];
-        $this->facetKeyCache  = [];
-        $this->fieldNameCache = [];
+        $this->facetKeyCache   = [];
+        $this->multiValuedKeys = [];
+        $this->fieldNameCache  = [];
     }
 
     // --- Synonym management -------------------------------------------------
@@ -3573,12 +3590,19 @@ class Index
      *
      * @param array<string, mixed>                                   $extracted    array_intersect_key result
      * @param array<string, array<int|string, array<int, float|null>>>   $facetBuffer  mutated in-place
+     * @param array<string, true>                                      $multiValued  fields with 2+ values in one doc
      * @param-out array<string, array<int|string, array<int, float|null>>> $facetBuffer
+     * @param-out array<string, true>                                  $multiValued
      */
-    private function accumulateFacets(array $extracted, int $documentId, array &$facetBuffer): void
-    {
+    private function accumulateFacets(
+        array $extracted,
+        int $documentId,
+        array &$facetBuffer,
+        array &$multiValued,
+    ): void {
         foreach ($extracted as $name => $rawValue) {
             if (is_array($rawValue)) {
+                $distinct = [];
                 foreach ($rawValue as $v) {
                     if (is_int($v) || is_float($v)) {
                         $strVal = (string) $v;
@@ -3586,7 +3610,13 @@ class Index
                     } elseif (is_string($v) && $v !== '') {
                         $strVal = $v;
                         $facetBuffer[$name][$strVal][$documentId] = null;
+                    } else {
+                        continue;
                     }
+                    $distinct[$strVal] = true;
+                }
+                if (count($distinct) > 1) {
+                    $multiValued[$name] = true;
                 }
             } elseif (is_int($rawValue) || is_float($rawValue)) {
                 $strVal = (string) $rawValue;
@@ -3618,6 +3648,7 @@ class Index
      *     docLengthBuffer:   array<int, int>,
      *     docPositionBuffer: array<int, array<string, list<int>>>,
      *     facetBuffer:       array<string, array<int|string, array<int, float|null>>>,
+     *     multiValuedFacets: array<string, true>,
      *     rawDocuments:      array<int, array<string, mixed>>,
      *     fieldTermBuffer:   array<int, array<string, array<string, int>>>
      * }
@@ -3636,6 +3667,8 @@ class Index
         $docPositionBuffer = [];
         /** @var array<string, array<int|string, array<int, float|null>>> $facetBuffer  name → value → docId → numValue */
         $facetBuffer       = [];
+        /** @var array<string, true> $multiValuedFacets Facet fields with 2+ distinct values in one document. */
+        $multiValuedFacets = [];
         /** @var array<int, array<string, mixed>> $rawDocuments Raw document arrays for the document store; empty when store is disabled. */
         $rawDocuments      = [];
         /** @var array<int, array<string, array<string, int>>> $fieldTermBuffer  docId → fieldName → term → hitCount */
@@ -3667,6 +3700,7 @@ class Index
                     array_intersect_key($document, $facetFieldFlipped),
                     $documentId,
                     $facetBuffer,
+                    $multiValuedFacets,
                 );
             }
 
@@ -3699,6 +3733,7 @@ class Index
             'docLengthBuffer'   => $docLengthBuffer,
             'docPositionBuffer' => $docPositionBuffer,
             'facetBuffer'       => $facetBuffer,
+            'multiValuedFacets' => $multiValuedFacets,
             'rawDocuments'      => $rawDocuments,
             'fieldTermBuffer'   => $fieldTermBuffer,
         ];
@@ -3721,6 +3756,7 @@ class Index
      * @param  array<int, array<string, mixed>>     $rawDocuments  doc_id → raw document array (store path only)
      * @param  array<string, array<int|string, array<int, float|null>>> $facetBuffer  name → value → docId → numValue
      * @param  array<int, array<string, array<string, int>>> $fieldTermBuffer  docId → fieldName → term → hitCount
+     * @param  array<string, true>                  $multiValuedFacets  facet fields with 2+ values in one document
      * @return int Total token count across all documents (for adjustStats).
      */
     private function flushBatch(
@@ -3732,6 +3768,7 @@ class Index
         array $rawDocuments = [],
         array $facetBuffer = [],
         array $fieldTermBuffer = [],
+        array $multiValuedFacets = [],
     ): int {
         $pdo = $this->pdo;
         assert($pdo instanceof \PDO);
@@ -3765,7 +3802,7 @@ class Index
         // Step 7: bulk-insert facet values sorted by (key_id, value, doc_id) for
         // WITHOUT ROWID clustered B-tree sequential appends.
         if ($facetBuffer !== []) {
-            $this->bulkFlushFacets($facetBuffer);
+            $this->bulkFlushFacets($facetBuffer, $multiValuedFacets);
         }
 
         return array_sum($docLengthBuffer);
@@ -5170,9 +5207,40 @@ class Index
             'INSERT INTO facet_values (key_id, value, doc_id, num_value) VALUES (?,?,?,?)
              ON CONFLICT(key_id, value, doc_id) DO NOTHING'
         );
+        $valuesPerKey = [];
         foreach ($rows as $row) {
             $keyId = $this->resolveFacetKeyId($row['name']);
             $stmt->execute([$keyId, $row['value'], $documentId, $row['numValue']]);
+            $valuesPerKey[$keyId][$row['value']] = true;
+        }
+        if (count($rows) > count($valuesPerKey)) {
+            $multi = array_keys(array_filter($valuesPerKey, static fn(array $values): bool => count($values) > 1));
+            $this->markMultiValued($multi);
+        }
+    }
+
+    /**
+     * Flag facet keys as multi-valued (some document stored two or more values for the key).
+     *
+     * The flag only goes from 0 to 1 on writes: deletes and updates never clear it, because
+     * finding out that no document has two values any more would cost a scan of the key. A
+     * stale 1 only costs speed (readers keep the multi-valued query shapes); clear() and
+     * rebuild() reset it. Keys already in $multiValuedKeys are skipped, so each key costs at
+     * most one UPDATE per connection.
+     *
+     * @param list<int> $keyIds
+     */
+    private function markMultiValued(array $keyIds): void
+    {
+        foreach ($keyIds as $keyId) {
+            if (isset($this->multiValuedKeys[$keyId])) {
+                continue;
+            }
+            $this->stmt(
+                'facetKeyMarkMulti',
+                'UPDATE facet_keys SET multi_valued = 1 WHERE id = ? AND multi_valued = 0'
+            )->execute([$keyId]);
+            $this->multiValuedKeys[$keyId] = true;
         }
     }
 
@@ -5182,8 +5250,9 @@ class Index
      * Receives a pre-organized name→value→docId→numValue map built by buildBatchBuffer().
      *
      * @param array<string, array<int|string, array<int, float|null>>> $facetBuffer  name → value → docId → numValue
+     * @param array<string, true>                                      $multiValued  fields with 2+ values in one doc
      */
-    private function bulkFlushFacets(array $facetBuffer): void
+    private function bulkFlushFacets(array $facetBuffer, array $multiValued = []): void
     {
         $pdo = $this->pdo;
         assert($pdo instanceof \PDO);
@@ -5212,6 +5281,10 @@ class Index
                 }
             }
         }
+
+        $this->markMultiValued(
+            array_map(fn(string $name): int => $this->facetKeyCache[$name], array_keys($multiValued)),
+        );
 
         // 2. Remap outer keys from field names to integer key_ids (~one iteration per declared facet field).
         /** @var array<int, array<int|string, array<int, float|null>>> $kvdMap */

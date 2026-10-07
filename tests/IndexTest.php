@@ -7216,6 +7216,117 @@ class IndexTest extends TestCase
         }
     }
 
+    // --- multi-valued facet key flag ---
+
+    /** @return array<string, int> facet key name => multi_valued flag, read straight from the file */
+    private function multiValuedFlags(): array
+    {
+        $stmt = new \PDO('sqlite:' . $this->dbPath)->query('SELECT name, multi_valued FROM facet_keys ORDER BY name');
+        $this->assertNotFalse($stmt);
+        /** @var array<string, int> $flags */
+        $flags = $stmt->fetchAll(\PDO::FETCH_KEY_PAIR);
+        return $flags;
+    }
+
+    private function multiValuedIndex(): Index
+    {
+        return new Index($this->dbPath, schema: new SchemaConfig(
+            filterableFields: ['tags', 'color'],
+            sortableFields: ['price'],
+        ));
+    }
+
+    public function testSingleInsertFlagsOnlyKeysWithTwoValues(): void
+    {
+        $index = $this->multiValuedIndex();
+        $index->insert([['id' => 1, 'title' => 'a', 'tags' => ['x', 'y'], 'color' => ['red'], 'price' => 5]]);
+
+        $this->assertSame(['color' => 0, 'price' => 0, 'tags' => 1], $this->multiValuedFlags());
+    }
+
+    public function testBulkInsertFlagsOnlyKeysWithTwoValues(): void
+    {
+        $index = $this->multiValuedIndex();
+        $index->insert([
+            ['id' => 1, 'title' => 'a', 'tags' => 'x', 'color' => 'red', 'price' => 5],
+            ['id' => 2, 'title' => 'b', 'tags' => ['x', 'y'], 'color' => ['blue', ''], 'price' => [7]],
+        ]);
+
+        $this->assertSame(['color' => 0, 'price' => 0, 'tags' => 1], $this->multiValuedFlags());
+    }
+
+    public function testRepeatedValueIsNotMultiValued(): void
+    {
+        $index = $this->multiValuedIndex();
+        $index->insert([['id' => 1, 'title' => 'a', 'tags' => ['x', 'x']]]);
+        $index->insert([
+            ['id' => 2, 'title' => 'b', 'tags' => ['y', 'y'], 'price' => [3, 3.0]],
+            ['id' => 3, 'title' => 'c', 'tags' => 'z'],
+        ]);
+
+        $this->assertSame(['price' => 0, 'tags' => 0], $this->multiValuedFlags());
+    }
+
+    public function testUpdateAndUpsertFlagMultiValuedKeys(): void
+    {
+        $index = $this->multiValuedIndex();
+        $index->insert([
+            ['id' => 1, 'title' => 'a', 'tags' => 'x', 'color' => 'red'],
+            ['id' => 2, 'title' => 'b', 'tags' => 'y', 'color' => 'blue'],
+        ]);
+        $this->assertSame(['color' => 0, 'tags' => 0], $this->multiValuedFlags());
+
+        $index->update([['id' => 1, 'title' => 'a', 'tags' => ['x', 'y'], 'color' => 'red']]);
+        $this->assertSame(['color' => 0, 'tags' => 1], $this->multiValuedFlags());
+
+        $index->upsert([
+            ['id' => 2, 'title' => 'b', 'tags' => 'y', 'color' => ['blue', 'navy']],
+            ['id' => 3, 'title' => 'c', 'tags' => 'z', 'color' => 'red'],
+        ]);
+        $this->assertSame(['color' => 1, 'tags' => 1], $this->multiValuedFlags());
+    }
+
+    public function testDeleteKeepsTheFlagAndClearResetsIt(): void
+    {
+        $index = $this->multiValuedIndex();
+        $index->insert([['id' => 1, 'title' => 'a', 'tags' => ['x', 'y']]]);
+        $index->delete(1);
+        $this->assertSame(['tags' => 1], $this->multiValuedFlags());
+
+        $index->clear();
+        $this->assertSame(['tags' => 0], $this->multiValuedFlags());
+        $index->insert([['id' => 2, 'title' => 'b', 'tags' => ['x', 'y']]]);
+        $this->assertSame(['tags' => 1], $this->multiValuedFlags());
+    }
+
+    public function testRebuildRecomputesTheFlag(): void
+    {
+        $index = $this->multiValuedIndex();
+        $index->insert([
+            ['id' => 1, 'title' => 'a', 'tags' => ['x', 'y']],
+            ['id' => 2, 'title' => 'b', 'tags' => 'z'],
+        ]);
+        $index->delete(1);
+        $index->close();
+
+        Index::rebuild($this->dbPath)->close();
+
+        $this->assertSame(['tags' => 0], $this->multiValuedFlags());
+    }
+
+    public function testFlagIsSetAgainAfterAnotherConnectionClears(): void
+    {
+        $writer = $this->multiValuedIndex();
+        $writer->insert([['id' => 1, 'title' => 'a', 'tags' => ['x', 'y']]]);
+
+        $other = new Index($this->dbPath);
+        $other->clear();
+        $other->close();
+
+        $writer->insert([['id' => 2, 'title' => 'b', 'tags' => ['x', 'y']]]);
+        $this->assertSame(['tags' => 1], $this->multiValuedFlags());
+    }
+
     // --- checkpoint ---
 
     public function testCheckpointTruncatesWal(): void
