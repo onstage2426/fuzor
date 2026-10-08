@@ -1665,26 +1665,78 @@ class Index
         }
 
         $this->wrapInTransaction(function () use ($ids): void {
-            $lengths = $this->fetchDocLengthsForDocs(array_values(array_unique($ids)));
-            if ($lengths === []) {
+            $this->deleteDocuments(array_values(array_unique($ids)));
+        });
+    }
+
+    /**
+     * Remove every document that matches $filter, as delete() does, and return how many.
+     *
+     * $filter has the shape and meaning of SearchOptions::$filter — values, lists, FacetRange,
+     * FacetExclude, all combined with AND — and names filterable fields only. Matching and
+     * deletion happen in one transaction.
+     *
+     * @param  array<string, FacetExclude|FacetRange|list<string>|string> $filter
+     * @return int The number of documents deleted.
+     * @throws \InvalidArgumentException If $filter is empty (clear() removes every document).
+     * @throws QueryException            If a field is not declared in filterableFields.
+     * @throws IOException               If the index is read-only.
+     */
+    public function deleteByFilter(array $filter): int
+    {
+        $this->assertWritable();
+        if ($filter === []) {
+            throw new \InvalidArgumentException('deleteByFilter() needs a filter; clear() removes every document.');
+        }
+        $this->checkFilterableFields('Filter', array_keys($filter));
+
+        $deleted = 0;
+        $this->wrapInTransaction(function () use ($filter, &$deleted): void {
+            $conditions = $this->orderBySelectivity($this->facetFilterConditions($filter));
+            // No conditions left: only exclusions of values no document holds, which keep every document.
+            $match = $conditions === [] ? ['SELECT doc_id FROM doc_lengths', []] : $this->matchingDocsSql($conditions);
+            if ($match === null) {
                 return;
             }
-            $deleted = array_keys($lengths);
-            $this->removeDocumentRows($deleted);
-            foreach (array_chunk($deleted, self::CHUNK_1P) as $chunk) {
-                $this->prepare(
-                    'INSERT INTO deleted_docs (doc_id) VALUES ' . implode(', ', array_fill(0, count($chunk), '(?)'))
-                )->execute($chunk);
-            }
-            $this->adjustStats(-count($lengths), -array_sum($lengths));
-            $this->hasDeleted = true;
-
-            $pending = $this->countDeleted();
-            $live    = (int) $this->getInfoValues(['total_documents'])['total_documents'];
-            if ($pending >= self::PURGE_RATIO * ($pending + $live)) {
-                $this->purgeDeleted();
-            }
+            $stmt = $this->prepare($match[0]);
+            $stmt->execute($match[1]);
+            /** @var list<int> $ids */
+            $ids     = $stmt->fetchAll(PDO::FETCH_COLUMN);
+            $deleted = $this->deleteDocuments(array_values(array_unique($ids)));
         });
+        return $deleted;
+    }
+
+    /**
+     * delete()'s work inside the caller's transaction: remove the per-document rows of the live
+     * documents among $ids, record them in deleted_docs, adjust the stats, and purge every
+     * deleted document once they reach PURGE_RATIO of the index.
+     *
+     * @param  list<int> $ids Distinct IDs; ones without a live document are skipped.
+     * @return int            The number of documents deleted.
+     */
+    private function deleteDocuments(array $ids): int
+    {
+        $lengths = $this->fetchDocLengthsForDocs($ids);
+        if ($lengths === []) {
+            return 0;
+        }
+        $deleted = array_keys($lengths);
+        $this->removeDocumentRows($deleted);
+        foreach (array_chunk($deleted, self::CHUNK_1P) as $chunk) {
+            $this->prepare(
+                'INSERT INTO deleted_docs (doc_id) VALUES ' . implode(', ', array_fill(0, count($chunk), '(?)'))
+            )->execute($chunk);
+        }
+        $this->adjustStats(-count($lengths), -array_sum($lengths));
+        $this->hasDeleted = true;
+
+        $pending = $this->countDeleted();
+        $live    = (int) $this->getInfoValues(['total_documents'])['total_documents'];
+        if ($pending >= self::PURGE_RATIO * ($pending + $live)) {
+            $this->purgeDeleted();
+        }
+        return count($deleted);
     }
 
     /**

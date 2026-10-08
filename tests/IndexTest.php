@@ -1522,6 +1522,138 @@ class IndexTest extends TestCase
         $index->optimize();
     }
 
+    // --- deleteByFilter ---
+
+    /** 30 products: brand acme for ids 1-6, globex otherwise; color red for even ids; price = id × 10; tags on 1-3. */
+    private function productIndex(): Index
+    {
+        $index = new Index($this->dbPath, schema: new SchemaConfig(
+            filterableFields: ['brand', 'color', 'price', 'tags', 'unused'],
+        ));
+        $docs = [];
+        for ($i = 1; $i <= 30; $i++) {
+            $docs[] = [
+                'id'    => $i,
+                'title' => "product{$i} shirt",
+                'brand' => $i <= 6 ? 'acme' : 'globex',
+                'color' => $i % 2 === 0 ? 'red' : 'blue',
+                'price' => $i * 10,
+            ] + ($i <= 3 ? ['tags' => ['sale', 'new']] : []);
+        }
+        $index->insert($docs);
+        return $index;
+    }
+
+    /** @return list<int> */
+    private function remainingIds(Index $index): array
+    {
+        $ids = $index->search('', new SearchOptions(limit: 100))->getIds();
+        sort($ids);
+        return $ids;
+    }
+
+    public function testDeleteByFilterRemovesTheMatchingDocuments(): void
+    {
+        $index = $this->productIndex();
+
+        $this->assertSame(2, $index->deleteByFilter(['brand' => 'acme', 'tags' => 'sale', 'color' => 'blue']));
+
+        $this->assertSame([2, ...range(4, 30)], $this->remainingIds($index));
+        $this->assertSame(28, $index->count());
+        $this->assertNotContains(1, $index->search('product1')->getIds());
+        $facets = $index->search('', new SearchOptions(facets: ['brand']))->facetDistribution['brand'];
+        $this->assertSame(['globex' => 24, 'acme' => 4], $facets);
+        // Under 10% of the index: marked deleted, not purged yet.
+        $this->assertSame(2, $this->scalarQuery('SELECT COUNT(*) FROM deleted_docs'));
+    }
+
+    /** @return array<string, array{0: array<string, FacetExclude|FacetRange|list<string>|string>, 1: list<int>}> */
+    public static function deleteFilterProvider(): array
+    {
+        return [
+            'value list' => [['color' => ['red', 'green'], 'brand' => 'acme'], [2, 4, 6]],
+            'range'      => [['price' => new FacetRange(gte: 280)], [28, 29, 30]],
+            'exclusion'  => [['brand' => new FacetExclude('globex'), 'color' => new FacetExclude('blue')], [2, 4, 6]],
+        ];
+    }
+
+    /**
+     * @param array<string, FacetExclude|FacetRange|list<string>|string> $filter
+     * @param list<int>                                                  $expected
+     */
+    #[DataProvider('deleteFilterProvider')]
+    public function testDeleteByFilterTakesEveryFilterForm(array $filter, array $expected): void
+    {
+        $index = $this->productIndex();
+
+        $this->assertSame(count($expected), $index->deleteByFilter($filter));
+
+        $this->assertSame(array_values(array_diff(range(1, 30), $expected)), $this->remainingIds($index));
+    }
+
+    public function testDeleteByFilterMatchingNothingDeletesNothing(): void
+    {
+        $index = $this->productIndex();
+
+        $this->assertSame(0, $index->deleteByFilter(['brand' => 'initech']));
+        $this->assertSame(0, $index->deleteByFilter(['unused' => 'x']));
+        $this->assertSame(0, $index->deleteByFilter(['brand' => []]));
+        $this->assertSame(0, $index->deleteByFilter(['brand' => 'acme', 'color' => 'green']));
+        $this->assertSame(30, $index->count());
+    }
+
+    public function testDeleteByFilterWithAnExclusionNobodyMatchesDeletesEverything(): void
+    {
+        // Same meaning as in search(): every document without the value, which is all of them.
+        $index = $this->productIndex();
+
+        $this->assertSame(30, $index->deleteByFilter(['brand' => new FacetExclude('initech')]));
+
+        $this->assertSame(0, $index->count());
+        $this->assertSame(0, $this->scalarQuery('SELECT COUNT(*) FROM doclist'));
+    }
+
+    public function testDeleteByFilterPurgesOnceTheRatioIsReached(): void
+    {
+        $index = $this->productIndex();
+
+        $this->assertSame(6, $index->deleteByFilter(['brand' => 'acme']));
+
+        $this->assertSame(0, $this->scalarQuery('SELECT COUNT(*) FROM deleted_docs'));
+        $this->assertSame(24, $this->scalarQuery("SELECT num_docs FROM wordlist WHERE term = 'shirt'"));
+    }
+
+    public function testDeleteByFilterNeedsAFilter(): void
+    {
+        $index = $this->productIndex();
+
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('clear()');
+        $index->deleteByFilter([]);
+    }
+
+    public function testDeleteByFilterRejectsAFieldThatIsNotFilterable(): void
+    {
+        $index = $this->productIndex();
+
+        try {
+            $index->deleteByFilter(['brand' => 'acme', 'title' => 'product1 shirt']);
+            $this->fail('Expected a QueryException');
+        } catch (QueryException $e) {
+            $this->assertStringContainsString("'title'", $e->getMessage());
+        }
+        $this->assertSame(30, $index->count());
+    }
+
+    public function testReadonlyDeleteByFilterThrows(): void
+    {
+        $this->productIndex()->close();
+        $index = new Index($this->dbPath, readonly: true);
+
+        $this->expectException(IOException::class);
+        $index->deleteByFilter(['brand' => 'acme']);
+    }
+
     // --- clear ---
 
     public function testClearRemovesAllDocuments(): void
