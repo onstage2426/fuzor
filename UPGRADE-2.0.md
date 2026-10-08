@@ -98,3 +98,11 @@ Latin accents on both sides, so more values can match.
 In 1.x, values with the same count came in whatever order they were counted, which could differ
 between a filtered and an unfiltered page. 2.0 lists them by value, so with more values than
 `Config::$maxValuesPerFacet` a different value can be the last one kept.
+
+## Deleted documents count in word statistics until purged
+
+`delete()` no longer rewrites the word index right away (see "Deleting" in `docs/indexing.md`).
+Results never include deleted documents, but BM25's per-word document counts do until the next
+purge, so close results can be ordered slightly differently after deletes. Call `optimize()`
+after a large deletion if you need exact statistics; it also runs by itself once 10% of the
+index is deleted.

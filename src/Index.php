@@ -104,6 +104,14 @@ class Index
      */
     private const int FACET_JOIN_THRESHOLD = 2_000;
 
+    /**
+     * delete() purges the posting rows of every deleted document once deleted documents are this
+     * share of all documents (live + deleted). Until then the per-term num_docs / num_hits keep
+     * counting them (BM25 only; measured on ecom with 10% deleted: first hit unchanged, 97% of
+     * top-20 sets unchanged).
+     */
+    private const float PURGE_RATIO = 0.1;
+
     /** Absolute path to the open SQLite index file. */
     private readonly string $path;
 
@@ -208,6 +216,13 @@ class Index
 
     /** @var array<string, list<string>>|null Normalized source → list<target>; null = not loaded. Cleared on connection change. */
     private ?array $synonymCache = null;
+
+    /**
+     * Whether deleted_docs has rows (see delete()); null = not probed yet. Posting fetches add a
+     * deleted_docs filter only while true. Cleared on connection change and by every write that
+     * changes deleted_docs.
+     */
+    private ?bool $hasDeleted = null;
 
     /** Tracks the manually-issued BEGIN IMMEDIATE; PDO::inTransaction() cannot see it. */
     private bool $inTransaction = false;
@@ -827,6 +842,11 @@ class Index
             ) STRICT"
         );
 
+        // deleted_docs: documents removed by delete() whose posting rows (doclist, positions,
+        // field_hits) are still on disk until purgeDeleted(). Read paths never see them: every
+        // posting read joins doc_lengths, which delete() clears.
+        $pdo->exec("CREATE TABLE IF NOT EXISTS deleted_docs (doc_id INTEGER PRIMARY KEY) STRICT");
+
         $pdo->exec("CREATE TABLE IF NOT EXISTS info (key TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT");
         /** @infection-ignore-all MethodCallRemoval: skipping this INSERT leaves total_documents/avg_doc_length rows absent; adjustStats UPDATEs hit 0 rows but keep infoCache correct for the current connection, so single-connection tests are unaffected; only a close+reopen would expose stale DB state */
         $pdo->exec("INSERT INTO info (key, value) VALUES ('total_documents', 0), ('avg_doc_length', 0)");
@@ -1121,6 +1141,7 @@ class Index
         $this->keyMultiValued  = [];
         $this->fieldNameCache  = [];
         $this->synonymCache    = null;
+        $this->hasDeleted      = null;
         $this->inTransaction   = false;
         $this->dataVersion    = null;
     }
@@ -1158,6 +1179,7 @@ class Index
             $this->keyMultiValued  = [];
             $this->fieldNameCache  = [];
             $this->synonymCache    = null;
+            $this->hasDeleted      = null;
         }
         $this->dataVersion = $version;
     }
@@ -1224,6 +1246,10 @@ class Index
         if (!$pdo instanceof \PDO) {
             throw new \LogicException('Index connection is closed.');
         }
+
+        // Deleted IDs written again: purge their old term-index rows first, in a transaction of
+        // its own, while the doc_id indexes the purge seeks on still exist (dropped below).
+        $this->wrapInTransaction(fn() => $this->purgeDeletedAmong(array_keys($ids)));
 
         // Probe once to know whether the doclist is empty; used to skip the duplicate-ID check
         // (nothing can already exist in an empty table) and to gate index drop/rebuild.
@@ -1356,6 +1382,7 @@ class Index
             }
             /** @infection-ignore-all MethodCallRemoval: closeCursor is a resource-management call; omitting it leaves the cursor open but does not affect WAL-mode write correctness */
             $check->closeCursor();
+            $this->purgeDeletedAmong([$id]);
 
             $length = $this->processDocument($document);
             $this->adjustStats(1, $length);
@@ -1403,7 +1430,8 @@ class Index
             throw new QueryException("Document must contain an 'id' key.");
         }
         $this->wrapInTransaction(function () use ($document, $strict): void {
-            $id        = $this->extractId($document['id']);
+            $id = $this->extractId($document['id']);
+            $this->purgeDeletedAmong([$id]);
             $oldLength = $this->removeDocumentData($id);
 
             if ($oldLength === null) {
@@ -1467,19 +1495,8 @@ class Index
                     $ids[] = $this->extractId($document['id']);
                 }
 
-                $oldLengths = [];
-                foreach (array_chunk($ids, self::CHUNK_1P) as $chunk) {
-                    $placeholders = $this->placeholders(count($chunk));
-                    $stmt = $this->prepare(
-                        "SELECT doc_id, length FROM doc_lengths WHERE doc_id IN ({$placeholders})"
-                    );
-                    $stmt->execute($chunk);
-                    /** @var list<array{doc_id: int, length: int}> $rows */
-                    $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
-                    foreach ($rows as $row) {
-                        $oldLengths[$row['doc_id']] = $row['length'];
-                    }
-                }
+                $this->purgeDeletedAmong($ids);
+                $oldLengths = $this->fetchDocLengthsForDocs($ids);
 
                 // 2. Strict mode: every ID must already exist.
                 if ($strict) {
@@ -1543,50 +1560,60 @@ class Index
      * delete(...$ids). Non-existent IDs are silently skipped. All deletions happen in
      * a single transaction with one stats update.
      *
+     * The documents leave every read path, the stored documents, the facet tables and the
+     * document count at once. Their rows in the term index (doclist, positions, field_hits) are
+     * only marked deleted and purged later by optimize(), or by delete() itself once deleted
+     * documents make up 10% of the index; until then BM25's per-term document counts still
+     * include them.
+     *
      * @param int ...$ids Document IDs to remove.
      */
     public function delete(int ...$ids): void
     {
         $this->assertWritable();
-        /** @infection-ignore-all ReturnRemoval: empty $ids produces zero iterations and docDelta=0; adjustStats is not called — identical result */
+        /** @infection-ignore-all ReturnRemoval: empty $ids finds no lengths and returns inside the transaction — identical result */
         if ($ids === []) {
             return;
         }
 
-        if (count($ids) === 1) {
-            $this->wrapInTransaction(function () use ($ids): void {
-                /** @infection-ignore-all CastInt: $id is int from variadic; the cast is defensive only */
-                $length = $this->removeDocumentData((int) $ids[0]);
-                if ($length !== null) {
-                    $this->adjustStats(-1, -$length);
-                }
-            });
-            return;
-        }
-
         $this->wrapInTransaction(function () use ($ids): void {
-            $oldLengths = [];
-            foreach (array_chunk($ids, self::CHUNK_1P) as $chunk) {
-                $placeholders = $this->placeholders(count($chunk));
-                $stmt = $this->prepare(
-                    "SELECT doc_id, length FROM doc_lengths WHERE doc_id IN ({$placeholders})"
-                );
-                $stmt->execute($chunk);
-                /** @var list<array{doc_id: int, length: int}> $rows */
-                $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
-                foreach ($rows as $row) {
-                    $oldLengths[$row['doc_id']] = $row['length'];
-                }
-            }
-
-            if ($oldLengths === []) {
+            $lengths = $this->fetchDocLengthsForDocs(array_values(array_unique($ids)));
+            if ($lengths === []) {
                 return;
             }
+            $deleted = array_keys($lengths);
+            $this->removeDocumentRows($deleted);
+            foreach (array_chunk($deleted, self::CHUNK_1P) as $chunk) {
+                $this->prepare(
+                    'INSERT INTO deleted_docs (doc_id) VALUES ' . implode(', ', array_fill(0, count($chunk), '(?)'))
+                )->execute($chunk);
+            }
+            $this->adjustStats(-count($lengths), -array_sum($lengths));
+            $this->hasDeleted = true;
 
-            $this->bulkRemoveDocuments(array_keys($oldLengths));
-
-            $this->adjustStats(-count($oldLengths), -array_sum($oldLengths));
+            $pending = $this->countDeleted();
+            $live    = (int) $this->getInfoValues(['total_documents'])['total_documents'];
+            if ($pending >= self::PURGE_RATIO * ($pending + $live)) {
+                $this->purgeDeleted();
+            }
         });
+    }
+
+    /**
+     * Purge the term-index rows of every deleted document (see delete()) and bring the per-term
+     * document and hit counts back to exact. rebuild() and clear() leave none behind either.
+     *
+     * @return int The number of deleted documents purged.
+     * @throws IOException If the index is read-only.
+     */
+    public function optimize(): int
+    {
+        $this->assertWritable();
+        $purged = 0;
+        $this->wrapInTransaction(function () use (&$purged): void {
+            $purged = $this->purgeDeleted();
+        });
+        return $purged;
     }
 
     /**
@@ -1615,6 +1642,7 @@ class Index
             $pdo->exec('DELETE FROM sort_keys');
             $pdo->exec('UPDATE facet_keys SET multi_valued = 0 WHERE multi_valued = 1');
             $pdo->exec('DELETE FROM field_hits');
+            $pdo->exec('DELETE FROM deleted_docs');
 
             $this->stmt(
                 'statsWrite',
@@ -1632,6 +1660,7 @@ class Index
         $this->multiValuedKeys = [];
         $this->keyMultiValued  = [];
         $this->fieldNameCache  = [];
+        $this->hasDeleted      = false;
     }
 
     // --- Synonym management -------------------------------------------------
@@ -2132,7 +2161,7 @@ class Index
             $df = count($word) === 1 ? $word[0]['num_docs'] : (int) array_sum(array_column($word, 'num_docs'));
             // Smoothed BM25 IDF, log((N + 1) / (df + 0.5)): positive only while df <= N, so df is
             // capped at N. It can exceed N when prefix expansions are summed (a document counted
-            // once per matching term).
+            // once per matching term) and while deleted documents are not purged (see delete()).
             $idfDf = min($df, $totalDocuments);
             /** @infection-ignore-all IncrementInteger|Minus|Plus|Division: IDF mutations monotonically shift all per-term scores by the same factor; relative document ordering is preserved for any single-term query */
             $idf      = log(1 + ($totalDocuments - $idfDf + 0.5) / ($idfDf + 0.5));
@@ -3413,22 +3442,54 @@ class Index
     // --- Private write helpers ----------------------------------------------
 
     /**
-     * Remove a set of documents from the index in bulk without adjusting total_documents or avg_doc_length.
+     * Remove a set of live documents from the index in bulk without adjusting total_documents or avg_doc_length.
      *
      * Equivalent to calling removeDocumentData() in a loop but issues one CTE-based UPDATE and a handful
-     * of bulk DELETEs per chunk rather than 5 individual prepared statements per document. Orphan
-     * terms are pruned from the wordlist scoped to the affected term set (no full table scan).
+     * of bulk DELETEs per chunk rather than 5 individual prepared statements per document.
      *
-     * @param int[] $ids Document IDs to remove; all must exist in the index.
+     * @param list<int> $ids Document IDs to remove; all must exist in the index.
      */
     private function bulkRemoveDocuments(array $ids): void
     {
-        $pdo = $this->pdo;
-        assert($pdo instanceof \PDO);
+        $this->purgePostings($ids);
+        $this->removeDocumentRows($ids);
+    }
 
+    /**
+     * Remove the per-document rows of documents: doc_lengths, the stored document, facet_values
+     * (with their facet_counts) and sort_keys. Their term-index rows are left to purgePostings().
+     *
+     * @param list<int> $ids
+     */
+    private function removeDocumentRows(array $ids): void
+    {
         foreach (array_chunk($ids, self::CHUNK_1P) as $chunk) {
-            $n            = count($chunk);
-            $placeholders = $this->placeholders($n);
+            $placeholders = $this->placeholders(count($chunk));
+            $this->prepare("DELETE FROM doc_lengths  WHERE doc_id IN ({$placeholders})")->execute($chunk);
+            if ($this->documentStoreEnabled) {
+                $this->prepare("DELETE FROM documents WHERE doc_id IN ({$placeholders})")->execute($chunk);
+            }
+            $removed = $this->prepare(
+                "DELETE FROM facet_values WHERE doc_id IN ({$placeholders}) RETURNING key_id, value, num_value"
+            );
+            $removed->execute($chunk);
+            /** @var list<array{0: int, 1: string, 2: float|null}> $removedRows */
+            $removedRows = $removed->fetchAll(PDO::FETCH_NUM);
+            $this->adjustFacetCounts(self::facetCountDeltas($removedRows, -1));
+            $this->prepare("DELETE FROM sort_keys    WHERE doc_id IN ({$placeholders})")->execute($chunk);
+        }
+    }
+
+    /**
+     * Remove the term-index rows of documents (doclist, positions, field_hits), subtract them
+     * from the per-term counts, prune terms left without hits, and forget the IDs in deleted_docs.
+     *
+     * @param list<int> $ids
+     */
+    private function purgePostings(array $ids): void
+    {
+        foreach (array_chunk($ids, self::CHUNK_1P) as $chunk) {
+            $placeholders = $this->placeholders(count($chunk));
 
             // Capture affected term IDs before any deletion so orphan pruning can be scoped.
             $termStmt = $this->prepare(
@@ -3455,19 +3516,8 @@ class Index
 
             $this->prepare("DELETE FROM doclist      WHERE doc_id IN ({$placeholders})")->execute($chunk);
             $this->prepare("DELETE FROM positions    WHERE doc_id IN ({$placeholders})")->execute($chunk);
-            $this->prepare("DELETE FROM doc_lengths  WHERE doc_id IN ({$placeholders})")->execute($chunk);
-            if ($this->documentStoreEnabled) {
-                $this->prepare("DELETE FROM documents WHERE doc_id IN ({$placeholders})")->execute($chunk);
-            }
-            $removed = $this->prepare(
-                "DELETE FROM facet_values WHERE doc_id IN ({$placeholders}) RETURNING key_id, value, num_value"
-            );
-            $removed->execute($chunk);
-            /** @var list<array{0: int, 1: string, 2: float|null}> $removedRows */
-            $removedRows = $removed->fetchAll(PDO::FETCH_NUM);
-            $this->adjustFacetCounts(self::facetCountDeltas($removedRows, -1));
-            $this->prepare("DELETE FROM sort_keys    WHERE doc_id IN ({$placeholders})")->execute($chunk);
-            $this->prepare("DELETE FROM field_hits WHERE doc_id IN ({$placeholders})")->execute($chunk);
+            $this->prepare("DELETE FROM field_hits   WHERE doc_id IN ({$placeholders})")->execute($chunk);
+            $this->prepare("DELETE FROM deleted_docs WHERE doc_id IN ({$placeholders})")->execute($chunk);
 
             // Prune orphan terms scoped to the affected set; avoids a full wordlist table scan.
             if ($affectedTermIds !== []) {
@@ -3482,6 +3532,83 @@ class Index
         // on re-insertion of those terms in the subsequent flushBatch() call.
         $this->termIdCache   = [];
         $this->wordlistCache = [];
+        $this->hasDeleted    = null;
+    }
+
+    /** Whether any deleted document still has term-index rows; probed once, then cached (see $hasDeleted). */
+    private function hasDeleted(): bool
+    {
+        if ($this->hasDeleted === null) {
+            $probe = $this->stmt('deletedAny', 'SELECT 1 FROM deleted_docs LIMIT 1');
+            $probe->execute();
+            $this->hasDeleted = $probe->fetchColumn() !== false;
+            $probe->closeCursor();
+        }
+        return $this->hasDeleted;
+    }
+
+    /**
+     * SQL condition keeping deleted documents out of a doclist / positions read on $column, or ''
+     * when there are none. Posting rows of deleted documents stay until purgeDeleted(), and a
+     * fetch capped by LIMIT must skip them before the cap, not after.
+     */
+    private function liveDocsSql(string $column): string
+    {
+        return $this->hasDeleted() ? " AND {$column} NOT IN (SELECT doc_id FROM deleted_docs)" : '';
+    }
+
+    /** Number of deleted documents whose term-index rows are not purged yet. */
+    private function countDeleted(): int
+    {
+        $stmt = $this->stmt('deletedCount', 'SELECT COUNT(*) FROM deleted_docs');
+        $stmt->execute();
+        $count = (int) $stmt->fetchColumn();
+        // An open cursor would keep this connection's read snapshot past the commit.
+        $stmt->closeCursor();
+        return $count;
+    }
+
+    /**
+     * Purge every deleted document's term-index rows (see delete()). Runs inside the caller's
+     * transaction.
+     *
+     * @return int The number of documents purged.
+     */
+    private function purgeDeleted(): int
+    {
+        $stmt = $this->stmt('deletedIds', 'SELECT doc_id FROM deleted_docs ORDER BY doc_id');
+        $stmt->execute();
+        /** @var list<int> $ids */
+        $ids = $stmt->fetchAll(PDO::FETCH_COLUMN);
+        if ($ids !== []) {
+            $this->purgePostings($ids);
+        }
+        return count($ids);
+    }
+
+    /**
+     * Purge the deleted documents among $ids before they are written again: their old
+     * term-index rows would collide with the new ones (and a later purge would remove those).
+     * One probe of the empty deleted_docs table in the common case.
+     *
+     * @param list<int> $ids
+     */
+    private function purgeDeletedAmong(array $ids): void
+    {
+        if (!$this->hasDeleted()) {
+            return;
+        }
+        foreach (array_chunk($ids, self::CHUNK_1P) as $chunk) {
+            $stmt = $this->prepare(
+                'SELECT doc_id FROM deleted_docs WHERE doc_id IN (' . $this->placeholders(count($chunk)) . ')'
+            );
+            $stmt->execute($chunk);
+            /** @var list<int> $deleted */
+            $deleted = $stmt->fetchAll(PDO::FETCH_COLUMN);
+            if ($deleted !== []) {
+                $this->purgePostings($deleted);
+            }
+        }
     }
 
     /**
@@ -4496,7 +4623,8 @@ class Index
     }
 
     /**
-     * Fetch document lengths for a set of doc IDs. Used by field boost re-scoring.
+     * Fetch document lengths for a set of doc IDs; IDs without a live document are absent.
+     * Used by field boost re-scoring, delete() and the bulk update path.
      *
      * @param  list<int>       $docIds
      * @return array<int, int>  docId → token length
@@ -4661,13 +4789,15 @@ class Index
             return [];
         }
 
-        $n = count($termIds);
+        $n    = count($termIds);
+        $live = $this->liveDocsSql('doc_id');
+        $tag  = $live === '' ? '' : ':live';
 
         /** @infection-ignore-all IncrementInteger,Identical: mutations on n===1 only switch between the single-term cached stmt and the IN()-based multi-term stmt; both queries return equivalent doc ID sets */
         if ($n === 1) {
             $stmt = $this->stmt(
-                'boolDocIds1',
-                'SELECT doc_id FROM doclist WHERE term_id = ? ORDER BY hit_count DESC LIMIT ?'
+                "boolDocIds1{$tag}",
+                "SELECT doc_id FROM doclist WHERE term_id = ?{$live} ORDER BY hit_count DESC LIMIT ?"
             );
             $stmt->execute([$termIds[0], $limit + 1]);
             /** @var list<int> $rows */
@@ -4678,8 +4808,8 @@ class Index
 
         $placeholders = $this->placeholders($n);
         $stmt         = $this->stmt(
-            "boolDocIds:{$n}",
-            "SELECT doc_id FROM doclist WHERE term_id IN ({$placeholders}) ORDER BY hit_count DESC LIMIT ?"
+            "boolDocIds:{$n}{$tag}",
+            "SELECT doc_id FROM doclist WHERE term_id IN ({$placeholders}){$live} ORDER BY hit_count DESC LIMIT ?"
         );
         $stmt->execute([...$termIds, $limit + 1]);
         /** @var list<int> $rows */
@@ -5266,7 +5396,7 @@ class Index
             }
             $conditions[] = [
                 'name'       => '-' . $text,
-                'rows'       => $rows . ' WHERE %1$s.term_id = ?',
+                'rows'       => $rows . ' WHERE %1$s.term_id = ?' . $this->liveDocsSql('%1$s.doc_id'),
                 'params'     => [...$params, $termIds[0]],
                 'impossible' => false,
                 'multiRow'   => count($termIds) > 1,
@@ -5483,8 +5613,10 @@ class Index
         float $k1_1mb,
         float $k1b_avgdl,
     ): array {
-        $ids = array_column($words, 'id');
-        $n   = count($ids);
+        $ids  = array_column($words, 'id');
+        $n    = count($ids);
+        $live = $this->liveDocsSql('doc_id');
+        $tag  = $live === '' ? '' : ':live';
 
         // All paths apply LIMIT inside a subquery before the doc_lengths JOIN, bounding
         // the join to exactly $limit rows. The BM25 score is computed in SQLite C so PHP
@@ -5499,12 +5631,12 @@ class Index
         /** @infection-ignore-all LogicalNot: negating !$isFuzzy to $isFuzzy only switches between the single-term cached stmt and the multi-term/fuzzy paths; all return equivalent doc sets for non-fuzzy calls */
         if ($n === 1 && !$isFuzzy) {
             $stmt = $this->stmt(
-                'fetchOneTermDocs',
-                'SELECT sub.term_id, sub.doc_id,
+                "fetchOneTermDocs{$tag}",
+                "SELECT sub.term_id, sub.doc_id,
                         ? * sub.hit_count / (? + ? * dl.length + sub.hit_count) AS score
                   FROM (SELECT term_id, doc_id, hit_count FROM doclist
-                        WHERE term_id = ? ORDER BY hit_count DESC LIMIT ?) sub
-                  JOIN doc_lengths dl ON dl.doc_id = sub.doc_id'
+                        WHERE term_id = ?{$live} ORDER BY hit_count DESC LIMIT ?) sub
+                  JOIN doc_lengths dl ON dl.doc_id = sub.doc_id"
             );
             $stmt->execute([$idfK1p1, $k1_1mb, $k1b_avgdl, $ids[0], $limit]);
             /** @var list<array{0: int, 1: int, 2: float}> $rows */
@@ -5520,10 +5652,10 @@ class Index
                 /** @infection-ignore-all DecrementInteger,IncrementInteger: array_fill start index 0 vs ±1 only changes array keys; implode() ignores keys */
                 0,
                 $n,
-                'SELECT term_id, doc_id, hit_count FROM doclist WHERE term_id = ?'
+                "SELECT term_id, doc_id, hit_count FROM doclist WHERE term_id = ?{$live}"
             ));
             $stmt = $this->stmt(
-                "fetchNTermDocs:{$n}",
+                "fetchNTermDocs:{$n}{$tag}",
                 "SELECT sub.term_id, sub.doc_id,
                         ? * sub.hit_count / (? + ? * dl.length + sub.hit_count) AS score
                   FROM ({$arms} ORDER BY hit_count DESC LIMIT ?) sub
@@ -5544,7 +5676,7 @@ class Index
             "SELECT sub.term_id, sub.doc_id,
                     ? * sub.hit_count / (? + ? * dl.length + sub.hit_count) AS score
               FROM (SELECT term_id, doc_id, hit_count FROM doclist
-                    WHERE term_id IN ({$placeholders})
+                    WHERE term_id IN ({$placeholders}){$live}
                     ORDER BY CASE term_id {$cases} END ASC, hit_count DESC LIMIT ?) sub
               JOIN doc_lengths dl ON dl.doc_id = sub.doc_id"
         );

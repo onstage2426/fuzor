@@ -1130,6 +1130,219 @@ class IndexTest extends TestCase
         $this->assertEmpty($index->search('coupe')->getIds());
     }
 
+    // --- delete: tombstones ---
+
+    /** 30 documents that all contain "car"; documents 1-3 contain it three times (its best BM25 rows). */
+    private function tombstoneIndex(?Config $config = null): Index
+    {
+        $index = new Index($this->dbPath, config: $config);
+        $docs  = [];
+        for ($i = 1; $i <= 30; $i++) {
+            $docs[] = [
+                'id'    => $i,
+                'title' => ($i <= 3 ? 'car car car' : 'car') . " model{$i} " . ($i % 2 === 0 ? 'red' : 'blue'),
+            ];
+        }
+        $index->insert($docs);
+        return $index;
+    }
+
+    /** First column of the first row of $sql, read from the index file over a separate connection. */
+    private function scalarQuery(string $sql): int
+    {
+        $pdo  = new \PDO('sqlite:' . $this->dbPath);
+        $stmt = $pdo->query($sql);
+        $this->assertNotFalse($stmt);
+        return (int) $stmt->fetchColumn();
+    }
+
+    public function testDeleteRecordsTheIdAndKeepsPostingRowsUntilPurged(): void
+    {
+        $index = $this->tombstoneIndex();
+        $index->delete(4);
+
+        $this->assertSame(1, $this->scalarQuery('SELECT COUNT(*) FROM deleted_docs WHERE doc_id = 4'));
+        $this->assertGreaterThan(0, $this->scalarQuery('SELECT COUNT(*) FROM doclist WHERE doc_id = 4'));
+        $this->assertSame(0, $this->scalarQuery('SELECT COUNT(*) FROM doc_lengths WHERE doc_id = 4'));
+        $this->assertSame(0, $this->scalarQuery('SELECT COUNT(*) FROM documents WHERE doc_id = 4'));
+
+        $this->assertNotContains(4, $index->search('model4')->getIds());
+        $this->assertSame(29, $index->search('car', new SearchOptions(limit: 50))->totalHits);
+        $this->assertSame(29, $index->count());
+        $this->assertFalse($index->has(4));
+        $this->assertNull($index->get(4));
+    }
+
+    public function testDeletedDocumentsDoNotTakeCandidateSlots(): void
+    {
+        // maxDocs 3 fetches the three best "car" rows: exactly the deleted documents 1 and 2 plus 3.
+        $index = $this->tombstoneIndex(new Config(maxDocs: 3));
+        $index->delete(1, 2);
+
+        $ids = $index->search('car', new SearchOptions(limit: 3))->getIds();
+        $this->assertCount(3, $ids);
+        $this->assertSame([], array_intersect([1, 2], $ids));
+        $this->assertSame(3, $ids[0]);
+    }
+
+    public function testSearchBooleanSkipsDeletedDocuments(): void
+    {
+        $index = $this->tombstoneIndex(new Config(maxDocs: 3));
+        $index->delete(1, 2);
+
+        $ids = $this->booleanIds($index, 'car');
+        $this->assertCount(3, $ids);
+        $this->assertSame([], array_intersect([1, 2], $ids));
+        $this->assertNotContains(1, $this->booleanIds($index, 'car or blue'));
+        $this->assertNotContains(1, $this->booleanIds($index, 'car blue'));
+    }
+
+    public function testNegationOnlyTotalsIgnoreDeletedDocuments(): void
+    {
+        $index = $this->tombstoneIndex();
+        $index->delete(1);
+
+        // 29 live documents: 14 blue (odd ids 3..29), 15 red; "car car" in documents 2 and 3.
+        $this->assertSame(15, $index->search('-blue')->totalHits);
+        $this->assertSame(27, $index->search('-"car car"')->totalHits);
+        $this->assertNotContains(1, $index->search('-red', new SearchOptions(limit: 50))->getIds());
+    }
+
+    public function testDeletedDocumentsStayOutOfPhraseAndBoostedSearch(): void
+    {
+        $index = $this->tombstoneIndex(new Config(fieldBoosts: ['title' => 2.0]));
+        $index->delete(1);
+
+        $phrase = $index->search('"car car"')->getIds();
+        sort($phrase);
+        $this->assertSame([2, 3], $phrase);
+        $this->assertNotContains(1, $index->search('car', new SearchOptions(limit: 50))->getIds());
+    }
+
+    public function testAnotherConnectionSeesTheDelete(): void
+    {
+        $reader = $this->tombstoneIndex();
+        $this->assertContains(4, $reader->search('model4')->getIds());
+
+        $writer = new Index($this->dbPath);
+        $writer->delete(4);
+        $writer->close();
+
+        $this->assertNotContains(4, $reader->search('model4')->getIds());
+        $this->assertSame(29, $reader->search('car', new SearchOptions(limit: 50))->totalHits);
+    }
+
+    /** @return array<string, array{0: callable(Index): void}> */
+    public static function reinsertProvider(): array
+    {
+        $bus = ['id' => 5, 'title' => 'bus'];
+        return [
+            'insert one'  => [fn(Index $i) => $i->insert([$bus])],
+            'insert many' => [fn(Index $i) => $i->insert([$bus, ['id' => 31, 'title' => 'van']])],
+            'upsert one'  => [fn(Index $i) => $i->upsert([$bus])],
+            'upsert many' => [fn(Index $i) => $i->upsert([$bus, ['id' => 6, 'title' => 'van']])],
+        ];
+    }
+
+    /** @param callable(Index): void $write */
+    #[DataProvider('reinsertProvider')]
+    public function testReinsertingADeletedIdIndexesOnlyTheNewDocument(callable $write): void
+    {
+        $index = $this->tombstoneIndex();
+        $index->delete(5);
+        $write($index);
+
+        $this->assertSame([5], $index->search('bus')->getIds());
+        $this->assertNotContains(5, $index->search('model5')->getIds());
+        $this->assertNotContains(5, $index->search('car', new SearchOptions(limit: 50))->getIds());
+        $this->assertSame(0, $this->scalarQuery('SELECT COUNT(*) FROM deleted_docs'));
+        $this->assertSame(1, $this->scalarQuery('SELECT COUNT(*) FROM doclist WHERE doc_id = 5'));
+
+        // A later purge must not touch the live document.
+        $this->assertSame(0, $index->optimize());
+        $this->assertSame([5], $index->search('bus')->getIds());
+    }
+
+    public function testUpdateOfADeletedIdThrows(): void
+    {
+        $index = $this->tombstoneIndex();
+        $index->delete(5);
+
+        $this->expectException(QueryException::class);
+        $index->update([['id' => 5, 'title' => 'bus']]);
+    }
+
+    public function testOptimizePurgesDeletedDocuments(): void
+    {
+        $index = $this->tombstoneIndex();
+        $index->delete(4, 7);
+
+        $this->assertSame(2, $index->optimize());
+
+        $this->assertSame(0, $this->scalarQuery('SELECT COUNT(*) FROM deleted_docs'));
+        foreach (['doclist', 'positions', 'field_hits'] as $table) {
+            $this->assertSame(0, $this->scalarQuery("SELECT COUNT(*) FROM {$table} WHERE doc_id IN (4, 7)"), $table);
+        }
+        $this->assertSame(0, $this->scalarQuery("SELECT COUNT(*) FROM wordlist WHERE term = 'model4'"));
+        $this->assertSame(28, $this->scalarQuery("SELECT num_docs FROM wordlist WHERE term = 'car'"));
+        $this->assertSame(
+            0,
+            $this->scalarQuery(
+                'SELECT COUNT(*) FROM wordlist w'
+                . ' WHERE num_docs <> (SELECT COUNT(*) FROM doclist d WHERE d.term_id = w.id)'
+                . ' OR num_hits <> (SELECT SUM(hit_count) FROM doclist d WHERE d.term_id = w.id)'
+            )
+        );
+        $this->assertSame(28, $index->search('car', new SearchOptions(limit: 50))->totalHits);
+        $this->assertSame(0, $index->optimize());
+    }
+
+    public function testDeleteReachingTheRatioPurgesEveryDeletedDocument(): void
+    {
+        $index = $this->tombstoneIndex();
+        $index->delete(1, 2);
+        $this->assertSame(2, $this->scalarQuery('SELECT COUNT(*) FROM deleted_docs'));
+
+        // 3 of 30 documents deleted: 10%.
+        $index->delete(3);
+        $this->assertSame(0, $this->scalarQuery('SELECT COUNT(*) FROM deleted_docs'));
+        $this->assertSame(0, $this->scalarQuery('SELECT COUNT(*) FROM doclist WHERE doc_id IN (1, 2, 3)'));
+        $this->assertSame(27, $this->scalarQuery("SELECT num_docs FROM wordlist WHERE term = 'car'"));
+    }
+
+    public function testClearForgetsDeletedDocuments(): void
+    {
+        $index = $this->tombstoneIndex();
+        $index->delete(4);
+        $index->clear();
+
+        $this->assertSame(0, $this->scalarQuery('SELECT COUNT(*) FROM deleted_docs'));
+        $index->insert([['id' => 4, 'title' => 'bus']]);
+        $this->assertSame([4], $index->search('bus')->getIds());
+    }
+
+    public function testRebuildDropsDeletedDocuments(): void
+    {
+        $index = $this->tombstoneIndex();
+        $index->delete(4);
+        $index->close();
+
+        Index::rebuild($this->dbPath)->close();
+
+        $this->assertSame(0, $this->scalarQuery('SELECT COUNT(*) FROM deleted_docs'));
+        $this->assertSame(0, $this->scalarQuery('SELECT COUNT(*) FROM doclist WHERE doc_id = 4'));
+        $this->assertSame(29, $this->scalarQuery("SELECT num_docs FROM wordlist WHERE term = 'car'"));
+    }
+
+    public function testReadonlyOptimizeThrows(): void
+    {
+        $this->tombstoneIndex()->close();
+        $index = new Index($this->dbPath, readonly: true);
+
+        $this->expectException(IOException::class);
+        $index->optimize();
+    }
+
     // --- clear ---
 
     public function testClearRemovesAllDocuments(): void

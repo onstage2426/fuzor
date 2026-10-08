@@ -270,11 +270,33 @@ $index->upsert([
 
 ## Deleting
 
-Removes one or more documents from all index tables and updates the document count. No-op for IDs that do not exist.
+Removes one or more documents and updates the document count. No-op for IDs that do not exist.
 
 ```php
 $index->delete(1);          // single
 $index->delete(1, 2, 3);    // multiple (variadic)
+```
+
+A deleted document is gone from every search, browse, facet count, `get()`, and `count()` as
+soon as `delete()` returns. Its rows in the word index are only marked deleted and removed
+later, in bulk: rewriting them costs far more than the rest of the delete (on a 44k-product
+catalog, 50 documents: ~13 ms instead of 250–700 ms, and a 0.5 ms single delete instead of
+3.4 ms). Until they are removed, the per-word document counts BM25 uses still include the
+deleted documents, which can reorder close results slightly (with 10% of a catalog deleted, the
+first hit was unchanged and 97% of top-20 sets kept the same documents), and searches pay a small
+extra filter (0.1–1.3 ms).
+
+They are removed:
+
+- by `delete()` itself, once deleted documents make up 10% of the index (that call takes longer:
+  ~1.4 s for 4,000 documents on the catalog above);
+- by `optimize()`, which returns the number of documents it purged;
+- by `rebuild()` and `clear()`;
+- one at a time when a deleted ID is inserted or upserted again.
+
+```php
+$index->delete(...$discontinued);
+$index->optimize();   // exact word statistics again, e.g. after a large cleanup
 ```
 
 ## Check existence
