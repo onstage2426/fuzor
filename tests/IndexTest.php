@@ -3861,6 +3861,167 @@ class IndexTest extends TestCase
         new Index($this->dbPath, readonly: true)->clear();
     }
 
+    // --- install ---
+
+    /** A snapshot of a small index at a fresh temp path (a file received from elsewhere). */
+    private function snapshotFile(string $title = 'electric sedan'): string
+    {
+        $source = sys_get_temp_dir() . '/fuzor_src_' . uniqid() . '.db';
+        $file   = sys_get_temp_dir() . '/fuzor_received_' . uniqid() . '.db';
+        $index  = new Index($source);
+        $index->insert([['id' => 1, 'title' => $title], ['id' => 2, 'title' => 'off-road suv']]);
+        $index->snapshotTo($file);
+        $index->close();
+        self::removeIndexFiles($source);
+        // A plain file, as a transfer would leave it.
+        $plain = sys_get_temp_dir() . '/fuzor_plain_' . uniqid() . '.db';
+        copy((string) realpath($file), $plain);
+        self::removeIndexFiles($file);
+        return $plain;
+    }
+
+    /** @return list<string> Files next to $path that are neither $path nor one of its versions. */
+    private function leftoversNextTo(string $path): array
+    {
+        return array_values(array_filter(
+            glob($path . '[.-]*') ?: [],
+            fn(string $f): bool => preg_match('/\.v-[0-9a-f]{8}$/', $f) !== 1,
+        ));
+    }
+
+    public function testInstallPublishesTheFileAtThePath(): void
+    {
+        $file = $this->snapshotFile();
+        try {
+            Index::install($file, $this->dbPath);
+
+            $this->assertTrue(is_link($this->dbPath));
+            $index = new Index($this->dbPath);
+            $this->assertSame([1], $index->search('sedan')->getIds());
+            $index->insert([['id' => 3, 'title' => 'cargo van']]);
+            $this->assertSame(3, $index->count());
+            $index->close();
+            $this->assertFileExists($file);
+            $this->assertSame([], $this->leftoversNextTo($this->dbPath));
+        } finally {
+            @unlink($file);
+        }
+    }
+
+    public function testInstallReplacesAnIndexWhileAReaderKeepsTheOldOne(): void
+    {
+        $old = new Index($this->dbPath);
+        $old->insert([['id' => 7, 'title' => 'old wagon']]);
+        $reader = new Index($this->dbPath, readonly: true);
+        $this->assertSame([7], $reader->search('wagon')->getIds());
+
+        $file = $this->snapshotFile();
+        try {
+            Index::install($file, $this->dbPath, check: true);
+
+            $this->assertSame([7], $reader->search('wagon')->getIds());
+            $fresh = new Index($this->dbPath, readonly: true);
+            $this->assertSame([], $fresh->search('wagon')->getIds());
+            $this->assertSame([1], $fresh->search('sedan')->getIds());
+            $fresh->close();
+        } finally {
+            $reader->close();
+            $old->close();
+            @unlink($file);
+        }
+    }
+
+    /** @return array<string, array{0: callable(string): mixed, 1: class-string<\Throwable>}> */
+    public static function badInstallFileProvider(): array
+    {
+        return [
+            'not SQLite'   => [
+                fn(string $f) => file_put_contents($f, str_repeat('not a database ', 500)),
+                QueryException::class,
+            ],
+            'other SQLite' => [
+                fn(string $f) => unlink($f) && new \PDO('sqlite:' . $f)->exec('CREATE TABLE t (x)') !== false,
+                QueryException::class,
+            ],
+            'truncated'    => [fn(string $f) => self::truncateToHalf($f), QueryException::class],
+            'missing'      => [fn(string $f) => @unlink($f), IOException::class],
+            '1.x revision' => [
+                fn(string $f) => new \PDO('sqlite:' . $f)
+                    ->exec("UPDATE info SET value = '3' WHERE key = 'schema_version'"),
+                QueryException::class,
+            ],
+        ];
+    }
+
+    private static function truncateToHalf(string $file): void
+    {
+        $h = fopen($file, 'r+');
+        assert($h !== false);
+        ftruncate($h, max(0, intdiv((int) filesize($file), 2)));
+        fclose($h);
+    }
+
+    /**
+     * @param callable(string): mixed  $spoil
+     * @param class-string<\Throwable> $exception
+     */
+    #[DataProvider('badInstallFileProvider')]
+    public function testInstallRejectsABadFileAndKeepsTheIndex(callable $spoil, string $exception): void
+    {
+        $index = new Index($this->dbPath);
+        $index->insert([['id' => 7, 'title' => 'old wagon']]);
+        $index->close();
+        $file = $this->snapshotFile();
+        $spoil($file);
+        try {
+            Index::install($file, $this->dbPath);
+            $this->fail("Expected {$exception}");
+        } catch (\Throwable $e) {
+            $this->assertInstanceOf($exception, $e);
+        } finally {
+            @unlink($file);
+        }
+
+        $this->assertFalse(is_link($this->dbPath));
+        $this->assertSame([7], new Index($this->dbPath, readonly: true)->search('wagon')->getIds());
+        $temp = array_filter($this->leftoversNextTo($this->dbPath), fn(string $f) => !preg_match('/-(wal|shm)$/', $f));
+        $this->assertSame([], $temp);
+    }
+
+    public function testInstallCheckFindsADamagedPage(): void
+    {
+        $file = $this->snapshotFile(str_repeat('long description words ', 400));
+        // Overwrite the middle of the file, keeping its size: only an integrity check notices.
+        $h = fopen($file, 'r+');
+        assert($h !== false);
+        fseek($h, intdiv((int) filesize($file), 2));
+        fwrite($h, str_repeat("\xff", 4096));
+        fclose($h);
+        try {
+            $this->expectException(QueryException::class);
+            $this->expectExceptionMessage('integrity');
+            Index::install($file, $this->dbPath, check: true);
+        } finally {
+            @unlink($file);
+            $this->assertFileDoesNotExist($this->dbPath);
+        }
+    }
+
+    public function testInstallRefusesAFileWithAWriteAheadLog(): void
+    {
+        $live = sys_get_temp_dir() . '/fuzor_live_' . uniqid() . '.db';
+        $index = new Index($live);
+        $index->insert([['id' => 1, 'title' => 'sedan']]);
+        try {
+            $this->expectException(IOException::class);
+            $this->expectExceptionMessage('snapshotTo()');
+            Index::install($live, $this->dbPath);
+        } finally {
+            $index->close();
+            self::removeIndexFiles($live);
+        }
+    }
+
     // --- snapshotTo ---
 
     public function testSnapshotToCreatesFile(): void

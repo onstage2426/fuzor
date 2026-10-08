@@ -726,6 +726,114 @@ class Index
     }
 
     /**
+     * Put an index file made elsewhere at $path: a snapshotTo() copy received from another
+     * server, or a backup.
+     *
+     * The file is copied next to $path under a temp name, synced to disk, and checked: it must
+     * be a complete Fuzor index (its size matches its page count) of a schema revision this
+     * version opens, and with $check also pass PRAGMA quick_check (~2 s on a 300 MB index,
+     * against 0.4 s for the copy). Then it is published like rebuild() publishes a build (see
+     * snapshotTo()): connections on the previous index keep reading it until they reopen. $file
+     * itself is left in place. On any failure nothing changes at $path.
+     *
+     * $file must not be in use by a writer: a database with a non-empty -wal next to it has
+     * commits that are not in the main file yet, so it is refused (publish a live index with
+     * snapshotTo() instead).
+     *
+     * @param  string $file  The index file to install.
+     * @param  string $path  Where to install it; an index there is replaced.
+     * @param  bool   $check Also run SQLite's integrity check (quick_check) before publishing.
+     * @throws IOException    If $file cannot be read or copied, has a write-ahead log, or the
+     *                        directory of $path does not exist.
+     * @throws QueryException If $file is not a complete Fuzor index this version opens, or fails
+     *                        the integrity check.
+     */
+    public static function install(string $file, string $path, bool $check = false): void
+    {
+        $resolved = self::resolvePath($path);
+        $source   = realpath($file);
+        if ($source === false || !is_file($source) || !is_readable($source)) {
+            throw new IOException("Cannot read index file: {$file}");
+        }
+        if ((int) @filesize($source . '-wal') > 0) {
+            throw new IOException(
+                "{$file} has a write-ahead log with commits not in the file yet; "
+                . 'publish a live index with snapshotTo() instead.'
+            );
+        }
+
+        self::cleanupTempFiles($resolved);
+        [$tmp, $tmpLock] = self::claimTempPath($resolved);
+        try {
+            if (!@copy($source, $tmp)) {
+                throw new IOException("Failed to copy {$file} to {$tmp}.");
+            }
+            $handle = fopen($tmp, 'r+');
+            if ($handle === false || !fsync($handle)) {
+                throw new IOException("Failed to write {$tmp} to disk.");
+            }
+            fclose($handle);
+            self::verifyInstallable($tmp, $file, $check);
+            self::publishVersion($tmp, $resolved);
+        } catch (\Throwable $e) {
+            foreach (['', '-wal', '-shm', '-journal'] as $suffix) {
+                @unlink($tmp . $suffix);
+            }
+            throw $e;
+        } finally {
+            self::releaseTempPath($tmp, $tmpLock);
+        }
+    }
+
+    /**
+     * Open the copy that install() is about to publish and check it; see install().
+     *
+     * @throws QueryException
+     */
+    private static function verifyInstallable(string $tmp, string $file, bool $check): void
+    {
+        try {
+            $index = new self($tmp, readonly: true);
+        } catch (\RuntimeException $e) {
+            // QueryException: a Fuzor revision this version does not open; PDOException: not one at all.
+            $why = $e instanceof QueryException ? 'cannot be installed' : 'is not a Fuzor index';
+            throw new QueryException("{$file} {$why}: {$e->getMessage()}", 0, $e);
+        }
+        try {
+            $pdo = $index->pdo;
+            assert($pdo instanceof \PDO);
+            $pragma = static function (string $name) use ($pdo): array {
+                $stmt = $pdo->query("PRAGMA {$name}");
+                assert($stmt !== false);
+                return array_map(
+                    fn(mixed $v): string => is_scalar($v) ? (string) $v : '',
+                    $stmt->fetchAll(PDO::FETCH_COLUMN),
+                );
+            };
+            clearstatcache(true, $tmp);
+            if ((int) $pragma('page_count')[0] * (int) $pragma('page_size')[0] !== filesize($tmp)) {
+                throw new QueryException("{$file} is incomplete: its size does not match its page count.");
+            }
+            if ($check) {
+                try {
+                    $result = $pragma('quick_check');
+                } catch (\PDOException $e) {
+                    $result = [$e->getMessage()];
+                }
+                if ($result !== ['ok']) {
+                    throw new QueryException(
+                        "{$file} failed the integrity check: " . implode('; ', array_slice($result, 0, 3))
+                    );
+                }
+            }
+        } catch (\PDOException $e) {
+            throw new QueryException("{$file} is not a usable Fuzor index: {$e->getMessage()}", 0, $e);
+        } finally {
+            $index->close();
+        }
+    }
+
+    /**
      * Run a WAL checkpoint, moving committed pages from the -wal file into the database.
      *
      * SQLite checkpoints automatically once the WAL passes `wal_autocheckpoint` pages, but

@@ -378,6 +378,19 @@ $index->snapshotTo('/path/to/articles-snapshot.db');
 
 The snapshot is published the same way as a rebuild: see [Index files after a rebuild or snapshot](#index-files-after-a-rebuild-or-snapshot).
 
+## Installing an index file
+
+`Index::install()` puts an index file made elsewhere at a path, for example a snapshot built on another server and transferred to this one:
+
+```php
+Index::install('/tmp/received-articles.db', '/var/db/articles.db');
+Index::install($file, $path, check: true);   // also run SQLite's integrity check
+```
+
+The file is copied next to the path under a temporary name, written to disk, and checked before anything changes: it must be a complete Fuzor index (a file cut short in transfer is rejected) of a schema revision this version opens. With `check: true` it must also pass SQLite's `quick_check`, which reads the whole file (about 2 s for 300 MB, against 0.4 s for the copy). It is then published like a rebuild, so processes that have the old index open keep reading it until they reopen. The source file is left in place. A bad file throws (`QueryException`, or `IOException` when it cannot be read) and leaves the index at the path untouched.
+
+Install snapshots, not live indexes: a file with a non-empty `-wal` next to it holds commits that are not in the file yet and is refused. Use `snapshotTo()` to copy an index that is in use.
+
 ## Atomic rebuild
 
 Replaces the entire contents of an index in one atomic operation. If anything throws, the original file is left completely untouched.
@@ -413,7 +426,7 @@ Internally, `rebuild` writes to a temporary file alongside the target, then publ
 
 ### Index files after a rebuild or snapshot
 
-`rebuild()`, `snapshotTo()`, and `new Index($path, force: true)` over an existing index publish each new file under a name of its own, `{path}.v-{8 hex}`, and turn `{path}` into a symlink to it, swapped atomically:
+`rebuild()`, `snapshotTo()`, `Index::install()`, and `new Index($path, force: true)` over an existing index publish each new file under a name of its own, `{path}.v-{8 hex}`, and turn `{path}` into a symlink to it, swapped atomically:
 
 ```
 articles.db          -> articles.db.v-3f9a01c2      (symlink, relative)
