@@ -1240,17 +1240,20 @@ class Index
         $this->facetFieldSet      = $this->filterableFieldSet + $this->sortableFieldSet;
     }
 
-    /** Why a file cannot be opened, and how to get a usable index again. */
     /**
      * The schema revision stored in a Fuzor index file, read without opening it as an Index;
      * null when the file is not a Fuzor index. Files before 1.5.0 have no schema_version key and
-     * are revision 1.
+     * are revision 1. Opened read-only, like a readonly Index: it only reads one value.
      */
     private static function storedRevision(string $resolved): ?int
     {
         try {
-            $pdo    = new \PDO('sqlite:' . $resolved, options: [\PDO::ATTR_ERRMODE => \PDO::ERRMODE_EXCEPTION]);
-            $tables = $pdo->query(
+            $encoded = implode('/', array_map(rawurlencode(...), explode('/', $resolved)));
+            $pdo     = new \PDO(
+                'sqlite:file://' . $encoded . '?mode=ro',
+                options: [\PDO::ATTR_ERRMODE => \PDO::ERRMODE_EXCEPTION],
+            );
+            $tables  = $pdo->query(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('info', 'wordlist')"
             );
             if ($tables === false || (int) $tables->fetchColumn() !== 2) {
@@ -1264,6 +1267,7 @@ class Index
         }
     }
 
+    /** Why a file cannot be opened, and how to get a usable index again. */
     private static function unsupportedRevisionMessage(string $path, int $revision): string
     {
         if ($revision > self::CURRENT_SCHEMA_VERSION) {
