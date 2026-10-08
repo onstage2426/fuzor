@@ -1581,8 +1581,9 @@ class Index
     /**
      * Replace one or many existing documents in the index.
      *
-     * All IDs are checked for existence before any writes — missing IDs throw without
-     * modifying the index.
+     * Runs in one transaction: a missing ID throws and leaves the index unchanged. Several
+     * documents are written in chunks of Config::$insertChunkSize, reading a generator one
+     * chunk at a time; the exception names the missing IDs of the first chunk that has any.
      *
      * @param list<array<string, mixed>>|\Traversable<mixed, array<string, mixed>> $documents
      *                                    List of document arrays; each must contain an 'id' key.
@@ -1647,28 +1648,27 @@ class Index
     /**
      * Shared implementation for the bulk update() and upsert() paths.
      *
-     * Uses the same two-phase bulk path as insertMany(): a single bulk-remove pass over all
-     * existing documents followed by buildBatchBuffer() + flushBatch() for all incoming documents.
-     * This avoids the per-document removeDocumentData() + processDocument() loop that wipes caches
-     * and issues individual prepared statements for every row.
+     * Works through the documents in chunks of Config::$insertChunkSize inside one transaction,
+     * reading a generator one chunk at a time (replaceChunk()); the stats are adjusted once at
+     * the end. A missing 'id' or, for update(), a document that does not exist throws and rolls
+     * the whole call back.
      *
      * @param list<array<string, mixed>>|\Traversable<mixed, array<string, mixed>> $documents
      * @throws QueryException
      */
     private function replaceMany(iterable $documents, bool $strict): void
     {
-        /** @infection-ignore-all LogicalNot: iterator_to_array() accepts arrays in PHP 8.1+; converting an array produces the same array */
-        if (!is_array($documents)) {
-            $documents = iterator_to_array($documents, false);
-        }
-
-        if ($documents === []) {
+        $chunks = self::chunked($documents, $this->config->insertChunkSize);
+        if (!$chunks->valid()) {
             return;
         }
+        $first = $chunks->current();
+        $chunks->next();
+        $more = $chunks->valid();
 
-        // Single-element list: use the lightweight single-doc path to avoid bulk pragma overhead.
-        if (count($documents) === 1) {
-            $this->replaceOne($documents[0], $strict);
+        // Single document: use the lightweight single-doc path to avoid bulk pragma overhead.
+        if (!$more && count($first) === 1) {
+            $this->replaceOne($first[0], $strict);
             return;
         }
 
@@ -1682,69 +1682,28 @@ class Index
         $this->applyBulkPragmas();
 
         try {
-            $this->wrapInTransaction(function () use ($documents, $strict): void {
-                // 1. Collect IDs and fetch existing doc lengths in one pass.
-                $ids = [];
-                foreach ($documents as $i => $document) {
-                    if (!array_key_exists('id', $document)) {
-                        throw new QueryException("Document at index {$i} must contain an 'id' key.");
+            $this->wrapInTransaction(function () use (&$first, $chunks, $more, $strict): void {
+                /** @var list<array<string, mixed>> $chunk */
+                $chunk       = $first;
+                $first       = null;
+                $offset      = 0;
+                $docDelta    = 0;
+                $lengthDelta = 0;
+                while (true) {
+                    [$docs, $length] = $this->replaceChunk($chunk, $offset, $strict);
+                    $docDelta       += $docs;
+                    $lengthDelta    += $length;
+                    $offset         += count($chunk);
+                    if (!$more) {
+                        break;
                     }
-                    $ids[] = $this->extractId($document['id']);
+                    /** @var list<array<string, mixed>> $chunk */
+                    $chunk = $chunks->current();
+                    $chunks->next();
+                    $more = $chunks->valid();
                 }
 
-                $this->purgeDeletedAmong($ids);
-                $oldLengths = $this->fetchDocLengthsForDocs($ids);
-
-                // 2. Strict mode: every ID must already exist.
-                if ($strict) {
-                    $missing = array_diff($ids, array_keys($oldLengths));
-                    if ($missing !== []) {
-                        throw new QueryException(
-                            'Documents do not exist with ids: '
-                                . implode(', ', $missing) . '. Use upsert() to create or replace them.'
-                        );
-                    }
-                }
-
-                // 3. Bulk-remove all documents that currently exist in the index; those whose
-                //    searchable input is unchanged keep their term-index rows.
-                $existingIds = array_keys($oldLengths);
-                $kept        = $this->unchangedSearchableLengths($documents, $oldLengths);
-                if ($kept !== []) {
-                    $this->removeDocumentRows(array_keys($kept));
-                }
-                $changedIds = array_values(array_diff($existingIds, array_keys($kept)));
-                if ($changedIds !== []) {
-                    $this->bulkRemoveDocuments($changedIds);
-                }
-
-                // 4. Bulk-insert all documents using the same two-phase path as insertMany().
-                ['wordHits'          => $wordHits,
-                 'wordDocs'          => $wordDocs,
-                 'docTermBuffer'     => $docTermBuffer,
-                 'docLengthBuffer'   => $docLengthBuffer,
-                 'docPositionBuffer' => $docPositionBuffer,
-                 'facetBuffer'       => $facetBuffer,
-                 'multiValuedFacets' => $multiValuedFacets,
-                 'rawDocuments'      => $rawDocuments,
-                 'fieldTermBuffer'   => $fieldTermBuffer] = $this->buildBatchBuffer($documents, knownLengths: $kept);
-
-                $totalNewLength = $this->flushBatch(
-                    $wordHits,
-                    $wordDocs,
-                    $docTermBuffer,
-                    $docLengthBuffer,
-                    $docPositionBuffer,
-                    $rawDocuments,
-                    $facetBuffer,
-                    $fieldTermBuffer,
-                    $multiValuedFacets,
-                );
-
-                // 5. Update stats: only truly new documents change the document count.
-                $docDelta    = count($ids) - count($existingIds);
-                $lengthDelta = $totalNewLength - array_sum($oldLengths);
-
+                // Only truly new documents change the document count.
                 /** @infection-ignore-all NotIdentical: diverges only when docDelta≠0 and lengthDelta=0, which requires new docs with zero tokens — impossible in practice */
                 if ($docDelta !== 0 || $lengthDelta !== 0) {
                     $this->adjustStats($docDelta, $lengthDelta);
@@ -1754,6 +1713,78 @@ class Index
             $this->restoreNormalPragmas();
             $this->bulkStmtCache = [];
         }
+    }
+
+    /**
+     * One chunk of replaceMany(), inside its transaction: check the IDs, remove the documents that
+     * exist (keeping the term-index rows of those whose searchable input is unchanged), and write
+     * the chunk with the two-phase bulk path.
+     *
+     * @param  list<array<string, mixed>> $chunk
+     * @param  int                        $offset Position of the chunk's first document in the input.
+     * @return array{0: int, 1: int}             Document count and total length deltas.
+     * @throws QueryException
+     */
+    private function replaceChunk(array $chunk, int $offset, bool $strict): array
+    {
+        $ids = [];
+        foreach ($chunk as $i => $document) {
+            if (!array_key_exists('id', $document)) {
+                $at = $offset + $i;
+                throw new QueryException("Document at index {$at} must contain an 'id' key.");
+            }
+            $ids[] = $this->extractId($document['id']);
+        }
+
+        $this->purgeDeletedAmong($ids);
+        $oldLengths = $this->fetchDocLengthsForDocs($ids);
+
+        if ($strict) {
+            $missing = array_diff($ids, array_keys($oldLengths));
+            if ($missing !== []) {
+                throw new QueryException(
+                    'Documents do not exist with ids: '
+                        . implode(', ', $missing) . '. Use upsert() to create or replace them.'
+                );
+            }
+        }
+
+        // Remove the documents that exist; those whose searchable input is unchanged keep their
+        // term-index rows.
+        $existingIds = array_keys($oldLengths);
+        $kept        = $this->unchangedSearchableLengths($chunk, $oldLengths);
+        if ($kept !== []) {
+            $this->removeDocumentRows(array_keys($kept));
+        }
+        $changedIds = array_values(array_diff($existingIds, array_keys($kept)));
+        if ($changedIds !== []) {
+            $this->bulkRemoveDocuments($changedIds);
+        }
+
+        // Write the chunk with the same two-phase path as insertMany().
+        ['wordHits'          => $wordHits,
+         'wordDocs'          => $wordDocs,
+         'docTermBuffer'     => $docTermBuffer,
+         'docLengthBuffer'   => $docLengthBuffer,
+         'docPositionBuffer' => $docPositionBuffer,
+         'facetBuffer'       => $facetBuffer,
+         'multiValuedFacets' => $multiValuedFacets,
+         'rawDocuments'      => $rawDocuments,
+         'fieldTermBuffer'   => $fieldTermBuffer] = $this->buildBatchBuffer($chunk, knownLengths: $kept);
+
+        $totalNewLength = $this->flushBatch(
+            $wordHits,
+            $wordDocs,
+            $docTermBuffer,
+            $docLengthBuffer,
+            $docPositionBuffer,
+            $rawDocuments,
+            $facetBuffer,
+            $fieldTermBuffer,
+            $multiValuedFacets,
+        );
+
+        return [count($ids) - count($existingIds), $totalNewLength - array_sum($oldLengths)];
     }
 
     /**

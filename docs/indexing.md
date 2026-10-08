@@ -245,7 +245,7 @@ Hits, `get()`, and `stream()` then return text, and `_formatted` highlights and 
 
 ## Updating
 
-Replaces existing documents. Old index data is removed and each document is re-indexed in a single transaction. All IDs are checked for existence before any writes — the transaction is never partially applied. Throws `QueryException` if any ID does not exist — use `upsert()` for create-or-replace semantics.
+Replaces existing documents. Old index data is removed and each document is re-indexed in a single transaction, which is never partially applied: if any ID does not exist, it throws a `QueryException` and nothing changes — use `upsert()` for create-or-replace semantics. Like `insert()`, a multi-document `update()` or `upsert()` works in chunks of `Config::$insertChunkSize` and reads a generator one chunk at a time; the exception names the missing IDs of the first chunk that has any.
 
 With the document store enabled (the default), a document whose searchable fields are unchanged — the same values, of the same type, in the same order — keeps its word index entries: only the stored document and its filterable / sortable values are rewritten. A price sync of 200 products on a 44k catalog takes 46 ms instead of 360 ms this way. `upsert()` does the same. Without a store there is nothing to compare with, so every document is re-indexed.
 
@@ -256,7 +256,7 @@ $index->update([
     ['id' => 1, 'title' => 'Updated sedan', 'body' => 'New content.'],
 ]);
 
-// Bulk — throws QueryException listing all missing IDs upfront
+// Bulk — throws QueryException if any ID is missing; nothing is written
 $index->update([
     ['id' => 1, 'title' => 'Updated sedan', 'body' => 'New content.'],
     ['id' => 2, 'title' => 'Updated SUV',   'body' => 'More new content.'],

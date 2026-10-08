@@ -3548,7 +3548,7 @@ class IndexTest extends TestCase
 
     // --- insert in chunks ---
 
-    /** @return list<array<string, mixed>> */
+    /** @return list<array{id: int, title: string, body: string, color: string|list<string>, price: int}> */
     private static function chunkDocs(): array
     {
         $docs = [];
@@ -3790,6 +3790,81 @@ class IndexTest extends TestCase
         $this->assertSame([5], $index->search('bus')->getIds());
         $this->assertNotContains(5, $index->search('car', new SearchOptions(limit: 50))->getIds());
         $this->assertSame(0, $this->scalarQuery('SELECT COUNT(*) FROM deleted_docs'));
+    }
+
+    #[DataProvider('chunkInputProvider')]
+    public function testChunkedUpsertWritesTheSameIndexAsOneBatch(bool $generator): void
+    {
+        $docs    = self::chunkDocs();
+        $changed = [];
+        foreach (array_slice($docs, 2) as $d) {
+            $title     = $d['title'] . ($d['id'] % 2 === 0 ? ' edition' : '');
+            $changed[] = ['title' => $title, 'price' => $d['price'] + 1] + $d;
+        }
+        $changed[] = ['id' => 11, 'title' => 'new van', 'color' => 'blue', 'price' => 5];
+        $index = $this->chunkIndex($this->dbPath, null);
+        $index->insert($docs);
+        $index->upsert($changed);
+
+        $chunkedPath = $this->dbPath . '-chunked.db';
+        try {
+            $chunked = $this->chunkIndex($chunkedPath, 3);
+            $chunked->insert($docs);
+            $chunked->upsert($generator ? self::generate($changed) : $changed);
+            $this->assertSame($this->indexContents($this->dbPath), $this->indexContents($chunkedPath));
+        } finally {
+            self::removeIndexFiles($chunkedPath);
+        }
+    }
+
+    public function testUpdateReadsAGeneratorOneChunkAtATime(): void
+    {
+        $index = $this->chunkIndex($this->dbPath, 3);
+        $index->insert(self::chunkDocs());
+        $seen = [];
+        $feed = function () use ($index, &$seen): \Generator {
+            foreach (self::chunkDocs() as $doc) {
+                // Before document 8 is read, the chunks holding documents 1-3 must be written.
+                if ($doc['id'] === 8) {
+                    $seen = [$index->get(1)['title'] ?? null, $index->get(7)['title'] ?? null];
+                }
+                yield ['title' => 'renamed ' . $doc['id']] + $doc;
+            }
+        };
+
+        $index->update($feed());
+
+        $this->assertSame('renamed 1', $seen[0]);
+        $all = new SearchOptions(asYouType: false, matchingStrategy: MatchingStrategy::All);
+        $this->assertSame([7], $index->search('renamed 7', $all)->getIds());
+    }
+
+    public function testUpdateWithAMissingIdInALaterChunkChangesNothing(): void
+    {
+        $index = $this->chunkIndex($this->dbPath, 3);
+        $index->insert(self::chunkDocs());
+        $docs    = array_map(fn(array $d): array => ['title' => 'renamed'] + $d, self::chunkDocs());
+        $docs[8] = ['id' => 99, 'title' => 'renamed'];
+
+        try {
+            $index->update(self::generate($docs));
+            $this->fail('Expected a QueryException');
+        } catch (QueryException $e) {
+            $this->assertStringContainsString('99', $e->getMessage());
+        }
+        $this->assertSame([], $index->search('renamed')->getIds());
+        $this->assertSame(10, $index->count());
+    }
+
+    public function testUpsertMissingIdKeyInALaterChunkIsReportedWithItsPosition(): void
+    {
+        $index   = $this->chunkIndex($this->dbPath, 3);
+        $docs    = self::chunkDocs();
+        $docs[7] = ['title' => 'no id'];
+
+        $this->expectException(QueryException::class);
+        $this->expectExceptionMessage("Document at index 7 must contain an 'id' key.");
+        $index->upsert(self::generate($docs));
     }
 
     public function testInsertChunkSizeMustBePositive(): void

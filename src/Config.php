@@ -99,9 +99,10 @@ final readonly class Config
          */
         public int $mmapSizeBytes = 536_870_912,
         /**
-         * Documents tokenised and written per step of a multi-document insert(). Memory during a
-         * bulk insert follows this number, not the input size (a generator is read one chunk at a
-         * time); all chunks still commit in one transaction. Lower it under a tight memory_limit.
+         * Documents tokenised and written per step of a multi-document insert(), update() or
+         * upsert(). Memory during a bulk write follows this number, not the input size (a
+         * generator is read one chunk at a time); all chunks still commit in one transaction.
+         * Lower it under a tight memory_limit.
          *
          * @infection-ignore-all: default value; mutations only affect memory and speed, not correctness
          */
