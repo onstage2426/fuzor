@@ -5230,9 +5230,9 @@ class IndexTest extends TestCase
 
     public function testExclusionOnlyBrowseFacetCountsAreExactAtAnyCap(): void
     {
-        // Two docs are excluded: cap 1 scans each key with NOT IN, caps 2 and 100 subtract the
-        // excluded docs' counts from the whole-index counts. Both must match what the search
-        // paths count over the kept candidates when nothing caps them (cap 100, run first).
+        // The cap does not change exclusion-only counts: they are exact at every cap and match
+        // what the search paths count over the kept candidates when nothing caps them (cap 100,
+        // run first).
         $reference = null;
         foreach ([100, 2, 1] as $cap) {
             $this->tearDown();
@@ -5251,6 +5251,71 @@ class IndexTest extends TestCase
             $this->assertSame(['min' => 20.0, 'max' => 50.0], $results['browse']->facetStats['price'], "cap {$cap}");
             $this->assertSame(['Adidas' => 2, 'Puma' => 2], $facets['browse'][0]['brand'], "cap {$cap}");
         }
+    }
+
+    /** 20 products: brand cycles Nike/Adidas/Puma/Asics, price = id, tags on some; doc 1 carries three tags. */
+    private function shareIndex(): Index
+    {
+        $index = new Index($this->dbPath, schema: new SchemaConfig(
+            filterableFields: ['brand', 'tags', 'price'],
+            sortableFields: ['price'],
+        ));
+        $brands = ['Nike', 'Adidas', 'Puma', 'Asics'];
+        $docs   = [];
+        for ($i = 1; $i <= 20; $i++) {
+            $docs[] = ['id' => $i, 'title' => 'shoe', 'brand' => $brands[$i % 4], 'price' => $i]
+                + match (true) {
+                    $i === 1  => ['tags' => ['hidden', 'archived', 'sale']],
+                    $i <= 3   => ['tags' => ['hidden']],
+                    $i <= 6   => ['tags' => ['sale']],
+                    default   => [],
+                };
+        }
+        $index->insert($docs);
+        return $index;
+    }
+
+    /** @return array<string, array{0: array<string, FacetExclude>, 1: non-empty-list<int>}> */
+    public static function excludedShareProvider(): array
+    {
+        return [
+            // 3 of 20 excluded: subtracted from the whole-index counts; doc 1 matches three times.
+            'few excluded'  => [
+                [
+                    'tags'  => new FacetExclude(['hidden', 'archived']),
+                    'price' => new FacetExclude(new FacetRange(lte: 1)),
+                ],
+                range(4, 20),
+            ],
+            // 15 of 20 excluded: the kept rows are counted directly.
+            'most excluded' => [
+                ['brand' => new FacetExclude(['Nike', 'Adidas', 'Asics'])],
+                [2, 6, 10, 14, 18],
+            ],
+        ];
+    }
+
+    /**
+     * @param array<string, FacetExclude> $filter
+     * @param non-empty-list<int>         $kept
+     */
+    #[DataProvider('excludedShareProvider')]
+    public function testExclusionOnlyFacetCountsAreExactWhateverShareIsExcluded(array $filter, array $kept): void
+    {
+        $index   = $this->shareIndex();
+        $options = new SearchOptions(filter: $filter, facets: ['brand', 'tags', 'price'], limit: 50);
+
+        $results = $this->assertFilterOnEveryPath($index, $options, $kept);
+        $facets  = $this->sortedFacets($results);
+
+        $this->assertSame($facets['search'], $facets['browse']);
+        $this->assertSame([], $results['browse']->approximateFacets);
+        $priceStats = ['min' => (float) min($kept), 'max' => (float) max($kept)];
+        $this->assertSame($priceStats, $results['browse']->facetStats['price']);
+        $brands   = ['Nike', 'Adidas', 'Puma', 'Asics'];
+        $expected = array_count_values(array_map(fn(int $i): string => $brands[$i % 4], $kept));
+        ksort($expected);
+        $this->assertSame($expected, $facets['browse'][0]['brand']);
     }
 
     public function testExclusionOnlyBrowseStatsAppearWhenOnlyNumbersRemain(): void

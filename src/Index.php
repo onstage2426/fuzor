@@ -105,6 +105,13 @@ class Index
     private const int FACET_JOIN_THRESHOLD = 2_000;
 
     /**
+     * Exclusion-only facet counts subtract the excluded documents' rows (cost per excluded
+     * document) up to this share of the index, and scan the kept rows (cost per facet row)
+     * above it. Measured crossover on a 533k index: ~30% (see collectFacetCountsExcluding()).
+     */
+    private const float EXCLUDED_SCAN_SHARE = 0.25;
+
+    /**
      * delete() purges the posting rows of every deleted document once deleted documents are this
      * share of all documents (live + deleted). Until then the per-term num_docs / num_hits keep
      * counting them (BM25 only; measured on ecom with 10% deleted: first hit unchanged, 97% of
@@ -7310,13 +7317,14 @@ class Index
      *
      * Visiting the kept documents one by one costs O(index size), so the counts are derived
      * instead: each key's whole-index counts (facet_counts, as for an unfiltered browse) minus
-     * the counts over the excluded documents, aggregated once for all keys in SQL. Exclusions
-     * usually remove few documents, which makes this nearly as cheap as the unfiltered count.
-     * When they remove more than Config::$maxFacetCountDocs, the kept rows of all keys are
-     * counted in one scan with doc_id NOT IN (excluded) instead. Both ways are exact.
+     * the counts over the excluded documents, aggregated once for all keys in SQL. That costs
+     * per excluded document; when more than EXCLUDED_SCAN_SHARE of the index is excluded, the
+     * kept rows of all keys are counted in one scan with doc_id NOT IN (excluded) instead, which
+     * costs per facet row. Both ways are exact.
      *
-     * Measured on the 45k ecom set, five keys: 15 ms with 4,025 docs excluded (37 ms before
-     * facet_counts), 45 ms with 34,409 excluded (60 ms with one NOT IN scan per key).
+     * Measured, five keys: 45k ecom set 15 ms with 4,025 docs excluded (37 ms before
+     * facet_counts), 45 ms with 34,409 excluded (scan); 533k set, subtraction ~3 µs per excluded
+     * doc (28k: 79 ms, 48k: 141 ms, 413k: 1.7 s) against ~600 ms for the scan.
      *
      * @param array<string, int>                           $nameToId     Facet key name → key_id.
      * @param non-empty-list<FacetCondition>               $conditions   Exclusions only, none impossible.
@@ -7330,14 +7338,11 @@ class Index
         array &$stats,
     ): void {
         [$excludedSql, $excludedParams] = $this->excludedDocsSql($conditions);
-        $cap  = $this->config->maxFacetCountDocs;
-        $stmt = $this->prepare("SELECT DISTINCT doc_id FROM ({$excludedSql}) LIMIT ?");
-        $stmt->execute([...$excludedParams, $cap + 1]);
-        /** @var list<int> $excludedIds */
-        $excludedIds = $stmt->fetchAll(PDO::FETCH_COLUMN);
+        $excluded = $this->countExcludedDocs($conditions);
+        $total    = (int) $this->getInfoValues(['total_documents'])['total_documents'];
 
-        if (count($excludedIds) > $cap) {
-            // Many excluded documents: count the kept rows of every key in one scan, so the
+        if ($excluded > self::EXCLUDED_SCAN_SHARE * $total) {
+            // Most documents excluded: count the kept rows of every key in one scan, so the
             // excluded set is materialised once instead of once per key.
             $keyIds = array_values($nameToId);
             $stmt   = $this->prepare(
@@ -7366,17 +7371,17 @@ class Index
         }
 
         // The excluded documents' rows per (key, value), aggregated in SQL so PHP gets one row per
-        // value instead of one per document and key (driven from the excluded IDs through the
-        // covering facet_doc_id_index).
-        $stmt = $this->stmt(
-            'facetCountsOfDocs',
-            'SELECT fv.key_id, fv.value, COUNT(*), COUNT(fv.num_value)
-               FROM json_each(?) j
-               CROSS JOIN facet_values fv ON fv.doc_id = j.value
+        // value instead of one per document and key. Driven from the distinct excluded documents
+        // (the exclusion SQL lists a document once per matching row) through the covering
+        // facet_doc_id_index.
+        $stmt = $this->prepare(
+            "SELECT fv.key_id, fv.value, COUNT(*), COUNT(fv.num_value)
+               FROM (SELECT DISTINCT doc_id FROM ({$excludedSql})) ex
+               CROSS JOIN facet_values fv ON fv.doc_id = ex.doc_id
               WHERE fv.key_id IN (SELECT value FROM json_each(?))
-              GROUP BY fv.key_id, fv.value'
+              GROUP BY fv.key_id, fv.value"
         );
-        $stmt->execute([json_encode($excludedIds), json_encode(array_values($nameToId))]);
+        $stmt->execute([...$excludedParams, json_encode(array_values($nameToId))]);
         /** @var list<array{0: int, 1: string, 2: int, 3: int}> $removedRows */
         $removedRows = $stmt->fetchAll(PDO::FETCH_NUM);
         /** @var array<int, array<array-key, array{0: int, 1: int}>> $removed  key_id → value → [rows, numeric rows] */
