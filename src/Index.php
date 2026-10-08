@@ -2130,9 +2130,12 @@ class Index
             }
             /** @infection-ignore-all IncrementInteger,Ternary,CastInt: numDocs feeds BM25 scoring only; for single-term prefix results array_sum equals word[0]['num_docs']; CastInt: array_sum returns int */
             $df = count($word) === 1 ? $word[0]['num_docs'] : (int) array_sum(array_column($word, 'num_docs'));
-            // Smoothed BM25 IDF: always ≥ 0, avoids negative weights for common terms.
+            // Smoothed BM25 IDF, log((N + 1) / (df + 0.5)): positive only while df <= N, so df is
+            // capped at N. It can exceed N when prefix expansions are summed (a document counted
+            // once per matching term).
+            $idfDf = min($df, $totalDocuments);
             /** @infection-ignore-all IncrementInteger|Minus|Plus|Division: IDF mutations monotonically shift all per-term scores by the same factor; relative document ordering is preserved for any single-term query */
-            $idf      = log(1 + ($totalDocuments - $df + 0.5) / ($df + 0.5));
+            $idf      = log(1 + ($totalDocuments - $idfDf + 0.5) / ($idfDf + 0.5));
             $groups[] = [
                 'words'     => $word,
                 'termIds'   => array_column($word, 'id'),

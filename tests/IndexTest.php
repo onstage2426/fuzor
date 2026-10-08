@@ -495,6 +495,19 @@ class IndexTest extends TestCase
         $this->assertContains(2, $result->getIds());
     }
 
+    public function testPrefixRankingHoldsWhenExpansionsCountMoreDocumentsThanTheIndex(): void
+    {
+        // "car" expands to cara (2 docs), carb and carc (1 each): summed df 4 > 2 documents.
+        // An uncapped df makes the IDF negative and ranks the document with more matches last.
+        $index = new Index($this->dbPath);
+        $index->insert([
+            ['id' => 1, 'title' => 'cara carb carc zzz'],
+            ['id' => 2, 'title' => 'cara zzz zzz zzz'],
+        ]);
+
+        $this->assertSame([1, 2], $index->search('car')->getIds());
+    }
+
     // --- maxDocs ---
 
     public function testMaxDocsLimitsResultsPerKeyword(): void
