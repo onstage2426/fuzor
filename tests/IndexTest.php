@@ -7825,6 +7825,33 @@ class IndexTest extends TestCase
         );
     }
 
+    public function testTiedFacetCountsAreOrderedByValueOnEveryCountingPath(): void
+    {
+        // 2,100 docs: brands C, A, B inserted in that order, 700 each; a filter matching all of
+        // them goes through the per-key scan (one key, more than 2,000 docs), a smaller one
+        // through the doc-driven join, no filter through facet_counts.
+        $index = new Index($this->dbPath, schema: new SchemaConfig(filterableFields: ['brand', 'all', 'few']));
+        $docs  = [];
+        for ($id = 1; $id <= 2100; $id++) {
+            $docs[] = [
+                'id'    => $id,
+                'title' => 'x',
+                'brand' => ['C', 'A', 'B'][intdiv($id - 1, 700)],
+                'all'   => 'yes',
+                'few'   => $id % 700 < 3 ? 'yes' : 'no',
+            ];
+        }
+        $index->insert($docs);
+        foreach ([[], ['all' => 'yes'], ['few' => 'yes']] as $filter) {
+            $result = $index->search('', new SearchOptions(filter: $filter, facets: ['brand']));
+            $this->assertSame(
+                ['A', 'B', 'C'],
+                array_keys($result->facetDistribution['brand']),
+                implode(',', array_keys($filter)),
+            );
+        }
+    }
+
     public function testFacetCountsStayExactThroughEveryWritePath(): void
     {
         $index = new Index($this->dbPath, schema: new SchemaConfig(

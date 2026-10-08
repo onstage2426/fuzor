@@ -92,3 +92,9 @@ The default page size is 20 hits instead of 100. Pass `limit: 100` to keep the o
 `FacetSearchQuery::$facetQuery` used to match the start of the value only, ignoring ASCII case.
 It now matches the start of any word (separated by spaces, `-`, `_`, or `/`) and ignores case and
 Latin accents on both sides, so more values can match.
+
+## Facet values with equal counts are ordered by value
+
+In 1.x, values with the same count came in whatever order they were counted, which could differ
+between a filtered and an unfiltered page. 2.0 lists them by value, so with more values than
+`Config::$maxValuesPerFacet` a different value can be the last one kept.
