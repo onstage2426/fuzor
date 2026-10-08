@@ -2882,11 +2882,21 @@ class Index
 
         $conditions = $this->orderBySelectivity([...$this->facetFilterConditions($filter), ...$negations]);
         $match      = $conditions === [] ? null : $this->matchingDocsSql($conditions);
+        // With facets to count over the matching documents, fetch their IDs once (up to the facet
+        // cap + 1): under the cap the list length is the exact total and the same IDs feed the
+        // facet counts, instead of evaluating the filter twice (COUNT, then the IDs).
+        $matchIds = null;
+        if ($facets !== [] && $match !== null && !self::isExclusionOnly($conditions)) {
+            $capped   = false;
+            $ids      = $this->browseFacetDocIds($conditions, $capped) ?? [];
+            $matchIds = ['ids' => $ids, 'capped' => $capped];
+        }
         $total      = match (true) {
-            $conditions === []                 => $totalDocuments,
-            $match === null                    => 0,
-            self::isExclusionOnly($conditions) => $totalDocuments - $this->countExcludedDocs($conditions),
-            default                            => $this->countBrowseDocs($match),
+            $conditions === []                         => $totalDocuments,
+            $match === null                            => 0,
+            self::isExclusionOnly($conditions)         => $totalDocuments - $this->countExcludedDocs($conditions),
+            $matchIds !== null && !$matchIds['capped'] => count($matchIds['ids']),
+            default                                    => $this->countBrowseDocs($match),
         };
         // Probe along the walk when matches are dense; materialise the filter when they are sparse.
         // Measured on the 45k ecom set: at 13% of the index a probed page takes 0.2 ms against
@@ -2898,7 +2908,7 @@ class Index
             'distribution' => $facetDistribution,
             'stats'        => $facetStats,
             'approximate'  => $approximateFacets,
-        ] = $this->browseFacetCounts($facets, $conditions);
+        ] = $this->browseFacetCounts($facets, $conditions, $matchIds);
         $facetDistribution = $this->orderFacetValues($facetDistribution, $options->sortFacetValuesBy);
         $warnings = [...$warnings, ...$this->capWarnings(null, false, $approximateFacets)];
 
@@ -3137,13 +3147,15 @@ class Index
      *
      * @param  list<string>         $facetKeys
      * @param  list<FacetCondition> $conditions  Ordered by orderBySelectivity().
+     * @param  array{ids: list<int>, capped: bool}|null $matchIds browseFacetDocIds($conditions), when
+     *                                              the caller already fetched it.
      * @return array{
      *     distribution: array<string, array<array-key, int>>,
      *     stats: array<string, array{min: float, max: float}>,
      *     approximate: list<string>
      * }
      */
-    private function browseFacetCounts(array $facetKeys, array $conditions): array
+    private function browseFacetCounts(array $facetKeys, array $conditions, ?array $matchIds = null): array
     {
         $distribution = [];
         $stats        = [];
@@ -3166,8 +3178,16 @@ class Index
                 $approximate[] = $keyName;
             }
         }
-        if ($common !== [] && $this->countBrowseFacetGroup($common, $conditions, $distribution, $stats)) {
-            array_push($approximate, ...array_keys($common));
+        if ($common !== []) {
+            if ($matchIds !== null) {
+                $this->collectFacetCounts($common, $matchIds['ids'], $distribution, $stats);
+                $capped = $matchIds['capped'];
+            } else {
+                $capped = $this->countBrowseFacetGroup($common, $conditions, $distribution, $stats);
+            }
+            if ($capped) {
+                array_push($approximate, ...array_keys($common));
+            }
         }
         return [
             'distribution' => $distribution,
@@ -3209,6 +3229,7 @@ class Index
      *
      * @param  list<FacetCondition> $conditions
      * @param  bool                 $capped Set to true when more documents matched than the cap.
+     * @param-out bool               $capped
      * @return list<int>|null
      */
     private function browseFacetDocIds(array $conditions, bool &$capped): ?array

@@ -6164,6 +6164,33 @@ class IndexTest extends TestCase
         }
     }
 
+    public function testFilteredBrowseWithFacetsKeepsAnExactTotalAboveTheFacetCap(): void
+    {
+        $index = new Index($this->dbPath, config: new Config(maxFacetCountDocs: 3), schema: new SchemaConfig(
+            filterableFields: ['color', 'brand'],
+        ));
+        $docs = [];
+        for ($id = 1; $id <= 6; $id++) {
+            $docs[] = [
+                'id'    => $id,
+                'title' => 'x',
+                'color' => $id <= 5 ? 'red' : 'blue',
+                'brand' => $id % 2 ? 'A' : 'B',
+            ];
+        }
+        $index->insert($docs);
+
+        $capped = $index->search('', new SearchOptions(filter: ['color' => 'red'], facets: ['brand']));
+        $under  = $index->search('', new SearchOptions(filter: ['color' => 'blue'], facets: ['brand']));
+
+        $this->assertSame(5, $capped->totalHits);
+        $this->assertSame(['brand'], $capped->approximateFacets);
+        $this->assertSame(3, array_sum($capped->facetDistribution['brand']));
+        $this->assertSame(1, $under->totalHits);
+        $this->assertSame([], $under->approximateFacets);
+        $this->assertSame(['B' => 1], $under->facetDistribution['brand']);
+    }
+
     public function testValueListTotalsOnSingleAndMultiValuedKeys(): void
     {
         $index = new Index($this->dbPath, schema: new SchemaConfig(filterableFields: ['color', 'tags']));
