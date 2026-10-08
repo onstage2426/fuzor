@@ -106,3 +106,10 @@ Results never include deleted documents, but BM25's per-word document counts do 
 purge, so close results can be ordered slightly differently after deletes. Call `optimize()`
 after a large deletion if you need exact statistics; it also runs by itself once 10% of the
 index is deleted.
+
+## `insert()` reads a generator in chunks
+
+A multi-document `insert()` no longer reads its whole input before writing (see
+`Config::$insertChunkSize`). For a generator, or any `Traversable` that is not `Countable`, the
+`progress` callback now receives `0` as `$total`; arrays and `Countable` inputs still get their
+size. A generator is read while the insert runs, so it should not depend on the index it feeds.

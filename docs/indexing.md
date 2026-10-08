@@ -126,11 +126,19 @@ $index->insert((function () use ($db) {
 })());
 ```
 
-Pass a `progress` callback to track indexing progress. It is called after each document is tokenised, with the number of documents done and the total:
+A multi-document `insert()` works through the documents in chunks of `Config::$insertChunkSize` (default 2,000): each chunk is tokenised and written before the next one is read, and all chunks commit in one transaction. Memory therefore follows the chunk, not the input, when you pass a generator: on a 44k-product catalog with HTML descriptions, a single `insert()` peaks at 127 MB (it used to load everything and peak at 2 GB), and `rebuild()` at about 150 MB. An array you pass is already in memory, of course. Lower the chunk size under a tight `memory_limit`; larger chunks did not load faster in our measurements.
+
+```php
+$index = new Index($path, config: new Config(insertChunkSize: 500));
+```
+
+If any document is invalid (no `id`, an `id` repeated in the input or already in the index), the insert throws and nothing is written, also when the problem is in a later chunk.
+
+Pass a `progress` callback to track indexing progress. It is called after each document is tokenised, with the number of documents done and the total. The total is `0` when the input is a generator or another `Traversable` that is not `Countable`, since it is not read ahead:
 
 ```php
 $index->insert($docs, progress: function (int $done, int $total): void {
-    echo "$done / $total\n";
+    echo $total > 0 ? "$done / $total\n" : "$done\n";
 });
 ```
 

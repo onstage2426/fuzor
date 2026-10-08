@@ -3381,6 +3381,258 @@ class IndexTest extends TestCase
         $this->assertFalse($fired);
     }
 
+    // --- insert in chunks ---
+
+    /** @return list<array<string, mixed>> */
+    private static function chunkDocs(): array
+    {
+        $docs = [];
+        for ($i = 1; $i <= 10; $i++) {
+            $docs[] = [
+                'id'    => $i,
+                'title' => "car model{$i} " . ($i % 3 === 0 ? 'red car' : 'blue van'),
+                'body'  => str_repeat('fast ', $i % 4) . 'city',
+                'color' => $i % 5 === 0 ? ['red', 'blue'] : ($i % 2 === 0 ? 'Red' : 'blue'),
+                'price' => $i * 10,
+            ];
+        }
+        return $docs;
+    }
+
+    /**
+     * @param  list<array<string, mixed>> $docs
+     * @param-out int                     $pulled Documents handed out so far.
+     * @return \Generator<int, array<string, mixed>>
+     */
+    private static function generate(array $docs, int &$pulled = 0): \Generator
+    {
+        $pulled = 0;
+        foreach ($docs as $doc) {
+            $pulled++;
+            yield $doc;
+        }
+    }
+
+    private function chunkIndex(string $path, ?int $chunkSize): Index
+    {
+        return new Index(
+            $path,
+            config: $chunkSize === null ? null : new Config(insertChunkSize: $chunkSize),
+            schema: new SchemaConfig(filterableFields: ['color'], sortableFields: ['color', 'price']),
+        );
+    }
+
+    /**
+     * Every table's rows, keyed by names and terms instead of IDs (term IDs depend on insert order).
+     *
+     * @return array<string, array<mixed>>
+     */
+    private function indexContents(string $path): array
+    {
+        $pdo   = new \PDO('sqlite:' . $path);
+        $query = function (string $sql) use ($pdo): array {
+            $stmt = $pdo->query($sql);
+            $this->assertNotFalse($stmt);
+            return $stmt->fetchAll(\PDO::FETCH_NUM);
+        };
+        return [
+            'wordlist'     => $query('SELECT term, num_hits, num_docs FROM wordlist ORDER BY term'),
+            'doclist'      => $query(
+                'SELECT w.term, d.doc_id, d.hit_count FROM doclist d JOIN wordlist w ON w.id = d.term_id ORDER BY 1, 2'
+            ),
+            'positions'    => $query(
+                'SELECT w.term, p.doc_id, p.position FROM positions p'
+                . ' JOIN wordlist w ON w.id = p.term_id ORDER BY 1, 2, 3'
+            ),
+            'field_hits'   => $query(
+                'SELECT w.term, f.doc_id, n.name, f.hit_count FROM field_hits f JOIN wordlist w ON w.id = f.term_id'
+                . ' JOIN field_names n ON n.id = f.field_id ORDER BY 1, 2, 3'
+            ),
+            'doc_lengths'  => $query('SELECT doc_id, length FROM doc_lengths ORDER BY 1'),
+            'documents'    => $query('SELECT doc_id, data FROM documents ORDER BY 1'),
+            'facet_keys'   => $query('SELECT name, multi_valued FROM facet_keys ORDER BY 1'),
+            'facet_values' => $query(
+                'SELECT k.name, v.value, v.doc_id, v.num_value FROM facet_values v'
+                . ' JOIN facet_keys k ON k.id = v.key_id ORDER BY 1, 2, 3'
+            ),
+            'facet_counts' => $query(
+                'SELECT k.name, c.value, c.count, c.num_count, c.num_value FROM facet_counts c'
+                . ' JOIN facet_keys k ON k.id = c.key_id ORDER BY 1, 2'
+            ),
+            'sort_keys'    => $query(
+                'SELECT k.name, s.sort_key, s.doc_id FROM sort_keys s'
+                . ' JOIN facet_keys k ON k.id = s.key_id ORDER BY 1, 2, 3'
+            ),
+            'stats'        => $query(
+                "SELECT key, value FROM info WHERE key IN ('total_documents', 'avg_doc_length') ORDER BY 1"
+            ),
+            'indexes'      => $query(
+                "SELECT name FROM sqlite_master WHERE type = 'index' AND sql IS NOT NULL ORDER BY 1"
+            ),
+        ];
+    }
+
+    /** @return array<string, array{0: bool}> */
+    public static function chunkInputProvider(): array
+    {
+        return ['array' => [false], 'generator' => [true]];
+    }
+
+    #[DataProvider('chunkInputProvider')]
+    public function testChunkedInsertWritesTheSameIndexAsOneBatch(bool $generator): void
+    {
+        $docs = self::chunkDocs();
+        $this->chunkIndex($this->dbPath, null)->insert($docs);
+
+        $chunkedPath = $this->dbPath . '-chunked.db';
+        try {
+            $this->chunkIndex($chunkedPath, 3)->insert($generator ? self::generate($docs) : $docs);
+            $this->assertSame($this->indexContents($this->dbPath), $this->indexContents($chunkedPath));
+        } finally {
+            self::removeIndexFiles($chunkedPath);
+        }
+    }
+
+    public function testChunkedInsertIntoAFilledIndexMatchesOneBatch(): void
+    {
+        $docs  = self::chunkDocs();
+        $first = array_slice($docs, 0, 4);
+        $rest  = array_slice($docs, 4);
+        $index = $this->chunkIndex($this->dbPath, null);
+        $index->insert($first);
+        $index->insert($rest);
+
+        $chunkedPath = $this->dbPath . '-chunked.db';
+        try {
+            $chunked = $this->chunkIndex($chunkedPath, 2);
+            $chunked->insert($first);
+            $chunked->insert(self::generate($rest));
+            $this->assertSame($this->indexContents($this->dbPath), $this->indexContents($chunkedPath));
+            $sorted = $chunked->search('"red car"', new SearchOptions(sort: ['price:asc']));
+            $this->assertSame([3, 6, 9], $sorted->getIds());
+        } finally {
+            self::removeIndexFiles($chunkedPath);
+        }
+    }
+
+    public function testGeneratorIsReadOneChunkAtATime(): void
+    {
+        $pulledAtFirstProgress = null;
+        $pulled                = 0;
+        $docs                  = self::generate(self::chunkDocs(), $pulled);
+
+        $this->chunkIndex($this->dbPath, 3)->insert(
+            $docs,
+            progress: function (int $done) use (&$pulled, &$pulledAtFirstProgress): void {
+                $pulledAtFirstProgress ??= $pulled;
+            },
+        );
+
+        // The first chunk (3) and the one after it (3) to know whether more follow.
+        $this->assertSame(6, $pulledAtFirstProgress);
+        $this->assertSame(10, $pulled);
+    }
+
+    public function testProgressCountsAcrossChunksAndReportsZeroTotalForAGenerator(): void
+    {
+        $calls = [];
+        $this->chunkIndex($this->dbPath, 3)->insert(
+            self::generate(self::chunkDocs()),
+            progress: function (int $done, int $total) use (&$calls): void {
+                $calls[] = [$done, $total];
+            },
+        );
+
+        $this->assertSame(array_map(fn(int $i): array => [$i, 0], range(1, 10)), $calls);
+    }
+
+    public function testDuplicateIdInALaterChunkInsertsNothing(): void
+    {
+        $docs   = self::chunkDocs();
+        $docs[] = ['id' => 2, 'title' => 'again'];
+        $index  = $this->chunkIndex($this->dbPath, 3);
+
+        try {
+            $index->insert(self::generate($docs));
+            $this->fail('Expected a QueryException');
+        } catch (QueryException $e) {
+            $this->assertStringContainsString('2', $e->getMessage());
+        }
+
+        $this->assertSame(0, $index->count());
+        $this->assertSame([], $index->search('car')->getIds());
+        $this->assertSame(0, $this->scalarQuery('SELECT COUNT(*) FROM doclist'));
+    }
+
+    public function testDuplicateIdInsideALaterChunkIsReportedWithItsPosition(): void
+    {
+        $docs    = self::chunkDocs();
+        $docs[7] = ['id' => 7, 'title' => 'again'];
+        $index   = $this->chunkIndex($this->dbPath, 3);
+
+        $this->expectException(QueryException::class);
+        $this->expectExceptionMessage('Duplicate id 7 at index 7.');
+        $index->insert(self::generate($docs));
+    }
+
+    public function testMissingIdInALaterChunkIsReportedWithItsPosition(): void
+    {
+        $docs    = self::chunkDocs();
+        $docs[8] = ['title' => 'no id'];
+        $index   = $this->chunkIndex($this->dbPath, 3);
+
+        try {
+            $index->insert(self::generate($docs));
+            $this->fail('Expected a QueryException');
+        } catch (QueryException $e) {
+            $this->assertSame("Document at index 8 must contain an 'id' key.", $e->getMessage());
+        }
+        $this->assertSame(0, $index->count());
+    }
+
+    public function testExistingIdInALaterChunkThrows(): void
+    {
+        $index = $this->chunkIndex($this->dbPath, 3);
+        $index->insert([['id' => 9, 'title' => 'first']]);
+
+        $this->expectException(QueryException::class);
+        $this->expectExceptionMessageMatches('/already exist.*9/');
+        $index->insert(self::generate(array_slice(self::chunkDocs(), 0, 9)));
+    }
+
+    public function testGeneratorWithOneDocumentIsInserted(): void
+    {
+        $index = $this->chunkIndex($this->dbPath, 3);
+        $index->insert(self::generate([['id' => 1, 'title' => 'sedan']]));
+        $index->insert(self::generate([]));
+
+        $this->assertSame([1], $index->search('sedan')->getIds());
+        $this->assertSame(1, $index->count());
+    }
+
+    public function testChunkedInsertPurgesPendingDeletesFirst(): void
+    {
+        $index = $this->tombstoneIndex(new Config(insertChunkSize: 3));
+        $index->delete(5);
+
+        $index->insert(self::generate([
+            ['id' => 5, 'title' => 'bus'],
+            ['id' => 31, 'title' => 'van'],
+            ['id' => 32, 'title' => 'tram'],
+            ['id' => 33, 'title' => 'ferry'],
+        ]));
+
+        $this->assertSame([5], $index->search('bus')->getIds());
+        $this->assertNotContains(5, $index->search('car', new SearchOptions(limit: 50))->getIds());
+        $this->assertSame(0, $this->scalarQuery('SELECT COUNT(*) FROM deleted_docs'));
+    }
+
+    public function testInsertChunkSizeMustBePositive(): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+        new Config(insertChunkSize: 0);
+    }
+
     // --- readonly ---
 
     public function testReadonlyOpenSucceeds(): void

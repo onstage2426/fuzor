@@ -98,6 +98,17 @@ final readonly class Config
          * @infection-ignore-all: default value; mutations only affect mapping size, not correctness
          */
         public int $mmapSizeBytes = 536_870_912,
+        /**
+         * Documents tokenised and written per step of a multi-document insert(). Memory during a
+         * bulk insert follows this number, not the input size (a generator is read one chunk at a
+         * time); all chunks still commit in one transaction. Lower it under a tight memory_limit.
+         *
+         * @infection-ignore-all: default value; mutations only affect memory and speed, not correctness
+         */
+        public int $insertChunkSize = 2_000,
     ) {
+        if ($insertChunkSize < 1) {
+            throw new \InvalidArgumentException('insertChunkSize must be >= 1.');
+        }
     }
 }

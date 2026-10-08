@@ -1213,43 +1213,26 @@ class Index
      */
     private function insertMany(iterable $documents, ?callable $progress = null): void
     {
-        /** @infection-ignore-all LogicalNot: iterator_to_array() accepts arrays in PHP 8.1+; converting an array produces the same array */
-        if (!is_array($documents)) {
-            $documents = iterator_to_array($documents, false);
-        }
-
+        $total  = is_array($documents) || $documents instanceof \Countable ? count($documents) : 0;
+        $chunks = self::chunked($documents, $this->config->insertChunkSize);
         /** @infection-ignore-all ReturnRemoval: empty batch produces no SQL writes; adjustStats(0,0) is a no-op when no tokens are processed */
-        if ($documents === []) {
+        if (!$chunks->valid()) {
             return;
         }
+        $first = $chunks->current();
+        $chunks->next();
+        $more = $chunks->valid();
 
-        // Single-element list: use the lightweight single-doc path to avoid bulk pragma overhead.
-        if (count($documents) === 1) {
-            $this->insertOne($documents[0]);
+        // Single document: use the lightweight single-doc path to avoid bulk pragma overhead.
+        if (!$more && count($first) === 1) {
+            $this->insertOne($first[0]);
             return;
-        }
-
-        $ids = [];
-        foreach ($documents as $i => $document) {
-            if (!array_key_exists('id', $document)) {
-                throw new QueryException("Document at index {$i} must contain an 'id' key.");
-            }
-            $id = $this->extractId($document['id']);
-            if (isset($ids[$id])) {
-                throw new QueryException("Duplicate id {$id} at index {$i}.");
-            }
-            /** @infection-ignore-all TrueValue: isset() returns true for any non-null value including false; both true and false mark the slot as occupied */
-            $ids[$id] = true;
         }
 
         $pdo = $this->pdo;
         if (!$pdo instanceof \PDO) {
             throw new \LogicException('Index connection is closed.');
         }
-
-        // Deleted IDs written again: purge their old term-index rows first, in a transaction of
-        // its own, while the doc_id indexes the purge seeks on still exist (dropped below).
-        $this->wrapInTransaction(fn() => $this->purgeDeletedAmong(array_keys($ids)));
 
         // Probe once to know whether the doclist is empty; used to skip the duplicate-ID check
         // (nothing can already exist in an empty table) and to gate index drop/rebuild.
@@ -1259,6 +1242,19 @@ class Index
         /** @infection-ignore-all MethodCallRemoval: closeCursor is resource cleanup; leaving cursor open is harmless in WAL mode */
         $probe->closeCursor();
 
+        // The first chunk is checked before anything is written or dropped, as a one-chunk
+        // insert always was; later chunks are checked inside the transaction.
+        $firstIds = $this->checkInsertIds($first, 0, !$indexIsEmpty);
+
+        // Pending deletes: purge them in a transaction of their own, while the doc_id indexes the
+        // purge seeks on still exist (dropped below). A deleted ID written again would otherwise
+        // collide with its old term-index rows.
+        $this->wrapInTransaction(function (): void {
+            if ($this->hasDeleted()) {
+                $this->purgeDeleted();
+            }
+        });
+
         // Fresh bulk-load statement cache for this call; released in finally so large-N INSERT
         // statements don't stay open as SQLite tracked-statements during subsequent insert() calls.
         $this->bulkStmtCache = [];
@@ -1266,9 +1262,10 @@ class Index
         // For large batches (or a fresh index), drop both secondary indexes before the INSERT
         // and rebuild once from the completed data. Maintaining them row-by-row during a bulk
         // load costs more than a single post-insert sequential scan. Below 1 000 docs on a
-        // non-empty index, per-row maintenance is cheaper than a full doclist rebuild.
+        // non-empty index, per-row maintenance is cheaper than a full doclist rebuild. An input
+        // longer than one chunk counts as large: its length is not known up front.
         /** @infection-ignore-all GreaterThanOrEqualTo,GreaterThanOrEqualToNegotiation,LogicalOr,LogicalOrAllSubExprNegation,LogicalOrNegation,LogicalOrSingleSubExprNegation: all mutations of this condition only affect whether secondary indexes are dropped/rebuilt; correctness is unaffected */
-        $dropIndexes = $indexIsEmpty || count($documents) >= 1_000;
+        $dropIndexes = $indexIsEmpty || $more || count($first) >= 1_000;
 
         // Bulk-import pragma overrides: restored in the finally block.
         /** @infection-ignore-all MethodCallRemoval: bulk-import pragma overrides are performance tuning only; correctness is unaffected */
@@ -1292,52 +1289,69 @@ class Index
         }
         /** @infection-ignore-all UnwrapFinally: removing the try-finally wrapper only affects exception safety of the pragma restore; on the success path the behaviour is identical */
         try {
-            $this->wrapInTransaction(function () use ($documents, $ids, $indexIsEmpty, $progress): void {
-                // Skip the duplicate-ID check on a known-empty table: nothing can already exist.
-                if (!$indexIsEmpty) {
-                    /** @infection-ignore-all UnwrapArrayKeys,DecrementInteger,IncrementInteger: removing array_keys passes values instead of keys; the chunk size constant change only affects chunk count, not correctness */
-                    foreach (array_chunk(array_keys($ids), self::CHUNK_1P) as $chunk) {
-                        $placeholders = $this->placeholders(count($chunk));
-                        $stmt = $this->prepare(
-                            "SELECT doc_id FROM doc_lengths WHERE doc_id IN ({$placeholders})"
-                        );
-                        $stmt->execute($chunk);
-                        $existing = array_map(
-                            fn(mixed $v): string => is_scalar($v) ? (string) $v : '',
-                            $stmt->fetchAll(PDO::FETCH_COLUMN)
-                        );
-                        if ($existing !== []) {
-                            throw new QueryException(
-                                'Documents already exist with ids: '
-                                    . implode(', ', $existing) . '. Use update() to replace them.'
-                            );
-                        }
+            $this->wrapInTransaction(function () use (&$first, $firstIds, $chunks, $more, $progress, $total): void {
+                // One chunk at a time (Config::$insertChunkSize): Phase 1 and Phase 2 per chunk,
+                // so memory follows the chunk, not the input. Stats are adjusted once at the end.
+                /** @var list<array<string, mixed>> $chunk */
+                $chunk       = $first;
+                $first       = null;
+                $ids         = $firstIds;
+                $offset      = 0;
+                $totalLength = 0;
+                while (true) {
+                    $this->purgeDeletedAmong($ids);
+                    $chunkProgress = $progress === null
+                        ? null
+                        : static fn(int $done) => $progress($offset + $done, $total);
+
+                    ['wordHits'          => $wordHits,
+                     'wordDocs'          => $wordDocs,
+                     'docTermBuffer'     => $docTermBuffer,
+                     'docLengthBuffer'   => $docLengthBuffer,
+                     'docPositionBuffer' => $docPositionBuffer,
+                     'facetBuffer'       => $facetBuffer,
+                     'multiValuedFacets' => $multiValuedFacets,
+                     'rawDocuments'      => $rawDocuments,
+                     'fieldTermBuffer'   => $fieldTermBuffer] = $this->buildBatchBuffer($chunk, $chunkProgress);
+
+                    $totalLength += $this->flushBatch(
+                        $wordHits,
+                        $wordDocs,
+                        $docTermBuffer,
+                        $docLengthBuffer,
+                        $docPositionBuffer,
+                        $rawDocuments,
+                        $facetBuffer,
+                        $fieldTermBuffer,
+                        $multiValuedFacets,
+                    );
+                    // Free this chunk's buffers before the next one is built.
+                    unset(
+                        $wordHits,
+                        $wordDocs,
+                        $docTermBuffer,
+                        $docLengthBuffer,
+                        $docPositionBuffer,
+                        $facetBuffer,
+                        $multiValuedFacets,
+                        $rawDocuments,
+                        $fieldTermBuffer,
+                    );
+                    $offset += count($chunk);
+
+                    if (!$more) {
+                        break;
                     }
+                    /** @var list<array<string, mixed>> $chunk */
+                    $chunk = $chunks->current();
+                    $chunks->next();
+                    $more = $chunks->valid();
+                    // Earlier chunks are in doc_lengths by now, so the index check also catches
+                    // an ID repeated across chunks.
+                    $ids = $this->checkInsertIds($chunk, $offset, true);
                 }
 
-                ['wordHits'          => $wordHits,
-                 'wordDocs'          => $wordDocs,
-                 'docTermBuffer'     => $docTermBuffer,
-                 'docLengthBuffer'   => $docLengthBuffer,
-                 'docPositionBuffer' => $docPositionBuffer,
-                 'facetBuffer'       => $facetBuffer,
-                 'multiValuedFacets' => $multiValuedFacets,
-                 'rawDocuments'      => $rawDocuments,
-                 'fieldTermBuffer'   => $fieldTermBuffer] = $this->buildBatchBuffer($documents, $progress);
-
-                $totalLength = $this->flushBatch(
-                    $wordHits,
-                    $wordDocs,
-                    $docTermBuffer,
-                    $docLengthBuffer,
-                    $docPositionBuffer,
-                    $rawDocuments,
-                    $facetBuffer,
-                    $fieldTermBuffer,
-                    $multiValuedFacets,
-                );
-
-                $this->adjustStats(count($documents), $totalLength);
+                $this->adjustStats($offset, $totalLength);
             });
         } finally {
             // Rebuild dropped indexes from the completed dataset while bulk-load pragmas
@@ -1365,6 +1379,66 @@ class Index
             // during subsequent single-doc insert() transactions.
             $this->bulkStmtCache = [];
         }
+    }
+
+    /**
+     * Split documents into lists of at most $size, reading the input lazily.
+     *
+     * @param  iterable<mixed, array<string, mixed>> $documents
+     * @return \Generator<int, list<array<string, mixed>>>
+     */
+    private static function chunked(iterable $documents, int $size): \Generator
+    {
+        $chunk = [];
+        foreach ($documents as $document) {
+            $chunk[] = $document;
+            if (count($chunk) === $size) {
+                yield $chunk;
+                $chunk = [];
+            }
+        }
+        if ($chunk !== []) {
+            yield $chunk;
+        }
+    }
+
+    /**
+     * Check one chunk of an insert: every document has an 'id', no ID repeats inside the chunk,
+     * and (with $checkIndex) none exists in the index yet — which, inside the insert's
+     * transaction, includes the IDs of its earlier chunks.
+     *
+     * @param  list<array<string, mixed>> $chunk
+     * @param  int                        $offset Position of the chunk's first document in the input.
+     * @return list<int>                          The chunk's IDs.
+     * @throws QueryException
+     */
+    private function checkInsertIds(array $chunk, int $offset, bool $checkIndex): array
+    {
+        $ids = [];
+        foreach ($chunk as $i => $document) {
+            $at = $offset + $i;
+            if (!array_key_exists('id', $document)) {
+                throw new QueryException("Document at index {$at} must contain an 'id' key.");
+            }
+            $id = $this->extractId($document['id']);
+            if (isset($ids[$id])) {
+                throw new QueryException("Duplicate id {$id} at index {$at}.");
+            }
+            /** @infection-ignore-all TrueValue: isset() returns true for any non-null value including false; both true and false mark the slot as occupied */
+            $ids[$id] = true;
+        }
+        $ids = array_keys($ids);
+        if ($checkIndex) {
+            $existing = array_keys($this->fetchDocLengthsForDocs($ids));
+            if ($existing !== []) {
+                $where = $offset === 0 ? '' : ' (in the index or earlier in this insert)';
+                throw new QueryException(
+                    'Documents already exist with ids: ' . implode(', ', $existing)
+                        . "{$where}. Use update() to replace them."
+                );
+            }
+        }
+        return $ids;
     }
 
     /** @param array<string, mixed> $document */
@@ -4267,11 +4341,10 @@ class Index
         }
         /** @infection-ignore-all GreaterThan: changing > 0 to >= 0 only matters when rowCount=0 (no partial chunk); tests always produce at least one row so this branch is always true regardless */
         if ($rowCount > 0) {
-            /** @infection-ignore-all AssignCoalesce: removing ??= only disables statement caching; correctness is unaffected */
-            ($this->bulkStmtCache["doclistChunk:{$rowCount}"] ??= $pdo->prepare(
+            $pdo->prepare(
                 'INSERT INTO doclist (term_id, doc_id, hit_count) VALUES '
                 . implode(',', array_fill(0, $rowCount, '(?,?,?)'))
-            ))->execute($params);
+            )->execute($params);
         }
     }
 
@@ -4310,11 +4383,10 @@ class Index
         }
         /** @infection-ignore-all GreaterThan: changing > 0 to >= 0 only matters when rowCount=0 (no partial chunk); tests always produce at least one row so this branch is always true regardless */
         if ($rowCount > 0) {
-            /** @infection-ignore-all AssignCoalesce: removing ??= only disables statement caching; correctness is unaffected */
-            ($this->bulkStmtCache["positionsChunk:{$rowCount}"] ??= $pdo->prepare(
+            $pdo->prepare(
                 'INSERT INTO positions (term_id, doc_id, position) VALUES '
                 . implode(',', array_fill(0, $rowCount, '(?,?,?)'))
-            ))->execute($params);
+            )->execute($params);
         }
     }
 
@@ -4367,10 +4439,10 @@ class Index
             }
         }
         if ($rowCount > 0) {
-            ($this->bulkStmtCache["docLengthChunk:{$rowCount}"] ??= $pdo->prepare(
+            $pdo->prepare(
                 'INSERT INTO doc_lengths (doc_id, length) VALUES '
                 . implode(',', array_fill(0, $rowCount, '(?,?)'))
-            ))->execute($params);
+            )->execute($params);
         }
     }
 
@@ -4401,10 +4473,10 @@ class Index
             }
         }
         if ($rowCount > 0) {
-            ($this->bulkStmtCache["documentsChunk:{$rowCount}"] ??= $pdo->prepare(
+            $pdo->prepare(
                 'INSERT INTO documents (doc_id, data) VALUES '
                 . implode(',', array_fill(0, $rowCount, '(?,?)'))
-            ))->execute($params);
+            )->execute($params);
         }
     }
 
@@ -4459,13 +4531,13 @@ class Index
                 $params[] = $hits;
                 $params[] = $knownDocs[$term];
             }
-            ($this->bulkStmtCache["batchWordlistUpdate:{$n}"] ??= $pdo->prepare(
+            $pdo->prepare(
                 'WITH delta(id, hits, docs) AS (VALUES ' . implode(',', array_fill(0, $n, '(?,?,?)')) . ')
                  UPDATE wordlist SET
                      num_hits = num_hits + delta.hits,
                      num_docs = num_docs + delta.docs
                  FROM delta WHERE wordlist.id = delta.id'
-            ))->execute($params);
+            )->execute($params);
 
             foreach (array_keys($chunk) as $term) {
                 $termIdMap[$term] = $this->termIdCache[$term];
@@ -4482,8 +4554,7 @@ class Index
                 $params[] = $hits;
                 $params[] = $newDocs[$term];
             }
-            /** @infection-ignore-all AssignCoalesce: removing ??= only disables statement caching; correctness is unaffected */
-            $stmt = ($this->bulkStmtCache["batchWordlistUpsert:{$n}"] ??= $pdo->prepare(
+            $stmt = $pdo->prepare(
                 'INSERT INTO wordlist (term, num_hits, num_docs) VALUES '
                     /** @infection-ignore-all DecrementInteger,IncrementInteger: array_fill start index 0 vs ±1 only changes array keys; implode() ignores keys */
                     . implode(',', array_fill(0, $n, '(?,?,?)'))
@@ -4491,7 +4562,7 @@ class Index
                            num_hits = num_hits + excluded.num_hits,
                            num_docs = num_docs + excluded.num_docs
                        RETURNING id, term'
-            ));
+            );
             $stmt->execute($params);
             /** @var list<array{id: int, term: string}> $upserted */
             $upserted = $stmt->fetchAll(PDO::FETCH_ASSOC);
@@ -4626,11 +4697,10 @@ class Index
         }
         /** @infection-ignore-all GreaterThan: changing > 0 to >= 0 only matters when rowCount=0 (no partial chunk); tests always produce at least one row so this branch is always true regardless */
         if ($rowCount > 0) {
-            /** @infection-ignore-all AssignCoalesce: removing ??= only disables statement caching; correctness is unaffected */
-            ($this->bulkStmtCache["fieldHitsChunk:{$rowCount}"] ??= $pdo->prepare(
+            $pdo->prepare(
                 'INSERT INTO field_hits (term_id, doc_id, field_id, hit_count) VALUES '
                 . implode(',', array_fill(0, $rowCount, '(?,?,?,?)'))
-            ))->execute($params);
+            )->execute($params);
         }
     }
 
@@ -6173,10 +6243,10 @@ class Index
             }
         }
         if ($rowCount > 0) {
-            ($this->bulkStmtCache["facetValuesChunk:{$rowCount}"] ??= $pdo->prepare(
+            $pdo->prepare(
                 'INSERT INTO facet_values (key_id, value, doc_id, num_value) VALUES '
                 . implode(',', array_fill(0, $rowCount, '(?,?,?,?)'))
-            ))->execute($params);
+            )->execute($params);
         }
 
         $deltas = [];
@@ -6246,10 +6316,10 @@ class Index
             }
         }
         if ($rowCount > 0) {
-            ($this->bulkStmtCache["sortKeysChunk:{$rowCount}"] ??= $pdo->prepare(
+            $pdo->prepare(
                 'INSERT INTO sort_keys (key_id, sort_key, doc_id) VALUES '
                 . implode(',', array_fill(0, $rowCount, '(?,?,?)'))
-            ))->execute($params);
+            )->execute($params);
         }
     }
 
