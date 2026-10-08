@@ -422,6 +422,12 @@ Index::rebuild('/path/to/articles.db', schema: new SchemaConfig(
 
 Throws `\InvalidArgumentException` if the callback is omitted and the existing index has no document store.
 
+With a callback **and** a schema, `rebuild()` does not need the existing index, so it also replaces one this version cannot open: a file written by Fuzor 1.x (or by a newer version) is replaced like a missing index. That is the in-place upgrade path; the old file's synonyms are not carried over, so set them in the callback. Without a callback or without a schema, such a file throws a `QueryException`, as opening it does.
+
+```php
+Index::rebuild($path, fn(Index $new) => $new->insert($documentsFromYourSource), new SchemaConfig(/* ... */));
+```
+
 Internally, `rebuild` writes to a temporary file alongside the target, then publishes it with an atomic swap — see below.
 
 ### Index files after a rebuild or snapshot

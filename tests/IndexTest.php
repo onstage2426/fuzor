@@ -8590,6 +8590,73 @@ class IndexTest extends TestCase
         new Index($this->dbPath);
     }
 
+    /** @return iterable<string, array{0: int|null}> */
+    public static function otherRevisions(): iterable
+    {
+        yield from self::oneXRevisions();
+        yield 'newer revision' => [Index::CURRENT_SCHEMA_VERSION + 1];
+    }
+
+    #[DataProvider('otherRevisions')]
+    public function testRebuildWithACallbackReplacesAnIndexOfAnotherRevision(?int $revision): void
+    {
+        $old = new Index($this->dbPath);
+        $old->insert([['id' => 1, 'title' => 'old sedan']]);
+        $old->close();
+        $this->setSchemaVersion($this->dbPath, $revision);
+
+        $index = Index::rebuild(
+            $this->dbPath,
+            fn(Index $new) => $new->insert([['id' => 2, 'title' => 'new wagon', 'color' => 'red']]),
+            new SchemaConfig(filterableFields: ['color']),
+        );
+
+        $this->assertSame(Index::CURRENT_SCHEMA_VERSION, $index->schemaVersion);
+        $this->assertSame([2], $index->search('wagon', new SearchOptions(filter: ['color' => 'red']))->getIds());
+        $this->assertSame([], $index->search('sedan')->getIds());
+        $this->assertSame(['color'], $index->filterableFields);
+    }
+
+    public function testRebuildOfAnotherRevisionNeedsASchema(): void
+    {
+        (new Index($this->dbPath))->close();
+        $this->setSchemaVersion($this->dbPath, 3);
+
+        try {
+            Index::rebuild($this->dbPath, fn(Index $new) => $new->insert([['id' => 1, 'title' => 'x']]));
+            $this->fail('Expected a QueryException');
+        } catch (QueryException $e) {
+            $this->assertStringContainsString('cannot inherit its schema', $e->getMessage());
+        }
+        $this->assertFalse(is_link($this->dbPath));
+    }
+
+    public function testRebuildWithoutACallbackStillRejectsAnotherRevision(): void
+    {
+        $old = new Index($this->dbPath);
+        $old->insert([['id' => 1, 'title' => 'old sedan']]);
+        $old->close();
+        $this->setSchemaVersion($this->dbPath, 3);
+
+        $this->expectException(QueryException::class);
+        $this->expectExceptionMessage('written by Fuzor 1.x');
+        Index::rebuild($this->dbPath);
+    }
+
+    public function testRebuildStillRejectsAFileThatIsNoIndex(): void
+    {
+        new \PDO('sqlite:' . $this->dbPath)->exec('CREATE TABLE notes (body TEXT)');
+
+        try {
+            Index::rebuild($this->dbPath, fn(Index $new) => null, new SchemaConfig());
+            $this->fail('Expected an exception');
+        } catch (\Throwable $e) {
+            $this->assertNotInstanceOf(\PHPUnit\Framework\AssertionFailedError::class, $e);
+        }
+        $this->assertFalse(is_link($this->dbPath));
+        $this->assertSame(1, $this->scalarQuery("SELECT COUNT(*) FROM sqlite_master WHERE name = 'notes'"));
+    }
+
     public function testForceRecreatesA1xIndex(): void
     {
         (new Index($this->dbPath))->close();

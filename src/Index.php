@@ -410,6 +410,10 @@ class Index
      * Pass a SchemaConfig to override the schema; omit it (null) to inherit the existing
      * index's schema. When no existing index is present, null uses SchemaConfig defaults.
      *
+     * An index of a schema revision this version does not open (written by 1.x, or by a newer
+     * version) is replaced like a missing one when $callback and $schema are given — the way to
+     * upgrade an index in place. Its synonyms are not carried over.
+     *
      * @param  string            $path     Absolute or relative path to the index file to rebuild.
      * @param  callable|null     $callback fn(Index $new): void — populate the new index here;
      *                                     null streams from the existing document store.
@@ -417,6 +421,8 @@ class Index
      * @return self               Open index pointing at the rebuilt file.
      * @throws \InvalidArgumentException If $callback is null and the existing index has no document store.
      * @throws IOException        If the rename fails or the parent directory does not exist.
+     * @throws QueryException     If the existing index has another schema revision and $callback or
+     *                            $schema is missing.
      */
     public static function rebuild(
         string $path,
@@ -424,7 +430,31 @@ class Index
         ?SchemaConfig $schema = null,
     ): self {
         $resolved = self::resolvePath($path);
-        $existing = file_exists($resolved) ? new self($resolved) : null;
+        $existing = null;
+        if (file_exists($resolved)) {
+            try {
+                $existing = new self($resolved);
+            } catch (QueryException $e) {
+                // An index of a schema revision this version does not open (1.x, or newer) is
+                // replaced as if it were missing when the callback provides the documents: its
+                // data is not needed, only its schema, which must then be passed.
+                $revision = self::storedRevision($resolved);
+                $readable = $revision === null
+                    || ($revision >= self::MIN_SCHEMA_VERSION && $revision <= self::CURRENT_SCHEMA_VERSION);
+                if ($callback === null || $readable) {
+                    throw $e;
+                }
+                if ($schema === null) {
+                    throw new QueryException(
+                        "Index {$resolved} has schema revision {$revision}, which this version does not open,"
+                            . ' so rebuild() cannot inherit its schema. Pass it:'
+                            . ' Index::rebuild($path, $callback, schema: new SchemaConfig(...)).',
+                        0,
+                        $e,
+                    );
+                }
+            }
+        }
 
         if ($callback === null && ($existing === null || !$existing->documentStoreEnabled)) {
             $existing?->close();
@@ -1169,6 +1199,29 @@ class Index
     }
 
     /** Why a file cannot be opened, and how to get a usable index again. */
+    /**
+     * The schema revision stored in a Fuzor index file, read without opening it as an Index;
+     * null when the file is not a Fuzor index. Files before 1.5.0 have no schema_version key and
+     * are revision 1.
+     */
+    private static function storedRevision(string $resolved): ?int
+    {
+        try {
+            $pdo    = new \PDO('sqlite:' . $resolved, options: [\PDO::ATTR_ERRMODE => \PDO::ERRMODE_EXCEPTION]);
+            $tables = $pdo->query(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('info', 'wordlist')"
+            );
+            if ($tables === false || (int) $tables->fetchColumn() !== 2) {
+                return null;
+            }
+            $stmt = $pdo->query("SELECT value FROM info WHERE key = 'schema_version'");
+            $value = $stmt === false ? false : $stmt->fetchColumn();
+            return $value === false ? 1 : (int) $value;
+        } catch (\PDOException) {
+            return null;
+        }
+    }
+
     private static function unsupportedRevisionMessage(string $path, int $revision): string
     {
         if ($revision > self::CURRENT_SCHEMA_VERSION) {
@@ -1177,7 +1230,8 @@ class Index
         }
         return "Index {$path} has schema revision {$revision}, written by Fuzor 1.x; this version opens"
             . ' revision ' . self::MIN_SCHEMA_VERSION . ' and later. Recreate it from your source data:'
-            . ' new Index($path, schema: ..., force: true), then insert the documents again.';
+            . ' new Index($path, schema: ..., force: true), then insert the documents again, or'
+            . ' Index::rebuild($path, $callback, schema: ...).';
     }
 
     /**
