@@ -8025,6 +8025,32 @@ class IndexTest extends TestCase
         $this->assertSame([1, 2], $result->getIds());
     }
 
+    /** @return array<string, array{0: int}> */
+    public static function boostIdOffsetProvider(): array
+    {
+        // IDs that pack into one integer with their term, and IDs that do not (JSON pairs).
+        return ['small ids' => [0], 'ids above 2^32' => [5_000_000_000], 'negative ids' => [-1_000]];
+    }
+
+    #[DataProvider('boostIdOffsetProvider')]
+    public function testFieldBoostRanksAPrefixAndSeveralWordsAtAnyDocumentId(int $offset): void
+    {
+        // Doc +1: "turbo" twice in the body; doc +2: "turbine" once in the title; doc +3: "turbo"
+        // in both. A title boost of 4 puts title matches first for the prefix "tur", and the
+        // two-word query ranks the document with both words in its title first.
+        $index = new Index($this->dbPath, config: new Config(fieldBoosts: ['title' => 4.0]));
+        $index->insert([
+            ['id' => $offset + 1, 'title' => 'engine kit', 'body' => 'turbo parts and turbo hoses for the engine'],
+            ['id' => $offset + 2, 'title' => 'turbine', 'body' => 'a quiet unit'],
+            ['id' => $offset + 3, 'title' => 'turbo engine', 'body' => 'one turbo'],
+        ]);
+
+        $this->assertSame([$offset + 3, $offset + 2, $offset + 1], $index->search('tur')->getIds());
+        $this->assertSame([$offset + 3, $offset + 1], $index->search('turbo engine', new SearchOptions(
+            matchingStrategy: MatchingStrategy::All,
+        ))->getIds());
+    }
+
     public function testFieldBoostEmptyArrayUsesNormalBM25(): void
     {
         // Empty fieldBoosts = uniform path; search should still return results normally.
