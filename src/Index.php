@@ -880,6 +880,19 @@ class Index
              ON facet_values (key_id, num_value, doc_id)
              WHERE num_value IS NOT NULL"
         );
+        // facet_counts: documents per (key, value), kept exact by every write (adjustFacetCounts()),
+        // so whole-key counts cost O(values) instead of a scan of every row of the key.
+        // num_count/num_value keep facetStats: stats only when every counted row is numeric.
+        $pdo->exec(
+            "CREATE TABLE IF NOT EXISTS facet_counts (
+                key_id    INTEGER NOT NULL,
+                value     TEXT    NOT NULL,
+                count     INTEGER NOT NULL,
+                num_count INTEGER NOT NULL,
+                num_value REAL,
+                PRIMARY KEY (key_id, value)
+            ) WITHOUT ROWID, STRICT"
+        );
         // sort_keys: case-folded string values of sortable fields (see sortKey()), clustered so a
         // sorted browse walks one key's values in sort order. Numbers sort via facet_numeric_index.
         $pdo->exec(
@@ -1592,6 +1605,7 @@ class Index
                 $pdo->exec('DELETE FROM documents');
             }
             $pdo->exec('DELETE FROM facet_values');
+            $pdo->exec('DELETE FROM facet_counts');
             $pdo->exec('DELETE FROM sort_keys');
             $pdo->exec('UPDATE facet_keys SET multi_valued = 0 WHERE multi_valued = 1');
             $pdo->exec('DELETE FROM field_hits');
@@ -2757,21 +2771,20 @@ class Index
 
         $byCount = $query->sortFacetValuesBy === FacetOrder::Count;
         $needle  = self::facetMatchKey($facetQuery);
+        // Unrestricted: the key's maintained counts, one row per value (no row scan).
+        $grouped = $from === 'facet_values fv' && $excludedSql === null
+            ? 'SELECT value, count FROM facet_counts fv WHERE key_id = ?'
+            : "SELECT fv.value, COUNT(*) AS count FROM {$from} WHERE {$where} GROUP BY fv.value";
         if ($facetQuery === '' && $byCount) {
             // Nothing to match in PHP: let SQL order and cut.
-            $stmt = $this->prepare(
-                "SELECT fv.value, COUNT(*) AS count FROM {$from} WHERE {$where}"
-                . ' GROUP BY fv.value ORDER BY count DESC, fv.value LIMIT ?'
-            );
+            $stmt = $this->prepare($grouped . ' ORDER BY count DESC, fv.value LIMIT ?');
             $stmt->execute([...$params, $query->limit]);
             /** @var array<array-key, int> $counts */
             $counts = $stmt->fetchAll(PDO::FETCH_KEY_PAIR);
         } else {
             // Case and accent folding (Tokenizer::sortKey()) and word-start matching cannot be
             // expressed in SQL, so the key's distinct values are grouped there and matched here.
-            $stmt = $this->prepare(
-                "SELECT fv.value, COUNT(*) AS count FROM {$from} WHERE {$where} GROUP BY fv.value"
-            );
+            $stmt = $this->prepare($grouped);
             $stmt->execute($params);
             /** @var array<array-key, int> $counts */
             $counts = $stmt->fetchAll(PDO::FETCH_KEY_PAIR);
@@ -3391,7 +3404,13 @@ class Index
             if ($this->documentStoreEnabled) {
                 $this->prepare("DELETE FROM documents WHERE doc_id IN ({$placeholders})")->execute($chunk);
             }
-            $this->prepare("DELETE FROM facet_values WHERE doc_id IN ({$placeholders})")->execute($chunk);
+            $removed = $this->prepare(
+                "DELETE FROM facet_values WHERE doc_id IN ({$placeholders}) RETURNING key_id, value, num_value"
+            );
+            $removed->execute($chunk);
+            /** @var list<array{0: int, 1: string, 2: float|null}> $removedRows */
+            $removedRows = $removed->fetchAll(PDO::FETCH_NUM);
+            $this->adjustFacetCounts(self::facetCountDeltas($removedRows, -1));
             $this->prepare("DELETE FROM sort_keys    WHERE doc_id IN ({$placeholders})")->execute($chunk);
             $this->prepare("DELETE FROM field_hits WHERE doc_id IN ({$placeholders})")->execute($chunk);
 
@@ -3456,8 +3475,16 @@ class Index
             ->execute([':documentId' => $documentId]);
 
         // 5. Remove facet rows for this document.
-        $this->stmt('facetValuesDeleteByDoc', 'DELETE FROM facet_values WHERE doc_id = :documentId')
-            ->execute([':documentId' => $documentId]);
+        $removed = $this->stmt(
+            'facetValuesDeleteByDoc',
+            'DELETE FROM facet_values WHERE doc_id = :documentId RETURNING key_id, value, num_value'
+        );
+        $removed->execute([':documentId' => $documentId]);
+        /** @var list<array{0: int, 1: string, 2: float|null}> $removedRows */
+        $removedRows = $removed->fetchAll(PDO::FETCH_NUM);
+        if ($removedRows !== []) {
+            $this->adjustFacetCounts(self::facetCountDeltas($removedRows, -1));
+        }
         $this->stmt('sortKeysDeleteByDoc', 'DELETE FROM sort_keys WHERE doc_id = :documentId')
             ->execute([':documentId' => $documentId]);
 
@@ -5667,9 +5694,16 @@ class Index
              ON CONFLICT(key_id, value, doc_id) DO NOTHING'
         );
         $valuesPerKey = [];
+        /** @var list<array{0: int, 1: string, 2: float|null}> $inserted  one per new (key, value) row */
+        $inserted = [];
         foreach ($rows as $row) {
             $keyId = $this->resolveFacetKeyId($row['name']);
             $stmt->execute([$keyId, $row['value'], $documentId, $row['numValue']]);
+            // The primary key is (key_id, value, doc_id): a repeated value is ignored, and
+            // counted once.
+            if (!isset($valuesPerKey[$keyId][$row['value']])) {
+                $inserted[] = [$keyId, $row['value'], $row['numValue']];
+            }
             $valuesPerKey[$keyId][$row['value']] = true;
             if ($row['numValue'] === null && isset($this->sortableFieldSet[$row['name']])) {
                 $this->stmt(
@@ -5679,9 +5713,67 @@ class Index
                 )->execute([$keyId, self::sortKey($row['value']), $documentId]);
             }
         }
+        $this->adjustFacetCounts(self::facetCountDeltas($inserted, 1));
         if (count($rows) > count($valuesPerKey)) {
             $multi = array_keys(array_filter($valuesPerKey, static fn(array $values): bool => count($values) > 1));
             $this->markMultiValued($multi);
+        }
+    }
+
+    /**
+     * Aggregate facet_values rows into facet_counts deltas: one per (key, value), with the row
+     * count and numeric row count multiplied by $sign (+1 inserted, -1 deleted).
+     *
+     * @param  list<array{0: int, 1: string|int, 2: float|null}> $rows [key_id, value, num_value]
+     * @return list<array{0: int, 1: string, 2: int, 3: int, 4: float|null}>
+     */
+    private static function facetCountDeltas(array $rows, int $sign): array
+    {
+        $deltas = [];
+        foreach ($rows as [$keyId, $value, $num]) {
+            $value = (string) $value;
+            $key   = $keyId . "\0" . $value;
+            if (!isset($deltas[$key])) {
+                $deltas[$key] = [$keyId, $value, 0, 0, null];
+            }
+            $deltas[$key][2] += $sign;
+            if ($num !== null) {
+                $deltas[$key][3] += $sign;
+                $deltas[$key][4] ??= (float) $num;
+            }
+        }
+        return array_values($deltas);
+    }
+
+    /**
+     * Apply facet_counts deltas in one statement, then drop the (key, value) rows they emptied.
+     *
+     * @param list<array{0: int, 1: string, 2: int, 3: int, 4: float|null}> $deltas From facetCountDeltas().
+     */
+    private function adjustFacetCounts(array $deltas): void
+    {
+        if ($deltas === []) {
+            return;
+        }
+        $json = json_encode($deltas, JSON_THROW_ON_ERROR | JSON_PRESERVE_ZERO_FRACTION);
+        // "WHERE true" lets SQLite parse an upsert whose source is a SELECT.
+        $this->stmt(
+            'facetCountsAdjust',
+            "INSERT INTO facet_counts (key_id, value, count, num_count, num_value)
+             SELECT j.value ->> '$[0]', j.value ->> '$[1]', j.value ->> '$[2]', j.value ->> '$[3]', j.value ->> '$[4]'
+               FROM json_each(?) j WHERE true
+             ON CONFLICT (key_id, value) DO UPDATE SET
+                 count     = facet_counts.count + excluded.count,
+                 num_count = facet_counts.num_count + excluded.num_count,
+                 num_value = COALESCE(facet_counts.num_value, excluded.num_value)"
+        )->execute([$json]);
+        if (min(array_column($deltas, 2)) < 0) {
+            $this->stmt(
+                'facetCountsPrune',
+                "DELETE FROM facet_counts WHERE count <= 0 AND (key_id, value) IN (
+                     SELECT j.value ->> '$[0]', j.value ->> '$[1]' FROM json_each(?) j
+                 )"
+            )->execute([$json]);
         }
     }
 
@@ -5789,6 +5881,21 @@ class Index
                 . implode(',', array_fill(0, $rowCount, '(?,?,?,?)'))
             ))->execute($params);
         }
+
+        $deltas = [];
+        foreach ($kvdMap as $keyId => $values) {
+            foreach ($values as $value => $docs) {
+                $numeric = array_filter($docs, static fn(?float $num): bool => $num !== null);
+                $deltas[] = [
+                    $keyId,
+                    (string) $value,
+                    count($docs),
+                    count($numeric),
+                    $numeric === [] ? null : reset($numeric),
+                ];
+            }
+        }
+        $this->adjustFacetCounts($deltas);
 
         $this->bulkFlushSortKeys($kvdMap, array_intersect_key($facetBuffer, $this->sortableFieldSet));
     }
@@ -6662,14 +6769,14 @@ class Index
      * Count facet values over every document except those an exclusion-only filter removes.
      *
      * Visiting the kept documents one by one costs O(index size), so the counts are derived
-     * instead: each key's whole-index counts (one primary-key scan, as for an unfiltered browse)
-     * minus the counts over the excluded documents, which are fetched once for all keys with
-     * the doc-driven join. Exclusions usually remove few documents, which makes this about as
-     * cheap as the unfiltered count. When they remove more than Config::$maxFacetCountDocs,
-     * each key is scanned once with doc_id NOT IN (excluded) instead. Both ways are exact.
+     * instead: each key's whole-index counts (facet_counts, as for an unfiltered browse) minus
+     * the counts over the excluded documents, aggregated once for all keys in SQL. Exclusions
+     * usually remove few documents, which makes this nearly as cheap as the unfiltered count.
+     * When they remove more than Config::$maxFacetCountDocs, the kept rows of all keys are
+     * counted in one scan with doc_id NOT IN (excluded) instead. Both ways are exact.
      *
-     * Measured on the 45k ecom set, three keys: 32 ms with 410 docs excluded, 42 ms with 4k,
-     * against 31 ms unfiltered; the NOT IN scan takes 57–74 ms at any size.
+     * Measured on the 45k ecom set, five keys: 15 ms with 4,025 docs excluded (37 ms before
+     * facet_counts), 45 ms with 34,409 excluded (60 ms with one NOT IN scan per key).
      *
      * @param array<string, int>                           $nameToId     Facet key name → key_id.
      * @param non-empty-list<FacetCondition>               $conditions   Exclusions only, none impossible.
@@ -6690,35 +6797,70 @@ class Index
         $excludedIds = $stmt->fetchAll(PDO::FETCH_COLUMN);
 
         if (count($excludedIds) > $cap) {
-            $results = array_map(
-                fn(int $keyId): array => self::summarizeFacetCounts(
-                    $this->fetchFacetCountRows($keyId, null, [$excludedSql, $excludedParams])
-                ),
-                $nameToId,
+            // Many excluded documents: count the kept rows of every key in one scan, so the
+            // excluded set is materialised once instead of once per key.
+            $keyIds = array_values($nameToId);
+            $stmt   = $this->prepare(
+                'SELECT key_id, value,
+                        COUNT(*) AS n, MIN(num_value) AS min_num, MAX(num_value) AS max_num,
+                        COUNT(num_value) AS num_count
+                   FROM facet_values
+                  WHERE key_id IN (SELECT value FROM json_each(?))'
+                . " AND doc_id NOT IN ({$excludedSql})
+                  GROUP BY key_id, value ORDER BY key_id, n DESC, value"
             );
+            $stmt->execute([json_encode($keyIds), ...$excludedParams]);
+            /** @var array<int, list<array{value: string, n: int, min_num: float|null, max_num: float|null, num_count: int}>> $byKey */
+            $byKey = [];
+            /** @var list<array{key_id: int, value: string, n: int, min_num: float|null, max_num: float|null, num_count: int}> $all */
+            $all = $stmt->fetchAll(PDO::FETCH_ASSOC);
+            foreach ($all as $row) {
+                $byKey[$row['key_id']][] = $row;
+            }
+            $results = [];
+            foreach ($nameToId as $keyName => $keyId) {
+                $results[$keyName] = self::summarizeFacetCounts($byKey[$keyId] ?? []);
+            }
             $this->mergeFacetCounts($results, $distribution, $stats);
             return;
         }
 
+        // The excluded documents' rows per (key, value), aggregated in SQL so PHP gets one row per
+        // value instead of one per document and key (driven from the excluded IDs through the
+        // covering facet_doc_id_index).
+        $stmt = $this->stmt(
+            'facetCountsOfDocs',
+            'SELECT fv.key_id, fv.value, COUNT(*), COUNT(fv.num_value)
+               FROM json_each(?) j
+               CROSS JOIN facet_values fv ON fv.doc_id = j.value
+              WHERE fv.key_id IN (SELECT value FROM json_each(?))
+              GROUP BY fv.key_id, fv.value'
+        );
+        $stmt->execute([json_encode($excludedIds), json_encode(array_values($nameToId))]);
+        /** @var list<array{0: int, 1: string, 2: int, 3: int}> $removedRows */
+        $removedRows = $stmt->fetchAll(PDO::FETCH_NUM);
         /** @var array<int, array<array-key, array{0: int, 1: int}>> $removed  key_id → value → [rows, numeric rows] */
         $removed = [];
-        foreach ($this->fetchFacetRowsForDocs($excludedIds, array_values($nameToId)) as [$keyId, $value, $num]) {
-            $removed[$keyId][$value][0] = ($removed[$keyId][$value][0] ?? 0) + 1;
-            $removed[$keyId][$value][1] = ($removed[$keyId][$value][1] ?? 0) + ($num === null ? 0 : 1);
+        foreach ($removedRows as [$keyId, $value, $n, $numCount]) {
+            $removed[$keyId][$value] = [$n, $numCount];
         }
         $results = [];
         foreach ($nameToId as $keyName => $keyId) {
             $rows = $this->fetchFacetCountRows($keyId, null);
             if (isset($removed[$keyId])) {
-                $kept = [];
+                $kept   = [];
+                $counts = [];
+                $values = [];
                 foreach ($rows as $row) {
                     [$n, $numCount] = $removed[$keyId][$row['value']] ?? [0, 0];
                     if ($row['n'] > $n) {
-                        $kept[] = ['n' => $row['n'] - $n, 'num_count' => $row['num_count'] - $numCount] + $row;
+                        $kept[]   = ['n' => $row['n'] - $n, 'num_count' => $row['num_count'] - $numCount] + $row;
+                        $counts[] = $row['n'] - $n;
+                        $values[] = (string) $row['value'];
                     }
                 }
-                // Stable, so values with equal counts keep the scan's order.
-                usort($kept, fn(array $a, array $b): int => $b['n'] <=> $a['n']);
+                // Count desc, then value: the order facet_counts is read in.
+                array_multisort($counts, SORT_DESC, SORT_NUMERIC, $values, SORT_ASC, SORT_STRING, $kept);
                 $rows = $kept;
             }
             $results[$keyName] = self::summarizeFacetCounts($rows);
@@ -6960,9 +7102,9 @@ class Index
      * identical execution plan to the original IN(?,?,?) but without variable-arity
      * compilation overhead.
      *
-     * With $docIds null the membership test is dropped and the key is counted over the whole
-     * index — one streaming scan of its primary-key range — or, when $excluded is given, over
-     * every document except those it selects (doc_id NOT IN, materialised once).
+     * With $docIds null the key is counted over the whole index from facet_counts (one row per
+     * value), or, when $excluded is given, over every document except those it selects (a scan
+     * of the key's rows with doc_id NOT IN, materialised once).
      *
      * @param  list<int>|null                         $docIds
      * @param  array{0: string, 1: list<mixed>}|null $excluded SQL selecting doc IDs to skip; with $docIds null only.
@@ -6983,7 +7125,18 @@ class Index
             );
             $stmt->execute([$keyId, ...$excluded[1]]);
         } elseif ($docIds === null) {
-            $stmt = $this->stmt('facetCountsForKeyAll', $select . ' GROUP BY value ORDER BY n DESC');
+            // The whole key: read the maintained counts (O(values)) instead of scanning its rows.
+            $stmt = $this->stmt(
+                'facetCountsForKeyAll',
+                'SELECT value,
+                        count                                              AS n,
+                        CASE WHEN num_count > 0 THEN num_value END         AS min_num,
+                        CASE WHEN num_count > 0 THEN num_value END         AS max_num,
+                        num_count
+                   FROM facet_counts
+                  WHERE key_id = ?
+                  ORDER BY count DESC, value'
+            );
             $stmt->execute([$keyId]);
         } else {
             $stmt = $this->stmt(

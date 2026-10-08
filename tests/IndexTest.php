@@ -7712,6 +7712,61 @@ class IndexTest extends TestCase
         $this->assertSame(['alpha' => 1, 'Beta' => 1], $result->facetDistribution['brand']);
     }
 
+    // --- facet_counts ---
+
+    /** facet_counts and a fresh GROUP BY over facet_values, both as key_id|value => [count, num_count, num]. */
+    private function assertFacetCountsMatchFacetValues(string $when): void
+    {
+        $pdo   = new \PDO('sqlite:' . $this->dbPath);
+        $table = static function (\PDO $pdo, string $sql): array {
+            $stmt = $pdo->query($sql);
+            \assert($stmt !== false);
+            $out = [];
+            /** @var list<array{0: int, 1: string, 2: int, 3: int, 4: float|null}> $rows */
+            $rows = $stmt->fetchAll(\PDO::FETCH_NUM);
+            foreach ($rows as [$key, $value, $count, $numCount, $num]) {
+                $out["{$key}|{$value}"] = [(int) $count, (int) $numCount, $num === null ? null : (float) $num];
+            }
+            ksort($out);
+            return $out;
+        };
+        $this->assertSame(
+            $table($pdo, 'SELECT key_id, value, COUNT(*), COUNT(num_value), MIN(num_value)
+                            FROM facet_values GROUP BY key_id, value'),
+            $table($pdo, 'SELECT key_id, value, count, num_count, num_value FROM facet_counts'),
+            $when,
+        );
+    }
+
+    public function testFacetCountsStayExactThroughEveryWritePath(): void
+    {
+        $index = new Index($this->dbPath, schema: new SchemaConfig(
+            filterableFields: ['tags', 'size'],
+            sortableFields: ['price'],
+        ));
+        $index->insert([['id' => 1, 'title' => 'a', 'tags' => ['x', 'y', 'x'], 'size' => 10, 'price' => 5]]);
+        $this->assertFacetCountsMatchFacetValues('single insert');
+        $index->insert([
+            ['id' => 2, 'title' => 'b', 'tags' => ['y', 'z'], 'size' => '10', 'price' => 5.5],
+            ['id' => 3, 'title' => 'c', 'tags' => 'z', 'size' => [10, 12], 'price' => 7],
+            ['id' => 4, 'title' => 'd', 'tags' => ['x'], 'size' => 9],
+        ]);
+        $this->assertFacetCountsMatchFacetValues('bulk insert');
+        $index->update([['id' => 1, 'title' => 'a', 'tags' => 'q', 'size' => 12]]);
+        $this->assertFacetCountsMatchFacetValues('single update');
+        $index->upsert([
+            ['id' => 2, 'title' => 'b', 'tags' => ['x', 'q']],
+            ['id' => 5, 'title' => 'e', 'tags' => 'z', 'price' => 5],
+        ]);
+        $this->assertFacetCountsMatchFacetValues('bulk upsert');
+        $index->delete(3);
+        $this->assertFacetCountsMatchFacetValues('single delete');
+        $index->delete(1, 4);
+        $this->assertFacetCountsMatchFacetValues('bulk delete');
+        $index->clear();
+        $this->assertFacetCountsMatchFacetValues('clear');
+    }
+
     // --- matching strategies ---
 
     /**
