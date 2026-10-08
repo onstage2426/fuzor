@@ -447,6 +447,7 @@ Replacing the file itself (a `rename()` over the path) is not safe while another
 Things to know about the layout:
 
 - Copy or back up `{path}` with a tool that follows symlinks (`cp`, `copy()`, `rsync -L`); `rsync -a` alone copies the link, not the data.
+- The `-wal` and `-shm` files sit next to the version, not next to `{path}`: SQLite names them after the resolved file (`{path}.v-3f9a01c2-wal`). Anything that watches the index's files, such as an HTTP cache validator (ETag, Last-Modified) built from `stat()`, must use `realpath($path)` and `realpath($path) . '-wal'`. `stat($path . '-wal')` finds no file and silently stops seeing writes that are still in the WAL.
 - Delete an index with `Index::remove($path)`, not by unlinking `{path}`: that removes only the link and leaves the version files (each the size of the index) behind. `remove()` deletes the link, every version, all their `-wal`/`-shm` files, and temp files of builds that are no longer running, and returns the deleted paths. It refuses a path that holds something other than a Fuzor index. Stop the processes that write the index first; readers keep reading the deleted files until they close.
 - Moving `{path}` to another directory breaks the relative link; move the version file with it, or copy instead.
 - On a filesystem without symlinks (Windows without the privilege, some network mounts), both methods fall back to renaming the new file over `{path}` and deleting its sidecars, which is only safe when no other process writes the old file.
