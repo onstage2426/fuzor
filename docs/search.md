@@ -142,6 +142,32 @@ $result = $index->search('"quick brown" "fast car"'); // multiple phrases
 
 Phrase words participate in BM25 scoring normally. `asYouType` applies to the last token even inside a phrase.
 
+## Matching strategy
+
+For a query of several words, `matchingStrategy` decides which documents are returned and ranks them in "words" buckets: a document matching more of the words in order always comes first, before `sort` fields and relevance.
+
+```php
+use Fuzor\MatchingStrategy;
+
+$index->search('big fat cat');   // MatchingStrategy::Last (default)
+$index->search('big fat cat', new SearchOptions(matchingStrategy: MatchingStrategy::All));
+$index->search('big fat cat', new SearchOptions(matchingStrategy: MatchingStrategy::Frequency));
+```
+
+| Strategy | Returns | Ranked first |
+|---|---|---|
+| `Last` (default) | Documents containing the first word | All words, then "big fat", then "big" |
+| `All` | Only documents containing every word | — |
+| `Frequency` | Documents containing the rarest word | Words kept rarest first, the most frequent dropped first |
+
+With `Last`, a document with "big" and "cat" but not "fat" is in the "big" bucket: only the leading words count. Within a bucket, documents are ranked by `sort` fields when given, otherwise by relevance (BM25 over the words of their bucket, with proximity for documents matching every word). A word that is not in the index still counts as a word, so `big zzz cat` returns the "big" bucket with `Last` and nothing with `All`.
+
+`All` is also exact: when the rarest word matches at most `Config::$maxDocs` documents, every document containing all words is found and `exhaustive` is `true`, even if the other words are very common.
+
+`searchBoolean()` keeps its own operators and ignores `matchingStrategy`; `facetSearch()` with a `query` requires every word.
+
+**Compared with Meilisearch:** the same three strategies and default. Meilisearch describes relaxing the query "when there are not enough results to satisfy `limit`"; Fuzor returns all buckets in order, which shows the same documents on the first pages and counts every returned document in `totalHits`. Within a bucket Fuzor ranks by `sort`, then BM25 with proximity, instead of Meilisearch's typo, proximity, attribute, and exactness rules.
+
 ## Excluding words and phrases
 
 Put `-` before a word or a quoted phrase to leave out the documents that contain it:
@@ -514,7 +540,7 @@ $result = $index->search('', new SearchOptions(sort: ['title_sort:asc']));
 
 When two documents share the same sort value, BM25 score is used as a tiebreaker in `search()`. Boolean search breaks ties by document ID ascending.
 
-**Compared with Meilisearch:** the type order, case-insensitive string order without accent folding, and missing-values-last rule match Meilisearch, and so does declaring sort fields up front (`sortableFields` is Meilisearch's `sortableAttributes`, which also requires the primary key to be listed before sorting on it). One difference: by default Meilisearch applies `sort` only as a tiebreaker after its relevance rules, whereas in Fuzor the sort fields decide the order and relevance breaks ties.
+**Compared with Meilisearch:** the type order, case-insensitive string order without accent folding, and missing-values-last rule match Meilisearch, and so does declaring sort fields up front (`sortableFields` is Meilisearch's `sortableAttributes`, which also requires the primary key to be listed before sorting on it). As in Meilisearch, `sort` applies after the words bucket (see [Matching strategy](#matching-strategy)); within a bucket the sort fields decide the order and relevance breaks ties, whereas Meilisearch's default rules also put typo, proximity, and attribute ranking before `sort`.
 
 ```php
 $result = $index->searchBoolean('sedan or coupe', new SearchOptions(sort: ['price:asc']));
@@ -571,6 +597,7 @@ Documents with no value for the distinct field are never collapsed — each pass
 | `facets` | `[]` | Filterable fields to compute value counts for |
 | `sort` | `[]` | Sort specs — `list<string>` of `'field:asc'` / `'field:desc'` |
 | `distinct` | `null` | Filterable field to collapse on |
+| `matchingStrategy` | `MatchingStrategy::Last` | Which documents a multi-word `search()` returns and how they rank first — see [Matching strategy](#matching-strategy) |
 | `distinctCount` | `1` | Max hits per distinct value |
 | `attributesToHighlight` | `null` | Fields to highlight in `_formatted`; `['*']` for all |
 | `highlightPreTag` | `'<mark>'` | Opening highlight tag |

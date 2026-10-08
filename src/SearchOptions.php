@@ -42,6 +42,9 @@ final readonly class SearchOptions
      *                              stripHtml index the stored HTML is first converted to its visible
      *                              text. When false (default) '_formatted' is the stored text with
      *                              tags inserted — only safe to render as HTML if that text is trusted.
+     * @param MatchingStrategy $matchingStrategy search() only: which documents a multi-word query
+     *                              returns and how they rank first (see MatchingStrategy). Ignored by
+     *                              searchBoolean() and facetSearch() (which requires every word).
      */
     public function __construct(
         public readonly bool $asYouType = true,
@@ -60,6 +63,7 @@ final readonly class SearchOptions
         public readonly string $cropMarker = '…',
         public readonly ?array $attributesToRetrieve = null,
         public readonly bool $escapeFormatted = false,
+        public readonly MatchingStrategy $matchingStrategy = MatchingStrategy::Last,
     ) {
     }
 }

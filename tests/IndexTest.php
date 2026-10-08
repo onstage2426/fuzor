@@ -7,6 +7,7 @@ use Fuzor\FacetExclude;
 use Fuzor\FacetRange;
 use Fuzor\FacetSearchQuery;
 use Fuzor\Index;
+use Fuzor\MatchingStrategy;
 use Fuzor\SchemaConfig;
 use Fuzor\SearchOptions;
 use Fuzor\SearchResult;
@@ -7487,11 +7488,12 @@ class IndexTest extends TestCase
     public function testTruncatedRankingMatchesTheFullRankingForTheDocumentsItFinds(): void
     {
         $options = new SearchOptions(asYouType: false);
-        $full    = $this->truncationIndex(100)->search('casual shirt', $options)->getIds();
-        $capped  = $this->truncationIndex(3)->search('casual shirt', $options)->getIds();
+        $full    = $this->truncationIndex(100)->search('shirt casual', $options)->getIds();
+        $capped  = $this->truncationIndex(3)->search('shirt casual', $options)->getIds();
 
-        // Docs 4 and 5 are only reachable through the truncated word; everything else must keep
-        // the order (so the scores) of the untruncated search.
+        // "shirt" comes first, so every result contains it (MatchingStrategy::Last). Docs 4 and 5
+        // are only reachable through its truncated rows; everything else must keep the order (so
+        // the scores) of the untruncated search.
         $this->assertSame(array_values(array_intersect($full, $capped)), $capped);
         $this->assertSame([4, 5], array_values(array_diff($full, $capped)));
     }
@@ -7574,6 +7576,144 @@ class IndexTest extends TestCase
                 "offset {$offset}, limit {$limit}",
             );
         }
+    }
+
+    // --- matching strategies ---
+
+    /**
+     * big: 1,2,3,4 · fat: 1,2,5 · cat: 1,3,5,6 — fat is the rarest word.
+     */
+    private function strategyIndex(): Index
+    {
+        $index = new Index($this->dbPath, schema: new SchemaConfig(
+            filterableFields: ['color'],
+            sortableFields: ['price'],
+        ));
+        $index->insert([
+            ['id' => 1, 'title' => 'big fat cat', 'color' => 'red', 'price' => 50],
+            ['id' => 2, 'title' => 'big fat', 'color' => 'red', 'price' => 40],
+            ['id' => 3, 'title' => 'big cat', 'color' => 'blue', 'price' => 30],
+            ['id' => 4, 'title' => 'big', 'color' => 'blue', 'price' => 20],
+            ['id' => 5, 'title' => 'fat cat', 'color' => 'blue', 'price' => 10],
+            ['id' => 6, 'title' => 'cat', 'color' => 'red', 'price' => 5],
+        ]);
+        return $index;
+    }
+
+    /** @param list<string> $sort */
+    private function strategySearch(
+        Index $index,
+        string $query,
+        MatchingStrategy $strategy,
+        array $sort = [],
+    ): SearchResult {
+        return $index->search($query, new SearchOptions(
+            asYouType: false,
+            matchingStrategy: $strategy,
+            sort: $sort,
+            facets: ['color'],
+        ));
+    }
+
+    public function testLastStrategyDropsWordsFromTheEnd(): void
+    {
+        $result = $this->strategySearch($this->strategyIndex(), 'big fat cat', MatchingStrategy::Last);
+
+        // Bucket 3: doc 1; bucket 2 (big fat): doc 2; bucket 1 (big): docs 3 and 4 — doc 3 also has
+        // "cat", but not "fat", so it is not in a higher bucket. Docs without "big" are not returned.
+        $this->assertSame([1, 2], array_slice($result->getIds(), 0, 2));
+        $this->assertEqualsCanonicalizing([3, 4], array_slice($result->getIds(), 2));
+        $this->assertSame(4, $result->totalHits);
+        $counts = $result->facetDistribution['color'];
+        ksort($counts);
+        $this->assertSame(['blue' => 2, 'red' => 2], $counts);
+    }
+
+    public function testLastIsTheDefaultStrategy(): void
+    {
+        $index = $this->strategyIndex();
+
+        $this->assertSame(
+            $this->strategySearch($index, 'big fat cat', MatchingStrategy::Last)->getIds(),
+            $index->search('big fat cat', new SearchOptions(asYouType: false, facets: ['color']))->getIds(),
+        );
+    }
+
+    public function testAllStrategyRequiresEveryWord(): void
+    {
+        $result = $this->strategySearch($this->strategyIndex(), 'big fat cat', MatchingStrategy::All);
+
+        $this->assertSame([1], $result->getIds());
+        $this->assertSame(1, $result->totalHits);
+        $this->assertSame(['red' => 1], $result->facetDistribution['color']);
+    }
+
+    public function testFrequencyStrategyDropsTheMostFrequentWordsFirst(): void
+    {
+        $result = $this->strategySearch($this->strategyIndex(), 'big fat cat', MatchingStrategy::Frequency);
+
+        // Order: fat (3 docs), then big and cat (4 each, query order). Doc 1 keeps all, doc 2
+        // keeps fat + big, doc 5 keeps fat only; docs without "fat" are not returned.
+        $this->assertSame([1, 2, 5], $result->getIds());
+    }
+
+    public function testUnknownWordStillCountsAsAWord(): void
+    {
+        $index = $this->strategyIndex();
+
+        $this->assertEqualsCanonicalizing(
+            [1, 2, 3, 4],
+            $this->strategySearch($index, 'big zzz cat', MatchingStrategy::Last)->getIds(),
+        );
+        $this->assertSame([], $this->strategySearch($index, 'big zzz cat', MatchingStrategy::All)->getIds());
+    }
+
+    public function testSortAppliesAfterTheWordsBucket(): void
+    {
+        $index  = $this->strategyIndex();
+        $result = $this->strategySearch($index, 'big fat cat', MatchingStrategy::Last, ['price:asc']);
+
+        // The full match (price 50) still comes first; sort orders within each bucket.
+        $this->assertSame([1, 2, 4, 3], $result->getIds());
+    }
+
+    public function testAllStrategyFindsAnSkuExactly(): void
+    {
+        $index = new Index($this->dbPath);
+        $index->insert([
+            ['id' => 1, 'title' => 'FZ-04217 evening dress'],
+            ['id' => 2, 'title' => 'FZ-04218 evening dress'],
+            ['id' => 3, 'title' => 'gift card 04217'],
+        ]);
+
+        $options = new SearchOptions(asYouType: false, matchingStrategy: MatchingStrategy::All);
+        $result  = $index->search('FZ-04217', $options);
+
+        $this->assertSame([1], $result->getIds());
+    }
+
+    public function testAllStrategyIsExactWhenTheRarestWordIsComplete(): void
+    {
+        // "shirt" exceeds maxDocs; "linen" does not, and every result must contain it.
+        $index = new Index($this->dbPath, config: new Config(maxDocs: 3));
+        $docs  = [];
+        for ($id = 1; $id <= 8; $id++) {
+            $docs[] = ['id' => $id, 'title' => 'shirt shirt'];
+        }
+        $docs[] = ['id' => 9, 'title' => 'linen shirt'];
+        $docs[] = ['id' => 10, 'title' => 'linen trousers'];
+        $index->insert($docs);
+
+        $all  = $index->search('linen shirt', new SearchOptions(
+            asYouType: false,
+            matchingStrategy: MatchingStrategy::All,
+        ));
+        $last = $index->search('shirt linen', new SearchOptions(asYouType: false));
+
+        $this->assertSame([9], $all->getIds());
+        $this->assertTrue($all->exhaustive);
+        $this->assertFalse($last->exhaustive);
+        $this->assertSame(9, $last->getIds()[0]);
     }
 
     // --- negated words and phrases in search() ---

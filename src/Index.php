@@ -36,8 +36,10 @@ use PDO;
  *     exclude: bool,
  * }
  * @phpstan-type KeywordGroup array{
+ *     words: list<array{id: int, term: string, num_hits: int, num_docs: int, distance?: int}>,
  *     termIds: list<int>,
  *     idfK1p1: float,
+ *     df: int,
  *     truncated: bool,
  *     rows: list<array{0: int, 1: int, 2: float}>,
  * }
@@ -2061,8 +2063,9 @@ class Index
 
         /** @var array<int, float> $docScores */
         $docScores = [];
-        /** @var array<int, int> $docMatchCount  Number of distinct keyword groups that matched each doc. */
-        $docMatchCount = [];
+        /** @var array<int, int> $docBucket  Leading keyword groups (in strategy order) each doc contains; see MatchingStrategy. */
+        $docBucket = [];
+        $strategy  = $options->matchingStrategy;
 
         $fieldBoosts    = $this->config->fieldBoosts;
         $useFieldBoosts = $fieldBoosts !== [];
@@ -2088,12 +2091,13 @@ class Index
 
         /** @var list<list<int>> $termGroups  keyword_index → matched term IDs, for proximity ranking */
         $termGroups = [];
-        /** @var list<KeywordGroup> $groups */
+        /** @var list<KeywordGroup> $groups  One per keyword, in query order. */
         $groups = [];
         // Set when a cap cut matches out: a keyword above maxDocs, or a capped prefix expansion.
         $candidatesCapped = false;
         $prefixCapped     = false;
 
+        // Phase 1: resolve every keyword group's terms and document frequency (wordlist only).
         foreach ($keywords as $idx => $term) {
             $isLastKeyword = $asYouType && ($lastIndex === $idx);
             $word = $this->getWordlistByKeyword($term, $isLastKeyword, true, $prefixCapped);
@@ -2103,63 +2107,111 @@ class Index
                     array_push($word, ...$synRows);
                 }
             }
-            if (!isset($word[0])) {
-                continue;
-            }
             /** @infection-ignore-all IncrementInteger,Ternary,CastInt: numDocs feeds BM25 scoring only; for single-term prefix results array_sum equals word[0]['num_docs']; CastInt: array_sum returns int */
             $df = count($word) === 1 ? $word[0]['num_docs'] : (int) array_sum(array_column($word, 'num_docs'));
-            // $df counts this keyword's doclist rows, and fetchDocsByTermIds() returns at most maxDocs of them.
-            $candidatesCapped = $candidatesCapped || $df > $this->config->maxDocs;
             // Smoothed BM25 IDF: always ≥ 0, avoids negative weights for common terms.
             /** @infection-ignore-all IncrementInteger|Minus|Plus|Division: IDF mutations monotonically shift all per-term scores by the same factor; relative document ordering is preserved for any single-term query */
-            $idf     = log(1 + ($totalDocuments - $df + 0.5) / ($df + 0.5));
-            /** @infection-ignore-all DecrementInteger|IncrementInteger|Plus|Multiplication: idfK1p1 is a per-term scalar; mutating k1+1 uniformly rescales every doc's contribution for that term, preserving relative ranking */
-            $idfK1p1 = $idf * ($k1 + 1);
-            // BM25 score computed in SQLite C; PHP receives (term_id, doc_id, score).
-            $docs = $this->fetchDocsByTermIds(
-                $word,
-                $this->config->maxDocs,
-                isset($word[0]['distance']),
-                $idfK1p1,
-                $k1_1mb,
-                $k1b_avgdl,
-            );
+            $idf      = log(1 + ($totalDocuments - $df + 0.5) / ($df + 0.5));
             $groups[] = [
+                'words'     => $word,
                 'termIds'   => array_column($word, 'id'),
-                'idfK1p1'   => $idfK1p1,
+                /** @infection-ignore-all DecrementInteger|IncrementInteger|Plus|Multiplication: idfK1p1 is a per-term scalar; mutating k1+1 uniformly rescales every doc's contribution for that term, preserving relative ranking */
+                'idfK1p1'   => $idf * ($k1 + 1),
+                'df'        => $df,
                 'truncated' => $df > $this->config->maxDocs,
-                'rows'      => $docs,
+                'rows'      => [],
             ];
         }
 
-        // A keyword group above maxDocs only fetched its maxDocs best rows, so a candidate found
-        // through another keyword may contain it without a row here: it would count as matching
-        // fewer keywords and miss this keyword's score. Fetch those rows for exactly the
-        // candidates the group has not seen (completeTruncatedGroups()); untruncated groups
-        // already hold every row they have.
-        $this->completeTruncatedGroups($groups, $k1_1mb, $k1b_avgdl);
+        // Phase 2: the order groups are required in (see MatchingStrategy), and which to fetch.
+        $order = array_keys($groups);
+        if ($strategy === MatchingStrategy::Frequency) {
+            usort($order, fn(int $a, int $b): int => $groups[$a]['df'] <=> $groups[$b]['df'] ?: $a <=> $b);
+        }
+        $fetch = $order;
+        if ($strategy === MatchingStrategy::All && $groups !== []) {
+            // Every result contains every word, so all of them are among the rarest word's
+            // documents. When that word is complete, nothing else needs to be fetched.
+            $rarest = $order;
+            usort($rarest, fn(int $a, int $b): int => $groups[$a]['df'] <=> $groups[$b]['df'] ?: $a <=> $b);
+            if (!$groups[$rarest[0]]['truncated']) {
+                $fetch = [$rarest[0]];
+            }
+        }
+        foreach ($fetch as $g) {
+            if ($groups[$g]['words'] === []) {
+                continue;
+            }
+            $candidatesCapped = $candidatesCapped || $groups[$g]['truncated'];
+            // BM25 score computed in SQLite C; PHP receives (term_id, doc_id, score).
+            $groups[$g]['rows'] = $this->fetchDocsByTermIds(
+                $groups[$g]['words'],
+                $this->config->maxDocs,
+                isset($groups[$g]['words'][0]['distance']),
+                $groups[$g]['idfK1p1'],
+                $k1_1mb,
+                $k1b_avgdl,
+            );
+        }
+
+        // Phase 3: walk the groups in order. A document's bucket is the number of leading groups
+        // it contains; it is fixed at the first group it lacks, so later groups are never looked
+        // up for it, and only the groups in its bucket add to its score (so how a word was cut at
+        // maxDocs cannot reorder documents within a bucket). A group cut at maxDocs is completed
+        // for the documents still alive that it has not seen (completeGroup()).
+        /** @var array<int, true> $alive */
+        $alive = [];
         foreach ($groups as $group) {
+            foreach ($group['rows'] as [, $docId]) {
+                $alive[$docId] = true;
+            }
+        }
+        foreach ($order as $position => $g) {
+            if ($alive === []) {
+                break;
+            }
+            $group = $groups[$g];
+            if ($group['truncated'] || !in_array($g, $fetch, true)) {
+                array_push($group['rows'], ...$this->completeGroup($group, $alive, $k1_1mb, $k1b_avgdl));
+            }
             /** @var array<int, true> $groupTermIds */
-            $groupTermIds    = [];
-            /** @var array<int, true> $seenThisKeyword  Docs already counted for this keyword group; prevents
-             *  prefix-expanded term IDs from inflating $docMatchCount for the same (keyword, doc) pair. */
-            $seenThisKeyword = [];
+            $groupTermIds = [];
+            /** @var array<int, true> $matched  Alive docs this group contains (prefix-expanded term IDs count once). */
+            $matched = [];
             foreach ($group['rows'] as [$termId, $docId, $score]) {
-                /** @infection-ignore-all OneZeroFloat: ?? 0.0 is the additive identity; the fallback only applies on first encounter of a docId which always has score 0 before accumulation */
-                $docScores[$docId] = ($docScores[$docId] ?? 0.0) + $score;
-                $groupTermIds[$termId] = true;
-                if (!isset($seenThisKeyword[$docId])) {
-                    $seenThisKeyword[$docId]  = true;
-                    $docMatchCount[$docId] = ($docMatchCount[$docId] ?? 0) + 1;
+                if (!isset($alive[$docId])) {
+                    continue;
                 }
+                /** @infection-ignore-all OneZeroFloat: ?? 0.0 is the additive identity; the fallback only applies on first encounter of a docId which always has score 0 before accumulation */
+                $docScores[$docId]     = ($docScores[$docId] ?? 0.0) + $score;
+                $groupTermIds[$termId] = true;
+                $matched[$docId]       = true;
                 if ($useFieldBoosts) {
                     $termIdfMap[$termId]               ??= $group['idfK1p1'];
                     $docContribTermIds[$docId][$termId]  = true;
                 }
             }
+            foreach (array_diff_key($alive, $matched) as $docId => $_) {
+                $docBucket[$docId] = $position;
+            }
+            $alive = $matched;
             if ($groupTermIds !== []) {
                 $termGroups[] = array_keys($groupTermIds);
             }
+        }
+        foreach ($alive as $docId => $_) {
+            $docBucket[$docId] = count($order);
+        }
+        // Bucket 0 (lacks the first required word) never matches; with All only full matches do.
+        $minBucket = $strategy === MatchingStrategy::All ? count($order) : 1;
+        foreach ($docBucket as $docId => $bucket) {
+            if ($bucket < $minBucket) {
+                unset($docBucket[$docId], $docScores[$docId], $docContribTermIds[$docId]);
+            }
+        }
+        if ($strategy === MatchingStrategy::All && $fetch !== $order) {
+            // Driven from the complete rarest word: every document with all words was found.
+            $candidatesCapped = false;
         }
 
         // Field boost re-scoring: replace uniform BM25 scores with field-weighted BM25.
@@ -2244,7 +2296,7 @@ class Index
         if ($proximity && ($limit > 0 || $distinct !== null) && ($sortSpecs === [] || $distinct !== null)) {
             $this->applyProximityRanking(
                 $docScores,
-                $docMatchCount,
+                $docBucket,
                 $termGroups,
                 count($keywords),
                 $sortSpecs === [] && $distinct === null ? $offset + $limit : null,
@@ -2271,16 +2323,14 @@ class Index
         if ($distinct !== null) {
             $keyId = $this->lookupFacetKeyId($distinct);
             if ($sortSpecs !== []) {
-                $sortedIds = $this->sortDocIdsBySpecs(array_keys($docScores), $sortSpecs, $docScores);
+                $sortedIds = $this->sortDocIdsBySpecs(
+                    array_keys($docScores),
+                    $sortSpecs,
+                    $docScores,
+                    leading: count($keywords) > 1 ? $docBucket : null,
+                );
             } elseif (count($keywords) > 1) {
-                $sortedIds = array_keys($docScores);
-                $mc = [];
-                $sc = [];
-                foreach ($sortedIds as $id) {
-                    $mc[] = $docMatchCount[$id] ?? 0;
-                    $sc[] = $docScores[$id];
-                }
-                array_multisort($mc, SORT_DESC, SORT_NUMERIC, $sc, SORT_DESC, SORT_NUMERIC, $sortedIds);
+                $sortedIds = self::rankByBucketThenScore($docScores, $docBucket);
             } else {
                 arsort($docScores);
                 $sortedIds = array_keys($docScores);
@@ -2325,15 +2375,21 @@ class Index
         }
 
         if ($sortSpecs !== []) {
-            // Custom field sort: primary keys are the declared sort fields, BM25 score is the
-            // tiebreaker, doc ID is the final deterministic key.
-            $sortedIds = $this->sortDocIdsBySpecs(array_keys($docScores), $sortSpecs, $docScores, $tieKeys);
+            // Words bucket first (MatchingStrategy), then the sort fields, then BM25 score, then
+            // doc ID as the final deterministic key.
+            $sortedIds = $this->sortDocIdsBySpecs(
+                array_keys($docScores),
+                $sortSpecs,
+                $docScores,
+                $tieKeys,
+                count($keywords) > 1 ? $docBucket : null,
+            );
             $pagedIds  = $proximity
                 ? $this->rerankSortedPageTies(
                     $sortedIds,
                     $tieKeys,
                     $docScores,
-                    $docMatchCount,
+                    $docBucket,
                     $termGroups,
                     count($keywords),
                     $offset,
@@ -2341,18 +2397,7 @@ class Index
                 )
                 : array_slice($sortedIds, $offset, $limit);
         } elseif (count($keywords) > 1) {
-            // Multi-keyword relevance sort: primary = matched keyword groups (DESC),
-            // secondary = BM25+proximity score (DESC). C-native array_multisort avoids
-            // per-comparison PHP closure call overhead.
-            $sortedIds = array_keys($docScores);
-            $mc = [];
-            $sc = [];
-            foreach ($sortedIds as $id) {
-                $mc[] = $docMatchCount[$id] ?? 0;
-                $sc[] = $docScores[$id];
-            }
-            array_multisort($mc, SORT_DESC, SORT_NUMERIC, $sc, SORT_DESC, SORT_NUMERIC, $sortedIds);
-            $pagedIds = array_slice($sortedIds, $offset, $limit);
+            $pagedIds = array_slice(self::rankByBucketThenScore($docScores, $docBucket), $offset, $limit);
         } else {
             // Single-keyword: all docs tie on match count; C-native arsort on scores alone.
             arsort($docScores);
@@ -4569,7 +4614,7 @@ class Index
      * two groups never share a position, so minSpan >= groups − 1 and no document can end above
      * bm25 × 1 / (1 + boost × (groups − 1)). With $topK set (no sort, no distinct: only the
      * first offset + limit documents are shown) the documents are reranked in BM25 order, in
-     * batches, until the next one's bound falls below the $topK-th best reranked score; the rest
+     * doubling batches, until the next one's bound falls below the $topK-th best reranked score; the rest
      * get their bound as score, which keeps them below that document, so the shown page is
      * exactly what reranking everything would give. Measured on the 45k ecom set ("blue jeans",
      * ~600 full matches): positions and spans for all of them cost ~6 ms.
@@ -4578,20 +4623,20 @@ class Index
      * are reranked, the others keep their BM25 score.
      *
      * @param array<int, float> $docScores     Scores keyed by doc ID; modified in place.
-     * @param array<int, int>   $docMatchCount Matched keyword groups per document.
+     * @param array<int, int>   $docBucket     Words bucket per document (full match = $numKeywords).
      * @param list<list<int>>   $termGroups    One list of term IDs per keyword group.
      * @param int|null          $topK          Documents that must be ranked exactly; null = all.
      */
     private function applyProximityRanking(
         array &$docScores,
-        array $docMatchCount,
+        array $docBucket,
         array $termGroups,
         int $numKeywords,
         ?int $topK,
     ): void {
         $boostSet = [];
         foreach ($docScores as $id => $score) {
-            if (($docMatchCount[$id] ?? 0) >= $numKeywords) {
+            if (($docBucket[$id] ?? 0) >= $numKeywords) {
                 $boostSet[$id] = $score;
             }
         }
@@ -4616,12 +4661,16 @@ class Index
 
         arsort($boostSet);
         $maxFactor = 1.0 / (1.0 + $this->config->proximityBoost * (count($termGroups) - 1));
+        // Batches double in size: a bound that prunes stops after the first one, and one that
+        // cannot (spans far above groups − 1, common with three or more words in long texts)
+        // costs a few batches instead of one per 32 documents.
         $batchSize = max(32, $topK);
         $reranked  = [];
         $pending   = $boostSet;
         while ($pending !== []) {
-            $batch   = array_slice($pending, 0, $batchSize, true);
-            $pending = array_slice($pending, $batchSize, null, true);
+            $batch     = array_slice($pending, 0, $batchSize, true);
+            $pending   = array_slice($pending, $batchSize, null, true);
+            $batchSize *= 2;
             $this->applyProximityBoost($batch, $termGroups);
             $reranked += $batch;
             if ($pending === [] || count($reranked) < $topK) {
@@ -4655,7 +4704,7 @@ class Index
      * @param  list<int>          $sortedIds
      * @param  array<int, string> $tieKeys       From sortDocIdsBySpecs().
      * @param  array<int, float>  $docScores
-     * @param  array<int, int>    $docMatchCount
+     * @param  array<int, int>    $docBucket
      * @param  list<list<int>>    $termGroups
      * @return list<int>
      */
@@ -4663,7 +4712,7 @@ class Index
         array $sortedIds,
         array $tieKeys,
         array $docScores,
-        array $docMatchCount,
+        array $docBucket,
         array $termGroups,
         int $numKeywords,
         int $offset,
@@ -4697,7 +4746,7 @@ class Index
         foreach ($groups as $group) {
             if (count($group) > 1) {
                 foreach ($group as $id) {
-                    if (($docMatchCount[$id] ?? 0) >= $numKeywords) {
+                    if (($docBucket[$id] ?? 0) >= $numKeywords) {
                         $boostSet[$id] = $docScores[$id];
                     }
                 }
@@ -5264,71 +5313,56 @@ class Index
     }
 
     /**
-     * Add the missing rows of truncated keyword groups for the other groups' candidates.
+     * The rows of a keyword group for the documents in $docIds that the group has not seen yet.
      *
-     * A group whose document frequency exceeds maxDocs holds only its maxDocs best rows. For
-     * every candidate (a document any group fetched) that such a group has not seen, its rows
-     * are fetched here, scored with the group's IDF exactly as fetchDocsByTermIds() scores them,
-     * and appended to the group. The candidate set itself does not grow. Measured on the 45k
-     * ecom set ("casual shirt": 469 unseen candidates per group, ~250 of them containing the
-     * other word): ~0.4 ms per single-term group with ~900 unseen candidates, ~2 ms for a
-     * 50-term prefix group; one (doc_id, term_id) seek in doc_id_index per pair.
+     * A group whose document frequency exceeds maxDocs (or that was not fetched at all, see
+     * search()) holds only some of its rows. A document found through another group may still
+     * contain it; this looks those rows up, scored with the group's IDF exactly as
+     * fetchDocsByTermIds() scores them. Measured on the 45k ecom set ("casual shirt": of 469
+     * unseen candidates ~250 contained the other word): ~0.4 ms for one term and ~900 unseen
+     * documents, ~2 ms for a 50-term prefix group.
      *
-     * @param list<KeywordGroup> $groups One per query keyword: its term IDs, IDF factor, whether
-     *                                  maxDocs cut it, and its (term_id, doc_id, score) rows.
+     * @param  KeywordGroup     $group
+     * @param  array<int, true> $docIds
+     * @return list<array{0: int, 1: int, 2: float}>
      */
-    private function completeTruncatedGroups(array &$groups, float $k1_1mb, float $k1b_avgdl): void
+    private function completeGroup(array $group, array $docIds, float $k1_1mb, float $k1b_avgdl): array
     {
-        if (count($groups) < 2) {
-            return;
+        if ($group['termIds'] === []) {
+            return [];
         }
-        /** @var array<int, true> $candidates */
-        $candidates = [];
-        foreach ($groups as $group) {
-            foreach ($group['rows'] as [, $docId]) {
-                $candidates[$docId] = true;
-            }
+        $unseen = $docIds;
+        foreach ($group['rows'] as [, $docId]) {
+            unset($unseen[$docId]);
         }
-        foreach ($groups as $i => $group) {
-            if (!$group['truncated']) {
-                continue;
-            }
-            $unseen = $candidates;
-            foreach ($group['rows'] as [, $docId]) {
-                unset($unseen[$docId]);
-            }
-            if ($unseen === []) {
-                continue;
-            }
-            // Both lists as json_each IN-lists: SQLite seeks each (term, candidate) pair through
-            // doc_id_index (doc_id, term_id) and reads doc_lengths only for the matches. Sorted
-            // candidate IDs keep consecutive seeks on neighbouring pages. Measured on ecom (~900
-            // unseen candidates, one term): 0.38 ms, against 0.69 ms driven from an unsorted
-            // json_each and 41 ms with a unary + on term_id (which turns the seeks into a scan of
-            // every candidate's terms).
-            $stmt = $this->stmt(
-                'completeTermGroup',
-                'SELECT d.term_id, d.doc_id, ? * d.hit_count / (? + ? * dl.length + d.hit_count)
-                   FROM doclist d
-                   CROSS JOIN doc_lengths dl ON dl.doc_id = d.doc_id
-                  WHERE d.term_id IN (SELECT value FROM json_each(?))
-                    AND d.doc_id IN (SELECT value FROM json_each(?))'
-            );
-            $unseenIds = array_keys($unseen);
-            sort($unseenIds);
-            $stmt->execute([
-                $group['idfK1p1'],
-                $k1_1mb,
-                $k1b_avgdl,
-                json_encode($group['termIds']),
-                json_encode($unseenIds),
-            ]);
-            /** @var list<array{0: int, 1: int, 2: float}> $rows */
-            $rows = $stmt->fetchAll(PDO::FETCH_NUM);
-            if ($rows !== []) {
-                array_push($groups[$i]['rows'], ...$rows);
-            }
+        if ($unseen === []) {
+            return [];
         }
+        $unseenIds = array_keys($unseen);
+        sort($unseenIds);
+        // Both lists as json_each IN-lists: SQLite seeks each (term, document) pair on the doclist
+        // primary key and reads doc_lengths only for the matches. Sorted document IDs keep
+        // consecutive seeks on neighbouring pages (0.38 ms vs 0.69 ms unsorted, driven from
+        // json_each). Never write +d.term_id: it turns the seeks into a scan of every document's
+        // terms (41 ms).
+        $stmt = $this->stmt(
+            'completeTermGroup',
+            'SELECT d.term_id, d.doc_id, ? * d.hit_count / (? + ? * dl.length + d.hit_count)
+               FROM doclist d
+               CROSS JOIN doc_lengths dl ON dl.doc_id = d.doc_id
+              WHERE d.term_id IN (SELECT value FROM json_each(?))
+                AND d.doc_id IN (SELECT value FROM json_each(?))'
+        );
+        $stmt->execute([
+            $group['idfK1p1'],
+            $k1_1mb,
+            $k1b_avgdl,
+            json_encode($group['termIds']),
+            json_encode($unseenIds),
+        ]);
+        /** @var list<array{0: int, 1: int, 2: float}> $rows */
+        $rows = $stmt->fetchAll(PDO::FETCH_NUM);
+        return $rows;
     }
 
     /**
@@ -5985,11 +6019,19 @@ class Index
      * @param  array<int, string>|null               $tieKeys  Set to doc ID → its sort ranks joined, so
      *                                                         callers can tell which documents tie on
      *                                                         every spec.
+     * @param  array<int, int>|null                  $leading  Optional key ordered before the specs,
+     *                                                         descending (the words bucket of a
+     *                                                         multi-word search()).
      * @param-out array<int, string>                 $tieKeys
      * @return list<int>
      */
-    private function sortDocIdsBySpecs(array $docIds, array $specs, array $scores, ?array &$tieKeys = null): array
-    {
+    private function sortDocIdsBySpecs(
+        array $docIds,
+        array $specs,
+        array $scores,
+        ?array &$tieKeys = null,
+        ?array $leading = null,
+    ): array {
         $tieKeys = [];
         if ($docIds === [] || $specs === []) {
             return $docIds;
@@ -6009,6 +6051,14 @@ class Index
                 $column[] = $ranks[$id];
             }
             $rankColumns[] = $column;
+        }
+        if ($leading !== null) {
+            // Descending bucket as an ascending rank column, so it joins the other columns.
+            $column = [];
+            foreach ($docIds as $id) {
+                $column[] = -($leading[$id] ?? 0);
+            }
+            array_unshift($rankColumns, $column);
         }
         foreach ($docIds as $i => $id) {
             $tieKeys[$id] = implode(',', array_column($rankColumns, $i));
@@ -6080,6 +6130,37 @@ class Index
             };
         }
         return $ranks;
+    }
+
+    /**
+     * Relevance order of a multi-word search: words bucket desc, then score desc, then doc ID
+     * asc, by one C-level array_multisort() (no PHP comparison callback).
+     *
+     * @param  array<int, float> $docScores
+     * @param  array<int, int>   $docBucket
+     * @return list<int>
+     */
+    private static function rankByBucketThenScore(array $docScores, array $docBucket): array
+    {
+        $ids     = array_keys($docScores);
+        $buckets = [];
+        $scores  = [];
+        foreach ($ids as $id) {
+            $buckets[] = $docBucket[$id] ?? 0;
+            $scores[]  = $docScores[$id];
+        }
+        array_multisort(
+            $buckets,
+            SORT_DESC,
+            SORT_NUMERIC,
+            $scores,
+            SORT_DESC,
+            SORT_NUMERIC,
+            $ids,
+            SORT_ASC,
+            SORT_NUMERIC,
+        );
+        return $ids;
     }
 
     /**

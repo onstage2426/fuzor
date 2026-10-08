@@ -69,3 +69,16 @@ new Config(typoTolerance: new TypoTolerance(minWordSizeForOneTypo: 4));
 
 The two-typo threshold (9) is now configurable as `minWordSizeForTwoTypos`. A swap of two
 neighbouring characters now counts as one typo instead of two, so slightly more words match.
+
+## Multi-word searches return documents matching the first word, ranked by matched words
+
+1.x returned every document containing any query word, ranked by how many words it matched. 2.0
+uses `SearchOptions::$matchingStrategy`, default `MatchingStrategy::Last`: documents must contain
+the first word, and rank by how many words they match from the start of the query ("big fat cat",
+then "big fat", then "big"). A document with only later words ("fat cat") is no longer returned.
+Pass `MatchingStrategy::All` to require every word, or `Frequency` to drop the most common words
+first.
+
+`sort` now applies after that words ranking: a document matching more words still comes first,
+and the sort fields order documents within each group. In 1.x the sort fields decided the whole
+order.
