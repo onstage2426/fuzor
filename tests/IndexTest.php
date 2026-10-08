@@ -3969,6 +3969,109 @@ class IndexTest extends TestCase
         new Index($this->dbPath, readonly: true)->clear();
     }
 
+    // --- remove ---
+
+    /** @return list<string> Every file next to the index path that belongs to it (path, versions, sidecars, temp). */
+    private function filesOfIndex(): array
+    {
+        clearstatcache();
+        $files = array_values(array_filter(
+            [$this->dbPath, ...(glob($this->dbPath . '[.-]*') ?: [])],
+            fn(string $f): bool => is_link($f) || file_exists($f),
+        ));
+        sort($files);
+        return $files;
+    }
+
+    public function testRemoveDeletesThePathItsVersionsAndSidecars(): void
+    {
+        $index = new Index($this->dbPath);
+        $index->insert([['id' => 1, 'title' => 'sedan']]);
+        $index->close();
+        Index::rebuild($this->dbPath)->close();
+        $reader = new Index($this->dbPath, readonly: true);   // leaves -wal / -shm next to the version
+        Index::rebuild($this->dbPath)->close();
+        $before = $this->filesOfIndex();
+        $this->assertGreaterThanOrEqual(3, count($before), implode(', ', $before));
+
+        $removed = Index::remove($this->dbPath);
+
+        $this->assertSame($before, $removed);
+        $this->assertSame([], $this->filesOfIndex());
+        $this->assertFalse(Index::exists($this->dbPath));
+        // A connection opened before keeps reading the deleted files until it closes.
+        $this->assertSame([1], $reader->search('sedan')->getIds());
+        $reader->close();
+    }
+
+    public function testRemoveDeletesAPlainIndexFileWithItsWal(): void
+    {
+        $index = new Index($this->dbPath);
+        $index->insert([['id' => 1, 'title' => 'sedan']]);
+        $this->assertFileExists($this->dbPath . '-wal');
+        $index->close();
+        file_put_contents($this->dbPath . '-wal', '');
+
+        $removed = Index::remove($this->dbPath);
+
+        $this->assertContains($this->dbPath, $removed);
+        $this->assertSame([], $this->filesOfIndex());
+    }
+
+    public function testRemoveDeletesA1xIndex(): void
+    {
+        (new Index($this->dbPath))->close();
+        $this->setSchemaVersion($this->dbPath, 3);
+
+        Index::remove($this->dbPath);
+
+        $this->assertSame([], $this->filesOfIndex());
+    }
+
+    public function testRemoveOfNothingIsANoop(): void
+    {
+        $this->assertSame([], Index::remove($this->dbPath));
+    }
+
+    public function testRemoveRefusesAFileThatIsNoIndex(): void
+    {
+        new \PDO('sqlite:' . $this->dbPath)->exec('CREATE TABLE notes (body TEXT)');
+        file_put_contents($this->dbPath . '.notes', 'keep me');
+        try {
+            $this->expectException(IOException::class);
+            Index::remove($this->dbPath);
+        } finally {
+            $this->assertFileExists($this->dbPath);
+            @unlink($this->dbPath . '.notes');
+        }
+    }
+
+    public function testRemoveLeavesOtherIndexesAndALiveBuildAlone(): void
+    {
+        $sibling = $this->dbPath . '2';   // shares the prefix, is another index
+        (new Index($sibling))->close();
+        Index::rebuild($sibling)->close();
+        (new Index($this->dbPath))->close();
+        // A build still running in another process: its temp lock is held.
+        [$tmp] = $this->makeTempFiles(['.tmp-0123abcd'], 7200);
+        $lock  = fopen($tmp . '.lock', 'c');
+        $this->assertNotFalse($lock);
+        flock($lock, LOCK_EX);
+        try {
+            Index::remove($this->dbPath);
+
+            $this->assertFileExists($tmp);
+            $this->assertTrue(Index::exists($sibling));
+        } finally {
+            flock($lock, LOCK_UN);
+            fclose($lock);
+            @unlink($tmp . '.lock');
+            @unlink($tmp);
+            self::removeIndexFiles($sibling);
+        }
+        $this->assertFalse(Index::exists($this->dbPath));
+    }
+
     // --- install ---
 
     /** A snapshot of a small index at a fresh temp path (a file received from elsewhere). */

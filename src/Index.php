@@ -588,6 +588,48 @@ class Index
     }
 
     /**
+     * Delete the index at $path with every file Fuzor keeps for it: the path itself (a symlink
+     * since rebuild()/snapshotTo() publish versions, or a plain file), each {path}.v-{8 hex}
+     * version, the -wal / -shm / -journal sidecars of all of them, and temp files of builds that
+     * are no longer running (cleanupTempFiles() with no minimum age; a live build is left alone).
+     *
+     * Stop every process that writes the index first. Connections that only read keep reading
+     * the deleted files until they close; new ones find no index. Nothing at $path is a no-op.
+     *
+     * @param  string       $path Index path, as passed to new Index().
+     * @return list<string>       Deleted paths, sorted.
+     * @throws IOException  If the directory does not exist, or $path holds a file that is not a
+     *                      Fuzor index (it is left untouched).
+     */
+    public static function remove(string $path): array
+    {
+        $resolved = self::resolvePath($path);
+        $isLink   = is_link($resolved);
+        if (!$isLink && file_exists($resolved) && self::storedRevision($resolved) === null) {
+            throw new IOException("Not a Fuzor index, refusing to delete it: {$resolved}");
+        }
+
+        $deleted = [];
+        // The path first, so a new connection finds no index while the rest goes.
+        foreach (['', '-wal', '-shm', '-journal'] as $suffix) {
+            $file = $resolved . $suffix;
+            if ((is_link($file) || file_exists($file)) && @unlink($file)) {
+                $deleted[] = $file;
+            }
+        }
+        $baseLen = strlen($resolved);
+        foreach (glob($resolved . '.v-*') ?: [] as $file) {
+            if (preg_match(self::VERSION_SUFFIX_PATTERN, substr($file, $baseLen)) === 1 && @unlink($file)) {
+                $deleted[] = $file;
+            }
+        }
+        array_push($deleted, ...self::cleanupTempFiles($resolved, 0));
+
+        sort($deleted);
+        return $deleted;
+    }
+
+    /**
      * Pick a fresh temp path next to $resolved and lock it until releaseTempPath().
      *
      * The lock file is what tells cleanupTempFiles() that the name belongs to a live build.
