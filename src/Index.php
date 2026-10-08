@@ -2399,6 +2399,7 @@ class Index
         if ($sortSpecs !== []) {
             // Words bucket first (MatchingStrategy), then the sort fields, then BM25 score, then
             // doc ID as the final deterministic key.
+            $tieKeys   = [];
             $sortedIds = $this->sortDocIdsBySpecs(
                 array_keys($docScores),
                 $sortSpecs,
@@ -2409,7 +2410,7 @@ class Index
             $pagedIds  = $proximity
                 ? $this->rerankSortedPageTies(
                     $sortedIds,
-                    $tieKeys,
+                    $tieKeys ?? [],
                     $docScores,
                     $docBucket,
                     $termGroups,
@@ -6207,13 +6208,13 @@ class Index
      * @param  list<int>                             $docIds
      * @param  list<array{field: string, asc: bool}> $specs
      * @param  array<int, float>                     $scores   BM25 scores; empty array for boolean path
-     * @param  array<int, string>|null               $tieKeys  Set to doc ID → its sort ranks joined, so
-     *                                                         callers can tell which documents tie on
-     *                                                         every spec.
+     * @param  array<int, string>|null               $tieKeys  When an array is passed, set to doc ID →
+     *                                                         its sort ranks joined, so callers can tell
+     *                                                         which documents tie on every spec.
      * @param  array<int, int>|null                  $leading  Optional key ordered before the specs,
      *                                                         descending (the words bucket of a
      *                                                         multi-word search()).
-     * @param-out array<int, string>                 $tieKeys
+     * @param-out array<int, string>|null            $tieKeys
      * @return list<int>
      */
     private function sortDocIdsBySpecs(
@@ -6223,7 +6224,6 @@ class Index
         ?array &$tieKeys = null,
         ?array $leading = null,
     ): array {
-        $tieKeys = [];
         if ($docIds === [] || $specs === []) {
             return $docIds;
         }
@@ -6251,8 +6251,13 @@ class Index
             }
             array_unshift($rankColumns, $column);
         }
-        foreach ($docIds as $i => $id) {
-            $tieKeys[$id] = implode(',', array_column($rankColumns, $i));
+        // Only for callers that ask (pass an array): an implode per document is measurable when a
+        // distinct browse sorts every match.
+        if ($tieKeys !== null) {
+            $tieKeys = [];
+            foreach ($docIds as $i => $id) {
+                $tieKeys[$id] = implode(',', array_column($rankColumns, $i));
+            }
         }
         $primary = $rankColumns[0];
         $rest    = [SORT_ASC, SORT_NUMERIC];
