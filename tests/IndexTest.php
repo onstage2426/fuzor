@@ -4,6 +4,7 @@ namespace Fuzor\Tests;
 
 use Fuzor\Config;
 use Fuzor\FacetExclude;
+use Fuzor\FacetOrder;
 use Fuzor\FacetRange;
 use Fuzor\FacetSearchQuery;
 use Fuzor\Index;
@@ -11,6 +12,7 @@ use Fuzor\MatchingStrategy;
 use Fuzor\SchemaConfig;
 use Fuzor\SearchOptions;
 use Fuzor\SearchResult;
+use Fuzor\Tokenizer;
 use Fuzor\TypoTolerance;
 use Fuzor\Exceptions\IOException;
 use Fuzor\Exceptions\QueryException;
@@ -330,19 +332,21 @@ class IndexTest extends TestCase
         $this->assertSame(3, $result->totalHits); // total untruncated
     }
 
-    public function testSearchDefaultNumOfResultsIsOneHundred(): void
+    public function testSearchDefaultNumOfResultsIsTwenty(): void
     {
-        // Insert 101 docs so the parameterless call must cap at exactly 100 — not 99 or 101.
+        // Insert 21 docs so the parameterless call must cap at exactly 20 — not 19 or 21.
         $index = new Index($this->dbPath);
-        $index->insert(array_map(fn($i): array => ['id' => $i, 'title' => 'sedan'], range(1, 101)));
+        $index->insert(array_map(fn($i): array => ['id' => $i, 'title' => 'sedan'], range(1, 21)));
 
         $result = $index->search('sedan');
-        $this->assertCount(100, $result->getIds());
-        $this->assertSame(101, $result->totalHits);
+        $this->assertCount(20, $result->getIds());
+        $this->assertSame(21, $result->totalHits);
 
         $resultBool = $index->searchBoolean('sedan');
-        $this->assertCount(100, $resultBool->getIds());
-        $this->assertSame(101, $resultBool->totalHits);
+        $this->assertCount(20, $resultBool->getIds());
+        $this->assertSame(21, $resultBool->totalHits);
+
+        $this->assertCount(20, $index->search('')->getIds());
     }
 
     public function testSearchIsCaseInsensitive(): void
@@ -7576,6 +7580,136 @@ class IndexTest extends TestCase
                 "offset {$offset}, limit {$limit}",
             );
         }
+    }
+
+    // --- facet value order and facetSearch() matching ---
+
+    private function facetValuesIndex(): Index
+    {
+        $index = new Index($this->dbPath, schema: new SchemaConfig(filterableFields: ['brand', 'size']));
+        $index->insert([
+            ['id' => 1, 'title' => 'dress', 'brand' => 'Rosa Clará', 'size' => 10],
+            ['id' => 2, 'title' => 'dress', 'brand' => 'rosa-clara', 'size' => 9],
+            ['id' => 3, 'title' => 'dress', 'brand' => 'Pronovias', 'size' => 9],
+            ['id' => 4, 'title' => 'dress', 'brand' => 'Pronovias', 'size' => 12],
+            ['id' => 5, 'title' => 'dress', 'brand' => 'Élan', 'size' => 36],
+            ['id' => 6, 'title' => 'dress', 'brand' => 'atelier_aimée', 'size' => 36],
+            ['id' => 7, 'title' => 'dress', 'brand' => 'Pronovias', 'size' => 36],
+        ]);
+        return $index;
+    }
+
+    /** @return list<string> */
+    private function facetValues(Index $index, string $facetQuery, FacetOrder $order = FacetOrder::Count): array
+    {
+        $hits = $index->facetSearch(new FacetSearchQuery(
+            facetName: 'brand',
+            facetQuery: $facetQuery,
+            sortFacetValuesBy: $order,
+        ))->facetHits;
+        return array_column($hits, 'value');
+    }
+
+    public function testFacetSearchMatchesTheStartOfAnyWordIgnoringCaseAndAccents(): void
+    {
+        $index = $this->facetValuesIndex();
+
+        $this->assertEqualsCanonicalizing(['Rosa Clará', 'rosa-clara'], $this->facetValues($index, 'CLARA'));
+        $this->assertEqualsCanonicalizing(['Rosa Clará', 'rosa-clara'], $this->facetValues($index, 'rosa cl'));
+        $this->assertSame(['Élan'], $this->facetValues($index, 'ela'));
+        $this->assertSame(['atelier_aimée'], $this->facetValues($index, 'Aimee'));
+        // Only word starts: "ova" is inside "Pronovias".
+        $this->assertSame([], $this->facetValues($index, 'ova'));
+    }
+
+    public function testFacetMatchKeyAsciiFastPathAgreesWithTheGeneralPath(): void
+    {
+        $key = new \ReflectionMethod(Index::class, 'facetMatchKey');
+        foreach (['Rosa-Clara', ' A  B_c/D ', "tab\tsep", 'UPPER', '', 'x--y__z//w', 'Ünïcode ÉLAN'] as $text) {
+            $general = trim(preg_replace('~[\s\-_/]+~u', ' ', Tokenizer::sortKey($text)) ?? '');
+            $this->assertSame($general, $key->invoke(null, $text), $text);
+        }
+    }
+
+    public function testFacetSearchTreatsLikeWildcardsLiterally(): void
+    {
+        $index = new Index($this->dbPath, schema: new SchemaConfig(filterableFields: ['tag']));
+        $index->insert([
+            ['id' => 1, 'title' => 'x', 'tag' => '50% off'],
+            ['id' => 2, 'title' => 'x', 'tag' => '500 club'],
+            ['id' => 3, 'title' => 'x', 'tag' => 'a%b'],
+            ['id' => 4, 'title' => 'x', 'tag' => 'axb'],
+        ]);
+        $values = fn(string $q) => array_column(
+            $index->facetSearch(new FacetSearchQuery(facetName: 'tag', facetQuery: $q))->facetHits,
+            'value',
+        );
+
+        $this->assertSame(['50% off'], $values('50%'));
+        $this->assertSame(['a%b'], $values('a%'));
+        $this->assertSame([], $values('a_b'));
+    }
+
+    public function testFacetSearchOrder(): void
+    {
+        $index = $this->facetValuesIndex();
+
+        $this->assertSame(
+            ['Pronovias', 'Rosa Clará', 'atelier_aimée', 'rosa-clara', 'Élan'],
+            $this->facetValues($index, ''),
+        );
+        $this->assertSame(
+            ['atelier_aimée', 'Pronovias', 'Rosa Clará', 'rosa-clara', 'Élan'],
+            $this->facetValues($index, '', FacetOrder::Alpha),
+        );
+        $this->assertSame(['Rosa Clará', 'rosa-clara'], $this->facetValues($index, 'ros', FacetOrder::Alpha));
+    }
+
+    /** @param array<string, FacetOrder> $sortBy */
+    private function facetOrderOptions(array $sortBy): SearchOptions
+    {
+        return new SearchOptions(facets: ['brand', 'size'], sortFacetValuesBy: $sortBy);
+    }
+
+    public function testFacetDistributionOrder(): void
+    {
+        $index = $this->facetValuesIndex();
+
+        $count = $index->search('dress', $this->facetOrderOptions([]))->facetDistribution;
+        $this->assertSame([36 => 3, 9 => 2, 10 => 1, 12 => 1], $count['size']);
+        $this->assertSame('Pronovias', array_key_first($count['brand']));
+
+        $alpha = $index->search('dress', $this->facetOrderOptions(['size' => FacetOrder::Alpha]))->facetDistribution;
+        $this->assertSame([9 => 2, 10 => 1, 12 => 1, 36 => 3], $alpha['size']);
+        $this->assertSame('Pronovias', array_key_first($alpha['brand']));
+
+        $all = $index->search('', $this->facetOrderOptions(['*' => FacetOrder::Alpha, 'size' => FacetOrder::Count]))
+            ->facetDistribution;
+        $this->assertSame(
+            ['atelier_aimée', 'Pronovias', 'Rosa Clará', 'rosa-clara', 'Élan'],
+            array_keys($all['brand']),
+        );
+        $this->assertSame(36, array_key_first($all['size']));
+    }
+
+    public function testAlphaOrderIsAppliedBeforeTheValueCap(): void
+    {
+        $index = new Index($this->dbPath, config: new Config(maxValuesPerFacet: 2), schema: new SchemaConfig(
+            filterableFields: ['brand'],
+        ));
+        $index->insert([
+            ['id' => 1, 'title' => 'x', 'brand' => 'Zeta'],
+            ['id' => 2, 'title' => 'x', 'brand' => 'Zeta'],
+            ['id' => 3, 'title' => 'x', 'brand' => 'Beta'],
+            ['id' => 4, 'title' => 'x', 'brand' => 'alpha'],
+        ]);
+
+        $result = $index->search('x', new SearchOptions(
+            facets: ['brand'],
+            sortFacetValuesBy: ['brand' => FacetOrder::Alpha],
+        ));
+
+        $this->assertSame(['alpha' => 1, 'Beta' => 1], $result->facetDistribution['brand']);
     }
 
     // --- matching strategies ---

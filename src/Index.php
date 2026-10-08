@@ -2279,6 +2279,7 @@ class Index
             $docScores,
             $this->config->maxFacetCountDocs,
         );
+        $facetDistribution = $this->orderFacetValues($facetDistribution, $options->sortFacetValuesBy);
         $exhaustive = !$candidatesCapped && !$prefixCapped;
         $warnings   = [
             ...$warnings,
@@ -2578,6 +2579,7 @@ class Index
             $filteredDocSet,
             $this->config->maxFacetCountDocs,
         );
+        $facetDistribution = $this->orderFacetValues($facetDistribution, $options->sortFacetValuesBy);
         $exhaustive = !$candidatesCapped && !$prefixCapped;
         $warnings   = [
             ...$warnings,
@@ -2753,27 +2755,41 @@ class Index
             array_push($params, ...$excludedSql[1]);
         }
 
-        if ($facetQuery !== '') {
-            $where   .= " AND LOWER(fv.value) LIKE ? ESCAPE '\\'";
-            // Escape LIKE special chars in the user-supplied prefix so '%' and '_' are literal.
-            $escaped  = str_replace(['\\', '%', '_'], ['\\\\', '\\%', '\\_'], strtolower($facetQuery));
-            $params[] = $escaped . '%';
+        $byCount = $query->sortFacetValuesBy === FacetOrder::Count;
+        $needle  = self::facetMatchKey($facetQuery);
+        if ($facetQuery === '' && $byCount) {
+            // Nothing to match in PHP: let SQL order and cut.
+            $stmt = $this->prepare(
+                "SELECT fv.value, COUNT(*) AS count FROM {$from} WHERE {$where}"
+                . ' GROUP BY fv.value ORDER BY count DESC, fv.value LIMIT ?'
+            );
+            $stmt->execute([...$params, $query->limit]);
+            /** @var array<array-key, int> $counts */
+            $counts = $stmt->fetchAll(PDO::FETCH_KEY_PAIR);
+        } else {
+            // Case and accent folding (Tokenizer::sortKey()) and word-start matching cannot be
+            // expressed in SQL, so the key's distinct values are grouped there and matched here.
+            $stmt = $this->prepare(
+                "SELECT fv.value, COUNT(*) AS count FROM {$from} WHERE {$where} GROUP BY fv.value"
+            );
+            $stmt->execute($params);
+            /** @var array<array-key, int> $counts */
+            $counts = $stmt->fetchAll(PDO::FETCH_KEY_PAIR);
+            if ($needle !== '') {
+                foreach ($counts as $value => $_) {
+                    if (!self::facetValueMatches(self::facetMatchKey((string) $value), $needle)) {
+                        unset($counts[$value]);
+                    }
+                }
+            }
+            $counts = $byCount ? self::countOrder($counts) : self::alphaOrder($counts);
+            $counts = array_slice($counts, 0, max(0, $query->limit), true);
         }
-        $params[] = $query->limit;
 
-        $stmt = $this->prepare(
-            "SELECT fv.value, COUNT(*) AS count FROM {$from} WHERE {$where}"
-            . ' GROUP BY fv.value ORDER BY count DESC LIMIT ?'
-        );
-        $stmt->execute($params);
-
-        /** @var list<array{value: string, count: string}> $rows */
-        $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
-
-        $hits = array_map(
-            fn(array $row) => ['value' => $row['value'], 'count' => (int) $row['count']],
-            $rows
-        );
+        $hits = [];
+        foreach ($counts as $value => $count) {
+            $hits[] = ['value' => (string) $value, 'count' => (int) $count];
+        }
 
         return new FacetSearchResult($hits, $facetQuery, $warnings, $exhaustive);
     }
@@ -2797,8 +2813,7 @@ class Index
      * Config::$maxFacetCountDocs matching documents, as in search() (see browseFacetCounts()).
      * distinct still needs every matching document in PHP to count the surviving groups, so
      * that combination costs O(matches); it is exact too.
-     */
-    /**
+     *
      * @param list<FacetCondition> $negations Exclusions from a query of only '-' words/phrases;
      *                                        $phrase is then not highlighted.
      */
@@ -2864,6 +2879,7 @@ class Index
             'stats'        => $facetStats,
             'approximate'  => $approximateFacets,
         ] = $this->browseFacetCounts($facets, $conditions);
+        $facetDistribution = $this->orderFacetValues($facetDistribution, $options->sortFacetValuesBy);
         $warnings = [...$warnings, ...$this->capWarnings(null, false, $approximateFacets)];
 
         if ($distinct !== null) {
@@ -6711,8 +6727,9 @@ class Index
     }
 
     /**
-     * Merge per-key counts into $distribution / $stats, capping each distribution at
-     * Config::$maxValuesPerFacet and omitting keys with no values.
+     * Merge per-key counts into $distribution / $stats, omitting keys with no values. The
+     * distributions stay complete (count order); orderFacetValues() orders and caps them once the
+     * requested order is known.
      *
      * @param array<string, array{
      *     distribution: array<array-key, int>,
@@ -6723,19 +6740,128 @@ class Index
      */
     private function mergeFacetCounts(array $results, array &$distribution, array &$stats): void
     {
-        $maxValues = $this->config->maxValuesPerFacet;
         foreach ($results as $keyName => $counts) {
             $dist = $counts['distribution'];
             if ($dist === []) {
                 continue;
             }
-            $distribution[$keyName] = $maxValues > 0 && count($dist) > $maxValues
-                ? array_slice($dist, 0, $maxValues, true)
-                : $dist;
+            $distribution[$keyName] = $dist;
             if ($counts['stats'] !== null) {
                 $stats[$keyName] = $counts['stats'];
             }
         }
+    }
+
+    /**
+     * Order each facet distribution as requested and cap it at Config::$maxValuesPerFacet.
+     *
+     * The order is applied first, so with FacetOrder::Alpha the cap keeps the first values
+     * alphabetically, not the most frequent ones.
+     *
+     * @param  array<string, array<array-key, int>> $distribution In count order (as collected).
+     * @param  array<string, FacetOrder>            $sortBy       Per field; '*' for the rest.
+     * @return array<string, array<array-key, int>>
+     */
+    private function orderFacetValues(array $distribution, array $sortBy): array
+    {
+        $maxValues = $this->config->maxValuesPerFacet;
+        foreach ($distribution as $field => $counts) {
+            if (($sortBy[$field] ?? $sortBy['*'] ?? FacetOrder::Count) === FacetOrder::Alpha) {
+                $counts = self::alphaOrder($counts);
+            }
+            if ($maxValues > 0 && count($counts) > $maxValues) {
+                $counts = array_slice($counts, 0, $maxValues, true);
+            }
+            $distribution[$field] = $counts;
+        }
+        return $distribution;
+    }
+
+    /**
+     * Facet counts in FacetOrder::Alpha order: numeric values first, by value, then the others by
+     * their sortKey() (case-insensitive), then by bytes. One array_multisort(), no comparison
+     * callback.
+     *
+     * @param  array<array-key, int> $counts Value → count.
+     * @return array<array-key, int>
+     */
+    private static function alphaOrder(array $counts): array
+    {
+        $values  = array_keys($counts);
+        $kinds   = [];
+        $numbers = [];
+        $folded  = [];
+        $raw     = [];
+        foreach ($values as $value) {
+            $text      = (string) $value;
+            $isNumber  = is_numeric($text);
+            $kinds[]   = $isNumber ? 0 : 1;
+            $numbers[] = $isNumber ? (float) $text : 0.0;
+            $folded[]  = $isNumber ? '' : self::sortKey($text);
+            $raw[]     = $text;
+        }
+        array_multisort(
+            $kinds,
+            SORT_ASC,
+            SORT_NUMERIC,
+            $numbers,
+            SORT_ASC,
+            SORT_NUMERIC,
+            $folded,
+            SORT_ASC,
+            SORT_STRING,
+            $raw,
+            SORT_ASC,
+            SORT_STRING,
+            $values,
+        );
+        $ordered = [];
+        foreach ($values as $value) {
+            $ordered[$value] = $counts[$value];
+        }
+        return $ordered;
+    }
+
+    /**
+     * Facet counts most documents first, ties by value bytes (the order SQL gives with
+     * ORDER BY count DESC, value).
+     *
+     * @param  array<array-key, int> $counts Value → count.
+     * @return array<array-key, int>
+     */
+    private static function countOrder(array $counts): array
+    {
+        $values = array_map('strval', array_keys($counts));
+        $nums   = array_values($counts);
+        array_multisort($nums, SORT_DESC, SORT_NUMERIC, $values, SORT_ASC, SORT_STRING);
+        $ordered = [];
+        foreach ($values as $i => $value) {
+            $ordered[$value] = $nums[$i];
+        }
+        return $ordered;
+    }
+
+    /**
+     * A facet value or facetSearch() query in the form they are matched in: Tokenizer::sortKey()
+     * (lowercase, Latin accents folded) with every run of spaces, '-', '_', and '/' turned into
+     * one space, so "rosa cl" finds "rosa-clara".
+     */
+    private static function facetMatchKey(string $text): string
+    {
+        // Most facet values are ASCII: no accents to fold and no multibyte case mapping, so
+        // byte functions give the same key several times faster (facetSearch() keys every
+        // distinct value of the facet).
+        if (!preg_match('/[^\x00-\x7F]/', $text)) {
+            $key = strtolower(strtr($text, "-_/\t\n\r\v\f", '        '));
+            return trim(str_contains($key, '  ') ? (preg_replace('/ +/', ' ', $key) ?? $key) : $key);
+        }
+        return trim(preg_replace('~[\s\-_/]+~u', ' ', Tokenizer::sortKey($text)) ?? '');
+    }
+
+    /** Whether $query (a facetMatchKey()) starts $value (a facetMatchKey()) or one of its words. */
+    private static function facetValueMatches(string $value, string $query): bool
+    {
+        return str_starts_with($value, $query) || str_contains($value, ' ' . $query);
     }
 
     /**

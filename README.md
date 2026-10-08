@@ -62,7 +62,7 @@ $result->facetDistribution;  // ['type' => ['sedan' => 1, 'suv' => 1]]
 // Facet value search — autocomplete a filter dropdown
 $facetResult = $index->facetSearch(new FacetSearchQuery(
     facetName:  'type',
-    facetQuery: 'se',      // prefix-match facet values: matches 'sedan'
+    facetQuery: 'se',      // matches the start of any word of a value: 'sedan', 'Sport Sedan'
     query:      'car',     // restrict to docs matching this FTS query
 ));
 

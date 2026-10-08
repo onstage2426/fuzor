@@ -398,6 +398,23 @@ $result->facetStats;
 // ['price' => ['min' => 29.99, 'max' => 499.0]]
 ```
 
+### Value order
+
+Values are ordered by count, most documents first. Use `sortFacetValuesBy` to order fields alphabetically instead (`'*'` sets the order for all other fields):
+
+```php
+use Fuzor\FacetOrder;
+
+$result = $index->search('watch', new SearchOptions(
+    facets:            ['brand', 'category', 'size'],
+    sortFacetValuesBy: ['*' => FacetOrder::Alpha, 'brand' => FacetOrder::Count],
+));
+```
+
+`FacetOrder::Alpha` puts numbers first, by value, then strings ignoring case. The order is applied before `Config::$maxValuesPerFacet` (100) cuts the list, so with `Alpha` a field with more values returns the first ones alphabetically, not the most used ones.
+
+**Compared with Meilisearch:** the same setting and orders, per query instead of per index. Meilisearch's default is `alpha`; Fuzor keeps `count`, because with the 100-value cap an alphabetical default drops the most used values.
+
 ### Disjunctive counting
 
 When a `filter` is active on a key that is also in `facets`, its counts are computed over the result set *without* that key's filter — so all values stay visible even while one is selected:
@@ -435,17 +452,23 @@ foreach ($result as $hit) {
 }
 ```
 
-### Prefix match
+### Matching values
 
-The `facetQuery` is matched case-insensitively against the start of each value:
+The `facetQuery` is matched against the start of any word of a value. Case and Latin accents are ignored on both sides, and spaces, `-`, `_`, and `/` all separate words:
 
 ```php
-// "sc" matches "Science Fiction" but not "Action" or "Drama"
+// "fi" matches "Science Fiction", "sc" matches it too; "ence" does not
 $result = $index->facetSearch(new FacetSearchQuery(
     facetName:  'genre',
-    facetQuery: 'sc',
+    facetQuery: 'fi',
 ));
+
+// "rosa cl" and "CLARA" both match "rosa-clara" and "Rosa Clará"
 ```
+
+Results are ordered by count; pass `sortFacetValuesBy: FacetOrder::Alpha` for alphabetical order (applied before `limit`).
+
+**Compared with Meilisearch:** Meilisearch matches only the start of the value's first word; Fuzor matches any word, so slugs (`rosa-clara`) and multi-word names can be found by any of their words. Fuzor has no typo tolerance on facet values.
 
 ### Restricting to a document set
 
@@ -469,7 +492,7 @@ Only values that appear on documents satisfying both the FTS query and all filte
 
 ```php
 $result->facetHits;        // list<array{value: string, count: int}>
-$result->facetQuery;       // the prefix that was searched
+$result->facetQuery;       // the facetQuery that was searched
 $result->warnings;         // list<string> — limits that made the result approximate
 $result->exhaustive;       // false when the `query` candidates were capped (maxFacetCountDocs)
 count($result);            // number of values returned
@@ -483,10 +506,11 @@ $result->toJSON();
 | Property | Default | Description |
 |---|---|---|
 | `facetName` | _(required)_ | Field to search; must be declared in `filterableFields` at index creation |
-| `facetQuery` | `''` | Prefix matched case-insensitively against values; empty string returns all values |
+| `facetQuery` | `''` | Matched at the start of any word of a value, ignoring case and accents; empty string returns all values |
 | `query` | `''` | FTS phrase to restrict candidate documents (phrases and `-` exclusions as in `search()`); empty string means all documents |
 | `filter` | `[]` | Facet filters applied before counting; same type as `SearchOptions::$filter` |
-| `limit` | `100` | Maximum number of values to return, ordered by count descending |
+| `limit` | `100` | Maximum number of values to return |
+| `sortFacetValuesBy` | `FacetOrder::Count` | `Count` (most documents first) or `Alpha` |
 
 ## Custom sort
 
@@ -591,7 +615,8 @@ Documents with no value for the distinct field are never collapsed — each pass
 | Property | Default | Description |
 |---|---|---|
 | `asYouType` | `true` | Match the last keyword as a prefix |
-| `limit` | `100` | Maximum hits to return |
+| `limit` | `20` | Maximum hits to return |
+| `sortFacetValuesBy` | `[]` | Facet value order per field (`FacetOrder`), `'*'` for the rest; default count — see [Value order](#value-order) |
 | `offset` | `0` | Hits to skip (pagination) |
 | `filter` | `[]` | Facet filters — `array<string, string\|list<string>\|FacetRange\|FacetExclude>` |
 | `facets` | `[]` | Filterable fields to compute value counts for |

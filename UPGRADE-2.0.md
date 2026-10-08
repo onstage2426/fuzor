@@ -82,3 +82,13 @@ first.
 `sort` now applies after that words ranking: a document matching more words still comes first,
 and the sort fields order documents within each group. In 1.x the sort fields decided the whole
 order.
+
+## `SearchOptions::$limit` defaults to 20
+
+The default page size is 20 hits instead of 100. Pass `limit: 100` to keep the old size.
+
+## `facetSearch()` matches any word, ignoring accents
+
+`FacetSearchQuery::$facetQuery` used to match the start of the value only, ignoring ASCII case.
+It now matches the start of any word (separated by spaces, `-`, `_`, or `/`) and ignores case and
+Latin accents on both sides, so more values can match.
