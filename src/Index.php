@@ -1432,6 +1432,14 @@ class Index
         $this->wrapInTransaction(function () use ($document, $strict): void {
             $id = $this->extractId($document['id']);
             $this->purgeDeletedAmong([$id]);
+            if ($this->documentStoreEnabled) {
+                $kept = $this->unchangedSearchableLengths([$document], $this->fetchDocLengthsForDocs([$id]));
+                if ($kept !== []) {
+                    $this->removeDocumentRows([$id]);
+                    $this->processDocument($document, $kept[$id]);
+                    return;
+                }
+            }
             $oldLength = $this->removeDocumentData($id);
 
             if ($oldLength === null) {
@@ -1509,10 +1517,16 @@ class Index
                     }
                 }
 
-                // 3. Bulk-remove all documents that currently exist in the index.
+                // 3. Bulk-remove all documents that currently exist in the index; those whose
+                //    searchable input is unchanged keep their term-index rows.
                 $existingIds = array_keys($oldLengths);
-                if ($existingIds !== []) {
-                    $this->bulkRemoveDocuments($existingIds);
+                $kept        = $this->unchangedSearchableLengths($documents, $oldLengths);
+                if ($kept !== []) {
+                    $this->removeDocumentRows(array_keys($kept));
+                }
+                $changedIds = array_values(array_diff($existingIds, array_keys($kept)));
+                if ($changedIds !== []) {
+                    $this->bulkRemoveDocuments($changedIds);
                 }
 
                 // 4. Bulk-insert all documents using the same two-phase path as insertMany().
@@ -1524,7 +1538,7 @@ class Index
                  'facetBuffer'       => $facetBuffer,
                  'multiValuedFacets' => $multiValuedFacets,
                  'rawDocuments'      => $rawDocuments,
-                 'fieldTermBuffer'   => $fieldTermBuffer] = $this->buildBatchBuffer($documents);
+                 'fieldTermBuffer'   => $fieldTermBuffer] = $this->buildBatchBuffer($documents, knownLengths: $kept);
 
                 $totalNewLength = $this->flushBatch(
                     $wordHits,
@@ -3758,6 +3772,73 @@ class Index
     }
 
     /**
+     * tokenizeDocumentFields()'s result for a document whose term-index rows are kept: no terms,
+     * the stored length.
+     *
+     * @return array{termCounts: array<string, int>, fieldTermCounts: array<string, array<string, int>>,
+     *               termPositions: array<string, list<int>>, length: int}
+     */
+    private static function untokenized(int $length): array
+    {
+        return ['termCounts' => [], 'fieldTermCounts' => [], 'termPositions' => [], 'length' => $length];
+    }
+
+    /**
+     * The values tokenizeDocumentFields() reads from a document, in the order it reads them.
+     * Two documents with identical (===) input produce identical terms, positions, per-field hits
+     * and length, so a replacement with unchanged input can keep its term-index rows.
+     *
+     * @param  array<string, mixed> $document
+     * @return array<string, mixed>
+     */
+    private function searchableInput(array $document): array
+    {
+        $input = [];
+        if ($this->searchableFieldSet !== null) {
+            foreach ($this->searchableFieldSet as $key => $_) {
+                if (isset($document[$key])) {
+                    $input[$key] = $document[$key];
+                }
+            }
+            return $input;
+        }
+        foreach ($document as $key => $value) {
+            if ($key !== 'id' && $value !== null && !isset($this->facetFieldSet[$key])) {
+                $input[$key] = $value;
+            }
+        }
+        return $input;
+    }
+
+    /**
+     * Live documents among $documents whose searchable input equals the stored document's, as
+     * docId → stored length. Their replacement rewrites only the per-document rows (stored
+     * document, facets, doc_lengths) and keeps doclist, positions, field_hits and the wordlist
+     * counts. Empty without a document store (nothing to compare with).
+     *
+     * @param  array<array<string, mixed>> $documents  Incoming documents, each with an 'id'.
+     * @param  array<int, int>             $oldLengths docId → length of the live documents among them.
+     * @return array<int, int>
+     */
+    private function unchangedSearchableLengths(array $documents, array $oldLengths): array
+    {
+        if (!$this->documentStoreEnabled || $oldLengths === []) {
+            return [];
+        }
+        $stored = $this->fetchDocuments(array_keys($oldLengths));
+        $kept   = [];
+        foreach ($documents as $document) {
+            $id = $this->extractId($document['id']);
+            if (isset($stored[$id]) && $this->searchableInput($stored[$id]) === $this->searchableInput($document)) {
+                $kept[$id] = $oldLengths[$id];
+            } else {
+                unset($kept[$id]);
+            }
+        }
+        return $kept;
+    }
+
+    /**
      * Tokenise one document field value and accumulate into the shared term/position maps.
      *
      * Null and empty/whitespace-only values are silently skipped. Both branches of
@@ -3812,17 +3893,23 @@ class Index
      * The 'id' field is used as the document ID and is excluded from indexing.
      * Empty or whitespace-only field values are skipped.
      *
-     * @param  array<string, mixed> $row Document fields; must contain an 'id' key.
-     * @return int                       Total token count across all indexed fields.
+     * @param  array<string, mixed> $row         Document fields; must contain an 'id' key.
+     * @param  int|null             $knownLength Length of a document whose term-index rows are
+     *                                           kept (see unchangedSearchableLengths()): it is not
+     *                                           tokenised, only its length, facets and stored
+     *                                           document are written.
+     * @return int                               Total token count across all indexed fields.
      */
-    private function processDocument(array $row): int
+    private function processDocument(array $row, ?int $knownLength = null): int
     {
         $documentId = $this->extractId($row['id']);
 
         ['termCounts'      => $termCounts,
          'fieldTermCounts' => $fieldTermCounts,
          'termPositions'   => $termPositions,
-         'length'          => $length] = $this->tokenizeDocumentFields($row);
+         'length'          => $length] = $knownLength !== null
+            ? self::untokenized($knownLength)
+            : $this->tokenizeDocumentFields($row);
 
         $termIds = $this->upsertWordlist($termCounts);
         $this->saveDoclist($documentId, $termIds);
@@ -3974,6 +4061,10 @@ class Index
      *   docPositionBuffer — per document: term text → ordered position list.
      *
      * @param  array<array<string, mixed>> $documents
+     * @param  array<int, int>             $knownLengths docId → length of documents whose term-index
+     *                                                   rows are kept (see unchangedSearchableLengths()):
+     *                                                   not tokenised, only their length, facets and
+     *                                                   stored document are buffered.
      * @return array{
      *     wordHits:          array<string, int>,
      *     wordDocs:          array<string, int>,
@@ -3986,7 +4077,7 @@ class Index
      *     fieldTermBuffer:   array<int, array<string, array<string, int>>>
      * }
      */
-    private function buildBatchBuffer(array $documents, ?callable $progress = null): array
+    private function buildBatchBuffer(array $documents, ?callable $progress = null, array $knownLengths = []): array
     {
         /** @var array<string, int> $wordHits */
         $wordHits          = [];
@@ -4020,7 +4111,9 @@ class Index
             ['termCounts'      => $termCounts,
              'fieldTermCounts' => $fieldTermCounts,
              'termPositions'   => $termPositions,
-             'length'          => $length] = $this->tokenizeDocumentFields($document);
+             'length'          => $length] = isset($knownLengths[$documentId])
+                ? self::untokenized($knownLengths[$documentId])
+                : $this->tokenizeDocumentFields($document);
 
             $docTermBuffer[$documentId]     = $termCounts;
             $docLengthBuffer[$documentId]   = $length;

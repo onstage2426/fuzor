@@ -762,6 +762,185 @@ class IndexTest extends TestCase
         $this->assertEqualsWithDelta(1.0, $info->avgDocLength, 0.01);
     }
 
+    // --- update: unchanged searchable fields ---
+
+    /**
+     * Catalog with a searchable title and body, a filterable + sortable price and a filterable color.
+     *
+     * @param list<string>|null $searchable
+     */
+    private function catalogIndex(bool $store = true, ?array $searchable = ['title', 'body']): Index
+    {
+        $index = new Index($this->dbPath, schema: new SchemaConfig(
+            store: $store,
+            filterableFields: ['price', 'color'],
+            sortableFields: ['price'],
+            searchableFields: $searchable,
+        ));
+        $index->insert([
+            ['id' => 1, 'title' => 'red sedan', 'body' => 'fast city car', 'price' => 100, 'color' => 'red'],
+            ['id' => 2, 'title' => 'blue coupe', 'body' => 'sporty car', 'price' => 200, 'color' => 'blue'],
+            ['id' => 3, 'title' => 'green truck', 'body' => 'heavy load', 'price' => 300, 'color' => 'green'],
+        ]);
+        return $index;
+    }
+
+    /**
+     * Count every row written to the term-index tables from now on, through triggers in the file.
+     * Rewriting identical rows leaves identical content, so the content alone cannot show a skip.
+     */
+    private function countPostingWrites(): void
+    {
+        $pdo = new \PDO('sqlite:' . $this->dbPath);
+        $pdo->exec('CREATE TABLE write_log (tbl TEXT NOT NULL)');
+        foreach (['wordlist', 'doclist', 'positions', 'field_hits'] as $table) {
+            foreach (['INSERT', 'UPDATE', 'DELETE'] as $op) {
+                $pdo->exec(
+                    "CREATE TRIGGER log_{$table}_{$op} AFTER {$op} ON {$table}"
+                    . " BEGIN INSERT INTO write_log VALUES ('{$table}'); END"
+                );
+            }
+        }
+    }
+
+    private function postingWrites(): int
+    {
+        return $this->scalarQuery('SELECT COUNT(*) FROM write_log');
+    }
+
+    /** @return array<string, array{0: string}> */
+    public static function replaceProvider(): array
+    {
+        return ['update' => ['update'], 'upsert' => ['upsert']];
+    }
+
+    /** @param list<array<string, mixed>> $docs */
+    private static function replace(Index $index, string $method, array $docs): void
+    {
+        $method === 'update' ? $index->update($docs) : $index->upsert($docs);
+    }
+
+    #[DataProvider('replaceProvider')]
+    public function testPriceOnlyChangeLeavesTheTermIndexAlone(string $method): void
+    {
+        $index = $this->catalogIndex();
+        $this->countPostingWrites();
+
+        self::replace($index, $method, [
+            ['id' => 1, 'title' => 'red sedan', 'body' => 'fast city car', 'price' => 150, 'color' => 'blue'],
+            ['id' => 2, 'title' => 'blue coupe', 'body' => 'sporty car', 'price' => 250, 'color' => 'blue'],
+        ]);
+
+        $this->assertSame(0, $this->postingWrites());
+        $this->assertSame(150, $index->get(1)['price'] ?? null);
+        $this->assertSame([1], $index->search('sedan')->getIds());
+        $this->assertSame([1, 2], $index->search('', new SearchOptions(
+            filter: ['color' => 'blue'],
+            sort: ['price:asc'],
+        ))->getIds());
+        $this->assertSame([], $index->search('', new SearchOptions(filter: ['price' => '100']))->getIds());
+        $result = $index->search('', new SearchOptions(facets: ['color']));
+        $this->assertSame(['blue' => 2, 'green' => 1], $result->facetDistribution['color']);
+        $this->assertSame(3, $index->count());
+        $this->assertEqualsWithDelta(13 / 3, $index->inspectQuery('car')->avgDocLength, 0.01);
+    }
+
+    #[DataProvider('replaceProvider')]
+    public function testSingleDocumentPriceChangeLeavesTheTermIndexAlone(string $method): void
+    {
+        $index = $this->catalogIndex();
+        $this->countPostingWrites();
+
+        self::replace($index, $method, [
+            ['id' => 3, 'title' => 'green truck', 'body' => 'heavy load', 'price' => 50, 'color' => 'green'],
+        ]);
+
+        $this->assertSame(0, $this->postingWrites());
+        $this->assertSame([3, 1, 2], $index->search('', new SearchOptions(sort: ['price:asc']))->getIds());
+        $this->assertSame([3], $index->search('truck')->getIds());
+    }
+
+    public function testMixedBatchReindexesOnlyChangedDocuments(): void
+    {
+        $index = $this->catalogIndex();
+
+        $index->upsert([
+            ['id' => 1, 'title' => 'red sedan', 'body' => 'fast city car', 'price' => 110, 'color' => 'red'],
+            ['id' => 2, 'title' => 'blue roadster', 'body' => 'sporty car', 'price' => 200, 'color' => 'blue'],
+            ['id' => 4, 'title' => 'yellow van', 'body' => 'family car', 'price' => 400, 'color' => 'yellow'],
+        ]);
+
+        $this->assertSame([], $index->search('coupe')->getIds());
+        $this->assertSame([2], $index->search('roadster')->getIds());
+        $this->assertSame([4], $index->search('van')->getIds());
+        $this->assertSame([1], $index->search('sedan')->getIds());
+        $cars = $index->search('car', new SearchOptions(limit: 50))->getIds();
+        sort($cars);
+        $this->assertSame([1, 2, 4], $cars);
+        $this->assertSame(4, $index->count());
+        $this->assertSame(
+            0,
+            $this->scalarQuery(
+                'SELECT COUNT(*) FROM wordlist w'
+                . ' WHERE num_docs <> (SELECT COUNT(*) FROM doclist d WHERE d.term_id = w.id)'
+                . ' OR num_hits <> (SELECT SUM(hit_count) FROM doclist d WHERE d.term_id = w.id)'
+            )
+        );
+    }
+
+    public function testChangedSearchableFieldIsReindexed(): void
+    {
+        $index = $this->catalogIndex();
+        $this->countPostingWrites();
+
+        $index->update([
+            ['id' => 1, 'title' => 'red sedan', 'body' => 'slow city car', 'price' => 100, 'color' => 'red'],
+        ]);
+
+        $this->assertGreaterThan(0, $this->postingWrites());
+        $this->assertSame([1], $index->search('slow')->getIds());
+        $this->assertSame([], $index->search('fast')->getIds());
+    }
+
+    public function testReorderedSearchableFieldsAreReindexed(): void
+    {
+        // Without searchableFields the fields are tokenised in document order, and positions
+        // run across fields: the reordered document has "car red" adjacent.
+        $index = $this->catalogIndex(searchable: null);
+        $this->assertSame([], $index->search('"car red"')->getIds());
+
+        $index->update([
+            ['id' => 1, 'body' => 'fast city car', 'title' => 'red sedan', 'price' => 100, 'color' => 'red'],
+        ]);
+
+        $this->assertSame([1], $index->search('"car red"')->getIds());
+    }
+
+    public function testValueOfAnotherTypeIsReindexed(): void
+    {
+        $index = new Index($this->dbPath, schema: new SchemaConfig(searchableFields: ['code']));
+        $index->insert([['id' => 1, 'code' => 7], ['id' => 2, 'code' => 8]]);
+        $this->countPostingWrites();
+
+        $index->update([['id' => 1, 'code' => '7']]);
+
+        $this->assertGreaterThan(0, $this->postingWrites());
+        $this->assertSame([1], $index->search('7')->getIds());
+    }
+
+    public function testWithoutStoreEveryUpdateIsReindexed(): void
+    {
+        $index = $this->catalogIndex(store: false);
+        $this->countPostingWrites();
+
+        $index->update([
+            ['id' => 1, 'title' => 'red sedan', 'body' => 'fast city car', 'price' => 150, 'color' => 'red'],
+        ]);
+
+        $this->assertGreaterThan(0, $this->postingWrites());
+        $this->assertSame([1], $index->search('sedan', new SearchOptions(filter: ['price' => '150']))->getIds());
+    }
+
     // --- upsert ---
 
     public function testUpsertCreatesDocWhenIdNotFound(): void
