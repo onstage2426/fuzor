@@ -18,11 +18,11 @@ All properties have sensible defaults — you only need to set what differs from
 
 | Property | Default | Effect |
 |---|---|---|
-| `maxDocs` | `500` | Max documents fetched per keyword before scoring. Higher = better recall; lower = faster queries. When a keyword matches more, the result reports `exhaustive: false`. |
+| `maxDocs` | `500` | Max documents fetched per keyword before scoring (its best matches by term frequency). Higher = better recall; lower = faster queries. When a keyword matches more, the result reports `exhaustive: false`. A document found through another keyword is still scored for every keyword it contains, so a document matching all words is ranked as such even when one word is very common. |
 | `k1` | `1.2` | Term frequency saturation. Lower values reduce the advantage of repeated terms. |
 | `b` | `0.75` | Length normalisation weight. `0` disables it; `1` fully penalises long documents. |
 | `proximityBoost` | `1.0` | How much to reward terms that appear close together. `0` disables proximity ranking. |
-| `proxWindowSize` | `0` | Max candidate documents to apply proximity ranking to (0 = all). Set a positive value to cap CPU cost on very broad queries. |
+| `proxWindowSize` | `0` | Max candidate documents to apply proximity ranking to (0 = as many as the requested page needs; Fuzor stops as soon as the page is settled). A positive value reranks only that many of the best BM25 matches. |
 
 ## Typo tolerance
 

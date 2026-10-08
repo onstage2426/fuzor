@@ -35,6 +35,12 @@ use PDO;
  *     multiRow: bool,
  *     exclude: bool,
  * }
+ * @phpstan-type KeywordGroup array{
+ *     termIds: list<int>,
+ *     idfK1p1: float,
+ *     truncated: bool,
+ *     rows: list<array{0: int, 1: int, 2: float}>,
+ * }
  */
 class Index
 {
@@ -2082,6 +2088,8 @@ class Index
 
         /** @var list<list<int>> $termGroups  keyword_index → matched term IDs, for proximity ranking */
         $termGroups = [];
+        /** @var list<KeywordGroup> $groups */
+        $groups = [];
         // Set when a cap cut matches out: a keyword above maxDocs, or a capped prefix expansion.
         $candidatesCapped = false;
         $prefixCapped     = false;
@@ -2116,12 +2124,27 @@ class Index
                 $k1_1mb,
                 $k1b_avgdl,
             );
+            $groups[] = [
+                'termIds'   => array_column($word, 'id'),
+                'idfK1p1'   => $idfK1p1,
+                'truncated' => $df > $this->config->maxDocs,
+                'rows'      => $docs,
+            ];
+        }
+
+        // A keyword group above maxDocs only fetched its maxDocs best rows, so a candidate found
+        // through another keyword may contain it without a row here: it would count as matching
+        // fewer keywords and miss this keyword's score. Fetch those rows for exactly the
+        // candidates the group has not seen (completeTruncatedGroups()); untruncated groups
+        // already hold every row they have.
+        $this->completeTruncatedGroups($groups, $k1_1mb, $k1b_avgdl);
+        foreach ($groups as $group) {
             /** @var array<int, true> $groupTermIds */
             $groupTermIds    = [];
             /** @var array<int, true> $seenThisKeyword  Docs already counted for this keyword group; prevents
              *  prefix-expanded term IDs from inflating $docMatchCount for the same (keyword, doc) pair. */
             $seenThisKeyword = [];
-            foreach ($docs as [$termId, $docId, $score]) {
+            foreach ($group['rows'] as [$termId, $docId, $score]) {
                 /** @infection-ignore-all OneZeroFloat: ?? 0.0 is the additive identity; the fallback only applies on first encounter of a docId which always has score 0 before accumulation */
                 $docScores[$docId] = ($docScores[$docId] ?? 0.0) + $score;
                 $groupTermIds[$termId] = true;
@@ -2130,7 +2153,7 @@ class Index
                     $docMatchCount[$docId] = ($docMatchCount[$docId] ?? 0) + 1;
                 }
                 if ($useFieldBoosts) {
-                    $termIdfMap[$termId]               ??= $idfK1p1;
+                    $termIdfMap[$termId]               ??= $group['idfK1p1'];
                     $docContribTermIds[$docId][$termId]  = true;
                 }
             }
@@ -2173,32 +2196,9 @@ class Index
             }
         }
 
-        if (count($termGroups) >= 2 && $this->config->proximityBoost > 0.0) {
-            // Only proximity-boost docs that matched all keyword groups; partial-match docs
-            // are skipped inside applyProximityBoost anyway — pre-filtering avoids fetching
-            // their positions and shrinks the positions IN() clause significantly.
-            $numKeywords = count($keywords);
-            $boostSet    = array_filter(
-                $docScores,
-                fn($id): bool => ($docMatchCount[$id] ?? 0) >= $numKeywords,
-                ARRAY_FILTER_USE_KEY,
-            );
-            $proxWindow = $this->config->proxWindowSize;
-            if ($proxWindow > 0 && count($boostSet) > $proxWindow) {
-                arsort($boostSet);
-                $boostSet = array_slice($boostSet, 0, $proxWindow, true);
-            }
-            if ($boostSet !== []) {
-                $this->applyProximityBoost($boostSet, $termGroups);
-                foreach ($boostSet as $id => $s) {
-                    $docScores[$id] = $s;
-                }
-            }
-        }
-
         // Phrase filter: remove documents that do not contain every quoted phrase as a
-        // contiguous token sequence. Runs after BM25+proximity so positions are only fetched
-        // for the (already-ranked) candidate set, not the entire doclist.
+        // contiguous token sequence. Positions are only fetched for the candidate set, not the
+        // entire doclist.
         if ($phraseGroups !== []) {
             $lastToken = end($keywords) ?: '';
             $matchIds  = $this->filterDocsByPhrases(array_keys($docScores), $phraseGroups, $lastToken, $asYouType);
@@ -2234,6 +2234,22 @@ class Index
         ];
 
         $total = count($docScores);
+
+        // Proximity only reorders the documents that remain after every filter, so it runs
+        // last. Without sort or distinct only the first offset + limit documents are shown, and
+        // the rerank can stop early (see applyProximityRanking()).
+        $proximity = count($termGroups) >= 2 && $this->config->proximityBoost > 0.0;
+        // With sort fields the proximity factor only breaks ties between documents with equal
+        // sort values, so the sorted path reranks just the ties on the page (rerankSortedPageTies()).
+        if ($proximity && ($limit > 0 || $distinct !== null) && ($sortSpecs === [] || $distinct !== null)) {
+            $this->applyProximityRanking(
+                $docScores,
+                $docMatchCount,
+                $termGroups,
+                count($keywords),
+                $sortSpecs === [] && $distinct === null ? $offset + $limit : null,
+            );
+        }
 
         /** @infection-ignore-all DecrementInteger: $total is count(); -1 is impossible, so the guard fires identically for any realistic input */
         if ($total === 0) {
@@ -2311,7 +2327,19 @@ class Index
         if ($sortSpecs !== []) {
             // Custom field sort: primary keys are the declared sort fields, BM25 score is the
             // tiebreaker, doc ID is the final deterministic key.
-            $pagedIds = $this->applySortedPagination(array_keys($docScores), $sortSpecs, $docScores, $offset, $limit);
+            $sortedIds = $this->sortDocIdsBySpecs(array_keys($docScores), $sortSpecs, $docScores, $tieKeys);
+            $pagedIds  = $proximity
+                ? $this->rerankSortedPageTies(
+                    $sortedIds,
+                    $tieKeys,
+                    $docScores,
+                    $docMatchCount,
+                    $termGroups,
+                    count($keywords),
+                    $offset,
+                    $limit,
+                )
+                : array_slice($sortedIds, $offset, $limit);
         } elseif (count($keywords) > 1) {
             // Multi-keyword relevance sort: primary = matched keyword groups (DESC),
             // secondary = BM25+proximity score (DESC). C-native array_multisort avoids
@@ -4534,6 +4562,165 @@ class Index
     }
 
     /**
+     * Apply the proximity factor to the documents that matched every keyword group.
+     *
+     * Ranking puts those documents first (more matched groups first), ordered by score, and
+     * the factor 1 / (1 + boost × minSpan) only lowers a score. When the groups share no term,
+     * two groups never share a position, so minSpan >= groups − 1 and no document can end above
+     * bm25 × 1 / (1 + boost × (groups − 1)). With $topK set (no sort, no distinct: only the
+     * first offset + limit documents are shown) the documents are reranked in BM25 order, in
+     * batches, until the next one's bound falls below the $topK-th best reranked score; the rest
+     * get their bound as score, which keeps them below that document, so the shown page is
+     * exactly what reranking everything would give. Measured on the 45k ecom set ("blue jeans",
+     * ~600 full matches): positions and spans for all of them cost ~6 ms.
+     *
+     * Config::$proxWindowSize > 0 keeps its meaning: only that many of the best BM25 documents
+     * are reranked, the others keep their BM25 score.
+     *
+     * @param array<int, float> $docScores     Scores keyed by doc ID; modified in place.
+     * @param array<int, int>   $docMatchCount Matched keyword groups per document.
+     * @param list<list<int>>   $termGroups    One list of term IDs per keyword group.
+     * @param int|null          $topK          Documents that must be ranked exactly; null = all.
+     */
+    private function applyProximityRanking(
+        array &$docScores,
+        array $docMatchCount,
+        array $termGroups,
+        int $numKeywords,
+        ?int $topK,
+    ): void {
+        $boostSet = [];
+        foreach ($docScores as $id => $score) {
+            if (($docMatchCount[$id] ?? 0) >= $numKeywords) {
+                $boostSet[$id] = $score;
+            }
+        }
+        if ($boostSet === []) {
+            return;
+        }
+        $proxWindow = $this->config->proxWindowSize;
+        if ($proxWindow > 0 && count($boostSet) > $proxWindow) {
+            arsort($boostSet);
+            $boostSet = array_slice($boostSet, 0, $proxWindow, true);
+            $topK     = null;
+        }
+        $allTerms = array_merge(...$termGroups);
+        $disjoint = count($allTerms) === count(array_unique($allTerms));
+        if ($topK === null || !$disjoint || count($boostSet) <= $topK) {
+            $this->applyProximityBoost($boostSet, $termGroups);
+            foreach ($boostSet as $id => $score) {
+                $docScores[$id] = $score;
+            }
+            return;
+        }
+
+        arsort($boostSet);
+        $maxFactor = 1.0 / (1.0 + $this->config->proximityBoost * (count($termGroups) - 1));
+        $batchSize = max(32, $topK);
+        $reranked  = [];
+        $pending   = $boostSet;
+        while ($pending !== []) {
+            $batch   = array_slice($pending, 0, $batchSize, true);
+            $pending = array_slice($pending, $batchSize, null, true);
+            $this->applyProximityBoost($batch, $termGroups);
+            $reranked += $batch;
+            if ($pending === [] || count($reranked) < $topK) {
+                continue;
+            }
+            $best = $reranked;
+            rsort($best);
+            if (reset($pending) * $maxFactor < $best[$topK - 1]) {
+                break;
+            }
+        }
+        foreach ($reranked as $id => $score) {
+            $docScores[$id] = $score;
+        }
+        foreach ($pending as $id => $score) {
+            $docScores[$id] = $score * $maxFactor;
+        }
+    }
+
+    /**
+     * The page of a sorted search, with ties on every sort spec broken by proximity-ranked score.
+     *
+     * $sortedIds is ordered by the sort specs, then BM25 score, then doc ID. The proximity factor
+     * only changes scores, so it can only reorder documents that tie on every sort spec. The page
+     * window is widened to whole tie groups at both ends; inside it, each group of two or more
+     * documents gets the factor for its full matches and is re-sorted by score desc, doc ID asc.
+     * Documents outside the window cannot move into it, so the page equals reranking everything
+     * first. On the 45k ecom set a price-sorted "casual shirt" reranked ~525 documents for a page
+     * where prices rarely tie.
+     *
+     * @param  list<int>          $sortedIds
+     * @param  array<int, string> $tieKeys       From sortDocIdsBySpecs().
+     * @param  array<int, float>  $docScores
+     * @param  array<int, int>    $docMatchCount
+     * @param  list<list<int>>    $termGroups
+     * @return list<int>
+     */
+    private function rerankSortedPageTies(
+        array $sortedIds,
+        array $tieKeys,
+        array $docScores,
+        array $docMatchCount,
+        array $termGroups,
+        int $numKeywords,
+        int $offset,
+        int $limit,
+    ): array {
+        $n     = count($sortedIds);
+        $start = min($offset, $n);
+        $end   = min($n, $offset + $limit);
+        if ($start >= $end) {
+            return [];
+        }
+        while ($start > 0 && $tieKeys[$sortedIds[$start - 1]] === $tieKeys[$sortedIds[$start]]) {
+            $start--;
+        }
+        while ($end < $n && $tieKeys[$sortedIds[$end]] === $tieKeys[$sortedIds[$end - 1]]) {
+            $end++;
+        }
+        $window = array_slice($sortedIds, $start, $end - $start);
+
+        /** @var list<list<int>> $groups  consecutive runs of equal tie keys */
+        $groups = [];
+        $last   = null;
+        foreach ($window as $id) {
+            if ($tieKeys[$id] !== $last) {
+                $groups[] = [];
+                $last     = $tieKeys[$id];
+            }
+            $groups[count($groups) - 1][] = $id;
+        }
+        $boostSet = [];
+        foreach ($groups as $group) {
+            if (count($group) > 1) {
+                foreach ($group as $id) {
+                    if (($docMatchCount[$id] ?? 0) >= $numKeywords) {
+                        $boostSet[$id] = $docScores[$id];
+                    }
+                }
+            }
+        }
+        if ($boostSet === []) {
+            return array_slice($sortedIds, $offset, $limit);
+        }
+        $this->applyProximityBoost($boostSet, $termGroups);
+        $scores = array_replace($docScores, $boostSet);
+
+        $ordered = [];
+        foreach ($groups as $group) {
+            if (count($group) > 1) {
+                $groupScores = array_map(fn(int $id): float => $scores[$id], $group);
+                array_multisort($groupScores, SORT_DESC, SORT_NUMERIC, $group, SORT_ASC, SORT_NUMERIC);
+            }
+            array_push($ordered, ...$group);
+        }
+        return array_slice($ordered, $offset - $start, $limit);
+    }
+
+    /**
      * Rerank BM25 scores in-place using a proximity factor: 1 / (1 + boost × minSpan).
      *
      * minSpan is the smallest token-position window (in indexed positions) that contains at
@@ -4564,11 +4751,8 @@ class Index
             }
         }
 
-        $numGroups     = count($termGroups);
-        $boost         = $this->config->proximityBoost;
-        // Single-term groups have positions already in ORDER BY position order from the DB query.
-        // Only multi-term groups (prefix/fuzzy expansion) need an explicit sort.
-        $groupNeedSort = array_map(fn(array $tids): bool => count($tids) > 1, $termGroups);
+        $numGroups = count($termGroups);
+        $boost     = $this->config->proximityBoost;
 
         foreach ($positions as $docId => $termPositions) {
             // Partition positions into per-keyword-group buckets.
@@ -4590,18 +4774,17 @@ class Index
                 }
             }
 
-            // Build a merged list of (position, groupIndex) sorted by position.
-            /** @var list<array{0: int, 1: int}> $merged */
+            // Merge all groups' positions into one list sorted by position. Each entry is one
+            // integer, position × numGroups + group, so a native sort() orders it with no PHP
+            // comparison callback (a usort() closure per document cost ~1 ms per 600 documents).
+            /** @var list<int> $merged */
             $merged = [];
             foreach ($groupPositions as $g => $posList) {
-                if ($groupNeedSort[$g]) {
-                    sort($posList);
-                }
                 foreach ($posList as $pos) {
-                    $merged[] = [$pos, $g];
+                    $merged[] = $pos * $numGroups + $g;
                 }
             }
-            usort($merged, static fn(array $a, array $b): int => $a[0] <=> $b[0]);
+            sort($merged);
 
             // Sliding-window minimum-span: smallest window covering all groups.
             $count   = array_fill(0, $numGroups, 0);
@@ -4609,21 +4792,22 @@ class Index
             $left    = 0;
             $minSpan = PHP_INT_MAX;
 
-            foreach ($merged as [$rightPos, $rightG]) {
+            foreach ($merged as $right) {
+                $rightG = $right % $numGroups;
                 if ($count[$rightG] === 0) {
                     $have++;
                 }
                 $count[$rightG]++;
 
                 while ($have === $numGroups) {
-                    $span = $rightPos - $merged[$left][0];
+                    $leftEntry = $merged[$left];
+                    $span      = intdiv($right, $numGroups) - intdiv($leftEntry, $numGroups);
                     if ($span < $minSpan) {
                         $minSpan = $span;
                     }
-                    /** @var array{0: int, 1: int} $leftEntry */
-                    $leftEntry = $merged[$left];
-                    $count[$leftEntry[1]]--;
-                    if ($count[$leftEntry[1]] === 0) {
+                    $leftG = $leftEntry % $numGroups;
+                    $count[$leftG]--;
+                    if ($count[$leftG] === 0) {
                         $have--;
                     }
                     $left++;
@@ -4649,19 +4833,19 @@ class Index
             return [];
         }
 
-        $nDocs         = count($docIds);
-        $nTerms        = count($termIds);
-        $dPlaceholders = $this->placeholders($nDocs);
-        $tPlaceholders = $this->placeholders($nTerms);
-
+        // One stable statement for any number of documents and terms (an IN (?, …) list per
+        // call would prepare a new statement every time). Driven from the documents, so rows
+        // arrive grouped by document; each (document, term) pair is one range of the covering
+        // positions_doc_id index, in position order. Measured on ecom, 3,400 phrase candidates:
+        // 6.1 ms, against 7.8 ms for IN lists and 8.3 ms with the terms as the outer loop.
         $stmt = $this->stmt(
-            "fetchPositions:{$nDocs}:{$nTerms}",
-            "SELECT doc_id, term_id, position
-             FROM positions
-             WHERE doc_id IN ({$dPlaceholders}) AND term_id IN ({$tPlaceholders})
-             ORDER BY doc_id, term_id, position"
+            'fetchPositions',
+            'SELECT p.doc_id, p.term_id, p.position
+               FROM json_each(?) d
+               CROSS JOIN positions p ON p.doc_id = d.value
+              WHERE p.term_id IN (SELECT value FROM json_each(?))'
         );
-        $stmt->execute([...$docIds, ...$termIds]);
+        $stmt->execute([json_encode($docIds), json_encode($termIds)]);
 
         /** @var array<int, array<int, list<int>>> $result */
         $result = [];
@@ -5077,6 +5261,74 @@ class Index
         $truncated = $truncated || $prefixTruncated;
 
         return $wordlistRows;
+    }
+
+    /**
+     * Add the missing rows of truncated keyword groups for the other groups' candidates.
+     *
+     * A group whose document frequency exceeds maxDocs holds only its maxDocs best rows. For
+     * every candidate (a document any group fetched) that such a group has not seen, its rows
+     * are fetched here, scored with the group's IDF exactly as fetchDocsByTermIds() scores them,
+     * and appended to the group. The candidate set itself does not grow. Measured on the 45k
+     * ecom set ("casual shirt": 469 unseen candidates per group, ~250 of them containing the
+     * other word): ~0.4 ms per single-term group with ~900 unseen candidates, ~2 ms for a
+     * 50-term prefix group; one (doc_id, term_id) seek in doc_id_index per pair.
+     *
+     * @param list<KeywordGroup> $groups One per query keyword: its term IDs, IDF factor, whether
+     *                                  maxDocs cut it, and its (term_id, doc_id, score) rows.
+     */
+    private function completeTruncatedGroups(array &$groups, float $k1_1mb, float $k1b_avgdl): void
+    {
+        if (count($groups) < 2) {
+            return;
+        }
+        /** @var array<int, true> $candidates */
+        $candidates = [];
+        foreach ($groups as $group) {
+            foreach ($group['rows'] as [, $docId]) {
+                $candidates[$docId] = true;
+            }
+        }
+        foreach ($groups as $i => $group) {
+            if (!$group['truncated']) {
+                continue;
+            }
+            $unseen = $candidates;
+            foreach ($group['rows'] as [, $docId]) {
+                unset($unseen[$docId]);
+            }
+            if ($unseen === []) {
+                continue;
+            }
+            // Both lists as json_each IN-lists: SQLite seeks each (term, candidate) pair through
+            // doc_id_index (doc_id, term_id) and reads doc_lengths only for the matches. Sorted
+            // candidate IDs keep consecutive seeks on neighbouring pages. Measured on ecom (~900
+            // unseen candidates, one term): 0.38 ms, against 0.69 ms driven from an unsorted
+            // json_each and 41 ms with a unary + on term_id (which turns the seeks into a scan of
+            // every candidate's terms).
+            $stmt = $this->stmt(
+                'completeTermGroup',
+                'SELECT d.term_id, d.doc_id, ? * d.hit_count / (? + ? * dl.length + d.hit_count)
+                   FROM doclist d
+                   CROSS JOIN doc_lengths dl ON dl.doc_id = d.doc_id
+                  WHERE d.term_id IN (SELECT value FROM json_each(?))
+                    AND d.doc_id IN (SELECT value FROM json_each(?))'
+            );
+            $unseenIds = array_keys($unseen);
+            sort($unseenIds);
+            $stmt->execute([
+                $group['idfK1p1'],
+                $k1_1mb,
+                $k1b_avgdl,
+                json_encode($group['termIds']),
+                json_encode($unseenIds),
+            ]);
+            /** @var list<array{0: int, 1: int, 2: float}> $rows */
+            $rows = $stmt->fetchAll(PDO::FETCH_NUM);
+            if ($rows !== []) {
+                array_push($groups[$i]['rows'], ...$rows);
+            }
+        }
     }
 
     /**
@@ -5729,11 +5981,16 @@ class Index
      *
      * @param  list<int>                             $docIds
      * @param  list<array{field: string, asc: bool}> $specs
-     * @param  array<int, float>                     $scores  BM25 scores; empty array for boolean path
+     * @param  array<int, float>                     $scores   BM25 scores; empty array for boolean path
+     * @param  array<int, string>|null               $tieKeys  Set to doc ID → its sort ranks joined, so
+     *                                                         callers can tell which documents tie on
+     *                                                         every spec.
+     * @param-out array<int, string>                 $tieKeys
      * @return list<int>
      */
-    private function sortDocIdsBySpecs(array $docIds, array $specs, array $scores): array
+    private function sortDocIdsBySpecs(array $docIds, array $specs, array $scores, ?array &$tieKeys = null): array
     {
+        $tieKeys = [];
         if ($docIds === [] || $specs === []) {
             return $docIds;
         }
@@ -5752,6 +6009,9 @@ class Index
                 $column[] = $ranks[$id];
             }
             $rankColumns[] = $column;
+        }
+        foreach ($docIds as $i => $id) {
+            $tieKeys[$id] = implode(',', array_column($rankColumns, $i));
         }
         $primary = $rankColumns[0];
         $rest    = [SORT_ASC, SORT_NUMERIC];

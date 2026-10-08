@@ -7455,6 +7455,127 @@ class IndexTest extends TestCase
         }
     }
 
+    // --- completing keyword groups truncated at maxDocs ---
+
+    /** Five docs where "shirt" is frequent, one with both words, two with "casual" only (doc 7 twice). */
+    private function truncationIndex(int $maxDocs): Index
+    {
+        $index = new Index($this->dbPath, force: true, config: new Config(maxDocs: $maxDocs));
+        $index->insert([
+            ['id' => 1, 'title' => 'shirt shirt shirt'],
+            ['id' => 2, 'title' => 'shirt shirt shirt'],
+            ['id' => 3, 'title' => 'shirt shirt shirt'],
+            ['id' => 4, 'title' => 'shirt shirt'],
+            ['id' => 5, 'title' => 'shirt shirt'],
+            ['id' => 6, 'title' => 'casual shirt'],
+            ['id' => 7, 'title' => 'casual casual'],
+            ['id' => 8, 'title' => 'casual jacket'],
+        ]);
+        return $index;
+    }
+
+    public function testDocumentMatchingAllWordsRanksFirstWhenACommonWordIsTruncated(): void
+    {
+        // "shirt" (6 docs) is cut to its 3 best rows; doc 6 is found through "casual" and must
+        // still count as matching both words.
+        $result = $this->truncationIndex(3)->search('casual shirt', new SearchOptions(asYouType: false));
+
+        $this->assertSame(6, $result->getIds()[0]);
+        $this->assertFalse($result->exhaustive);
+    }
+
+    public function testTruncatedRankingMatchesTheFullRankingForTheDocumentsItFinds(): void
+    {
+        $options = new SearchOptions(asYouType: false);
+        $full    = $this->truncationIndex(100)->search('casual shirt', $options)->getIds();
+        $capped  = $this->truncationIndex(3)->search('casual shirt', $options)->getIds();
+
+        // Docs 4 and 5 are only reachable through the truncated word; everything else must keep
+        // the order (so the scores) of the untruncated search.
+        $this->assertSame(array_values(array_intersect($full, $capped)), $capped);
+        $this->assertSame([4, 5], array_values(array_diff($full, $capped)));
+    }
+
+    public function testTruncatedPrefixGroupIsCompletedToo(): void
+    {
+        $index = new Index($this->dbPath, config: new Config(maxDocs: 2));
+        $index->insert([
+            ['id' => 1, 'title' => 'shiny shiny shiny'],
+            ['id' => 2, 'title' => 'shiny shiny shiny'],
+            ['id' => 3, 'title' => 'shin shin'],
+            ['id' => 4, 'title' => 'casual shirts'],
+            ['id' => 5, 'title' => 'casual casual'],
+        ]);
+
+        // The last word "shi" expands to shiny, shin, shirts (several term IDs, over maxDocs).
+        $result = $index->search('casual shi');
+
+        $this->assertSame(4, $result->getIds()[0]);
+    }
+
+    /** 300 documents containing both words at varying distances, with a 'grade' of 1–4 (big ties). */
+    private function proximityCorpus(): Index
+    {
+        mt_srand(7);
+        $fill  = ['alpha', 'beta', 'gamma', 'delta', 'omega', 'sigma', 'kappa'];
+        $docs  = [];
+        for ($id = 1; $id <= 300; $id++) {
+            $words = [];
+            for ($i = 0, $n = mt_rand(4, 30); $i < $n; $i++) {
+                $words[] = $fill[mt_rand(0, count($fill) - 1)];
+            }
+            for ($i = 0, $n = mt_rand(1, 3); $i < $n; $i++) {
+                array_splice($words, mt_rand(0, count($words)), 0, ['blue']);
+            }
+            for ($i = 0, $n = mt_rand(1, 3); $i < $n; $i++) {
+                array_splice($words, mt_rand(0, count($words)), 0, ['jeans']);
+            }
+            $docs[] = ['id' => $id, 'title' => implode(' ', $words), 'grade' => mt_rand(1, 4)];
+        }
+        $index = new Index($this->dbPath, schema: new SchemaConfig(sortableFields: ['grade']));
+        $index->insert($docs);
+        return $index;
+    }
+
+    public function testProximityEarlyStopGivesTheSamePagesAsRerankingEverything(): void
+    {
+        $index   = $this->proximityCorpus();
+        $options = fn(int $offset, int $limit) => new SearchOptions(asYouType: false, offset: $offset, limit: $limit);
+
+        $all = $index->search('blue jeans', $options(0, 1000))->getIds();
+        $this->assertCount(300, $all);
+        foreach ([[0, 1], [0, 10], [0, 20], [5, 20], [40, 10], [100, 50], [290, 20]] as [$offset, $limit]) {
+            $this->assertSame(
+                array_slice($all, $offset, $limit),
+                $index->search('blue jeans', $options($offset, $limit))->getIds(),
+                "offset {$offset}, limit {$limit}",
+            );
+        }
+    }
+
+    public function testSortedPagesRerankTiesLikeRerankingEverything(): void
+    {
+        // A page computed with the tie-only rerank must equal the same slice of a page that
+        // covers every document (every tie group reranked).
+        $index   = $this->proximityCorpus();
+        $options = fn(int $offset, int $limit) => new SearchOptions(
+            asYouType: false,
+            sort: ['grade:desc'],
+            offset: $offset,
+            limit: $limit,
+        );
+
+        $all = $index->search('blue jeans', $options(0, 1000))->getIds();
+        $this->assertCount(300, $all);
+        foreach ([[0, 1], [0, 20], [7, 20], [60, 30], [150, 75], [295, 10]] as [$offset, $limit]) {
+            $this->assertSame(
+                array_slice($all, $offset, $limit),
+                $index->search('blue jeans', $options($offset, $limit))->getIds(),
+                "offset {$offset}, limit {$limit}",
+            );
+        }
+    }
+
     // --- negated words and phrases in search() ---
 
     private function negationIndex(): Index
