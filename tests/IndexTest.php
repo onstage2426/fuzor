@@ -6122,6 +6122,66 @@ class IndexTest extends TestCase
         }
     }
 
+    public function testRangeOnTheSortFieldOfASingleValuedKeyMatchesTheReference(): void
+    {
+        // Single-valued price: the browse walk seeks into the range instead of probing past every
+        // price outside it. It must order exactly like the in-memory sort (searchBoolean()).
+        $index = new Index($this->dbPath, schema: new SchemaConfig(
+            filterableFields: ['price', 'group'],
+            sortableFields: ['price', 'group'],
+        ));
+        $prices = [12, 7.5, 'n/a', 30, null, 7.5, 18, 3, 25, null, 12, 9, 'free', 40, 15, 12, 22, 5, 18, 11];
+        $docs   = [];
+        foreach ($prices as $i => $price) {
+            $doc = ['id' => $i + 1, 'title' => 'product', 'group' => ['a', 'b', 'c'][$i % 3]];
+            if ($price !== null) {
+                $doc['price'] = $price;
+            }
+            $docs[] = $doc;
+        }
+        $index->insert($docs);
+
+        $ranges = [FacetRange::between(7, 20), FacetRange::min(15), FacetRange::max(9), FacetRange::between(100, 200)];
+        $sorts  = [['price:asc'], ['price:desc'], ['price:asc', 'group:desc']];
+        foreach ($ranges as $range) {
+            foreach ($sorts as $sort) {
+                foreach ([[0, 3], [2, 4], [0, 50]] as [$offset, $limit]) {
+                    foreach ([[], ['group' => ['a', 'b']]] as $extra) {
+                        $options  = new SearchOptions(
+                            filter: ['price' => $range, ...$extra],
+                            sort: $sort,
+                            offset: $offset,
+                            limit: $limit,
+                        );
+                        $label    = json_encode([$range, $sort, $offset, $limit, $extra]);
+                        $expected = $index->searchBoolean('product', $options);
+                        $actual   = $index->search('', $options);
+                        $this->assertSame($expected->getIds(), $actual->getIds(), "ids {$label}");
+                        $this->assertSame($expected->totalHits, $actual->totalHits, "total {$label}");
+                    }
+                }
+            }
+        }
+    }
+
+    public function testValueListTotalsOnSingleAndMultiValuedKeys(): void
+    {
+        $index = new Index($this->dbPath, schema: new SchemaConfig(filterableFields: ['color', 'tags']));
+        $index->insert([
+            ['id' => 1, 'title' => 'x', 'color' => 'red', 'tags' => ['a', 'b']],
+            ['id' => 2, 'title' => 'x', 'color' => 'blue', 'tags' => ['b']],
+            ['id' => 3, 'title' => 'x', 'color' => 'green', 'tags' => ['a', 'c']],
+        ]);
+
+        $single = $index->search('', new SearchOptions(filter: ['color' => ['red', 'blue']]));
+        $multi  = $index->search('', new SearchOptions(filter: ['tags' => ['a', 'b']]));
+
+        $this->assertSame(2, $single->totalHits);
+        $this->assertSame([2, 1], $single->getIds());
+        $this->assertSame(3, $multi->totalHits);
+        $this->assertSame([3, 2, 1], $multi->getIds());
+    }
+
     public function testBrowseUnsortedFilterShapesAgree(): void
     {
         $index = new Index($this->dbPath, schema: new SchemaConfig(

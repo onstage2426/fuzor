@@ -34,6 +34,7 @@ use PDO;
  *     impossible: bool,
  *     multiRow: bool,
  *     exclude: bool,
+ *     range?: array{keyId: int, sql: string, params: list<mixed>},
  * }
  * @phpstan-type KeywordGroup array{
  *     words: list<array{id: int, term: string, num_hits: int, num_docs: int, distance?: int}>,
@@ -177,6 +178,9 @@ class Index
      * reset the flags).
      */
     private array $multiValuedKeys = [];
+
+    /** @var array<int, bool> facet key ID → facet_keys.multi_valued, read lazily; cleared with the caches. */
+    private array $keyMultiValued = [];
 
     /** @var array<string, true>|null TypoTolerance::$disableOnWords as normalised query terms; built on first use. */
     private ?array $typoExactWords = null;
@@ -1114,6 +1118,7 @@ class Index
         $this->wordlistCache  = [];
         $this->facetKeyCache   = [];
         $this->multiValuedKeys = [];
+        $this->keyMultiValued  = [];
         $this->fieldNameCache  = [];
         $this->synonymCache    = null;
         $this->inTransaction   = false;
@@ -1150,6 +1155,7 @@ class Index
             $this->termIdCache    = [];
             $this->facetKeyCache   = [];
             $this->multiValuedKeys = [];
+            $this->keyMultiValued  = [];
             $this->fieldNameCache  = [];
             $this->synonymCache    = null;
         }
@@ -1624,6 +1630,7 @@ class Index
         $this->wordlistCache  = [];
         $this->facetKeyCache   = [];
         $this->multiValuedKeys = [];
+        $this->keyMultiValued  = [];
         $this->fieldNameCache  = [];
     }
 
@@ -3034,6 +3041,25 @@ class Index
         $wanted    = $offset + $limit;
         $finishTie = count($specs) > 1;
 
+        // A range on the sort field itself, when every document holds at most one value for it:
+        // seek the numeric walk straight into the range (instead of probing past every value
+        // outside it), and skip the string and missing phases, which cannot satisfy a range.
+        // Multi-valued fields keep the plain walk: a document sorts by its smallest/largest
+        // value overall, not within the range (D5).
+        $rangeSql    = '';
+        $rangeParams = [];
+        if ($keyId !== null && !$this->isMultiValuedKey($keyId)) {
+            foreach ($conditions as $i => $condition) {
+                if (($condition['range']['keyId'] ?? null) === $keyId) {
+                    $rangeSql    = ' AND ' . sprintf($condition['range']['sql'], 's');
+                    $rangeParams = $condition['range']['params'];
+                    unset($conditions[$i]);
+                    $conditions = array_values($conditions);
+                    break;
+                }
+            }
+        }
+
         [$walkSql, $walkParams]       = $this->facetFilterSql($conditions, 's.doc_id', $probe) ?? ['', []];
         [$missingSql, $missingParams] = $this->facetFilterSql($conditions, 'd.doc_id', $probe) ?? ['', []];
 
@@ -3043,9 +3069,9 @@ class Index
             : [
                 [
                     'SELECT s.doc_id, s.num_value FROM facet_values s'
-                    . ' WHERE s.key_id = ? AND s.num_value IS NOT NULL' . $walkSql
+                    . ' WHERE s.key_id = ? AND s.num_value IS NOT NULL' . $rangeSql . $walkSql
                     . " ORDER BY s.num_value {$direction}, s.doc_id",
-                    [$keyId, ...$walkParams],
+                    [$keyId, ...$rangeParams, ...$walkParams],
                 ],
                 [
                     'SELECT s.doc_id, s.sort_key FROM sort_keys s'
@@ -3060,6 +3086,10 @@ class Index
                     [$keyId, ...$missingParams],
                 ],
             ];
+
+        if ($rangeSql !== '') {
+            $phases = [$phases[0]];
+        }
 
         /** @var array<int, true> $collected  doc_id → true, in walk order */
         $collected = [];
@@ -5799,7 +5829,24 @@ class Index
                 'UPDATE facet_keys SET multi_valued = 1 WHERE id = ? AND multi_valued = 0'
             )->execute([$keyId]);
             $this->multiValuedKeys[$keyId] = true;
+            $this->keyMultiValued[$keyId]  = true;
         }
+    }
+
+    /**
+     * Whether some document stored two or more values for this facet key (facet_keys.multi_valued;
+     * see markMultiValued()). Single-valued keys allow cheaper query shapes: no DISTINCT over a
+     * value list or range, and a range pushed into a sorted walk on the same field.
+     */
+    private function isMultiValuedKey(int $keyId): bool
+    {
+        if (!isset($this->keyMultiValued[$keyId])) {
+            $stmt = $this->stmt('facetKeyMultiValued', 'SELECT multi_valued FROM facet_keys WHERE id = ?');
+            $stmt->execute([$keyId]);
+            $this->keyMultiValued[$keyId] = (int) $stmt->fetchColumn() === 1;
+            $stmt->closeCursor();
+        }
+        return $this->keyMultiValued[$keyId];
     }
 
     /**
@@ -6364,7 +6411,9 @@ class Index
      * key yet (declared but unpopulated), or the value list is empty — is marked 'impossible'.
      *
      * 'multiRow' marks a condition one document can satisfy with several rows (a range, or more
-     * than one value), which matters when the condition drives a query (see matchingDocsSql()).
+     * than one value, on a multi-valued key), which matters when the condition drives a query
+     * (see matchingDocsSql()). A positive range also carries 'range' (its key and num_value
+     * predicate), so a sorted walk on the same field can seek into it (browseSortedPage()).
      *
      * A FacetExclude is rendered from the filter it wraps and flagged 'exclude': a document
      * satisfies it when it has none of the rows 'rows' selects. On a declared field no document
@@ -6408,14 +6457,21 @@ class Index
             if ($exclude && $matchesNothing) {
                 continue;
             }
-            $conditions[] = [
+            $condition = [
                 'name'       => $name,
                 'rows'       => 'FROM facet_values %1$s WHERE %1$s.key_id = ? AND ' . $sql,
                 'params'     => [$keyId ?? 0, ...$params],
                 'impossible' => !$exclude && $matchesNothing,
-                'multiRow'   => $filterValue instanceof FacetRange || count($params) > 1,
+                // A document matches a value list or range with several rows only if it holds
+                // several values for the key.
+                'multiRow'   => ($filterValue instanceof FacetRange || count($params) > 1)
+                    && $keyId !== null && $this->isMultiValuedKey($keyId),
                 'exclude'    => $exclude,
             ];
+            if ($filterValue instanceof FacetRange && !$exclude && $keyId !== null) {
+                $condition['range'] = ['keyId' => $keyId, 'sql' => $sql, 'params' => $params];
+            }
+            $conditions[] = $condition;
         }
         return $conditions;
     }
