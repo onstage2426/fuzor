@@ -25,6 +25,7 @@ Read-only: makes no writes and does not affect search results.
 | `tokens` | `list<QueryToken>` | Per-token detail, one entry per filtered token |
 | `booleanPostfix` | `list<string>` | Postfix expression used by `searchBoolean()` |
 | `phraseGroups` | `list<string>` | Raw contents of each quoted phrase in the query |
+| `negations` | `list<array>` | The `-word` / `-"phrase"` exclusions, one entry each: `raw` (as typed), `tokens` (normalised like a quoted phrase), `applied` (`false` when a word is not in the index, so `search()` drops the exclusion). They are not part of `tokens` / `filteredTokens`, which describe the words searched for. |
 
 ### `QueryToken`
 

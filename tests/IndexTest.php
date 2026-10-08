@@ -9,6 +9,7 @@ use Fuzor\FacetRange;
 use Fuzor\FacetSearchQuery;
 use Fuzor\Index;
 use Fuzor\MatchingStrategy;
+use Fuzor\QueryToken;
 use Fuzor\SchemaConfig;
 use Fuzor\SearchOptions;
 use Fuzor\SearchResult;
@@ -2558,6 +2559,38 @@ class IndexTest extends TestCase
     }
 
     // --- inspectQuery ---
+
+    public function testInspectQueryReportsNegationsApartFromTheSearchedWords(): void
+    {
+        $index = new Index($this->dbPath, schema: new SchemaConfig(language: 'en'));
+        $index->insert([
+            ['id' => 1, 'title' => 'casual cotton shirt'],
+            ['id' => 2, 'title' => 'formal shirt with long sleeves'],
+        ]);
+
+        $info = $index->inspectQuery('shirt -formal -"long sleeves" -zzzunknown -the t-shirt');
+
+        // "t-shirt" is not a negation ("t" itself is an English stopword).
+        $this->assertSame(['shirt', 'shirt'], $info->filteredTokens);
+        $this->assertSame(['shirt', 'shirt'], array_map(fn(QueryToken $t): string => $t->processed, $info->tokens));
+        $this->assertSame([
+            ['raw' => 'formal', 'tokens' => ['formal'], 'applied' => true],
+            ['raw' => 'long sleeves', 'tokens' => ['sleev'], 'applied' => true],   // "long" is a stopword
+            ['raw' => 'zzzunknown', 'tokens' => ['zzzunknown'], 'applied' => false],
+            ['raw' => 'the', 'tokens' => ['the'], 'applied' => false],              // stopwords are not indexed
+        ], $info->negations);
+        // searchBoolean() keeps its own NOT: its postfix still covers the whole query.
+        $this->assertContains('formal', $info->booleanPostfix);
+        $this->assertSame([1], $index->search('shirt -formal')->getIds());
+    }
+
+    public function testInspectQueryWithoutNegationsHasNone(): void
+    {
+        $index = new Index($this->dbPath);
+        $index->insert([['id' => 1, 'title' => 't-shirt']]);
+
+        $this->assertSame([], $index->inspectQuery('t-shirt')->negations);
+    }
 
     public function testInspectQueryRawTokensMatchTokenizer(): void
     {

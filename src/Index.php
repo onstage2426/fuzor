@@ -2220,7 +2220,9 @@ class Index
     public function inspectQuery(string $phrase, bool $asYouType = true): QueryInspection
     {
         $this->checkDataVersion();
-        $verbose = $this->filterQueryTokens($phrase, verbose: true);
+        // As in search(): negations are split off first; the tokens describe the positive part.
+        ['phrase' => $positive, 'negations' => $negated] = self::splitNegations($phrase);
+        $verbose = $this->filterQueryTokens($positive, verbose: true);
         /** @var list<string> $filteredTokens */
         $filteredTokens = $verbose['filtered'];
         /** @var list<string> $survivingRaw */
@@ -2265,6 +2267,16 @@ class Index
             );
         }
 
+        $negations = [];
+        foreach ($negated as $text) {
+            $negationTokens = $this->normalizePhraseTokens($text);
+            $applied        = $negationTokens !== [];
+            foreach ($negationTokens as $token) {
+                $applied = $applied && $this->lookupTermId($token) !== null;
+            }
+            $negations[] = ['raw' => $text, 'tokens' => $negationTokens, 'applied' => $applied];
+        }
+
         $indexInfo = $this->getInfoValues(['total_documents', 'avg_doc_length']);
 
         return new QueryInspection(
@@ -2277,8 +2289,12 @@ class Index
             avgDocLength:    (float) ($indexInfo['avg_doc_length'] ?? 0),
             tokens:          $tokens,
             /** @infection-ignore-all Concat|ConcatOperandRemoval: '|' prepend is the OR identity; '|' . $phrase and $phrase . '|' both yield identical postfix because '|' is always the last operator popped */
-            booleanPostfix:  BooleanParser::toPostfix('|' . $verbose['free_phrase'])[0],
+            // searchBoolean() reads '-' as its own NOT, so its postfix covers the whole query.
+            booleanPostfix:  BooleanParser::toPostfix(
+                '|' . $this->filterQueryTokens($phrase, verbose: true)['free_phrase']
+            )[0],
             phraseGroups:    $verbose['phrase_groups'],
+            negations:       $negations,
         );
     }
 
@@ -5675,6 +5691,29 @@ class Index
     }
 
     /**
+     * The '-word' / '-"phrase"' negations of a query (see extractNegations()), as typed, and the
+     * query without them.
+     *
+     * @return array{phrase: string, negations: list<string>}
+     */
+    private static function splitNegations(string $phrase): array
+    {
+        if (!str_contains($phrase, '-')) {
+            return ['phrase' => $phrase, 'negations' => []];
+        }
+        $negations = [];
+        $positive  = preg_replace_callback(
+            '/(?<!\S)-(?:"([^"]*)"|([^\s"]+))/u',
+            function (array $m) use (&$negations): string {
+                $negations[] = ($m[2] ?? '') !== '' ? $m[2] : $m[1];
+                return ' ';
+            },
+            $phrase,
+        ) ?? $phrase;
+        return ['phrase' => $positive, 'negations' => $negations];
+    }
+
+    /**
      * Split '-word' and '-"phrase"' negations off a search() / facetSearch() query.
      *
      * A '-' counts at the start of the query or after whitespace, followed by a word or a closed
@@ -5690,18 +5729,10 @@ class Index
      */
     private function extractNegations(string $phrase): array
     {
-        if (!str_contains($phrase, '-')) {
+        ['phrase' => $positive, 'negations' => $raw] = self::splitNegations($phrase);
+        if ($raw === []) {
             return ['phrase' => $phrase, 'conditions' => []];
         }
-        $raw      = [];
-        $positive = preg_replace_callback(
-            '/(?<!\S)-(?:"([^"]*)"|([^\s"]+))/u',
-            function (array $m) use (&$raw): string {
-                $raw[] = ($m[2] ?? '') !== '' ? $m[2] : $m[1];
-                return ' ';
-            },
-            $phrase,
-        ) ?? $phrase;
 
         $conditions = [];
         foreach ($raw as $text) {

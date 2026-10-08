@@ -13,6 +13,10 @@ final readonly class QueryInspection
      * @param list<QueryToken> $tokens         Per-token detail, one entry per filtered token.
      * @param list<string>     $booleanPostfix Postfix expression used by searchBoolean().
      * @param list<list<string>> $phraseGroups Stemmed token lists, one per quoted phrase in the query.
+     * @param list<array{raw: string, tokens: list<string>, applied: bool}> $negations
+     *        The query's '-word' / '-"phrase"' negations as search() reads them: as typed, normalised
+     *        like a quoted phrase, and whether they exclude anything (search() drops a negation
+     *        unless every token is in the index). Not part of $tokens.
      */
     public function __construct(
         public array $rawTokens,
@@ -26,6 +30,7 @@ final readonly class QueryInspection
         public array $booleanPostfix,
         /** @var list<list<string>> */
         public array $phraseGroups,
+        public array $negations = [],
     ) {
     }
 }
