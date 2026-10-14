@@ -108,9 +108,11 @@ class Index
     /**
      * Exclusion-only facet counts subtract the excluded documents' rows (cost per excluded
      * document) up to this share of the index, and scan the kept rows (cost per facet row)
-     * above it. Measured crossover on a 533k index: ~30% (see collectFacetCountsExcluding()).
+     * above it. Measured crossover: ~30% on a 533k index, ~39% on the 45k ecom set ("-shirt"
+     * with three facets, 30% excluded: 24.5 ms subtracted, 32.7 ms scanned; see
+     * collectFacetCountsExcluding()).
      */
-    private const float EXCLUDED_SCAN_SHARE = 0.25;
+    private const float EXCLUDED_SCAN_SHARE = 0.3;
 
     /**
      * fetchSortValues() scans all rows of the key instead of seeking each document's when the
