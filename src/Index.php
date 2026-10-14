@@ -6915,11 +6915,11 @@ class Index
         // spec, then the BM25 score (descending) when present, then the doc ID itself — so a
         // single C-level array_multisort() orders the candidates with no PHP callback per
         // comparison.
-        /** @var list<list<int>> $rankColumns */
+        /** @var list<list<int|float>> $rankColumns */
         $rankColumns = [];
         foreach ($specs as ['field' => $field, 'asc' => $asc]) {
             $values = $this->fetchSortValues($docIds, $this->lookupFacetKeyId($field), $asc, fold: true);
-            $ranks  = self::sortRanks($values, $asc);
+            $ranks  = self::sortRanks($values, $asc, ranked: $tieKeys !== null);
             $column = [];
             foreach ($docIds as $id) {
                 $column[] = $ranks[$id];
@@ -6975,20 +6975,44 @@ class Index
      * O(distinct log distinct) with no PHP comparison callback. Missing values rank
      * PHP_INT_MAX and so sort last in both directions.
      *
+     * Without $ranked, a column holding only finite numbers is returned as the numbers
+     * themselves, negated for descending, missing as INF: array_multisort() orders floats
+     * natively, and converting each one to a string key cost ~2/3 of the ranking (22k prices on
+     * the 45k ecom set: 6.7 ms ranked). Tie keys need ranks: they compare columns as strings,
+     * which would merge floats that differ beyond 14 digits, as the rank keys do.
+     *
      * @param  array<int, float|string|null> $values Doc ID → sort value, from fetchSortValues().
-     * @return array<int, int>                       Doc ID → rank.
+     * @return array<int, int|float>                 Doc ID → rank (or the number itself).
      */
-    private static function sortRanks(array $values, bool $asc): array
+    private static function sortRanks(array $values, bool $asc, bool $ranked): array
     {
-        // Prefixed string keys keep numbers and strings apart and floats exact (float array
-        // keys would be truncated to int).
+        if (!$ranked) {
+            $column = [];
+            foreach ($values as $docId => $value) {
+                if (is_string($value)) {
+                    $column = null;
+                    break;
+                }
+                $column[$docId] = $value === null ? INF : ($asc ? $value : -$value);
+            }
+            if ($column !== null && !in_array(INF, $values, true) && !in_array(-INF, $values, true)) {
+                return $column;
+            }
+        }
+        // Prefixed string keys keep numbers and strings apart (float array keys would be
+        // truncated to int); each document's key is kept so it is built once.
         $numbers = [];
         $strings = [];
-        foreach ($values as $value) {
+        $keys    = [];
+        foreach ($values as $docId => $value) {
             if (is_float($value)) {
-                $numbers['n' . $value] = $value;
+                $key           = 'n' . $value;
+                $numbers[$key] = $value;
+                $keys[$docId]  = $key;
             } elseif ($value !== null) {
-                $strings['s' . $value] = $value;
+                $key           = 's' . $value;
+                $strings[$key] = $value;
+                $keys[$docId]  = $key;
             }
         }
         if ($asc) {
@@ -7001,12 +7025,8 @@ class Index
 
         $rankOf = array_flip([...array_keys($numbers), ...array_keys($strings)]);
         $ranks  = [];
-        foreach ($values as $docId => $value) {
-            $ranks[$docId] = match (true) {
-                $value === null   => PHP_INT_MAX,
-                is_float($value)  => $rankOf['n' . $value],
-                default           => $rankOf['s' . $value],
-            };
+        foreach ($values as $docId => $_) {
+            $ranks[$docId] = isset($keys[$docId]) ? $rankOf[$keys[$docId]] : PHP_INT_MAX;
         }
         return $ranks;
     }
