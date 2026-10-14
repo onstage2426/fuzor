@@ -7658,6 +7658,14 @@ class IndexTest extends TestCase
                 ['color' => ['red' => 3, 'blue' => 1, 'green' => 1], 'brand' => ['B' => 4]],
                 [],
             ],
+            // 4 other documents, above maxFacetCountDocs (2): left as a capped positive filter.
+            'others above the cap'  => [
+                ['color' => 'red'],
+                [],
+                [6, 5, 4, 3, 2, 1],
+                ['color' => ['red' => 6, 'blue' => 2, 'green' => 2], 'brand' => ['A' => 1, 'B' => 1]],
+                ['brand'],
+            ],
             // A multi-valued key is left as it is: counted over at most maxFacetCountDocs.
             'multi-valued key'      => [
                 ['tags' => ['new', 'old']],
@@ -7671,8 +7679,8 @@ class IndexTest extends TestCase
 
     /**
      * A value filter covering most of a single-valued key that every document has is counted
-     * through the other values (complementSelections()): exact facet counts despite the cap,
-     * the field's own counts still disjunctive.
+     * through the other values (complementSelections()) when those fit within the facet cap:
+     * exact facet counts, the field's own counts still disjunctive.
      *
      * @param array<string, FacetExclude|list<string>|string> $filter
      * @param list<string>                                    $sort

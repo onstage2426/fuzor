@@ -3438,8 +3438,11 @@ class Index
      * keeps its positive meaning for disjunctive facet counts ('selection'). Listed values
      * that cover every document match everything, so the condition is dropped.
      *
-     * Measured on the 45k ecom set, gender Women or Men (40.8k docs), six facets and a sort:
-     * 21.1 ms with five of the facets approximate, 14.0 ms exact (80.5 ms exact the other way).
+     * Counting through the excluded documents costs per excluded document (~2–3 µs), so the
+     * other values may hold at most maxFacetCountDocs rows: the work stays within what the
+     * capped count of the listed values costs. Measured on the 45k ecom set, gender Women or
+     * Men (40.8k docs, 3.6k others), six facets and a sort: 21.1 ms with five of the facets
+     * approximate, 14.0 ms exact (80.5 ms exact the other way).
      *
      * @param  list<FacetCondition> $conditions From facetFilterConditions().
      * @return list<FacetCondition>
@@ -3469,7 +3472,12 @@ class Index
             $stmt->execute([json_encode($values['values']), $keyId]);
             /** @var array{0: int, 1: int} $rows */
             $rows = $stmt->fetch(PDO::FETCH_NUM);
-            if ($rows[0] !== $totalDocuments || $rows[1] * 2 <= $totalDocuments) {
+            $otherRows = $rows[0] - $rows[1];
+            if (
+                $rows[0] !== $totalDocuments
+                || $otherRows >= $rows[1]
+                || $otherRows > $this->config->maxFacetCountDocs
+            ) {
                 $result[] = $condition;
                 continue;
             }
