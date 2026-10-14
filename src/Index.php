@@ -36,6 +36,7 @@ use PDO;
  *     exclude: bool,
  *     range?: array{keyId: int, sql: string, params: list<mixed>},
  *     values?: array{keyId: int, values: list<mixed>},
+ *     selection?: true,
  * }
  * @phpstan-type KeywordGroup array{
  *     words: list<array{id: int, term: string, num_hits: int, num_docs: int, distance?: int}>,
@@ -3343,7 +3344,10 @@ class Index
             );
         }
 
-        $conditions = $this->orderBySelectivity([...$this->facetFilterConditions($filter), ...$negations]);
+        $conditions = $this->orderBySelectivity([
+            ...$this->complementSelections($this->facetFilterConditions($filter), $totalDocuments),
+            ...$negations,
+        ]);
         $match      = $conditions === [] ? null : $this->matchingDocsSql($conditions);
         // With facets to count over the matching documents, fetch their IDs once (up to the facet
         // cap + 1): under the cap the list length is the exact total and the same IDs feed the
@@ -3421,6 +3425,67 @@ class Index
             exhaustive: $exhaustive,
             approximateFacets: $approximateFacets,
         );
+    }
+
+    /**
+     * Turn broad value filters into exclusions of the remaining values, for browse().
+     *
+     * On a single-valued key that every document has, "one of these values" is the same set
+     * of documents as "none of the other values". When the listed values hold more than half
+     * of the key's rows, the other values select fewer rows, and an all-exclusion filter takes
+     * the complement paths: exact totals and facet counts from facet_counts minus the excluded
+     * documents, instead of counting up to maxFacetCountDocs matching documents. The condition
+     * keeps its positive meaning for disjunctive facet counts ('selection'). Listed values
+     * that cover every document match everything, so the condition is dropped.
+     *
+     * Measured on the 45k ecom set, gender Women or Men (40.8k docs), six facets and a sort:
+     * 21.1 ms with five of the facets approximate, 14.0 ms exact (80.5 ms exact the other way).
+     *
+     * @param  list<FacetCondition> $conditions From facetFilterConditions().
+     * @return list<FacetCondition>
+     */
+    private function complementSelections(array $conditions, int $totalDocuments): array
+    {
+        $result = [];
+        foreach ($conditions as $condition) {
+            $values = $condition['values'] ?? null;
+            $keyId  = $values['keyId'] ?? 0;
+            if (
+                $values === null
+                || $condition['exclude']
+                || $condition['impossible']
+                || $this->isMultiValuedKey($keyId)
+                || $this->keyRowCount($keyId) !== $totalDocuments
+                || $this->conditionRowCount($condition) * 2 <= $totalDocuments
+            ) {
+                $result[] = $condition;
+                continue;
+            }
+            $stmt = $this->stmt(
+                'otherFacetValues',
+                'SELECT value FROM facet_counts
+                  WHERE key_id = ? AND value NOT IN (SELECT value FROM json_each(?)) LIMIT 1001'
+            );
+            $stmt->execute([$keyId, json_encode($values['values'])]);
+            /** @var list<string> $others */
+            $others = $stmt->fetchAll(PDO::FETCH_COLUMN);
+            if (count($others) > 1000) {
+                $result[] = $condition;
+            } elseif ($others !== []) {
+                $result[] = [
+                    'name'       => $condition['name'],
+                    'rows'       => 'FROM facet_values %1$s WHERE %1$s.key_id = ? AND %1$s.value IN ('
+                        . $this->placeholders(count($others)) . ')',
+                    'params'     => [$keyId, ...$others],
+                    'impossible' => false,
+                    'multiRow'   => false,
+                    'exclude'    => true,
+                    'values'     => ['keyId' => $keyId, 'values' => $others],
+                    'selection'  => true,
+                ];
+            }
+        }
+        return $result;
     }
 
     /**
@@ -3657,10 +3722,12 @@ class Index
             if ($keyId === null) {
                 continue;
             }
-            // Only positive filters are disjunctive: an exclusion also applies to its own field.
-            $others = array_values(
-                array_filter($conditions, fn(array $c): bool => $c['exclude'] || $c['name'] !== $keyName)
-            );
+            // Only positive filters are disjunctive: an exclusion also applies to its own field,
+            // unless it stands for a positive one (complementSelections()).
+            $others = array_values(array_filter(
+                $conditions,
+                fn(array $c): bool => $c['exclude'] && !isset($c['selection']) || $c['name'] !== $keyName,
+            ));
             if (count($others) === count($conditions)) {
                 $common[$keyName] = $keyId;
                 continue;

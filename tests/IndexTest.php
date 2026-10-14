@@ -7307,7 +7307,8 @@ class IndexTest extends TestCase
             ),
             config: new Config(maxFacetCountDocs: 3),
         );
-        $index->insert($this->browseCatalog());
+        // A product without a color keeps the color filter a capped positive one (complementSelections()).
+        $index->insert([...$this->browseCatalog(), ['id' => 13, 'title' => 'product', 'brand' => 'Acme']]);
 
         $result = $index->search('', new SearchOptions(filter: ['color' => 'blue'], facets: ['brand']));
 
@@ -7450,6 +7451,8 @@ class IndexTest extends TestCase
                 'brand' => $id % 2 ? 'A' : 'B',
             ];
         }
+        // A document without a color keeps the color filter a capped positive one (complementSelections()).
+        $docs[] = ['id' => 7, 'title' => 'x', 'brand' => 'A'];
         $index->insert($docs);
 
         $capped = $index->search('', new SearchOptions(filter: ['color' => 'red'], facets: ['brand']));
@@ -7618,6 +7621,102 @@ class IndexTest extends TestCase
 
         $this->assertSame(array_slice($expected, 0, 60), $result->getIds());
         $this->assertSame(count($expected), $result->totalHits);
+    }
+
+    /**
+     * @return array<string, array{
+     *     0: array<string, FacetExclude|list<string>|string>,
+     *     1: list<string>,
+     *     2: list<int>,
+     *     3: array<string, array<string, int>>,
+     *     4: list<string>,
+     * }>
+     */
+    public static function broadSelectionProvider(): array
+    {
+        return [
+            // 8 of 10 documents: counted as all documents minus green, exactly.
+            'most values'           => [
+                ['color' => ['red', 'blue']],
+                ['price:desc'],
+                [8, 7, 6, 5, 4, 3, 2, 1],
+                ['color' => ['red' => 6, 'blue' => 2, 'green' => 2], 'brand' => ['A' => 4, 'B' => 4]],
+                [],
+            ],
+            'every value'           => [
+                ['color' => ['red', 'blue', 'green']],
+                [],
+                [10, 9, 8, 7, 6, 5, 4, 3, 2, 1],
+                ['color' => ['red' => 6, 'blue' => 2, 'green' => 2], 'brand' => ['A' => 5, 'B' => 5]],
+                [],
+            ],
+            // The color counts keep the brand exclusion; the brand counts keep the color filter.
+            'with an exclusion'     => [
+                ['color' => ['red', 'blue'], 'brand' => new FacetExclude('A')],
+                [],
+                [8, 6, 4, 2],
+                ['color' => ['red' => 3, 'blue' => 1, 'green' => 1], 'brand' => ['B' => 4]],
+                [],
+            ],
+            // A multi-valued key is left as it is: counted over at most maxFacetCountDocs.
+            'multi-valued key'      => [
+                ['tags' => ['new', 'old']],
+                [],
+                [10, 9, 8, 7, 6, 5, 4, 3, 2, 1],
+                ['tags' => ['new' => 10, 'old' => 1], 'brand' => ['A' => 1, 'B' => 1]],
+                ['brand'],
+            ],
+        ];
+    }
+
+    /**
+     * A value filter covering most of a single-valued key that every document has is counted
+     * through the other values (complementSelections()): exact facet counts despite the cap,
+     * the field's own counts still disjunctive.
+     *
+     * @param array<string, FacetExclude|list<string>|string> $filter
+     * @param list<string>                                    $sort
+     * @param list<int>                                       $ids
+     * @param array<string, array<string, int>>               $facets
+     * @param list<string>                                    $approximate
+     */
+    #[DataProvider('broadSelectionProvider')]
+    public function testBroadValueFilterIsCountedThroughTheOtherValues(
+        array $filter,
+        array $sort,
+        array $ids,
+        array $facets,
+        array $approximate,
+    ): void {
+        $index = new Index(
+            $this->dbPath,
+            schema: new SchemaConfig(filterableFields: ['color', 'brand', 'tags'], sortableFields: ['price']),
+            config: new Config(maxFacetCountDocs: 2),
+        );
+        $docs = [];
+        for ($i = 1; $i <= 10; $i++) {
+            $docs[] = [
+                'id'    => $i,
+                'title' => 'product',
+                'price' => $i,
+                'color' => $i <= 6 ? 'red' : ($i <= 8 ? 'blue' : 'green'),
+                'brand' => $i % 2 ? 'A' : 'B',
+                'tags'  => $i === 1 ? ['new', 'old'] : ['new'],
+            ];
+        }
+        $index->insert($docs);
+
+        $result = $index->search('', new SearchOptions(
+            filter: $filter,
+            facets: array_keys($facets),
+            sort: $sort,
+            limit: 20,
+        ));
+
+        $this->assertSame($ids, $result->getIds());
+        $this->assertSame(count($ids), $result->totalHits);
+        $this->assertSame($facets, $result->facetDistribution);
+        $this->assertSame($approximate, $result->approximateFacets);
     }
 
     public function testBrowseSortedPagesConcatenateToFullOrder(): void
@@ -8092,7 +8191,8 @@ class IndexTest extends TestCase
             ),
             config: new Config(maxDocs: 1, maxFacetCountDocs: 3),
         );
-        $index->insert($this->browseCatalog());
+        // A product without a color keeps the color filter a capped positive one (complementSelections()).
+        $index->insert([...$this->browseCatalog(), ['id' => 13, 'title' => 'product', 'brand' => 'Acme']]);
 
         // color is disjunctive with no other filter → whole-index count, exact; brand uses the 8 blue docs.
         $result = $index->search('', new SearchOptions(filter: ['color' => 'blue'], facets: ['brand', 'color']));
