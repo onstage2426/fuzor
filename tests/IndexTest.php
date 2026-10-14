@@ -5529,6 +5529,52 @@ class IndexTest extends TestCase
         $this->assertSame($expected, $facets['browse'][0]['brand']);
     }
 
+    /** @return array<string, array{0: array<string, FacetExclude|FacetRange|list<string>|string>, 1: list<int>}> */
+    public static function mixedExclusionProvider(): array
+    {
+        return [
+            // 3 excluded rows against 5 driver rows: counted as Adidas minus the hidden Adidas docs.
+            'one positive'                 => [
+                ['brand' => 'Adidas', 'tags' => new FacetExclude('hidden')],
+                [5, 9, 13, 17],
+            ],
+            // Doc 1 holds both tags: the positive count must not count it twice.
+            'multi-valued value list'      => [
+                ['tags' => ['hidden', 'sale'], 'brand' => new FacetExclude('Nike')],
+                [1, 2, 3, 5, 6],
+            ],
+            // Docs 1 and 2 match both exclusions.
+            'overlapping exclusions'       => [
+                [
+                    'brand' => ['Adidas', 'Puma'],
+                    'tags'  => new FacetExclude('hidden'),
+                    'price' => new FacetExclude(FacetRange::max(2)),
+                ],
+                [5, 6, 9, 10, 13, 14, 17, 18],
+            ],
+            // Two positive conditions: the positive count is a query of its own.
+            'two positives'                => [
+                ['brand' => ['Adidas', 'Puma'], 'price' => FacetRange::max(15), 'tags' => new FacetExclude('hidden')],
+                [5, 6, 9, 10, 13, 14],
+            ],
+            // 18 excluded rows against 5 driver rows: probed per Adidas doc.
+            'exclusion larger than driver' => [
+                ['brand' => 'Adidas', 'price' => new FacetExclude(FacetRange::min(3))],
+                [1],
+            ],
+        ];
+    }
+
+    /**
+     * @param array<string, FacetExclude|FacetRange|list<string>|string> $filter
+     * @param list<int>                                                  $expected
+     */
+    #[DataProvider('mixedExclusionProvider')]
+    public function testBrowseTotalWithPositiveFiltersAndExclusionsIsExact(array $filter, array $expected): void
+    {
+        $this->assertFilterOnEveryPath($this->shareIndex(), new SearchOptions(filter: $filter, limit: 50), $expected);
+    }
+
     public function testExclusionOnlyBrowseStatsAppearWhenOnlyNumbersRemain(): void
     {
         $reference = null;

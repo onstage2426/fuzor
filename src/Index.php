@@ -35,6 +35,7 @@ use PDO;
  *     multiRow: bool,
  *     exclude: bool,
  *     range?: array{keyId: int, sql: string, params: list<mixed>},
+ *     values?: array{keyId: int, values: list<mixed>},
  * }
  * @phpstan-type KeywordGroup array{
  *     words: list<array{id: int, term: string, num_hits: int, num_docs: int, distance?: int}>,
@@ -3331,7 +3332,7 @@ class Index
             $match === null                            => 0,
             self::isExclusionOnly($conditions)         => $totalDocuments - $this->countExcludedDocs($conditions),
             $matchIds !== null && !$matchIds['capped'] => count($matchIds['ids']),
-            default                                    => $this->countBrowseDocs($match),
+            default                                    => $this->countBrowseDocs($conditions, $match),
         };
         // Probe along the walk when matches are dense; materialise the filter when they are sparse.
         // Measured on the 45k ecom set: at 13% of the index a probed page takes 0.2 ms against
@@ -3396,12 +3397,35 @@ class Index
     }
 
     /**
-     * Count the documents matched by matchingDocsSql().
+     * Count the documents matched by matchingDocsSql($conditions).
      *
-     * @param array{0: string, 1: list<mixed>} $match
+     * That query probes the exclusions once per document of the driving condition. When the
+     * exclusions select fewer rows than the driver, the count is taken as a difference instead:
+     * the documents matching the positive conditions minus those of them that an exclusion
+     * removes, driven from the excluded rows. Measured on the 45k ecom set, gender Men without
+     * usage Sports (22k against 4k rows): 17 ms probed, 2.1 ms as a difference.
+     *
+     * @param non-empty-list<FacetCondition>   $conditions From orderBySelectivity(): positives first.
+     * @param array{0: string, 1: list<mixed>} $match      matchingDocsSql($conditions).
      */
-    private function countBrowseDocs(array $match): int
+    private function countBrowseDocs(array $conditions, array $match): int
     {
+        $positive   = array_values(array_filter($conditions, fn(array $c): bool => !$c['exclude']));
+        $exclusions = array_values(array_filter($conditions, fn(array $c): bool => $c['exclude']));
+        if ($positive !== [] && $exclusions !== []) {
+            $driverRows = $this->conditionRowCount($positive[0]);
+            if (array_sum(array_map($this->conditionRowCount(...), $exclusions)) < $driverRows) {
+                // One row per matching document when a single positive condition is not multiRow.
+                $positiveMatch = $this->matchingDocsSql($positive);
+                if ($positiveMatch === null) {
+                    return 0;
+                }
+                $kept = count($positive) === 1 && !$positive[0]['multiRow']
+                    ? $driverRows
+                    : $this->countBrowseDocs($positive, $positiveMatch);
+                return $kept - $this->countExcludedDocs($exclusions, $positive);
+            }
+        }
         $stmt = $this->prepare("SELECT COUNT(*) FROM ({$match[0]})");
         $stmt->execute($match[1]);
         return (int) $stmt->fetchColumn();
@@ -3413,13 +3437,18 @@ class Index
      * Counting the kept documents directly probes every document in the index (~31 ms on the
      * 45k ecom set); the excluded ones sit in one index range per condition (0.06–1.7 ms).
      *
+     * With $among, only excluded documents that also satisfy those (positive) conditions count;
+     * they are probed per excluded document (see countBrowseDocs()).
+     *
      * @param non-empty-list<FacetCondition> $conditions Exclusions only (see isExclusionOnly()).
+     * @param list<FacetCondition>           $among      Positive conditions, none impossible.
      */
-    private function countExcludedDocs(array $conditions): int
+    private function countExcludedDocs(array $conditions, array $among = []): int
     {
         [$sql, $params] = $this->excludedDocsSql($conditions);
-        $stmt = $this->prepare("SELECT COUNT(DISTINCT doc_id) FROM ({$sql})");
-        $stmt->execute($params);
+        [$probeSql, $probeParams] = $this->renderFacetProbes($among, 'e.doc_id') ?? ['', []];
+        $stmt = $this->prepare("SELECT COUNT(DISTINCT e.doc_id) FROM ({$sql}) e WHERE 1{$probeSql}");
+        $stmt->execute([...$params, ...$probeParams]);
         return (int) $stmt->fetchColumn();
     }
 
@@ -7093,7 +7122,9 @@ class Index
      * 'multiRow' marks a condition one document can satisfy with several rows (a range, or more
      * than one value, on a multi-valued key), which matters when the condition drives a query
      * (see matchingDocsSql()). A positive range also carries 'range' (its key and num_value
-     * predicate), so a sorted walk on the same field can seek into it (browseSortedPage()).
+     * predicate), so a sorted walk on the same field can seek into it (browseSortedPage()). A
+     * value list carries 'values' (its key and values), so its row count can be read from
+     * facet_counts (conditionRowCount()).
      *
      * A FacetExclude is rendered from the filter it wraps and flagged 'exclude': a document
      * satisfies it when it has none of the rows 'rows' selects. On a declared field no document
@@ -7150,6 +7181,8 @@ class Index
             ];
             if ($filterValue instanceof FacetRange && !$exclude && $keyId !== null) {
                 $condition['range'] = ['keyId' => $keyId, 'sql' => $sql, 'params' => $params];
+            } elseif (!$filterValue instanceof FacetRange && $keyId !== null) {
+                $condition['values'] = ['keyId' => $keyId, 'values' => $params];
             }
             $conditions[] = $condition;
         }
@@ -7179,18 +7212,38 @@ class Index
         if (count($conditions) < 2) {
             return $conditions;
         }
-        $rows = [];
-        foreach ($conditions as $i => $condition) {
-            if ($condition['impossible']) {
-                $rows[$i] = 0;
-                continue;
-            }
-            $stmt = $this->prepare('SELECT COUNT(*) ' . sprintf($condition['rows'], 'ff'));
-            $stmt->execute($condition['params']);
-            $rows[$i] = (int) $stmt->fetchColumn();
-        }
+        $rows = array_map($this->conditionRowCount(...), $conditions);
         asort($rows);
         return array_map(fn(int $i): array => $conditions[$i], array_keys($rows));
+    }
+
+    /**
+     * How many rows a condition selects: its document count when one document can match with
+     * one row only (not 'multiRow'), an upper bound otherwise.
+     *
+     * A value list is summed from facet_counts (one primary key seek per value); anything else
+     * is an index-only COUNT over its rows. Measured on the 45k ecom set: gender Men (22k rows)
+     * 0.01 ms against 1.1 ms counted.
+     *
+     * @param FacetCondition $condition
+     */
+    private function conditionRowCount(array $condition): int
+    {
+        if ($condition['impossible']) {
+            return 0;
+        }
+        if (isset($condition['values'])) {
+            $stmt = $this->stmt(
+                'facetValueRowCount',
+                'SELECT COALESCE(SUM(count), 0) FROM facet_counts
+                  WHERE key_id = ? AND value IN (SELECT value FROM json_each(?))'
+            );
+            $stmt->execute([$condition['values']['keyId'], json_encode($condition['values']['values'])]);
+        } else {
+            $stmt = $this->prepare('SELECT COUNT(*) ' . sprintf($condition['rows'], 'ff'));
+            $stmt->execute($condition['params']);
+        }
+        return (int) $stmt->fetchColumn();
     }
 
     /**
