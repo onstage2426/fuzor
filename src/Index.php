@@ -3221,23 +3221,41 @@ class Index
 
         $byCount = $query->sortFacetValuesBy === FacetOrder::Count;
         $needle  = self::facetMatchKey($facetQuery);
-        // Unrestricted: the key's maintained counts, one row per value (no row scan).
-        $grouped = $from === 'facet_values fv' && $excludedSql === null
-            ? 'SELECT value, count FROM facet_counts fv WHERE key_id = ?'
-            : "SELECT fv.value, COUNT(*) AS count FROM {$from} WHERE {$where} GROUP BY fv.value";
-        if ($facetQuery === '' && $byCount) {
-            // Nothing to match in PHP: let SQL order and cut.
-            $stmt = $this->prepare($grouped . ' ORDER BY count DESC, fv.value LIMIT ?');
+        $driven  = $from !== 'facet_values fv';
+        if (!$driven && $facetQuery === '' && $byCount) {
+            // Nothing to match in PHP: let SQL order and cut (the key's maintained counts, one
+            // row per value, or its rows grouped in primary key order).
+            $stmt = $this->prepare(
+                ($excludedSql === null
+                    ? 'SELECT value, count FROM facet_counts fv WHERE key_id = ?'
+                    : "SELECT fv.value, COUNT(*) AS count FROM {$from} WHERE {$where} GROUP BY fv.value")
+                . ' ORDER BY count DESC, fv.value LIMIT ?'
+            );
             $stmt->execute([...$params, $query->limit]);
             /** @var array<array-key, int> $counts */
             $counts = $stmt->fetchAll(PDO::FETCH_KEY_PAIR);
         } else {
+            if ($driven) {
+                // Driven from the documents, the joined rows arrive in document order: SQL would
+                // group and order them through two temporary B-trees, counting them here is
+                // cheaper (gender Men, brandName: 9.3 → 8.3 ms on the 45k ecom set).
+                $stmt = $this->prepare("SELECT fv.value FROM {$from} WHERE {$where}");
+                $stmt->execute($params);
+                /** @var list<string> $values */
+                $values = $stmt->fetchAll(PDO::FETCH_COLUMN);
+                $counts = array_count_values($values);
+            } else {
+                $stmt = $this->prepare(
+                    $excludedSql === null
+                        ? 'SELECT value, count FROM facet_counts WHERE key_id = ?'
+                        : "SELECT fv.value, COUNT(*) AS count FROM {$from} WHERE {$where} GROUP BY fv.value"
+                );
+                $stmt->execute($params);
+                /** @var array<array-key, int> $counts */
+                $counts = $stmt->fetchAll(PDO::FETCH_KEY_PAIR);
+            }
             // Case and accent folding (Tokenizer::sortKey()) and word-start matching cannot be
-            // expressed in SQL, so the key's distinct values are grouped there and matched here.
-            $stmt = $this->prepare($grouped);
-            $stmt->execute($params);
-            /** @var array<array-key, int> $counts */
-            $counts = $stmt->fetchAll(PDO::FETCH_KEY_PAIR);
+            // expressed in SQL, so the key's distinct values are counted first and matched here.
             if ($needle !== '') {
                 foreach ($counts as $value => $_) {
                     if (!self::facetValueMatches(self::facetMatchKey((string) $value), $needle)) {
