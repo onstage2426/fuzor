@@ -113,6 +113,13 @@ class Index
     private const float EXCLUDED_SCAN_SHARE = 0.25;
 
     /**
+     * fetchSortValues() scans all rows of the key instead of seeking each document's when the
+     * documents number at least this share of the key's rows. Measured crossover on the 45k
+     * ecom set: ~0.4 (11k of 44k: seek 8.4 vs scan 12.6 ms; 22k: 17.5 vs 12.7 ms).
+     */
+    private const float SORT_VALUE_SCAN_SHARE = 0.4;
+
+    /**
      * delete() purges the posting rows of every deleted document once deleted documents are this
      * share of all documents (live + deleted). Until then the per-term num_docs / num_hits keep
      * counting them (BM25 only; measured on ecom with 10% deleted: first hit unchanged, 97% of
@@ -6821,7 +6828,11 @@ class Index
      * its smallest value ascending, its largest descending.
      *
      * Uses a fixed json_each-based statement (always cached as 'fetchSortValues') so there is
-     * no per-call prepare overhead regardless of candidate count.
+     * no per-call prepare overhead regardless of candidate count. That statement seeks each
+     * document's row (~0.8 µs per document on the 45k ecom set); for at least
+     * SORT_VALUE_SCAN_SHARE of the key's rows, scanning all of them and skipping the documents
+     * not asked for is cheaper (~0.3 µs per row): a distinct browse over all 44k documents
+     * 33 → 11 ms.
      *
      * With $fold, strings are returned as their sortKey(), the form sorting compares; without
      * it (distinct grouping) as stored.
@@ -6837,17 +6848,31 @@ class Index
         if ($keyId === null) {
             return $result;
         }
-        $stmt = $this->stmt(
-            'fetchSortValues',
-            'SELECT doc_id, num_value, value
-               FROM facet_values
-              WHERE key_id = ? AND doc_id IN (SELECT value FROM json_each(?))'
-        );
-        $stmt->execute([$keyId, json_encode($docIds)]);
+        // Below 1,000 documents either way costs under a millisecond; no row count is read.
+        $scan = count($docIds) >= 1000
+            && count($docIds) >= self::SORT_VALUE_SCAN_SHARE * $this->keyRowCount($keyId);
+        if ($scan) {
+            $stmt = $this->stmt(
+                'fetchKeySortValues',
+                'SELECT doc_id, num_value, value FROM facet_values WHERE key_id = ?'
+            );
+            $stmt->execute([$keyId]);
+        } else {
+            $stmt = $this->stmt(
+                'fetchSortValues',
+                'SELECT doc_id, num_value, value
+                   FROM facet_values
+                  WHERE key_id = ? AND doc_id IN (SELECT value FROM json_each(?))'
+            );
+            $stmt->execute([$keyId, json_encode($docIds)]);
+        }
         /** @var list<array{0: int, 1: float|null, 2: string}> $sortRows */
         $sortRows = $stmt->fetchAll(PDO::FETCH_NUM);
         $folded = [];
         foreach ($sortRows as [$docId, $numValue, $strValue]) {
+            if ($scan && !array_key_exists($docId, $result)) {
+                continue;
+            }
             $value   = $numValue ?? ($fold ? $folded[$strValue] ??= self::sortKey($strValue) : $strValue);
             $current = $result[$docId];
             if ($current === null || self::compareSortValues($value, $current, $asc) < 0) {
@@ -7938,6 +7963,14 @@ class Index
         /** @var list<array{value: string, n: int, min_num: float|null, max_num: float|null, num_count: int}> $rows */
         $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
         return $rows;
+    }
+
+    /** How many facet_values rows a key has, summed from facet_counts (one row per value). */
+    private function keyRowCount(int $keyId): int
+    {
+        $stmt = $this->stmt('keyRowCount', 'SELECT COALESCE(SUM(count), 0) FROM facet_counts WHERE key_id = ?');
+        $stmt->execute([$keyId]);
+        return (int) $stmt->fetchColumn();
     }
 
     /** Whether any document holds a number for this facet key (one probe of facet_numeric_index). */

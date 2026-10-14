@@ -7549,6 +7549,77 @@ class IndexTest extends TestCase
         $this->assertSame(2, $result->totalHits);
     }
 
+    /** @return array<string, array{0: string, 1: bool}> */
+    public static function largeDistinctSortProvider(): array
+    {
+        return [
+            'number desc'           => ['rank', false],
+            'multi-valued text asc' => ['tags', true],
+        ];
+    }
+
+    /**
+     * Enough documents (1,044 after the exclusion) that sort and distinct values are read by
+     * scanning the key's rows (fetchSortValues()); checked against the order computed here.
+     */
+    #[DataProvider('largeDistinctSortProvider')]
+    public function testLargeDistinctSortedBrowseMatchesReferenceOrder(string $field, bool $asc): void
+    {
+        $index = new Index($this->dbPath, schema: new SchemaConfig(
+            filterableFields: ['group', 'rank', 'tags'],
+            sortableFields: ['rank', 'tags'],
+        ));
+        $docs   = [];
+        $groups = [];
+        $values = [];
+        for ($i = 1; $i <= 1200; $i++) {
+            $group = $i % 11 === 0 ? null : 'g' . ($i % 7);
+            $rank  = $i % 13 === 0 ? null : ($i * 37) % 101;
+            $tags  = ['T' . ($i % 5), 't' . ($i % 3)];
+            $docs[] = array_filter(
+                ['id' => $i, 'title' => 'item', 'group' => $group, 'rank' => $rank, 'tags' => $tags],
+                fn(mixed $v): bool => $v !== null,
+            );
+            if ($group !== 'g0') {
+                $groups[$i] = $group;
+                // Sort value: the number, or the multi-valued field's folded value that sorts first.
+                $values[$i] = $field === 'rank' ? $rank : min('t' . ($i % 5), 't' . ($i % 3));
+            }
+        }
+        $index->insert($docs);
+
+        $ids = array_keys($values);
+        usort($ids, function (int $a, int $b) use ($values, $asc): int {
+            [$va, $vb] = [$values[$a], $values[$b]];
+            if ($va === null || $vb === null) {
+                return ($va === null) <=> ($vb === null) ?: $a <=> $b;
+            }
+            return ($asc ? $va <=> $vb : $vb <=> $va) ?: $a <=> $b;
+        });
+        $seen     = [];
+        $expected = [];
+        foreach ($ids as $id) {
+            $group = $groups[$id];
+            if ($group !== null && isset($seen[$group])) {
+                continue;
+            }
+            $expected[] = $id;
+            if ($group !== null) {
+                $seen[$group] = true;
+            }
+        }
+
+        $result = $index->search('', new SearchOptions(
+            filter: ['group' => new FacetExclude('g0')],
+            sort: [$field . ($asc ? ':asc' : ':desc')],
+            distinct: 'group',
+            limit: 60,
+        ));
+
+        $this->assertSame(array_slice($expected, 0, 60), $result->getIds());
+        $this->assertSame(count($expected), $result->totalHits);
+    }
+
     public function testBrowseSortedPagesConcatenateToFullOrder(): void
     {
         $index = new Index($this->dbPath, schema: new SchemaConfig(
