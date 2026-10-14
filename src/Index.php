@@ -3455,9 +3455,21 @@ class Index
                 || $condition['exclude']
                 || $condition['impossible']
                 || $this->isMultiValuedKey($keyId)
-                || $this->keyRowCount($keyId) !== $totalDocuments
-                || $this->conditionRowCount($condition) * 2 <= $totalDocuments
             ) {
+                $result[] = $condition;
+                continue;
+            }
+            // The key's rows and the listed values' rows, in one pass over the key's counts.
+            $stmt = $this->stmt(
+                'selectionShare',
+                'SELECT COALESCE(SUM(count), 0),
+                        COALESCE(SUM(CASE WHEN value IN (SELECT value FROM json_each(?)) THEN count END), 0)
+                   FROM facet_counts WHERE key_id = ?'
+            );
+            $stmt->execute([json_encode($values['values']), $keyId]);
+            /** @var array{0: int, 1: int} $rows */
+            $rows = $stmt->fetch(PDO::FETCH_NUM);
+            if ($rows[0] !== $totalDocuments || $rows[1] * 2 <= $totalDocuments) {
                 $result[] = $condition;
                 continue;
             }
@@ -3502,6 +3514,10 @@ class Index
      */
     private function countBrowseDocs(array $conditions, array $match): int
     {
+        if (count($conditions) === 1 && !$conditions[0]['exclude'] && !$conditions[0]['multiRow']) {
+            // One row per matching document: a value list is counted in facet_counts.
+            return $this->conditionRowCount($conditions[0]);
+        }
         $positive   = array_values(array_filter($conditions, fn(array $c): bool => !$c['exclude']));
         $exclusions = array_values(array_filter($conditions, fn(array $c): bool => $c['exclude']));
         if ($positive !== [] && $exclusions !== []) {
