@@ -3564,16 +3564,30 @@ class IndexTest extends TestCase
         $this->assertSame([1], $index->search('"fast sedan"')->getIds());
     }
 
-    public function testProximityRanksWordsInOneFieldAboveWordsSplitAcrossFields(): void
+    public function testProximityRanksWordsInFirstFieldAboveWordsSplitAcrossFields(): void
     {
         $index = new Index($this->dbPath);
         $index->insert([
-            // Both words in the body, next to each other, in a longer document (lower BM25).
-            ['id' => 1, 'title' => 'listing', 'body' => 'red car with a long description of everything'],
-            // "red" ends the title and "car" starts the body: adjacent only across the field boundary.
-            ['id' => 2, 'title' => 'red', 'body' => 'car'],
+            // Both words in the title (first field), adjacent: real proximity span.
+            ['id' => 1, 'title' => 'red car', 'body' => 'generic listing with some other stuff'],
+            // "red" in title, "car" in body: not all in the first field, gets the cross-field span.
+            ['id' => 2, 'title' => 'red listing', 'body' => 'car with some other generic stuff'],
         ]);
 
+        $this->assertSame([1, 2], $index->search('red car', new SearchOptions(asYouType: false))->getIds());
+    }
+
+    public function testProximityBodyAdjacentDoesNotBeatTitleWithGap(): void
+    {
+        // With field-0-only proximity, a body-adjacent match gets the cross-field constant span
+        // (8) while a title match with a gap of 2 gets span 2, so the title doc wins even though
+        // its terms are not adjacent. The old cross-field-aware algorithm would have ranked the
+        // body-adjacent doc higher because span=1 beats span=2.
+        $index = new Index($this->dbPath);
+        $index->insert([
+            ['id' => 1, 'title' => 'red stuff car', 'body' => 'content here'],  // title span = 2
+            ['id' => 2, 'title' => 'other stuff', 'body' => 'red car here'],    // body-adjacent, not in title
+        ]);
         $this->assertSame([1, 2], $index->search('red car', new SearchOptions(asYouType: false))->getIds());
     }
 

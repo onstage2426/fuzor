@@ -117,8 +117,9 @@ class Index
     private const int FIELD_POSITION_STRIDE = 1 << 20;
 
     /**
-     * Distance a proximity window counts per word gap when its words lie in different fields
-     * (applyProximityBoost()): far, but not as far as the positions are apart.
+     * Proximity span assigned to a document when its query terms do not all appear in the first
+     * indexed field (applyProximityBoost()): larger than a typical title match, so title-only
+     * matches always rank above body-only ones. Scaled by (numGroups - 1).
      */
     private const int CROSS_FIELD_SPAN = 8;
 
@@ -5839,15 +5840,17 @@ class Index
     /**
      * Rerank BM25 scores in-place using a proximity factor: 1 / (1 + boost × minSpan).
      *
-     * minSpan is the smallest token-position window (in indexed positions) that contains at
-     * least one occurrence of every query-keyword group. A "group" is the set of term IDs
-     * produced by one keyword — including prefix/fuzzy expansions — so "se" matching
-     * {sedan, seat} counts as a single group, not two independent constraints. A window whose
-     * words lie in different fields counts CROSS_FIELD_SPAN per word gap (each field has its
-     * own position slot, see tokenizeDocumentFields()), so a match inside one field ranks above
-     * one split across fields unless its words are further apart than that.
+     * Only positions in the first indexed field (field 0; positions below FIELD_POSITION_STRIDE)
+     * are considered. If every query-keyword group has at least one hit there, minSpan is the
+     * smallest window covering one occurrence of each group within that field. If any group is
+     * absent from the first field, minSpan is CROSS_FIELD_SPAN × (numGroups − 1) — the same
+     * constant used for cross-field windows — so title matches always rank above body-only ones.
      *
-     * Documents that do not have positions for every group (partial matches) are unchanged.
+     * A "group" is the set of term IDs produced by one keyword — including prefix/fuzzy
+     * expansions — so "se" matching {sedan, seat} counts as a single group.
+     *
+     * Documents that do not have positions for every group anywhere (partial BM25 matches)
+     * are unchanged.
      *
      * @param array<int, float> $docScores  BM25 scores keyed by doc ID; modified in-place.
      * @param list<list<int>>   $termGroups One element per keyword; each is a list of term IDs.
@@ -5873,40 +5876,62 @@ class Index
         $numGroups      = count($termGroups);
         $boost          = $this->config->proximityBoost;
         $crossFieldSpan = self::CROSS_FIELD_SPAN * ($numGroups - 1);
+        $titleLimit     = self::FIELD_POSITION_STRIDE;
 
         foreach ($positions as $docId => $termPositions) {
-            // Partition positions into per-keyword-group buckets.
-            /** @var array<int, list<int>> $groupPositions */
-            $groupPositions = array_fill(0, $numGroups, []);
+            // Collect positions in the first field per group; track whether each group has any
+            // position at all (across all fields) to detect partial BM25 matches.
+            /** @var array<int, list<int>> $firstField */
+            $firstField = array_fill(0, $numGroups, []);
+            /** @var array<int, int> $anyField */
+            $anyField   = array_fill(0, $numGroups, 0);
+
             foreach ($termPositions as $termId => $posList) {
                 $g = $termToGroup[$termId] ?? null;
                 if ($g !== null) {
                     foreach ($posList as $pos) {
-                        $groupPositions[$g][] = $pos;
+                        $anyField[$g] = 1;
+                        if ($pos < $titleLimit) {
+                            $firstField[$g][] = $pos;
+                        }
                     }
                 }
             }
 
             // Skip docs missing positions for any group (partial BM25 matches).
-            foreach ($groupPositions as $gp) {
-                if ($gp === []) {
+            foreach ($anyField as $has) {
+                if (!$has) {
                     continue 2;
                 }
             }
 
-            // Merge all groups' positions into one list sorted by position. Each entry is one
-            // integer, position × numGroups + group, so a native sort() orders it with no PHP
-            // comparison callback (a usort() closure per document cost ~1 ms per 600 documents).
+            // Check whether all groups have a hit in the first field.
+            $allInTitle = true;
+            foreach ($firstField as $gp) {
+                if ($gp === []) {
+                    $allInTitle = false;
+                    break;
+                }
+            }
+
+            if (!$allInTitle) {
+                // Some groups only appear in later fields: assign the cross-field penalty.
+                $docScores[$docId] *= 1.0 / (1.0 + $boost * $crossFieldSpan);
+                continue;
+            }
+
+            // All groups are in the first field: find the smallest window covering each group.
+            // Each entry is position × numGroups + group, so sort() orders by position with no
+            // PHP comparison callback (a usort() closure per document cost ~1 ms per 600 docs).
             /** @var list<int> $merged */
             $merged = [];
-            foreach ($groupPositions as $g => $posList) {
+            foreach ($firstField as $g => $posList) {
                 foreach ($posList as $pos) {
                     $merged[] = $pos * $numGroups + $g;
                 }
             }
             sort($merged);
 
-            // Sliding-window minimum-span: smallest window covering all groups.
             $count   = array_fill(0, $numGroups, 0);
             $have    = 0;
             $left    = 0;
@@ -5920,17 +5945,12 @@ class Index
                 $count[$rightG]++;
 
                 while ($have === $numGroups) {
-                    $leftEntry = $merged[$left];
-                    $leftPos   = intdiv($leftEntry, $numGroups);
-                    $rightPos  = intdiv($right, $numGroups);
-                    // A window across fields would span the gap between their position slots.
-                    $sameField = intdiv($leftPos, self::FIELD_POSITION_STRIDE)
-                        === intdiv($rightPos, self::FIELD_POSITION_STRIDE);
-                    $span      = $sameField ? $rightPos - $leftPos : $crossFieldSpan;
+                    $leftPos = intdiv($merged[$left], $numGroups);
+                    $span    = intdiv($right, $numGroups) - $leftPos;
                     if ($span < $minSpan) {
                         $minSpan = $span;
                     }
-                    $leftG = $leftEntry % $numGroups;
+                    $leftG = $merged[$left] % $numGroups;
                     $count[$leftG]--;
                     if ($count[$leftG] === 0) {
                         $have--;
