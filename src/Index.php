@@ -5849,8 +5849,9 @@ class Index
      * A "group" is the set of term IDs produced by one keyword — including prefix/fuzzy
      * expansions — so "se" matching {sedan, seat} counts as a single group.
      *
-     * Documents that do not have positions for every group anywhere (partial BM25 matches)
-     * are unchanged.
+     * Callers pass full matches only (every group in the document), so only the first field's
+     * positions are read: a range of the positions index per (document, term), which skips
+     * the longer later fields.
      *
      * @param array<int, float> $docScores  BM25 scores keyed by doc ID; modified in-place.
      * @param list<list<int>>   $termGroups One element per keyword; each is a list of term IDs.
@@ -5859,10 +5860,11 @@ class Index
     {
         /** @var list<int> $allTermIds */
         $allTermIds = array_values(array_unique(array_merge(...$termGroups)));
-        $positions  = $this->fetchPositionsForDocs(array_keys($docScores), $allTermIds);
-        if ($positions === []) {
-            return;
-        }
+        $positions  = $this->fetchPositionsForDocs(
+            array_keys($docScores),
+            $allTermIds,
+            self::FIELD_POSITION_STRIDE
+        );
 
         // Invert: term_id → group index, for O(1) lookup in the per-doc loop.
         /** @var array<int, int> $termToGroup */
@@ -5876,36 +5878,18 @@ class Index
         $numGroups      = count($termGroups);
         $boost          = $this->config->proximityBoost;
         $crossFieldSpan = self::CROSS_FIELD_SPAN * ($numGroups - 1);
-        $titleLimit     = self::FIELD_POSITION_STRIDE;
 
-        foreach ($positions as $docId => $termPositions) {
-            // Collect positions in the first field per group; track whether each group has any
-            // position at all (across all fields) to detect partial BM25 matches.
+        foreach ($docScores as $docId => $_) {
+            // Positions in the first field per group.
             /** @var array<int, list<int>> $firstField */
             $firstField = array_fill(0, $numGroups, []);
-            /** @var array<int, int> $anyField */
-            $anyField   = array_fill(0, $numGroups, 0);
-
-            foreach ($termPositions as $termId => $posList) {
+            foreach ($positions[$docId] ?? [] as $termId => $posList) {
                 $g = $termToGroup[$termId] ?? null;
                 if ($g !== null) {
-                    foreach ($posList as $pos) {
-                        $anyField[$g] = 1;
-                        if ($pos < $titleLimit) {
-                            $firstField[$g][] = $pos;
-                        }
-                    }
+                    array_push($firstField[$g], ...$posList);
                 }
             }
 
-            // Skip docs missing positions for any group (partial BM25 matches).
-            foreach ($anyField as $has) {
-                if (!$has) {
-                    continue 2;
-                }
-            }
-
-            // Check whether all groups have a hit in the first field.
             $allInTitle = true;
             foreach ($firstField as $gp) {
                 if ($gp === []) {
@@ -5970,9 +5954,10 @@ class Index
      *
      * @param  list<int> $docIds
      * @param  list<int> $termIds
+     * @param  int|null  $below    Only positions below this one (null = all fields).
      * @return array<int, array<int, list<int>>> doc_id → term_id → sorted position list
      */
-    private function fetchPositionsForDocs(array $docIds, array $termIds): array
+    private function fetchPositionsForDocs(array $docIds, array $termIds, ?int $below = null): array
     {
         if ($docIds === [] || $termIds === []) {
             return [];
@@ -5983,14 +5968,19 @@ class Index
         // arrive grouped by document; each (document, term) pair is one range of the covering
         // positions_doc_id index, in position order. Measured on ecom, 3,400 phrase candidates:
         // 6.1 ms, against 7.8 ms for IN lists and 8.3 ms with the terms as the outer loop.
-        $stmt = $this->stmt(
-            'fetchPositions',
-            'SELECT p.doc_id, p.term_id, p.position
-               FROM json_each(?) d
-               CROSS JOIN positions p ON p.doc_id = d.value
-              WHERE p.term_id IN (SELECT value FROM json_each(?))'
-        );
-        $stmt->execute([json_encode($docIds), json_encode($termIds)]);
+        // With $below, the position bound narrows each range (the index is (doc_id, term_id,
+        // position)), so proximity reads only the first field.
+        $sql = 'SELECT p.doc_id, p.term_id, p.position
+                  FROM json_each(?) d
+                  CROSS JOIN positions p ON p.doc_id = d.value
+                 WHERE p.term_id IN (SELECT value FROM json_each(?))';
+        $params = [json_encode($docIds), json_encode($termIds)];
+        if ($below !== null) {
+            $sql     .= ' AND p.position < ?';
+            $params[] = $below;
+        }
+        $stmt = $this->stmt($below === null ? 'fetchPositions' : 'fetchPositionsBelow', $sql);
+        $stmt->execute($params);
 
         /** @var array<int, array<int, list<int>>> $result */
         $result = [];
