@@ -931,19 +931,20 @@ class IndexTest extends TestCase
         return $positions;
     }
 
-    public function testValueOfAnotherTypeIsReindexed(): void
+    public function testValueOfAnotherTypeWithTheSameWordsWritesNoTermRows(): void
     {
+        // 7 and '7' are different input, so the document is compared row by row: same rows.
         $index = new Index($this->dbPath, schema: new SchemaConfig(searchableFields: ['code']));
         $index->insert([['id' => 1, 'code' => 7], ['id' => 2, 'code' => 8]]);
         $this->countPostingWrites();
 
         $index->update([['id' => 1, 'code' => '7']]);
 
-        $this->assertGreaterThan(0, $this->postingWrites());
+        $this->assertSame(0, $this->postingWrites());
         $this->assertSame([1], $index->search('7')->getIds());
     }
 
-    public function testWithoutStoreEveryUpdateIsReindexed(): void
+    public function testWithoutStoreAPriceOnlyUpdateWritesNoTermRows(): void
     {
         $index = $this->catalogIndex(store: false);
         $this->countPostingWrites();
@@ -952,8 +953,151 @@ class IndexTest extends TestCase
             ['id' => 1, 'title' => 'red sedan', 'body' => 'fast city car', 'price' => 150, 'color' => 'red'],
         ]);
 
-        $this->assertGreaterThan(0, $this->postingWrites());
+        $this->assertSame(0, $this->postingWrites());
         $this->assertSame([1], $index->search('sedan', new SearchOptions(filter: ['price' => '150']))->getIds());
+    }
+
+    /** @return array<string, array{0: bool, 1: int}> */
+    public static function editedDocumentProvider(): array
+    {
+        return [
+            'single, store'    => [true, 1],
+            'single, no store' => [false, 1],
+            'bulk, store'      => [true, 2],
+            'bulk, no store'   => [false, 2],
+        ];
+    }
+
+    #[DataProvider('editedDocumentProvider')]
+    public function testAWordAddedToTheTitleWritesOnlyItsOwnRows(bool $store, int $docs): void
+    {
+        $index = $this->catalogIndex(store: $store);
+        $this->countPostingWrites();
+
+        $batch = [
+            ['id' => 1, 'title' => 'red sedan deluxe', 'body' => 'fast city car', 'price' => 100, 'color' => 'red'],
+        ];
+        if ($docs > 1) {
+            $batch[] = ['id' => 2, 'title' => 'blue coupe', 'body' => 'sporty car', 'price' => 210, 'color' => 'blue'];
+        }
+        $index->update($batch);
+
+        // One word list row, and the new word's doclist, positions and field_hits rows.
+        $this->assertSame(4, $this->postingWrites());
+        $this->assertSame([1], $index->search('deluxe')->getIds());
+        $this->assertSame([1], $index->search('"fast city car"')->getIds());
+    }
+
+    #[DataProvider('editedDocumentProvider')]
+    public function testAWordRemovedFromItsOnlyDocumentLeavesTheWordList(bool $store, int $docs): void
+    {
+        $index = $this->catalogIndex(store: $store);
+        $green = ['id' => 3, 'title' => 'green van', 'body' => 'light load', 'price' => 300, 'color' => 'green'];
+        $extra = [['id' => 2, 'title' => 'blue coupe', 'body' => 'sporty car', 'price' => 220, 'color' => 'blue']];
+
+        $index->update($docs > 1 ? [$green, ...$extra] : [$green]);
+
+        $this->assertSame(0, $this->scalarQuery("SELECT COUNT(*) FROM wordlist WHERE term IN ('truck', 'heavy')"));
+        $this->assertSame([], $index->search('truck')->getIds());
+
+        // The pruned word comes back under a new ID.
+        $index->update([
+            ['id' => 3, 'title' => 'green truck', 'body' => 'heavy load', 'price' => 300, 'color' => 'green'],
+        ]);
+        $this->assertSame([3], $index->search('truck')->getIds());
+        $this->assertSame([3], $index->search('"heavy load"')->getIds());
+    }
+
+    /**
+     * Random edits through update() / upsert(), one and many documents at a time, with and
+     * without a store: the term-index tables must end up exactly as an index built from the
+     * final documents.
+     */
+    #[DataProvider('editedDocumentProvider')]
+    public function testRewrittenTermRowsMatchAFreshIndex(bool $store, int $_): void
+    {
+        $words = ['red', 'blue', 'car', 'fast', 'city', 'sedan', 'van', 'big', 'small', 'road', 'old', 'new'];
+        mt_srand(42);
+        $text = function (int $min, int $max) use ($words): string {
+            $n = mt_rand($min, $max);
+            $out = [];
+            for ($i = 0; $i < $n; $i++) {
+                $out[] = $words[mt_rand(0, count($words) - 1)];
+            }
+            return implode(' ', $out);
+        };
+        $schema = new SchemaConfig(store: $store, filterableFields: ['color'], searchableFields: ['title', 'body']);
+        $docs   = [];
+        for ($id = 1; $id <= 20; $id++) {
+            $docs[$id] = ['id' => $id, 'title' => $text(1, 3), 'body' => $text(0, 8), 'color' => 'c' . ($id % 3)];
+        }
+        $index = new Index($this->dbPath, schema: $schema);
+        $index->insert(array_values($docs));
+        for ($round = 0; $round < 8; $round++) {
+            $batch = [];
+            foreach ((array) array_rand($docs, mt_rand(1, 6)) as $id) {
+                $doc = $docs[$id];
+                match (mt_rand(0, 3)) {
+                    0 => $doc['title'] .= ' ' . $text(1, 1),
+                    1 => $doc['body'] = $text(0, 8),
+                    2 => $doc['title'] = $text(1, 3),
+                    default => $doc['color'] = 'c' . mt_rand(0, 5),
+                };
+                $docs[$id] = $doc;
+                $batch[]   = $doc;
+            }
+            // A new document now and then, first in the batch so it goes through upsert().
+            if ($round % 3 === 0) {
+                $id        = 100 + $round;
+                $docs[$id] = ['id' => $id, 'title' => $text(1, 3), 'body' => $text(0, 8), 'color' => 'c1'];
+                array_unshift($batch, $docs[$id]);
+            }
+            $round % 2 === 0 ? $index->upsert($batch) : $index->upsert(array_slice($batch, 0, 1));
+            if ($round % 2 === 1) {
+                $index->update(array_slice($batch, 1));
+            }
+        }
+        $index->close();
+        $edited = $this->termIndexContent($this->dbPath);
+
+        $freshPath = $this->dbPath . '.fresh';
+        $fresh     = new Index($freshPath, schema: $schema);
+        $fresh->insert(array_values($docs));
+        $fresh->close();
+        $expected = $this->termIndexContent($freshPath);
+        Index::remove($freshPath);
+
+        $this->assertSame($expected, $edited);
+    }
+
+    /** @return array<string, list<string>> term-index rows by term text, sorted */
+    private function termIndexContent(string $path): array
+    {
+        $pdo     = new \PDO('sqlite:' . $path);
+        $queries = [
+            'wordlist'   => 'SELECT term, num_hits, num_docs FROM wordlist',
+            'doclist'    => 'SELECT w.term, d.doc_id, d.hit_count FROM doclist d JOIN wordlist w ON w.id = d.term_id',
+            'positions'  => 'SELECT w.term, p.doc_id, p.position FROM positions p JOIN wordlist w ON w.id = p.term_id',
+            'field_hits' => 'SELECT w.term, f.doc_id, n.name, f.hit_count FROM field_hits f'
+                . ' JOIN wordlist w ON w.id = f.term_id JOIN field_names n ON n.id = f.field_id',
+            'orphans'    => 'SELECT d.term_id FROM doclist d'
+                . ' LEFT JOIN wordlist w ON w.id = d.term_id WHERE w.id IS NULL',
+            'lengths'    => 'SELECT doc_id, length FROM doc_lengths',
+        ];
+        $content = [];
+        foreach ($queries as $name => $sql) {
+            $stmt = $pdo->query($sql);
+            $this->assertNotFalse($stmt);
+            $rows = [];
+            /** @var list<list<int|string>> $fetched */
+            $fetched = $stmt->fetchAll(\PDO::FETCH_NUM);
+            foreach ($fetched as $row) {
+                $rows[] = implode('|', $row);
+            }
+            sort($rows);
+            $content[$name] = $rows;
+        }
+        return $content;
     }
 
     // --- upsert ---

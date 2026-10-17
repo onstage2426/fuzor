@@ -1746,25 +1746,23 @@ class Index
         $this->wrapInTransaction(function () use ($document, $strict): void {
             $id = $this->extractId($document['id']);
             $this->purgeDeletedAmong([$id]);
-            if ($this->documentStoreEnabled) {
-                $kept = $this->unchangedSearchableLengths([$document], $this->fetchDocLengthsForDocs([$id]));
-                if ($kept !== []) {
-                    $this->removeDocumentRows([$id]);
-                    $this->processDocument($document, $kept[$id]);
-                    return;
-                }
-            }
-            $oldLength = $this->removeDocumentData($id);
-
-            if ($oldLength === null) {
+            $oldLengths = $this->fetchDocLengthsForDocs([$id]);
+            if ($oldLengths === []) {
                 if ($strict) {
                     throw new QueryException("Document {$id} does not exist. Use upsert() to create or replace it.");
                 }
-                $newLength = $this->processDocument($document);
-                $this->adjustStats(1, $newLength);
-            } else {
-                $newLength = $this->processDocument($document);
-                $this->adjustStats(0, $newLength - $oldLength);
+                $this->adjustStats(1, $this->processDocument($document));
+                return;
+            }
+            // As in replaceChunk(): keep the term-index rows, rewriting only those that change.
+            $kept      = $this->documentStoreEnabled
+                ? $this->unchangedSearchableLengths([$document], $oldLengths)
+                : [];
+            $newLength = $kept[$id] ?? $this->rewritePostings([$id => $document])[$id];
+            $this->removeDocumentRows([$id]);
+            $this->processDocument($document, $newLength);
+            if ($newLength !== $oldLengths[$id]) {
+                $this->adjustStats(0, $newLength - $oldLengths[$id]);
             }
         });
     }
@@ -1873,17 +1871,23 @@ class Index
             }
         }
 
-        // Remove the documents that exist; those whose searchable input is unchanged keep their
-        // term-index rows.
+        // Documents that exist keep their term-index rows: unchanged searchable input keeps all
+        // of them, changed input rewrites only the rows that differ (rewritePostings()). Their
+        // per-document rows are written again below, with the length they now have.
         $existingIds = array_keys($oldLengths);
         $kept        = $this->unchangedSearchableLengths($chunk, $oldLengths);
-        if ($kept !== []) {
-            $this->removeDocumentRows(array_keys($kept));
+        /** @var array<int, array<string, mixed>> $changed last occurrence of each ID wins */
+        $changed = [];
+        foreach ($chunk as $document) {
+            $id = $this->extractId($document['id']);
+            if (isset($oldLengths[$id]) && !isset($kept[$id])) {
+                $changed[$id] = $document;
+            }
         }
-        $changedIds = array_values(array_diff($existingIds, array_keys($kept)));
-        if ($changedIds !== []) {
-            $this->bulkRemoveDocuments($changedIds);
+        if ($existingIds !== []) {
+            $this->removeDocumentRows($existingIds);
         }
+        $known = $kept + ($changed === [] ? [] : $this->rewritePostings($changed));
 
         // Write the chunk with the same two-phase path as insertMany().
         ['wordHits'          => $wordHits,
@@ -1894,7 +1898,7 @@ class Index
          'facetBuffer'       => $facetBuffer,
          'multiValuedFacets' => $multiValuedFacets,
          'rawDocuments'      => $rawDocuments,
-         'fieldTermBuffer'   => $fieldTermBuffer] = $this->buildBatchBuffer($chunk, knownLengths: $kept);
+         'fieldTermBuffer'   => $fieldTermBuffer] = $this->buildBatchBuffer($chunk, knownLengths: $known);
 
         $totalNewLength = $this->flushBatch(
             $wordHits,
@@ -4004,20 +4008,6 @@ class Index
     // --- Private write helpers ----------------------------------------------
 
     /**
-     * Remove a set of live documents from the index in bulk without adjusting total_documents or avg_doc_length.
-     *
-     * Equivalent to calling removeDocumentData() in a loop but issues one CTE-based UPDATE and a handful
-     * of bulk DELETEs per chunk rather than 5 individual prepared statements per document.
-     *
-     * @param list<int> $ids Document IDs to remove; all must exist in the index.
-     */
-    private function bulkRemoveDocuments(array $ids): void
-    {
-        $this->purgePostings($ids);
-        $this->removeDocumentRows($ids);
-    }
-
-    /**
      * Remove the per-document rows of documents: doc_lengths, the stored document, facet_values
      * (with their facet_counts) and sort_keys. Their term-index rows are left to purgePostings().
      *
@@ -4097,6 +4087,325 @@ class Index
         $this->hasDeleted    = null;
     }
 
+    /**
+     * Bring the term-index rows of existing documents in line with their new searchable input,
+     * touching only rows that change: doclist and field_hits rows whose term or hit count
+     * differs, positions that moved, and the per-term counts of the terms involved (terms left
+     * without hits are pruned). The per-document rows are not written here.
+     *
+     * Rewriting every row of a changed document costs pages in each B-tree its terms touch;
+     * an edit usually changes a few terms of one field, and each field has its own position
+     * slot (tokenizeDocumentFields()). Measured on the 45k ecom set, one word appended to the
+     * title of 200 documents: 9,300 WAL pages rewritten, about 2,300 with only the changes.
+     *
+     * @param  array<int, array<string, mixed>> $documents Doc ID → new document; all exist and
+     *                                                     none is in deleted_docs.
+     * @return array<int, int>                             Doc ID → new length.
+     */
+    private function rewritePostings(array $documents): array
+    {
+        $ids = array_keys($documents);
+        sort($ids);
+        $idsJson = json_encode($ids);
+
+        /** @var array<int, array{termCounts: array<string, int>, fieldTermCounts: array<string, array<string, int>>, termPositions: array<string, list<int>>, length: int}> $new */
+        $new   = [];
+        $terms = [];
+        foreach ($documents as $id => $document) {
+            $new[$id] = $this->tokenizeDocumentFields($document);
+            $terms   += $new[$id]['termCounts'];
+        }
+
+        // Term IDs of the new terms; terms the word list does not have yet are inserted below.
+        /** @var array<string, int> $termIds */
+        $termIds = [];
+        $unknown = [];
+        foreach ($terms as $term => $_) {
+            $term = (string) $term;
+            if (isset($this->termIdCache[$term])) {
+                $termIds[$term] = $this->termIdCache[$term];
+            } else {
+                $unknown[] = $term;
+            }
+        }
+        if ($unknown !== []) {
+            $stmt = $this->stmt(
+                'termIdsByTerm',
+                'SELECT term, id FROM wordlist WHERE term IN (SELECT value FROM json_each(?))'
+            );
+            $stmt->execute([json_encode($unknown)]);
+            /** @var array<string, int> $found */
+            $found    = $stmt->fetchAll(PDO::FETCH_KEY_PAIR);
+            $termIds += $found;
+        }
+
+        // The doclist rows the documents have now.
+        /** @var array<int, array<int, int>> $oldHits doc → term ID → hit count */
+        $oldHits = [];
+        $stmt = $this->stmt(
+            'postingDiffDoclist',
+            'SELECT doc_id, term_id, hit_count FROM doclist WHERE doc_id IN (SELECT value FROM json_each(?))'
+        );
+        $stmt->execute([$idsJson]);
+        /** @var list<array{0: int, 1: int, 2: int}> $rows */
+        $rows = $stmt->fetchAll(PDO::FETCH_NUM);
+        foreach ($rows as [$docId, $termId, $hits]) {
+            $oldHits[$docId][$termId] = $hits;
+        }
+
+        // Terms new to the word list get their counts on insert.
+        /** @var array<string, array{0: int, 1: int}> $newTerms term → [hits, docs] */
+        $newTerms = [];
+        foreach ($new as $tokens) {
+            foreach ($tokens['termCounts'] as $term => $hits) {
+                $term = (string) $term;
+                if (!isset($termIds[$term])) {
+                    $newTerms[$term] = [($newTerms[$term][0] ?? 0) + $hits, ($newTerms[$term][1] ?? 0) + 1];
+                }
+            }
+        }
+        if ($newTerms !== []) {
+            $rows = [];
+            foreach ($newTerms as $term => [$hits, $docs]) {
+                $rows[] = [$term, $hits, $docs];
+            }
+            $stmt = $this->stmt(
+                'postingDiffNewTerms',
+                'INSERT INTO wordlist (term, num_hits, num_docs)
+                 SELECT value ->> 0, value ->> 1, value ->> 2 FROM json_each(?) RETURNING term, id'
+            );
+            $stmt->execute([json_encode($rows)]);
+            /** @var array<string, int> $inserted */
+            $inserted = $stmt->fetchAll(PDO::FETCH_KEY_PAIR);
+            $termIds += $inserted;
+        }
+        foreach ($termIds as $term => $termId) {
+            $this->termIdCache[(string) $term] = $termId;
+        }
+        /** @var array<int, true> $insertedIds terms whose counts were written on insert */
+        $insertedIds = [];
+        foreach ($newTerms as $term => $_) {
+            $insertedIds[$termIds[(string) $term]] = true;
+        }
+
+        // Per document: the per-term count changes, the doclist rows that differ, and whether to
+        // rewrite the document whole. When more of its terms change than stay, one delete by
+        // document and every new row costs less than a seek per changed row (a full text change
+        // of 200 documents measured 870 ms diffed against 760 ms rewritten), and its positions and
+        // field hits are not read at all.
+        /** @var array<int, array{0: int, 1: int}> $wordDeltas term ID → [hits, docs] for terms that existed */
+        $wordDeltas = [];
+        $rewrite       = [];
+        $diffed        = [];
+        $doclistDelete = [];
+        $doclistUpdate = [];
+        /** @var array<int, array<int, int>> $doclistInsert term ID → doc → hits */
+        $doclistInsert = [];
+        $lengths       = [];
+        foreach ($new as $docId => $tokens) {
+            $lengths[$docId] = $tokens['length'];
+            $before          = $oldHits[$docId] ?? [];
+            $after           = [];
+            foreach ($tokens['termCounts'] as $term => $hits) {
+                $after[$termIds[(string) $term]] = $hits;
+            }
+            $kept    = 0;
+            $deletes = [];
+            $updates = [];
+            foreach ($before as $termId => $hits) {
+                if (!isset($after[$termId])) {
+                    $deletes[]           = [$termId, $docId];
+                    $wordDeltas[$termId] = [
+                        ($wordDeltas[$termId][0] ?? 0) - $hits,
+                        ($wordDeltas[$termId][1] ?? 0) - 1,
+                    ];
+                }
+            }
+            foreach ($after as $termId => $hits) {
+                $was = $before[$termId] ?? null;
+                if ($was === $hits) {
+                    $kept++;
+                    continue;
+                }
+                if ($was !== null) {
+                    $updates[] = [$termId, $docId, $hits];
+                }
+                if (!isset($insertedIds[$termId])) {
+                    $wordDeltas[$termId] = [
+                        ($wordDeltas[$termId][0] ?? 0) + $hits - ($was ?? 0),
+                        ($wordDeltas[$termId][1] ?? 0) + ($was === null ? 1 : 0),
+                    ];
+                }
+            }
+            $added = count($after) - $kept - count($updates);
+            if (count($deletes) + count($updates) + $added > $kept) {
+                $rewrite[] = $docId;
+                foreach ($after as $termId => $hits) {
+                    $doclistInsert[$termId][$docId] = $hits;
+                }
+                continue;
+            }
+            $diffed[] = $docId;
+            array_push($doclistDelete, ...$deletes);
+            array_push($doclistUpdate, ...$updates);
+            foreach ($after as $termId => $hits) {
+                if (!isset($before[$termId])) {
+                    $doclistInsert[$termId][$docId] = $hits;
+                }
+            }
+        }
+
+        // Positions and field hits: every row for rewritten documents, the differences for the rest.
+        /** @var array<int, array<int, array<int, true>>> $oldPositions doc → term ID → position set */
+        $oldPositions = [];
+        /** @var array<int, array<int, array<int, int>>> $oldFieldHits doc → term ID → field ID → hit count */
+        $oldFieldHits = [];
+        if ($diffed !== []) {
+            $diffedJson = json_encode($diffed);
+            $stmt = $this->stmt(
+                'postingDiffPositions',
+                'SELECT doc_id, term_id, position FROM positions WHERE doc_id IN (SELECT value FROM json_each(?))'
+            );
+            $stmt->execute([$diffedJson]);
+            /** @var list<array{0: int, 1: int, 2: int}> $rows */
+            $rows = $stmt->fetchAll(PDO::FETCH_NUM);
+            foreach ($rows as [$docId, $termId, $position]) {
+                $oldPositions[$docId][$termId][$position] = true;
+            }
+            $stmt = $this->stmt(
+                'postingDiffFieldHits',
+                'SELECT doc_id, term_id, field_id, hit_count FROM field_hits
+                  WHERE doc_id IN (SELECT value FROM json_each(?))'
+            );
+            $stmt->execute([$diffedJson]);
+            /** @var list<array{0: int, 1: int, 2: int, 3: int}> $rows */
+            $rows = $stmt->fetchAll(PDO::FETCH_NUM);
+            foreach ($rows as [$docId, $termId, $fieldId, $hits]) {
+                $oldFieldHits[$docId][$termId][$fieldId] = $hits;
+            }
+        }
+        $rewriting      = array_flip($rewrite);
+        $positionDelete = [];
+        /** @var array<int, array<int, list<int>>> $positionInsert term ID → doc → positions */
+        $positionInsert = [];
+        $fieldDelete    = [];
+        $fieldUpdate    = [];
+        /** @var array<int, array<int, array<int, int>>> $fieldInsert term ID → doc → field ID → hits */
+        $fieldInsert    = [];
+        foreach ($new as $docId => $tokens) {
+            $whole  = isset($rewriting[$docId]);
+            $oldPos = $oldPositions[$docId] ?? [];
+            foreach ($tokens['termPositions'] as $term => $positions) {
+                $termId = $termIds[(string) $term];
+                foreach ($positions as $position) {
+                    if ($whole || !isset($oldPos[$termId][$position])) {
+                        $positionInsert[$termId][$docId][] = $position;
+                    } else {
+                        unset($oldPos[$termId][$position]);
+                    }
+                }
+            }
+            foreach ($oldPos as $termId => $positions) {
+                foreach ($positions as $position => $_) {
+                    $positionDelete[] = [$termId, $docId, $position];
+                }
+            }
+            $oldFields = $oldFieldHits[$docId] ?? [];
+            foreach ($tokens['fieldTermCounts'] as $fieldName => $fieldTerms) {
+                $fieldId = $this->resolveFieldNameId((string) $fieldName);
+                foreach ($fieldTerms as $term => $hits) {
+                    $termId = $termIds[(string) $term];
+                    $was    = $oldFields[$termId][$fieldId] ?? null;
+                    unset($oldFields[$termId][$fieldId]);
+                    if ($whole || $was === null) {
+                        $fieldInsert[$termId][$docId][$fieldId] = $hits;
+                    } elseif ($was !== $hits) {
+                        $fieldUpdate[] = [$termId, $docId, $fieldId, $hits];
+                    }
+                }
+            }
+            foreach ($oldFields as $termId => $fields) {
+                foreach ($fields as $fieldId => $_) {
+                    $fieldDelete[] = [$termId, $docId, $fieldId];
+                }
+            }
+        }
+
+        if ($rewrite !== []) {
+            $rewriteJson = json_encode($rewrite);
+            foreach (['doclist', 'positions', 'field_hits'] as $table) {
+                $this->stmt(
+                    "postingRewrite:{$table}",
+                    "DELETE FROM {$table} WHERE doc_id IN (SELECT value FROM json_each(?))"
+                )->execute([$rewriteJson]);
+            }
+        }
+        $this->runPostingDiff('doclistDiffDelete', 'DELETE FROM doclist
+            WHERE (term_id, doc_id) IN (SELECT value ->> 0, value ->> 1 FROM json_each(?))', $doclistDelete);
+        $this->runPostingDiff('doclistDiffUpdate', 'UPDATE doclist SET hit_count = j.value ->> 2
+            FROM json_each(?) j
+            WHERE doclist.term_id = j.value ->> 0 AND doclist.doc_id = j.value ->> 1', $doclistUpdate);
+        $this->runPostingDiff('positionsDiffDelete', 'DELETE FROM positions
+            WHERE (term_id, doc_id, position) IN
+                  (SELECT value ->> 0, value ->> 1, value ->> 2 FROM json_each(?))', $positionDelete);
+        $this->runPostingDiff('fieldHitsDiffDelete', 'DELETE FROM field_hits
+            WHERE (term_id, doc_id, field_id) IN
+                  (SELECT value ->> 0, value ->> 1, value ->> 2 FROM json_each(?))', $fieldDelete);
+        $this->runPostingDiff('fieldHitsDiffUpdate', 'UPDATE field_hits SET hit_count = j.value ->> 3
+            FROM json_each(?) j
+            WHERE field_hits.term_id = j.value ->> 0 AND field_hits.doc_id = j.value ->> 1
+              AND field_hits.field_id = j.value ->> 2', $fieldUpdate);
+        if ($doclistInsert !== []) {
+            $this->bulkInsertDoclistRows($doclistInsert);
+        }
+        if ($positionInsert !== []) {
+            $this->bulkInsertPositionRows($positionInsert);
+        }
+        if ($fieldInsert !== []) {
+            $this->bulkInsertFieldHitRows($fieldInsert);
+        }
+
+        $deltaRows = [];
+        $shrunk    = [];
+        foreach ($wordDeltas as $termId => [$hits, $docs]) {
+            if ($hits !== 0 || $docs !== 0) {
+                $deltaRows[] = [$termId, $hits, $docs];
+            }
+            if ($hits < 0) {
+                $shrunk[] = $termId;
+            }
+        }
+        $this->runPostingDiff('wordlistDiffUpdate', 'UPDATE wordlist
+            SET num_hits = num_hits + (j.value ->> 1), num_docs = num_docs + (j.value ->> 2)
+            FROM json_each(?) j WHERE wordlist.id = j.value ->> 0', $deltaRows);
+        if ($shrunk !== []) {
+            $stmt = $this->stmt(
+                'wordlistDiffPrune',
+                'DELETE FROM wordlist WHERE num_hits <= 0 AND id IN (SELECT value FROM json_each(?))'
+            );
+            $stmt->execute([json_encode($shrunk)]);
+            if ($stmt->rowCount() > 0) {
+                $this->termIdCache = [];
+            }
+        }
+        // Per-term counts changed even when the documents' lengths did not.
+        $this->wordlistCache = [];
+
+        return $lengths;
+    }
+
+    /**
+     * Run one statement of rewritePostings() with its rows as a JSON list; nothing when empty.
+     *
+     * @param list<list<int>> $rows
+     */
+    private function runPostingDiff(string $key, string $sql, array $rows): void
+    {
+        if ($rows !== []) {
+            $this->stmt($key, $sql)->execute([json_encode($rows)]);
+        }
+    }
+
     /** Whether any deleted document still has term-index rows; probed once, then cached (see $hasDeleted). */
     private function hasDeleted(): bool
     {
@@ -4173,92 +4482,6 @@ class Index
         }
     }
 
-    /**
-     * Remove a document's index data (wordlist stats, doclist rows, positions rows, and
-     * doc_lengths) without touching total_documents or avg_doc_length. Returns the
-     * document's token length, or null if the document was not found.
-     *
-     * @param  int      $documentId ID of the document to remove.
-     * @return int|null             Token length of the removed document, or null if not found.
-     */
-    private function removeDocumentData(int $documentId): ?int
-    {
-        // 1. Decrement wordlist stats for every term this document contributed.
-        // UPDATE … FROM (SQLite 3.33+) joins once rather than running a correlated subquery per row.
-        /** @infection-ignore-all MethodCallRemoval,ArrayItemRemoval: skipping execute() or omitting the :documentId param leaves wordlist num_docs/num_hits inflated; doclist rows are still removed in step 4, so search results are unaffected (BM25-scoring stats only) */
-        $this->stmt(
-            'wordlistDecrementByDoc',
-            'WITH doc_terms AS (
-                 SELECT term_id, hit_count FROM doclist WHERE doc_id = :documentId
-             )
-             UPDATE wordlist SET
-                 num_docs = num_docs - 1,
-                 num_hits = num_hits - doc_terms.hit_count
-             FROM doc_terms
-             WHERE wordlist.id = doc_terms.term_id'
-        )->execute([':documentId' => $documentId]);
-
-        // 2. Prune any term whose hit count reached zero.
-        // Scoped to terms belonging to this document via doc_id_index. The doclist rows still
-        // exist at this point (step 4 removes them), so the subquery is valid. SQLite serialises
-        // writers, so no concurrent operation can produce new orphans for other terms between
-        // steps 1 and 2; limiting to this document's terms avoids a full wordlist table scan.
-        /** @infection-ignore-all MethodCallRemoval,ArrayItemRemoval: orphan pruning is a housekeeping step; stale wordlist entries without doclist rows produce empty fetch results */
-        $this->stmt(
-            'wordlistDeleteOrphans',
-            'DELETE FROM wordlist WHERE num_hits <= 0
-             AND id IN (SELECT term_id FROM doclist WHERE doc_id = :documentId)'
-        )->execute([':documentId' => $documentId]);
-
-        // 3. Remove doclist rows for this document.
-        $this->stmt('doclistDeleteByDoc', 'DELETE FROM doclist WHERE doc_id = :documentId')
-            ->execute([':documentId' => $documentId]);
-
-        // 4. Remove positions rows for this document.
-        $this->stmt('positionsDeleteByDoc', 'DELETE FROM positions WHERE doc_id = :documentId')
-            ->execute([':documentId' => $documentId]);
-
-        // 5. Remove facet rows for this document.
-        $removed = $this->stmt(
-            'facetValuesDeleteByDoc',
-            'DELETE FROM facet_values WHERE doc_id = :documentId RETURNING key_id, value, num_value'
-        );
-        $removed->execute([':documentId' => $documentId]);
-        /** @var list<array{0: int, 1: string, 2: float|null}> $removedRows */
-        $removedRows = $removed->fetchAll(PDO::FETCH_NUM);
-        if ($removedRows !== []) {
-            $this->adjustFacetCounts(self::facetCountDeltas($removedRows, -1));
-        }
-        $this->stmt('sortKeysDeleteByDoc', 'DELETE FROM sort_keys WHERE doc_id = :documentId')
-            ->execute([':documentId' => $documentId]);
-
-        // 6. Remove field_hits rows for this document.
-        $this->stmt('fieldHitsDeleteByDoc', 'DELETE FROM field_hits WHERE doc_id = :documentId')
-            ->execute([':documentId' => $documentId]);
-
-        // 7. Remove doc_lengths and return the old token count (null if the document was not found).
-        $delStmt = $this->stmt(
-            'docLengthsDelete',
-            'DELETE FROM doc_lengths WHERE doc_id = :documentId RETURNING length'
-        );
-        $delStmt->execute([':documentId' => $documentId]);
-        $length = $delStmt->fetchColumn();
-        $delStmt->closeCursor();
-
-        // Orphan terms may have been pruned from wordlist; stale cache entries would
-        // corrupt the doclist on re-insertion of those terms in a future insertMany call.
-        /** @infection-ignore-all MethodCallRemoval: skipping cache invalidation leaves stale termId/wordlist entries; visible only on delete+re-insert within the same session (not covered by tests) */
-        $this->termIdCache   = [];
-        $this->wordlistCache = [];
-
-        if ($this->documentStoreEnabled) {
-            $this->stmt('documentDelete', 'DELETE FROM documents WHERE doc_id = :documentId')
-                ->execute([':documentId' => $documentId]);
-        }
-
-        /** @infection-ignore-all NullValue,CastInt: the NullValue branch is only reached when $length is false (doc not found); CastInt: $length from RETURNING is already int-like */
-        return $length === false ? null : (int) $length;
-    }
 
     /**
      * Tokenise all non-id fields of a document and accumulate per-term counts and positions.
@@ -5405,7 +5628,7 @@ class Index
         // Keep infoCache coherent so the next getInfoValues() call needs no DB read.
         // wordlistCache must be cleared: num_hits/num_docs on wordlist rows changed.
         // termIdCache is stable after a stats-only write; IDs only become stale when
-        // terms are pruned, which removeDocumentData() handles directly.
+        // terms are pruned, which purgePostings() and rewritePostings() handle directly.
         $this->infoCache = [
             'total_documents' => (string) $newN,
             /** @infection-ignore-all CastString: infoCache stores strings for consistency with PDO fetch; float stored in cache is coerced to string on next read */
@@ -8212,7 +8435,7 @@ class Index
     /**
      * Run $fn inside a transaction, committing on success and rolling back on exception.
      *
-     * When already inside a transaction (e.g. replaceMany() calling bulkRemoveDocuments()),
+     * When already inside a transaction (e.g. replaceMany() calling replaceOne()),
      * the callback runs in the existing transaction rather than starting a nested one.
      *
      * Uses BEGIN IMMEDIATE (issued via exec(), since PDO's transaction API only emits a
