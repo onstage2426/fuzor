@@ -7622,6 +7622,55 @@ class IndexTest extends TestCase
         }
     }
 
+    public function testBudgetedSortedBrowseWalkMatchesTheReference(): void
+    {
+        // A sorted browse walks the sort field's index while the expected walk is short, and
+        // stops after SORTED_WALK_ROWS_PER_MATCH rows per match (here 2 × 60 = 120) to
+        // materialise instead. Group x holds the 60 highest prices, so price:asc pages cut the
+        // walk after 120 rows of group y and fall back; price:desc fills within the budget. Its
+        // documents also carry string sizes and missing sizes, so the size walk crosses phases.
+        $index = new Index($this->dbPath, schema: new SchemaConfig(
+            filterableFields: ['group', 'size', 'price'],
+            sortableFields: ['price', 'size', 'group'],
+        ));
+        $docs = [];
+        for ($i = 1; $i <= 200; $i++) {
+            $doc = ['id' => $i, 'title' => 'product', 'price' => $i, 'group' => $i > 140 ? 'x' : 'y'];
+            $size = match ($i % 4) {
+                0 => $i % 9,
+                1 => ['S', 'm', 'L'][$i % 3],
+                2 => null,
+                default => [$i % 5, 'XL'],
+            };
+            if ($size !== null) {
+                $doc['size'] = $size;
+            }
+            $docs[] = $doc;
+        }
+        $index->insert($docs);
+
+        $filters = [
+            ['group' => 'x'],
+            ['group' => 'y'],
+            ['group' => 'x', 'price' => FacetRange::min(150)],
+            ['group' => new FacetExclude('y')],
+        ];
+        $sorts   = [['price:asc'], ['price:desc'], ['size:asc'], ['size:desc', 'price:asc'], ['group:asc', 'size:asc']];
+        $pages   = [[0, 5], [10, 5], [55, 10], [0, 200]];
+        foreach ($filters as $filter) {
+            foreach ($sorts as $sort) {
+                foreach ($pages as [$offset, $limit]) {
+                    $options  = new SearchOptions(filter: $filter, sort: $sort, offset: $offset, limit: $limit);
+                    $label    = json_encode([$filter, $sort, $offset, $limit]);
+                    $expected = $index->searchBoolean('product', $options);
+                    $actual   = $index->search('', $options);
+                    $this->assertSame($expected->getIds(), $actual->getIds(), "ids {$label}");
+                    $this->assertSame($expected->totalHits, $actual->totalHits, "total {$label}");
+                }
+            }
+        }
+    }
+
     public function testRangeRowCountFromFacetCountsMatchesTheRows(): void
     {
         // conditionRowCount() sums a range from facet_counts: only the numeric rows of the

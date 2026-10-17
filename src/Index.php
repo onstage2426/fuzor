@@ -139,6 +139,20 @@ class Index
     private const float SORT_VALUE_SCAN_SHARE = 0.4;
 
     /**
+     * A sorted filtered browse walks the sort field's index while it expects to read at most this
+     * many index rows per matching document, and materialises the matches otherwise; the walk
+     * also stops after that many rows and falls back, so a page costs at most about twice the
+     * materialised one. The ratio is the cost of a materialised match over a walked row, which
+     * depends on the first probe: a single value is one seek into its adjacent primary key rows.
+     * Measured on 1.43M amazon products: materialised 0.57–0.95 µs per match; walked row 0.36–0.40
+     * µs with a single value first, 1.17–1.38 µs with a value list, a range or an exclusion.
+     */
+    private const float SORTED_WALK_ROWS_PER_MATCH = 1.5;
+
+    /** See SORTED_WALK_ROWS_PER_MATCH: the first probe is a value list, a range or an exclusion. */
+    private const float SORTED_WALK_ROWS_PER_MATCH_SLOW_PROBE = 0.6;
+
+    /**
      * delete() purges the posting rows of every deleted document once deleted documents are this
      * share of all documents (live + deleted). Until then the per-term num_docs / num_hits keep
      * counting them (BM25 only; measured on ecom with 10% deleted: first hit unchanged, 97% of
@@ -3372,7 +3386,8 @@ class Index
         // Probe along the walk when matches are dense; materialise the filter when they are sparse.
         // Measured on the 45k ecom set: at 13% of the index a probed page takes 0.2 ms against
         // 6.4 ms materialised, at 5% the order flips (0.5 ms vs 5 ms — matches cluster by
-        // insertion order, so the walk runs long). The crossover sits near 10%.
+        // insertion order, so the walk runs long). The crossover sits near 10%. A sorted page
+        // decides by its own walk length instead (browseSortedPage()).
         $probe = $total * 10 >= $totalDocuments;
 
         [
@@ -3411,7 +3426,7 @@ class Index
         if ($total === 0 || $limit === 0) {
             $pagedIds = [];
         } elseif ($sortSpecs !== []) {
-            $pagedIds = $this->browseSortedPage($sortSpecs, $conditions, $probe, $offset, $limit);
+            $pagedIds = $this->browseSortedPage($sortSpecs, $conditions, $offset, $limit, $total, $totalDocuments);
         } else {
             $pagedIds = $this->browseUnsortedPage($conditions, $probe, $offset, $limit);
         }
@@ -3623,12 +3638,31 @@ class Index
      * boundary, then sortDocIdsBySpecs() orders the collected prefix. Every uncollected document
      * sorts after the boundary value, so the prefix is exactly the head of the full order.
      *
+     * The filter either probes each walked row (correlated EXISTS) or is materialised once
+     * (IN (matchingDocsSql())). The walk is expected to read (offset + limit) × walked rows /
+     * matches rows; it probes while that is within SORTED_WALK_ROWS_PER_MATCH rows per match,
+     * and each phase then reads at most that budget: a phase that stops there before the page is
+     * full and still has rows left hands the page to the materialised shape. The rows read before
+     * the stop are a prefix of the walk, so a page that fills within the budget is the same as
+     * with an unbounded walk.
+     *
      * @param  list<array{field: string, asc: bool}> $specs
      * @param  list<FacetCondition>                  $conditions
+     * @param  int                                   $total          Documents matching $conditions (> 0).
+     * @param  int                                   $totalDocuments Documents in the index.
+     * @param  bool                                  $materialise    Skip the walk (the fallback).
      * @return list<int>
      */
-    private function browseSortedPage(array $specs, array $conditions, bool $probe, int $offset, int $limit): array
-    {
+    private function browseSortedPage(
+        array $specs,
+        array $conditions,
+        int $offset,
+        int $limit,
+        int $total,
+        int $totalDocuments,
+        bool $materialise = false,
+    ): array {
+        $allConditions = $conditions;
         ['field' => $field, 'asc' => $asc] = $specs[0];
         $keyId     = $this->lookupFacetKeyId($field);
         $direction = $asc ? 'ASC' : 'DESC';
@@ -3640,11 +3674,13 @@ class Index
         // outside it), and skip the string and missing phases, which cannot satisfy a range.
         // Multi-valued fields keep the plain walk: a document sorts by its smallest/largest
         // value overall, not within the range (D5).
-        $rangeSql    = '';
-        $rangeParams = [];
+        $rangeSql       = '';
+        $rangeParams    = [];
+        $rangeCondition = null;
         if ($keyId !== null && !$this->isMultiValuedKey($keyId)) {
             foreach ($conditions as $i => $condition) {
                 if (($condition['range']['keyId'] ?? null) === $keyId) {
+                    $rangeCondition = $condition;
                     $rangeSql    = ' AND ' . sprintf($condition['range']['sql'], 's');
                     $rangeParams = $condition['range']['params'];
                     unset($conditions[$i]);
@@ -3654,30 +3690,47 @@ class Index
             }
         }
 
-        [$walkSql, $walkParams]       = $this->facetFilterSql($conditions, 's.doc_id', $probe) ?? ['', []];
-        [$missingSql, $missingParams] = $this->facetFilterSql($conditions, 'd.doc_id', $probe) ?? ['', []];
+        // Probe while the expected walk fits the budget; without conditions left there is nothing
+        // to probe, and the walk runs unbounded (every row it reads is a match).
+        $probe  = !$materialise;
+        $budget = null;
+        if ($conditions !== [] && $probe) {
+            $walked = $rangeCondition !== null ? $this->conditionRowCount($rangeCondition) : $totalDocuments;
+            $first  = $conditions[0];
+            $ratio  = !$first['exclude'] && count($first['values']['values'] ?? []) === 1
+                ? self::SORTED_WALK_ROWS_PER_MATCH
+                : self::SORTED_WALK_ROWS_PER_MATCH_SLOW_PROBE;
+            $budget = max(1, (int) ($ratio * $total));
+            $probe  = intdiv(($offset + $limit) * $walked, $total) <= $budget;
+            if (!$probe) {
+                $budget = null;
+            }
+        }
+        [$walkSql, $walkParams] = $this->facetFilterSql($conditions, 's.doc_id', $probe) ?? ['', []];
 
+        // Each phase walks one table aliased s in sort order: [select list, FROM … WHERE …, order, params].
         // A declared field that no document has populated has no key: every document is "missing".
         $phases = $keyId === null
-            ? [['SELECT d.doc_id, NULL FROM doc_lengths d WHERE 1' . $missingSql . ' ORDER BY d.doc_id', $missingParams]] // phpcs:ignore Generic.Files.LineLength.TooLong
+            ? [['s.doc_id, NULL', 'FROM doc_lengths s WHERE 1', 's.doc_id', []]]
             : [
                 [
-                    'SELECT s.doc_id, s.num_value FROM facet_values s'
-                    . ' WHERE s.key_id = ? AND s.num_value IS NOT NULL' . $rangeSql . $walkSql
-                    . " ORDER BY s.num_value {$direction}, s.doc_id",
-                    [$keyId, ...$rangeParams, ...$walkParams],
+                    's.doc_id, s.num_value',
+                    'FROM facet_values s WHERE s.key_id = ? AND s.num_value IS NOT NULL' . $rangeSql,
+                    "s.num_value {$direction}, s.doc_id",
+                    [$keyId, ...$rangeParams],
                 ],
                 [
-                    'SELECT s.doc_id, s.sort_key FROM sort_keys s'
-                    . ' WHERE s.key_id = ?' . $walkSql
-                    . " ORDER BY s.sort_key {$direction}, s.doc_id",
-                    [$keyId, ...$walkParams],
+                    's.doc_id, s.sort_key',
+                    'FROM sort_keys s WHERE s.key_id = ?',
+                    "s.sort_key {$direction}, s.doc_id",
+                    [$keyId],
                 ],
                 [
-                    'SELECT d.doc_id, NULL FROM doc_lengths d'
-                    . ' WHERE NOT EXISTS (SELECT 1 FROM facet_values m WHERE m.doc_id = d.doc_id AND m.key_id = ?)'
-                    . $missingSql . ' ORDER BY d.doc_id',
-                    [$keyId, ...$missingParams],
+                    's.doc_id, NULL',
+                    'FROM doc_lengths s'
+                    . ' WHERE NOT EXISTS (SELECT 1 FROM facet_values m WHERE m.doc_id = s.doc_id AND m.key_id = ?)',
+                    's.doc_id',
+                    [$keyId],
                 ],
             ];
 
@@ -3688,9 +3741,14 @@ class Index
         /** @var array<int, true> $collected  doc_id → true, in walk order */
         $collected = [];
         $boundary  = null;
-        foreach ($phases as [$sql, $params]) {
+        foreach ($phases as [$columns, $from, $order, $params]) {
+            // With a budget the walk is a LIMITed inner query (read lazily) and the filter probes
+            // the rows it yields; without one the filter goes into the walk itself.
+            $sql  = $budget === null
+                ? "SELECT {$columns} {$from}{$walkSql} ORDER BY {$order}"
+                : "SELECT s.* FROM (SELECT {$columns} {$from} ORDER BY {$order} LIMIT ?) s WHERE 1{$walkSql}";
             $stmt = $this->prepare($sql);
-            $stmt->execute($params);
+            $stmt->execute($budget === null ? [...$params, ...$walkParams] : [...$params, $budget, ...$walkParams]);
             $full = false;
             while (($row = $stmt->fetch(PDO::FETCH_NUM)) !== false) {
                 /** @var array{0: int, 1: float|string|null} $row */
@@ -3708,6 +3766,24 @@ class Index
             $stmt->closeCursor();
             if ($full) {
                 break;
+            }
+            if ($budget !== null) {
+                // Did the phase stop at the budget with rows left? Then materialise instead.
+                $more = $this->prepare("SELECT 1 {$from} ORDER BY {$order} LIMIT 1 OFFSET ?");
+                $more->execute([...$params, $budget]);
+                $cut = $more->fetchColumn() !== false;
+                $more->closeCursor();
+                if ($cut) {
+                    return $this->browseSortedPage(
+                        $specs,
+                        $allConditions,
+                        $offset,
+                        $limit,
+                        $total,
+                        $totalDocuments,
+                        materialise: true,
+                    );
+                }
             }
         }
 
