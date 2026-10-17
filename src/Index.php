@@ -107,6 +107,19 @@ class Index
     private const int FACET_JOIN_THRESHOLD = 2_000;
 
     /**
+     * Positions per field: field n's positions start at n × this (tokenizeDocumentFields()).
+     * 2^20 keeps the stored position small (3-byte varints for the second field) while no
+     * realistic field reaches a million tokens.
+     */
+    private const int FIELD_POSITION_STRIDE = 1 << 20;
+
+    /**
+     * Distance a proximity window counts per word gap when its words lie in different fields
+     * (applyProximityBoost()): far, but not as far as the positions are apart.
+     */
+    private const int CROSS_FIELD_SPAN = 8;
+
+    /**
      * Exclusion-only facet counts subtract the excluded documents' rows (cost per excluded
      * document) up to this share of the index, and scan the kept rows (cost per facet row)
      * above it. Measured crossover: ~30% on a 533k index, ~39% on the 45k ecom set ("-shirt"
@@ -4250,8 +4263,12 @@ class Index
     /**
      * Tokenise all non-id fields of a document and accumulate per-term counts and positions.
      *
-     * Positions use a global counter across all fields so cross-field proximity is meaningful.
-     * Shared by processDocument() and buildBatchBuffer().
+     * Each field's positions start at its own slot, field number × FIELD_POSITION_STRIDE (the
+     * schema's searchableFields order, else the document's field order; a skipped field keeps
+     * its slot), so an edit in one field does not move the positions of the others, and a
+     * phrase cannot join the end of one field to the start of the next. A field longer than
+     * the stride pushes the next field one position further. Shared by processDocument() and
+     * buildBatchBuffer().
      *
      * @param  array<string, mixed> $fields Document fields; 'id' is skipped.
      * @return array{termCounts: array<string, int>, fieldTermCounts: array<string, array<string, int>>,
@@ -4270,7 +4287,9 @@ class Index
         if ($this->searchableFieldSet !== null) {
             // When searchableFields is declared, iterate ONLY those keys — avoids scanning every
             // document field when most are non-searchable (e.g. 1 searchable out of 16 total).
+            $fieldNo = 0;
             foreach ($this->searchableFieldSet as $key => $_) {
+                $position = self::fieldStart($fieldNo++, $position);
                 $this->indexFieldColumn(
                     $fields[$key] ?? null,
                     $key,
@@ -4283,10 +4302,12 @@ class Index
             }
         } else {
             // searchableFields is null → all non-facet fields are searchable; iterate full doc.
+            $fieldNo = 0;
             foreach ($fields as $key => $col) {
                 if ($key === 'id' || isset($this->facetFieldSet[$key])) {
                     continue;
                 }
+                $position = self::fieldStart($fieldNo++, $position);
                 $this->indexFieldColumn(
                     $col,
                     $key,
@@ -4304,6 +4325,15 @@ class Index
             'termPositions'   => $termPositions,
             'length'          => $length,
         ];
+    }
+
+    /**
+     * The first position of field $fieldNo: its slot, or one past the previous field's last
+     * position when that field outgrew its slot (the gap keeps phrases from joining them).
+     */
+    private static function fieldStart(int $fieldNo, int $next): int
+    {
+        return max($fieldNo * self::FIELD_POSITION_STRIDE, $next === 0 ? 0 : $next + 1);
     }
 
     /**
@@ -5654,7 +5684,10 @@ class Index
      * minSpan is the smallest token-position window (in indexed positions) that contains at
      * least one occurrence of every query-keyword group. A "group" is the set of term IDs
      * produced by one keyword — including prefix/fuzzy expansions — so "se" matching
-     * {sedan, seat} counts as a single group, not two independent constraints.
+     * {sedan, seat} counts as a single group, not two independent constraints. A window whose
+     * words lie in different fields counts CROSS_FIELD_SPAN per word gap (each field has its
+     * own position slot, see tokenizeDocumentFields()), so a match inside one field ranks above
+     * one split across fields unless its words are further apart than that.
      *
      * Documents that do not have positions for every group (partial matches) are unchanged.
      *
@@ -5679,8 +5712,9 @@ class Index
             }
         }
 
-        $numGroups = count($termGroups);
-        $boost     = $this->config->proximityBoost;
+        $numGroups      = count($termGroups);
+        $boost          = $this->config->proximityBoost;
+        $crossFieldSpan = self::CROSS_FIELD_SPAN * ($numGroups - 1);
 
         foreach ($positions as $docId => $termPositions) {
             // Partition positions into per-keyword-group buckets.
@@ -5729,7 +5763,12 @@ class Index
 
                 while ($have === $numGroups) {
                     $leftEntry = $merged[$left];
-                    $span      = intdiv($right, $numGroups) - intdiv($leftEntry, $numGroups);
+                    $leftPos   = intdiv($leftEntry, $numGroups);
+                    $rightPos  = intdiv($right, $numGroups);
+                    // A window across fields would span the gap between their position slots.
+                    $sameField = intdiv($leftPos, self::FIELD_POSITION_STRIDE)
+                        === intdiv($rightPos, self::FIELD_POSITION_STRIDE);
+                    $span      = $sameField ? $rightPos - $leftPos : $crossFieldSpan;
                     if ($span < $minSpan) {
                         $minSpan = $span;
                     }

@@ -905,16 +905,30 @@ class IndexTest extends TestCase
 
     public function testReorderedSearchableFieldsAreReindexed(): void
     {
-        // Without searchableFields the fields are tokenised in document order, and positions
-        // run across fields: the reordered document has "car red" adjacent.
+        // Without searchableFields the fields are tokenised in document order, each in its own
+        // position slot: reordering the fields moves "red" from the first slot to the second.
         $index = $this->catalogIndex(searchable: null);
-        $this->assertSame([], $index->search('"car red"')->getIds());
+        $this->assertSame([0], $this->positionsOf(1, 'red'));
 
         $index->update([
             ['id' => 1, 'body' => 'fast city car', 'title' => 'red sedan', 'price' => 100, 'color' => 'red'],
         ]);
 
-        $this->assertSame([1], $index->search('"car red"')->getIds());
+        $this->assertSame([1 << 20], $this->positionsOf(1, 'red'));
+    }
+
+    /** @return list<int> */
+    private function positionsOf(int $docId, string $term): array
+    {
+        $pdo  = new \PDO('sqlite:' . $this->dbPath);
+        $stmt = $pdo->prepare(
+            'SELECT p.position FROM positions p JOIN wordlist w ON w.id = p.term_id
+              WHERE p.doc_id = ? AND w.term = ? ORDER BY p.position'
+        );
+        $stmt->execute([$docId, $term]);
+        /** @var list<int> $positions */
+        $positions = $stmt->fetchAll(\PDO::FETCH_COLUMN);
+        return $positions;
     }
 
     public function testValueOfAnotherTypeIsReindexed(): void
@@ -3324,10 +3338,10 @@ class IndexTest extends TestCase
         $this->assertSame(2, $rows['review']);
     }
 
-    public function testStorePositionsGlobalCounterAcrossFields(): void
+    public function testStorePositionsStartEachFieldInItsOwnSlot(): void
     {
         $index = new Index($this->dbPath);
-        // title contributes tokens at 0, 1; body continues from 2, 3
+        // title contributes tokens at 0, 1; body starts at its slot, 1 << 20
         $index->insert([['id' => 1, 'title' => 'city car', 'body' => 'fast sedan']]);
 
         $pdo  = new \PDO('sqlite:' . $this->dbPath);
@@ -3343,8 +3357,33 @@ class IndexTest extends TestCase
 
         $this->assertSame(0, $rows['city']);
         $this->assertSame(1, $rows['car']);
-        $this->assertSame(2, $rows['fast']);
-        $this->assertSame(3, $rows['sedan']);
+        $this->assertSame(1 << 20, $rows['fast']);
+        $this->assertSame((1 << 20) + 1, $rows['sedan']);
+    }
+
+    public function testPhraseDoesNotJoinTheEndOfOneFieldToTheStartOfTheNext(): void
+    {
+        $index = new Index($this->dbPath);
+        $index->insert([
+            ['id' => 1, 'title' => 'city car', 'body' => 'fast sedan'],
+            ['id' => 2, 'title' => 'a car fast on the road', 'body' => 'sedan'],
+        ]);
+
+        $this->assertSame([2], $index->search('"car fast"')->getIds());
+        $this->assertSame([1], $index->search('"fast sedan"')->getIds());
+    }
+
+    public function testProximityRanksWordsInOneFieldAboveWordsSplitAcrossFields(): void
+    {
+        $index = new Index($this->dbPath);
+        $index->insert([
+            // Both words in the body, next to each other, in a longer document (lower BM25).
+            ['id' => 1, 'title' => 'listing', 'body' => 'red car with a long description of everything'],
+            // "red" ends the title and "car" starts the body: adjacent only across the field boundary.
+            ['id' => 2, 'title' => 'red', 'body' => 'car'],
+        ]);
+
+        $this->assertSame([1, 2], $index->search('red car', new SearchOptions(asYouType: false))->getIds());
     }
 
     public function testStorePositionsDeletedOnDocumentRemoval(): void
