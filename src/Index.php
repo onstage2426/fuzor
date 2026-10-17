@@ -7574,9 +7574,11 @@ class Index
      * How many rows a condition selects: its document count when one document can match with
      * one row only (not 'multiRow'), an upper bound otherwise.
      *
-     * A value list is summed from facet_counts (one primary key seek per value); anything else
-     * is an index-only COUNT over its rows. Measured on the 45k ecom set: gender Men (22k rows)
-     * 0.01 ms against 1.1 ms counted.
+     * A value list is summed from facet_counts (one primary key seek per value), a range from
+     * the numeric rows of the key's values in range (one scan of the key's facet_counts rows);
+     * anything else is an index-only COUNT over its rows. Measured on the 45k ecom set: gender
+     * Men (22k rows) 0.01 ms against 1.1 ms counted; on 1.43M amazon products stars >= 4
+     * (1.16M rows) 0.12 ms against 47 ms.
      *
      * @param FacetCondition $condition
      */
@@ -7592,6 +7594,14 @@ class Index
                   WHERE key_id = ? AND value IN (SELECT value FROM json_each(?))'
             );
             $stmt->execute([$condition['values']['keyId'], json_encode($condition['values']['values'])]);
+        } elseif (isset($condition['range'])) {
+            // The range's own WHERE fits facet_counts too: num_value is the value as a number.
+            $range = $condition['range'];
+            $stmt  = $this->prepare(
+                'SELECT COALESCE(SUM(fc.num_count), 0) FROM facet_counts fc
+                  WHERE fc.key_id = ? AND ' . sprintf($range['sql'], 'fc')
+            );
+            $stmt->execute([$range['keyId'], ...$range['params']]);
         } else {
             $stmt = $this->prepare('SELECT COUNT(*) ' . sprintf($condition['rows'], 'ff'));
             $stmt->execute($condition['params']);

@@ -7622,6 +7622,40 @@ class IndexTest extends TestCase
         }
     }
 
+    public function testRangeRowCountFromFacetCountsMatchesTheRows(): void
+    {
+        // conditionRowCount() sums a range from facet_counts: only the numeric rows of the
+        // values in range count, also when one value is stored both as a number and as text.
+        $index = new Index($this->dbPath, schema: new SchemaConfig(filterableFields: ['size']));
+        $index->insert([
+            ['id' => 1, 'title' => 'x', 'size' => 4],
+            ['id' => 2, 'title' => 'x', 'size' => '4'],
+            ['id' => 3, 'title' => 'x', 'size' => [2, 9.5]],
+            ['id' => 4, 'title' => 'x', 'size' => 'L'],
+            ['id' => 5, 'title' => 'x', 'size' => 9.5],
+            ['id' => 6, 'title' => 'x'],
+        ]);
+        $conditions = new \ReflectionMethod(Index::class, 'facetFilterConditions');
+        $rowCount   = new \ReflectionMethod(Index::class, 'conditionRowCount');
+        $pdo        = new \PDO('sqlite:' . $this->dbPath);
+        $ranges     = [FacetRange::min(3), FacetRange::max(4), FacetRange::between(4, 9.5), FacetRange::gt(9.5)];
+        foreach ($ranges as $range) {
+            $list = $conditions->invoke($index, ['size' => $range]);
+            $this->assertIsArray($list);
+            $condition = $list[0];
+            $this->assertIsArray($condition);
+            $this->assertIsString($condition['rows']);
+            $this->assertIsArray($condition['params']);
+            $count = $pdo->prepare('SELECT COUNT(*) ' . sprintf($condition['rows'], 'ff'));
+            $count->execute($condition['params']);
+            $this->assertSame(
+                (int) $count->fetchColumn(),
+                $rowCount->invoke($index, $condition),
+                json_encode($range) ?: '',
+            );
+        }
+    }
+
     public function testRangeOnTheSortFieldOfASingleValuedKeyMatchesTheReference(): void
     {
         // Single-valued price: the browse walk seeks into the range instead of probing past every
