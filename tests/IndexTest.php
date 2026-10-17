@@ -794,7 +794,7 @@ class IndexTest extends TestCase
     {
         $pdo = new \PDO('sqlite:' . $this->dbPath);
         $pdo->exec('CREATE TABLE write_log (tbl TEXT NOT NULL)');
-        foreach (['wordlist', 'doclist', 'positions', 'field_hits'] as $table) {
+        foreach (['wordlist', 'doclist', 'positions'] as $table) {
             foreach (['INSERT', 'UPDATE', 'DELETE'] as $op) {
                 $pdo->exec(
                     "CREATE TRIGGER log_{$table}_{$op} AFTER {$op} ON {$table}"
@@ -982,8 +982,8 @@ class IndexTest extends TestCase
         }
         $index->update($batch);
 
-        // One word list row, and the new word's doclist, positions and field_hits rows.
-        $this->assertSame(4, $this->postingWrites());
+        // One word list row, and the new word's doclist and positions rows (single-field term).
+        $this->assertSame(3, $this->postingWrites());
         $this->assertSame([1], $index->search('deluxe')->getIds());
         $this->assertSame([1], $index->search('"fast city car"')->getIds());
     }
@@ -1076,10 +1076,9 @@ class IndexTest extends TestCase
         $pdo     = new \PDO('sqlite:' . $path);
         $queries = [
             'wordlist'   => 'SELECT term, num_hits, num_docs FROM wordlist',
-            'doclist'    => 'SELECT w.term, d.doc_id, d.hit_count FROM doclist d JOIN wordlist w ON w.id = d.term_id',
+            'doclist'    => 'SELECT w.term, d.doc_id, d.hit_count, COALESCE(n.name, \'-\'), d.field_split'
+                . ' FROM doclist d JOIN wordlist w ON w.id = d.term_id LEFT JOIN field_names n ON n.id = d.field_id',
             'positions'  => 'SELECT w.term, p.doc_id, p.position FROM positions p JOIN wordlist w ON w.id = p.term_id',
-            'field_hits' => 'SELECT w.term, f.doc_id, n.name, f.hit_count FROM field_hits f'
-                . ' JOIN wordlist w ON w.id = f.term_id JOIN field_names n ON n.id = f.field_id',
             'orphans'    => 'SELECT d.term_id FROM doclist d'
                 . ' LEFT JOIN wordlist w ON w.id = d.term_id WHERE w.id IS NULL',
             'lengths'    => 'SELECT doc_id, length FROM doc_lengths',
@@ -1618,7 +1617,7 @@ class IndexTest extends TestCase
         $this->assertSame(2, $index->optimize());
 
         $this->assertSame(0, $this->scalarQuery('SELECT COUNT(*) FROM deleted_docs'));
-        foreach (['doclist', 'positions', 'field_hits'] as $table) {
+        foreach (['doclist', 'positions'] as $table) {
             $this->assertSame(0, $this->scalarQuery("SELECT COUNT(*) FROM {$table} WHERE doc_id IN (4, 7)"), $table);
         }
         $this->assertSame(0, $this->scalarQuery("SELECT COUNT(*) FROM wordlist WHERE term = 'model4'"));
@@ -3505,6 +3504,54 @@ class IndexTest extends TestCase
         $this->assertSame((1 << 20) + 1, $rows['sedan']);
     }
 
+    #[DataProvider('replaceProvider')]
+    public function testFieldHitsKeepOnlyTermsFoundInSeveralFields(string $method): void
+    {
+        $index = new Index($this->dbPath);
+        $docs  = [
+            ['id' => 1, 'title' => 'red car', 'body' => 'fast car'],
+            ['id' => 2, 'title' => 'blue van', 'body' => 'slow'],
+        ];
+        // insert() takes the bulk path for two documents; update/upsert of one the single path.
+        $index->insert($docs);
+        self::replace($index, $method, [['id' => 2, 'title' => 'blue van van', 'body' => 'slow van']]);
+
+        $pdo  = new \PDO('sqlite:' . $this->dbPath);
+        $rows = function (string $sql) use ($pdo): array {
+            $stmt = $pdo->query($sql);
+            $this->assertNotFalse($stmt);
+            return $stmt->fetchAll(\PDO::FETCH_NUM);
+        };
+        // "car" (doc 1) and "van" (doc 2) span both fields: field_id NULL, field_split set.
+        // Every other term is in one field: field_id non-null, field_split null.
+        $this->assertSame(
+            ['car', 'van'],
+            array_column(
+                $rows('SELECT w.term FROM doclist d JOIN wordlist w ON w.id = d.term_id'
+                    . ' WHERE d.field_id IS NULL ORDER BY 1'),
+                0
+            )
+        );
+        $this->assertSame(
+            ['blue', 'fast', 'red', 'slow'],
+            array_column(
+                $rows('SELECT w.term FROM doclist d JOIN wordlist w ON w.id = d.term_id'
+                    . ' WHERE d.field_id IS NOT NULL ORDER BY 1'),
+                0
+            )
+        );
+        $this->assertSame(
+            [['blue', 'title'], ['car', '-'], ['fast', 'body'], ['red', 'title'], ['slow', 'body'], ['van', '-']],
+            $rows("SELECT w.term, COALESCE(n.name, '-') FROM doclist d JOIN wordlist w ON w.id = d.term_id"
+                . ' LEFT JOIN field_names n ON n.id = d.field_id ORDER BY 1'),
+        );
+
+        // Boosts read both: a title boost lifts the document with "van" twice in its title.
+        $boosted = new Index($this->dbPath, config: new Config(fieldBoosts: ['title' => 5.0]));
+        $this->assertSame([2], $boosted->search('van')->getIds());
+        $this->assertSame([1], $boosted->search('red')->getIds());
+    }
+
     public function testPhraseDoesNotJoinTheEndOfOneFieldToTheStartOfTheNext(): void
     {
         $index = new Index($this->dbPath);
@@ -3786,15 +3833,12 @@ class IndexTest extends TestCase
         return [
             'wordlist'     => $query('SELECT term, num_hits, num_docs FROM wordlist ORDER BY term'),
             'doclist'      => $query(
-                'SELECT w.term, d.doc_id, d.hit_count FROM doclist d JOIN wordlist w ON w.id = d.term_id ORDER BY 1, 2'
+                'SELECT w.term, d.doc_id, d.hit_count, d.field_id, d.field_split FROM doclist d'
+                . ' JOIN wordlist w ON w.id = d.term_id ORDER BY 1, 2'
             ),
             'positions'    => $query(
                 'SELECT w.term, p.doc_id, p.position FROM positions p'
                 . ' JOIN wordlist w ON w.id = p.term_id ORDER BY 1, 2, 3'
-            ),
-            'field_hits'   => $query(
-                'SELECT w.term, f.doc_id, n.name, f.hit_count FROM field_hits f JOIN wordlist w ON w.id = f.term_id'
-                . ' JOIN field_names n ON n.id = f.field_id ORDER BY 1, 2, 3'
             ),
             'doc_lengths'  => $query('SELECT doc_id, length FROM doc_lengths ORDER BY 1'),
             'documents'    => $query('SELECT doc_id, data FROM documents ORDER BY 1'),
@@ -8486,7 +8530,7 @@ class IndexTest extends TestCase
 
     public function testFieldBoostOnReopenedIndex(): void
     {
-        // Build the index (field_hits present), close, reopen with a config that has boosts.
+        // Build the index, close, reopen with a config that has boosts.
         $index = new Index($this->dbPath);
         $index->insert([
             ['id' => 1, 'title' => 'turbo car', 'body' => 'generic content'],
@@ -8501,7 +8545,7 @@ class IndexTest extends TestCase
 
     public function testFieldBoostUpsertUpdatesFieldHits(): void
     {
-        // Upsert should replace old field_hits rows, not accumulate them.
+        // Upsert should replace old doclist field rows, not accumulate them.
         $index = new Index($this->dbPath, config: new Config(fieldBoosts: ['title' => 3.0, 'body' => 1.0]));
         $index->insert([['id' => 1, 'title' => 'widget', 'body' => 'generic content']]);
         // Now replace: "widget" moved to body only; title no longer has it.

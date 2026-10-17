@@ -97,6 +97,9 @@ class Index
     /** Max rows per chunk when each row uses 4 bind variables (facet_values bulk INSERT). */
     private const int CHUNK_4P = 8_191;
 
+    /** Max rows per chunk when each row uses 5 bind variables (doclist bulk INSERT). */
+    private const int CHUNK_5P = 6_553;
+
 
     /**
      * When N (result-set size) is at or below this threshold, facet counts are fetched
@@ -1036,6 +1039,8 @@ class Index
                 term_id   INTEGER NOT NULL,
                 doc_id    INTEGER NOT NULL,
                 hit_count INTEGER NOT NULL,
+                field_id    INTEGER,
+                field_split TEXT,
                 PRIMARY KEY (term_id, doc_id)
             ) WITHOUT ROWID, STRICT"
         );
@@ -1053,9 +1058,9 @@ class Index
             ) STRICT"
         );
 
-        // deleted_docs: documents removed by delete() whose posting rows (doclist, positions,
-        // field_hits) are still on disk until purgeDeleted(). Read paths never see them: every
-        // posting read joins doc_lengths, which delete() clears.
+        // deleted_docs: documents removed by delete() whose posting rows (doclist, positions)
+        // are still on disk until purgeDeleted(). Read paths never see them: every posting read
+        // joins doc_lengths, which delete() clears.
         $pdo->exec("CREATE TABLE IF NOT EXISTS deleted_docs (doc_id INTEGER PRIMARY KEY) STRICT");
 
         $pdo->exec("CREATE TABLE IF NOT EXISTS info (key TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT");
@@ -1147,20 +1152,6 @@ class Index
                 name TEXT NOT NULL UNIQUE
             ) STRICT"
         );
-        // field_hits: per-field term hit counts for field boost re-scoring.
-        // WITHOUT ROWID clusters on composite PK (term_id, doc_id, field_id);
-        // sorted bulk insertion yields sequential B-tree appends identical to doclist.
-        $pdo->exec(
-            "CREATE TABLE IF NOT EXISTS field_hits (
-                term_id   INTEGER NOT NULL,
-                doc_id    INTEGER NOT NULL,
-                field_id  INTEGER NOT NULL,
-                hit_count INTEGER NOT NULL,
-                PRIMARY KEY (term_id, doc_id, field_id)
-            ) WITHOUT ROWID, STRICT"
-        );
-        /** @infection-ignore-all MethodCallRemoval: field_hits_doc_id is a performance index; DELETE-by-doc_id still works via full scan */
-        $pdo->exec("CREATE INDEX IF NOT EXISTS 'main'.'field_hits_doc_id' ON field_hits (doc_id);");
 
         // WITHOUT ROWID clusters on (source, target); single-SELECT synonym lookup is a pure B-tree scan.
         $pdo->exec(
@@ -1522,7 +1513,6 @@ class Index
                 DROP INDEX IF EXISTS positions_doc_id;
                 DROP INDEX IF EXISTS facet_doc_id_index;
                 DROP INDEX IF EXISTS facet_numeric_index;
-                DROP INDEX IF EXISTS field_hits_doc_id;
                 DROP INDEX IF EXISTS sort_keys_doc_id;
             ');
         }
@@ -1608,8 +1598,6 @@ class Index
                     CREATE INDEX IF NOT EXISTS facet_numeric_index ON facet_values (key_id, num_value, doc_id)
                         WHERE num_value IS NOT NULL;
                 ');
-                /** @infection-ignore-all MethodCallRemoval: rebuilding field_hits_doc_id is a performance step; correctness is unaffected */
-                $pdo->exec('CREATE INDEX IF NOT EXISTS field_hits_doc_id ON field_hits (doc_id);');
                 $pdo->exec('CREATE INDEX IF NOT EXISTS sort_keys_doc_id ON sort_keys (doc_id);');
             }
             /** @infection-ignore-all MethodCallRemoval: restoring pragmas after bulk load is a performance step; the next connection will re-apply from applyPragmas() */
@@ -1923,7 +1911,7 @@ class Index
      * a single transaction with one stats update.
      *
      * The documents leave every read path, the stored documents, the facet tables and the
-     * document count at once. Their rows in the term index (doclist, positions, field_hits) are
+     * document count at once. Their rows in the term index (doclist, positions) are
      * only marked deleted and purged later by optimize(), or by delete() itself once deleted
      * documents make up 10% of the index; until then BM25's per-term document counts still
      * include them.
@@ -2055,7 +2043,6 @@ class Index
             $pdo->exec('DELETE FROM facet_counts');
             $pdo->exec('DELETE FROM sort_keys');
             $pdo->exec('UPDATE facet_keys SET multi_valued = 0 WHERE multi_valued = 1');
-            $pdo->exec('DELETE FROM field_hits');
             $pdo->exec('DELETE FROM deleted_docs');
 
             $this->stmt(
@@ -4033,7 +4020,7 @@ class Index
     }
 
     /**
-     * Remove the term-index rows of documents (doclist, positions, field_hits), subtract them
+     * Remove the term-index rows of documents (doclist, positions), subtract them
      * from the per-term counts, prune terms left without hits, and forget the IDs in deleted_docs.
      *
      * @param list<int> $ids
@@ -4068,7 +4055,6 @@ class Index
 
             $this->prepare("DELETE FROM doclist      WHERE doc_id IN ({$placeholders})")->execute($chunk);
             $this->prepare("DELETE FROM positions    WHERE doc_id IN ({$placeholders})")->execute($chunk);
-            $this->prepare("DELETE FROM field_hits   WHERE doc_id IN ({$placeholders})")->execute($chunk);
             $this->prepare("DELETE FROM deleted_docs WHERE doc_id IN ({$placeholders})")->execute($chunk);
 
             // Prune orphan terms scoped to the affected set; avoids a full wordlist table scan.
@@ -4089,14 +4075,17 @@ class Index
 
     /**
      * Bring the term-index rows of existing documents in line with their new searchable input,
-     * touching only rows that change: doclist and field_hits rows whose term or hit count
-     * differs, positions that moved, and the per-term counts of the terms involved (terms left
-     * without hits are pruned). The per-document rows are not written here.
+     * touching only rows that change: doclist rows whose hit count or fields differ, positions
+     * that moved, and the per-term counts of the terms involved (terms left without hits are
+     * pruned). The per-document rows are not written here.
      *
      * Rewriting every row of a changed document costs pages in each B-tree its terms touch;
      * an edit usually changes a few terms of one field, and each field has its own position
      * slot (tokenizeDocumentFields()). Measured on the 45k ecom set, one word appended to the
-     * title of 200 documents: 9,300 WAL pages rewritten, about 2,300 with only the changes.
+     * title of 200 documents: 9,541 WAL pages rewritten, 2,888 with only the changes (780 →
+     * 278 ms). A document where more of its terms change than stay is rewritten whole (one
+     * delete by document, then every new row): a full text change of 200 documents measured
+     * 870 ms diffed against 760 ms rewritten, and its old positions are not read.
      *
      * @param  array<int, array<string, mixed>> $documents Doc ID → new document; all exist and
      *                                                     none is in deleted_docs.
@@ -4139,18 +4128,19 @@ class Index
             $termIds += $found;
         }
 
-        // The doclist rows the documents have now.
-        /** @var array<int, array<int, int>> $oldHits doc → term ID → hit count */
-        $oldHits = [];
+        // The doclist rows the documents have now: term ID → [hits, field ID, field split].
+        /** @var array<int, array<int, array{0: int, 1: int|null, 2: string|null}>> $oldRows */
+        $oldRows = [];
         $stmt = $this->stmt(
             'postingDiffDoclist',
-            'SELECT doc_id, term_id, hit_count FROM doclist WHERE doc_id IN (SELECT value FROM json_each(?))'
+            'SELECT doc_id, term_id, hit_count, field_id, field_split FROM doclist
+              WHERE doc_id IN (SELECT value FROM json_each(?))'
         );
         $stmt->execute([$idsJson]);
-        /** @var list<array{0: int, 1: int, 2: int}> $rows */
+        /** @var list<array{0: int, 1: int, 2: int, 3: int|null, 4: string|null}> $rows */
         $rows = $stmt->fetchAll(PDO::FETCH_NUM);
-        foreach ($rows as [$docId, $termId, $hits]) {
-            $oldHits[$docId][$termId] = $hits;
+        foreach ($rows as [$docId, $termId, $hits, $fieldId, $split]) {
+            $oldRows[$docId][$termId] = [$hits, $fieldId, $split];
         }
 
         // Terms new to the word list get their counts on insert.
@@ -4189,30 +4179,54 @@ class Index
         }
 
         // Per document: the per-term count changes, the doclist rows that differ, and whether to
-        // rewrite the document whole. When more of its terms change than stay, one delete by
-        // document and every new row costs less than a seek per changed row (a full text change
-        // of 200 documents measured 870 ms diffed against 760 ms rewritten), and its positions and
-        // field hits are not read at all.
+        // rewrite the document whole.
         /** @var array<int, array{0: int, 1: int}> $wordDeltas term ID → [hits, docs] for terms that existed */
-        $wordDeltas = [];
+        $wordDeltas    = [];
         $rewrite       = [];
         $diffed        = [];
         $doclistDelete = [];
         $doclistUpdate = [];
         /** @var array<int, array<int, int>> $doclistInsert term ID → doc → hits */
         $doclistInsert = [];
+        /** @var array<int, array<int, array<int, int>>> $doclistFields term ID → doc → field ID → hits */
+        $doclistFields = [];
         $lengths       = [];
         foreach ($new as $docId => $tokens) {
             $lengths[$docId] = $tokens['length'];
-            $before          = $oldHits[$docId] ?? [];
-            $after           = [];
-            foreach ($tokens['termCounts'] as $term => $hits) {
-                $after[$termIds[(string) $term]] = $hits;
+            $before          = $oldRows[$docId] ?? [];
+            /** @var array<int, array<int, int>> $fields term ID → field ID → hits */
+            $fields = [];
+            foreach ($tokens['fieldTermCounts'] as $fieldName => $fieldTerms) {
+                $fieldId = $this->resolveFieldNameId((string) $fieldName);
+                foreach ($fieldTerms as $term => $hits) {
+                    $fields[$termIds[(string) $term]][$fieldId] = $hits;
+                }
             }
             $kept    = 0;
+            $added   = 0;
             $deletes = [];
             $updates = [];
-            foreach ($before as $termId => $hits) {
+            $after   = [];
+            foreach ($tokens['termCounts'] as $term => $hits) {
+                $termId                = $termIds[(string) $term];
+                $after[$termId]        = $hits;
+                [$fieldId, $split]     = self::fieldColumns($fields[$termId] ?? []);
+                $was                   = $before[$termId] ?? null;
+                if ($was === [$hits, $fieldId, $split]) {
+                    $kept++;
+                } elseif ($was === null) {
+                    $added++;
+                } else {
+                    $updates[] = [$termId, $docId, $hits, $fieldId, $split];
+                }
+                if (!isset($insertedIds[$termId]) && $hits !== ($was[0] ?? null)) {
+                    $wordDeltas[$termId] = [
+                        ($wordDeltas[$termId][0] ?? 0) + $hits - ($was[0] ?? 0),
+                        ($wordDeltas[$termId][1] ?? 0) + ($was === null ? 1 : 0),
+                    ];
+                }
+            }
+            foreach ($before as $termId => [$hits]) {
                 if (!isset($after[$termId])) {
                     $deletes[]           = [$termId, $docId];
                     $wordDeltas[$termId] = [
@@ -4221,77 +4235,43 @@ class Index
                     ];
                 }
             }
-            foreach ($after as $termId => $hits) {
-                $was = $before[$termId] ?? null;
-                if ($was === $hits) {
-                    $kept++;
-                    continue;
-                }
-                if ($was !== null) {
-                    $updates[] = [$termId, $docId, $hits];
-                }
-                if (!isset($insertedIds[$termId])) {
-                    $wordDeltas[$termId] = [
-                        ($wordDeltas[$termId][0] ?? 0) + $hits - ($was ?? 0),
-                        ($wordDeltas[$termId][1] ?? 0) + ($was === null ? 1 : 0),
-                    ];
-                }
-            }
-            $added = count($after) - $kept - count($updates);
-            if (count($deletes) + count($updates) + $added > $kept) {
+            $whole = count($deletes) + count($updates) + $added > $kept;
+            if ($whole) {
                 $rewrite[] = $docId;
-                foreach ($after as $termId => $hits) {
-                    $doclistInsert[$termId][$docId] = $hits;
-                }
-                continue;
+            } else {
+                $diffed[] = $docId;
+                array_push($doclistDelete, ...$deletes);
+                array_push($doclistUpdate, ...$updates);
             }
-            $diffed[] = $docId;
-            array_push($doclistDelete, ...$deletes);
-            array_push($doclistUpdate, ...$updates);
             foreach ($after as $termId => $hits) {
-                if (!isset($before[$termId])) {
+                if ($whole || !isset($before[$termId])) {
                     $doclistInsert[$termId][$docId] = $hits;
+                    if (isset($fields[$termId])) {
+                        $doclistFields[$termId][$docId] = $fields[$termId];
+                    }
                 }
             }
         }
 
-        // Positions and field hits: every row for rewritten documents, the differences for the rest.
+        // Positions: every row for rewritten documents, the moved ones for the rest.
         /** @var array<int, array<int, array<int, true>>> $oldPositions doc → term ID → position set */
         $oldPositions = [];
-        /** @var array<int, array<int, array<int, int>>> $oldFieldHits doc → term ID → field ID → hit count */
-        $oldFieldHits = [];
         if ($diffed !== []) {
-            $diffedJson = json_encode($diffed);
             $stmt = $this->stmt(
                 'postingDiffPositions',
                 'SELECT doc_id, term_id, position FROM positions WHERE doc_id IN (SELECT value FROM json_each(?))'
             );
-            $stmt->execute([$diffedJson]);
+            $stmt->execute([json_encode($diffed)]);
             /** @var list<array{0: int, 1: int, 2: int}> $rows */
             $rows = $stmt->fetchAll(PDO::FETCH_NUM);
             foreach ($rows as [$docId, $termId, $position]) {
                 $oldPositions[$docId][$termId][$position] = true;
-            }
-            $stmt = $this->stmt(
-                'postingDiffFieldHits',
-                'SELECT doc_id, term_id, field_id, hit_count FROM field_hits
-                  WHERE doc_id IN (SELECT value FROM json_each(?))'
-            );
-            $stmt->execute([$diffedJson]);
-            /** @var list<array{0: int, 1: int, 2: int, 3: int}> $rows */
-            $rows = $stmt->fetchAll(PDO::FETCH_NUM);
-            foreach ($rows as [$docId, $termId, $fieldId, $hits]) {
-                $oldFieldHits[$docId][$termId][$fieldId] = $hits;
             }
         }
         $rewriting      = array_flip($rewrite);
         $positionDelete = [];
         /** @var array<int, array<int, list<int>>> $positionInsert term ID → doc → positions */
         $positionInsert = [];
-        $fieldDelete    = [];
-        $fieldUpdate    = [];
-        /** @var array<int, array<int, array<int, int>>> $fieldInsert term ID → doc → field ID → hits */
-        $fieldInsert    = [];
         foreach ($new as $docId => $tokens) {
             $whole  = isset($rewriting[$docId]);
             $oldPos = $oldPositions[$docId] ?? [];
@@ -4310,30 +4290,11 @@ class Index
                     $positionDelete[] = [$termId, $docId, $position];
                 }
             }
-            $oldFields = $oldFieldHits[$docId] ?? [];
-            foreach ($tokens['fieldTermCounts'] as $fieldName => $fieldTerms) {
-                $fieldId = $this->resolveFieldNameId((string) $fieldName);
-                foreach ($fieldTerms as $term => $hits) {
-                    $termId = $termIds[(string) $term];
-                    $was    = $oldFields[$termId][$fieldId] ?? null;
-                    unset($oldFields[$termId][$fieldId]);
-                    if ($whole || $was === null) {
-                        $fieldInsert[$termId][$docId][$fieldId] = $hits;
-                    } elseif ($was !== $hits) {
-                        $fieldUpdate[] = [$termId, $docId, $fieldId, $hits];
-                    }
-                }
-            }
-            foreach ($oldFields as $termId => $fields) {
-                foreach ($fields as $fieldId => $_) {
-                    $fieldDelete[] = [$termId, $docId, $fieldId];
-                }
-            }
         }
 
         if ($rewrite !== []) {
             $rewriteJson = json_encode($rewrite);
-            foreach (['doclist', 'positions', 'field_hits'] as $table) {
+            foreach (['doclist', 'positions'] as $table) {
                 $this->stmt(
                     "postingRewrite:{$table}",
                     "DELETE FROM {$table} WHERE doc_id IN (SELECT value FROM json_each(?))"
@@ -4342,27 +4303,18 @@ class Index
         }
         $this->runPostingDiff('doclistDiffDelete', 'DELETE FROM doclist
             WHERE (term_id, doc_id) IN (SELECT value ->> 0, value ->> 1 FROM json_each(?))', $doclistDelete);
-        $this->runPostingDiff('doclistDiffUpdate', 'UPDATE doclist SET hit_count = j.value ->> 2
+        $this->runPostingDiff('doclistDiffUpdate', 'UPDATE doclist
+            SET hit_count = j.value ->> 2, field_id = j.value ->> 3, field_split = j.value ->> 4
             FROM json_each(?) j
             WHERE doclist.term_id = j.value ->> 0 AND doclist.doc_id = j.value ->> 1', $doclistUpdate);
         $this->runPostingDiff('positionsDiffDelete', 'DELETE FROM positions
             WHERE (term_id, doc_id, position) IN
                   (SELECT value ->> 0, value ->> 1, value ->> 2 FROM json_each(?))', $positionDelete);
-        $this->runPostingDiff('fieldHitsDiffDelete', 'DELETE FROM field_hits
-            WHERE (term_id, doc_id, field_id) IN
-                  (SELECT value ->> 0, value ->> 1, value ->> 2 FROM json_each(?))', $fieldDelete);
-        $this->runPostingDiff('fieldHitsDiffUpdate', 'UPDATE field_hits SET hit_count = j.value ->> 3
-            FROM json_each(?) j
-            WHERE field_hits.term_id = j.value ->> 0 AND field_hits.doc_id = j.value ->> 1
-              AND field_hits.field_id = j.value ->> 2', $fieldUpdate);
         if ($doclistInsert !== []) {
-            $this->bulkInsertDoclistRows($doclistInsert);
+            $this->bulkInsertDoclistRows($doclistInsert, $doclistFields);
         }
         if ($positionInsert !== []) {
             $this->bulkInsertPositionRows($positionInsert);
-        }
-        if ($fieldInsert !== []) {
-            $this->bulkInsertFieldHitRows($fieldInsert);
         }
 
         $deltaRows = [];
@@ -4397,7 +4349,7 @@ class Index
     /**
      * Run one statement of rewritePostings() with its rows as a JSON list; nothing when empty.
      *
-     * @param list<list<int>> $rows
+     * @param list<list<int|string|null>> $rows
      */
     private function runPostingDiff(string $key, string $sql, array $rows): void
     {
@@ -4601,7 +4553,7 @@ class Index
     /**
      * Live documents among $documents whose searchable input equals the stored document's, as
      * docId → stored length. Their replacement rewrites only the per-document rows (stored
-     * document, facets, doc_lengths) and keeps doclist, positions, field_hits and the wordlist
+     * document, facets, doc_lengths) and keeps doclist, positions and the wordlist
      * counts. Empty without a document store (nothing to compare with).
      *
      * @param  array<array<string, mixed>> $documents  Incoming documents, each with an 'id'.
@@ -4700,10 +4652,18 @@ class Index
             : $this->tokenizeDocumentFields($row);
 
         $termIds = $this->upsertWordlist($termCounts);
-        $this->saveDoclist($documentId, $termIds);
-        if ($fieldTermCounts !== []) {
-            $this->saveFieldHits($documentId, $fieldTermCounts);
+        /** @var array<int, array<int, int>> $termFields term ID → field ID → hits */
+        $termFields = [];
+        foreach ($fieldTermCounts as $fieldName => $fieldTerms) {
+            $fieldId = $this->resolveFieldNameId((string) $fieldName);
+            foreach ($fieldTerms as $term => $hits) {
+                $termId = $this->termIdCache[(string) $term] ?? null;
+                if ($termId !== null) {
+                    $termFields[$termId][$fieldId] = $hits;
+                }
+            }
         }
+        $this->saveDoclist($documentId, $termIds, $termFields);
         if ($termPositions !== []) {
             $termIdPositions = [];
             foreach ($termPositions as $term => $positions) {
@@ -4990,15 +4950,13 @@ class Index
         // Step 1: upsert all unique terms; get back term text → wordlist ID mapping.
         $termIdMap = $this->batchUpsertWordlist($wordHits, $wordDocs);
 
-        // Step 2: invert both docTermBuffer and docPositionBuffer, then insert doclist.
+        // Step 2: invert both docTermBuffer and docPositionBuffer, then insert doclist with the
+        // fields each term was found in (fieldColumns()).
         [$termDocMap, $termDocPosMap] = $this->invertTermBuffers($docTermBuffer, $docPositionBuffer, $termIdMap);
-        $this->bulkInsertDoclistRows($termDocMap);
-
-        // Step 3: invert fieldTermBuffer and bulk-insert per-field hit counts.
-        if ($fieldTermBuffer !== []) {
-            $termDocFieldMap = $this->invertFieldBuffer($fieldTermBuffer, $termIdMap);
-            $this->bulkInsertFieldHitRows($termDocFieldMap);
-        }
+        $this->bulkInsertDoclistRows(
+            $termDocMap,
+            $fieldTermBuffer === [] ? [] : $this->invertFieldBuffer($fieldTermBuffer, $termIdMap),
+        );
 
         // Step 4: bulk-insert doc_lengths.
         $this->bulkInsertDocLengthRows($docLengthBuffer);
@@ -5025,9 +4983,10 @@ class Index
     /**
      * Bulk-insert doclist rows in clustered (term_id, doc_id) PK order.
      *
-     * @param array<int, array<int, int>> $termDocMap  term_id → doc_id → hit_count (unsorted; sorted here)
+     * @param array<int, array<int, int>>             $termDocMap      term_id → doc_id → hit_count (sorted here)
+     * @param array<int, array<int, array<int, int>>> $termDocFieldMap term_id → doc_id → field_id → hits
      */
-    private function bulkInsertDoclistRows(array $termDocMap): void
+    private function bulkInsertDoclistRows(array $termDocMap, array $termDocFieldMap = []): void
     {
         $pdo = $this->pdo;
         assert($pdo instanceof \PDO);
@@ -5039,14 +4998,17 @@ class Index
             /** @infection-ignore-all FunctionCallRemoval: ksort orders by doc_id for clustered PK order; omitting only degrades write speed */
             ksort($docs);
             foreach ($docs as $docId => $hits) {
+                [$fieldId, $split] = self::fieldColumns($termDocFieldMap[$termId][$docId] ?? []);
                 $params[] = $termId;
                 $params[] = $docId;
                 $params[] = $hits;
-                if (++$rowCount === self::CHUNK_3P) {
+                $params[] = $fieldId;
+                $params[] = $split;
+                if (++$rowCount === self::CHUNK_5P) {
                     /** @infection-ignore-all AssignCoalesce: removing ??= only disables statement caching; correctness is unaffected */
-                    ($this->bulkStmtCache['doclistChunk:' . self::CHUNK_3P] ??= $pdo->prepare(
-                        'INSERT INTO doclist (term_id, doc_id, hit_count) VALUES '
-                        . implode(',', array_fill(0, self::CHUNK_3P, '(?,?,?)'))
+                    ($this->bulkStmtCache['doclistChunk:' . self::CHUNK_5P] ??= $pdo->prepare(
+                        'INSERT INTO doclist (term_id, doc_id, hit_count, field_id, field_split) VALUES '
+                        . implode(',', array_fill(0, self::CHUNK_5P, '(?,?,?,?,?)'))
                     ))->execute($params);
                     $params   = [];
                     $rowCount = 0;
@@ -5056,10 +5018,55 @@ class Index
         /** @infection-ignore-all GreaterThan: changing > 0 to >= 0 only matters when rowCount=0 (no partial chunk); tests always produce at least one row so this branch is always true regardless */
         if ($rowCount > 0) {
             $pdo->prepare(
-                'INSERT INTO doclist (term_id, doc_id, hit_count) VALUES '
-                . implode(',', array_fill(0, $rowCount, '(?,?,?)'))
+                'INSERT INTO doclist (term_id, doc_id, hit_count, field_id, field_split) VALUES '
+                . implode(',', array_fill(0, $rowCount, '(?,?,?,?,?)'))
             )->execute($params);
         }
+    }
+
+    /**
+     * The doclist columns recording which fields a term was found in: the field ID when it is
+     * one field, else the split "fieldId:hits fieldId:hits" (field IDs ascending). Field boosts
+     * read them (fetchFieldHitsForPairs()); a separate field_hits table cost a row per field, 2.2M
+     * rows on the 45k ecom set where 88% of the pairs have one field, and a second seek per pair.
+     *
+     * @param  array<int, int> $fields field ID → hits; [] for a document without field hits
+     * @return array{0: int|null, 1: string|null}
+     */
+    private static function fieldColumns(array $fields): array
+    {
+        if (count($fields) === 1) {
+            return [array_key_first($fields), null];
+        }
+        if ($fields === []) {
+            return [null, null];
+        }
+        ksort($fields);
+        $parts = [];
+        foreach ($fields as $fieldId => $hits) {
+            $parts[] = $fieldId . ':' . $hits;
+        }
+        return [null, implode(' ', $parts)];
+    }
+
+    /**
+     * Field ID → hits from fieldColumns()' two columns.
+     *
+     * @return array<int, int>
+     */
+    private static function fieldsFromColumns(?int $fieldId, ?string $split, int $hits): array
+    {
+        if ($fieldId !== null) {
+            return [$fieldId => $hits];
+        }
+        $fields = [];
+        foreach (explode(' ', (string) $split) as $part) {
+            if ($part !== '') {
+                [$id, $n] = explode(':', $part);
+                $fields[(int) $id] = (int) $n;
+            }
+        }
+        return $fields;
     }
 
     /**
@@ -5298,10 +5305,11 @@ class Index
      * is not faster here: single-document inserts have small row counts, so the overhead of
      * a variable-shape prepared statement outweighs the savings.
      *
-     * @param int             $documentId Document ID.
-     * @param array<int, int> $termIds  term_id → hit_count map from upsertWordlist().
+     * @param int                         $documentId Document ID.
+     * @param array<int, int>             $termIds    term_id → hit_count map from upsertWordlist().
+     * @param array<int, array<int, int>> $termFields term_id → field_id → hits (fieldColumns())
      */
-    private function saveDoclist(int $documentId, array $termIds): void
+    private function saveDoclist(int $documentId, array $termIds, array $termFields): void
     {
         if ($termIds === []) {
             return;
@@ -5313,43 +5321,18 @@ class Index
         // descent, and the per-statement setup overhead cancels the execute() savings.
         $stmt = $this->stmt(
             'saveDoclistRow',
-            'INSERT INTO doclist (term_id, doc_id, hit_count) VALUES (?,?,?)'
+            'INSERT INTO doclist (term_id, doc_id, hit_count, field_id, field_split) VALUES (?,?,?,?,?)'
         );
         foreach ($termIds as $termId => $hits) {
-            $stmt->execute([$termId, $documentId, $hits]);
+            [$fieldId, $split] = self::fieldColumns($termFields[$termId] ?? []);
+            $stmt->execute([$termId, $documentId, $hits, $fieldId, $split]);
         }
     }
 
-    /**
-     * Write per-field term hit counts for a single document (single-insert path).
-     *
-     * @param int                               $documentId      Document ID.
-     * @param array<string, array<string, int>> $fieldTermCounts fieldName → term → hitCount
-     */
-    private function saveFieldHits(int $documentId, array $fieldTermCounts): void
-    {
-        if ($fieldTermCounts === []) {
-            return;
-        }
-        $stmt = $this->stmt(
-            'saveFieldHitRow',
-            'INSERT INTO field_hits (term_id, doc_id, field_id, hit_count) VALUES (?,?,?,?)'
-        );
-        foreach ($fieldTermCounts as $fieldName => $termCounts) {
-            $fieldId = $this->resolveFieldNameId($fieldName);
-            foreach ($termCounts as $term => $hits) {
-                $termId = $this->termIdCache[$term] ?? null;
-                if ($termId === null) {
-                    continue;
-                }
-                $stmt->execute([$termId, $documentId, $fieldId, $hits]);
-            }
-        }
-    }
 
     /**
      * Invert docId → fieldName → term → hitCount into termId → docId → fieldId → hitCount,
-     * sorted in composite PK order for sequential B-tree appends into field_hits.
+     * sorted in composite PK order for sequential B-tree appends into doclist.
      *
      * @param array<int, array<string, array<string, int>>> $fieldTermBuffer  docId → fieldName → term → hitCount
      * @param array<string, int>                            $termIdMap        term text → wordlist ID
@@ -5373,50 +5356,6 @@ class Index
         return $termDocFieldMap;
     }
 
-    /**
-     * Bulk-insert field_hits rows in clustered (term_id, doc_id, field_id) PK order.
-     *
-     * @param array<int, array<int, array<int, int>>> $termDocFieldMap  termId → docId → fieldId → hitCount
-     */
-    private function bulkInsertFieldHitRows(array $termDocFieldMap): void
-    {
-        $pdo = $this->pdo;
-        assert($pdo instanceof \PDO);
-        /** @infection-ignore-all FunctionCallRemoval: ksort orders INSERTs by term_id PK for B-tree performance; omitting only degrades write speed */
-        ksort($termDocFieldMap);
-        $rowCount = 0;
-        $params   = [];
-        foreach ($termDocFieldMap as $termId => $docs) {
-            /** @infection-ignore-all FunctionCallRemoval: ksort orders by doc_id for clustered PK order; omitting only degrades write speed */
-            ksort($docs);
-            foreach ($docs as $docId => $fields) {
-                /** @infection-ignore-all FunctionCallRemoval: ksort orders by field_id for clustered PK order; omitting only degrades write speed */
-                ksort($fields);
-                foreach ($fields as $fieldId => $hits) {
-                    $params[] = $termId;
-                    $params[] = $docId;
-                    $params[] = $fieldId;
-                    $params[] = $hits;
-                    if (++$rowCount === self::CHUNK_4P) {
-                        /** @infection-ignore-all AssignCoalesce: removing ??= only disables statement caching; correctness is unaffected */
-                        ($this->bulkStmtCache['fieldHitsChunk:' . self::CHUNK_4P] ??= $pdo->prepare(
-                            'INSERT INTO field_hits (term_id, doc_id, field_id, hit_count) VALUES '
-                            . implode(',', array_fill(0, self::CHUNK_4P, '(?,?,?,?)'))
-                        ))->execute($params);
-                        $params   = [];
-                        $rowCount = 0;
-                    }
-                }
-            }
-        }
-        /** @infection-ignore-all GreaterThan: changing > 0 to >= 0 only matters when rowCount=0 (no partial chunk); tests always produce at least one row so this branch is always true regardless */
-        if ($rowCount > 0) {
-            $pdo->prepare(
-                'INSERT INTO field_hits (term_id, doc_id, field_id, hit_count) VALUES '
-                . implode(',', array_fill(0, $rowCount, '(?,?,?,?)'))
-            )->execute($params);
-        }
-    }
 
     /**
      * Resolve a field name to its field_names.id, inserting if absent.
@@ -5465,62 +5404,58 @@ class Index
 
     /**
      * Fetch per-field hit counts for the (term, document) pairs the field boost re-scoring in
-     * search() reads: one primary-key seek per pair. Passing every term ID and every candidate
-     * as two IN lists cost 6.2 ms for "blue jeans" on the 45k ecom set (954 candidates) against
-     * 1.8 ms for the pairs.
+     * search() reads: one primary-key seek per pair in doclist, whose fieldColumns() hold the
+     * fields. Passing every term ID and every candidate as two IN lists cost 6.2 ms for "blue
+     * jeans" on the 45k ecom set (954 candidates) against 1.8 ms for the pairs; 1,800 pairs
+     * read 0.9 ms from doclist against 1.3 ms from the former field_hits table (one row per
+     * field).
      *
      * The pairs travel as one json_each list. Each is packed into one integer (term × 2^32 +
      * document) when every ID fits, which is the case for all but exotic document IDs; otherwise
-     * as [term, document] arrays read with ->> (2.5 ms).
+     * as [term, document] arrays read with ->>.
      *
      * @param  array<int, array<int, true>> $docTerms docId → termId → true
      * @return array<int, array<int, array<int, int>>> termId → docId → fieldId → hitCount
      */
     private function fetchFieldHitsForPairs(array $docTerms): array
     {
-        $packed = [];
         $pairs  = [];
+        $packed = [];
         foreach ($docTerms as $docId => $terms) {
             foreach ($terms as $termId => $_) {
                 $pairs[] = [$termId, $docId];
+                if ($packed !== null && $docId >= 0 && $docId <= 0xFFFFFFFF && $termId >= 0 && $termId <= 0x7FFFFFFF) {
+                    $packed[] = ($termId << 32) | $docId;
+                } else {
+                    $packed = null;
+                }
             }
         }
         if ($pairs === []) {
             return [];
         }
-        $fits = true;
-        foreach ($pairs as [$termId, $docId]) {
-            if ($docId < 0 || $docId > 0xFFFFFFFF || $termId < 0 || $termId > 0x7FFFFFFF) {
-                $fits = false;
-                break;
-            }
-            $packed[] = ($termId << 32) | $docId;
-        }
-        if ($fits) {
+        $select = 'SELECT d.term_id, d.doc_id, d.hit_count, d.field_id, d.field_split FROM json_each(?) p';
+        if ($packed !== null) {
             // Sorted, so consecutive seeks land on neighbouring primary-key pages.
             sort($packed);
             $stmt = $this->stmt(
                 'fieldHitsForPackedPairs',
-                'SELECT f.term_id, f.doc_id, f.field_id, f.hit_count
-                   FROM json_each(?) p
-                   CROSS JOIN field_hits f ON f.term_id = p.value >> 32 AND f.doc_id = p.value & 4294967295'
+                $select . ' CROSS JOIN doclist d ON d.term_id = p.value >> 32 AND d.doc_id = p.value & 4294967295'
             );
             $stmt->execute([json_encode($packed)]);
         } else {
             sort($pairs);
             $stmt = $this->stmt(
                 'fieldHitsForPairs',
-                'SELECT f.term_id, f.doc_id, f.field_id, f.hit_count
-                   FROM json_each(?) p
-                   CROSS JOIN field_hits f ON f.term_id = p.value ->> 0 AND f.doc_id = p.value ->> 1'
+                $select . ' CROSS JOIN doclist d ON d.term_id = p.value ->> 0 AND d.doc_id = p.value ->> 1'
             );
             $stmt->execute([json_encode($pairs)]);
         }
-        /** @var list<array{0: int, 1: int, 2: int, 3: int}> $rows */
+        /** @var list<array{0: int, 1: int, 2: int, 3: int|null, 4: string|null}> $rows */
         $rows   = $stmt->fetchAll(PDO::FETCH_NUM);
         $result = [];
-        foreach ($rows as [$termId, $docId, $fieldId, $hits]) {
-            $result[$termId][$docId][$fieldId] = $hits;
+        foreach ($rows as [$termId, $docId, $hits, $fieldId, $split]) {
+            $result[$termId][$docId] = self::fieldsFromColumns($fieldId, $split, $hits);
         }
         return $result;
     }
