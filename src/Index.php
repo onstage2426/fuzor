@@ -117,9 +117,8 @@ class Index
     private const int FIELD_POSITION_STRIDE = 1 << 20;
 
     /**
-     * Proximity span assigned to a document when its query terms do not all appear in the first
-     * indexed field (applyProximityBoost()): larger than a typical title match, so title-only
-     * matches always rank above body-only ones. Scaled by (numGroups - 1).
+     * Distance a proximity window counts per word gap when its words lie in different fields
+     * (applyProximityBoost()): far, but not as far as the positions are apart.
      */
     private const int CROSS_FIELD_SPAN = 8;
 
@@ -5840,18 +5839,15 @@ class Index
     /**
      * Rerank BM25 scores in-place using a proximity factor: 1 / (1 + boost × minSpan).
      *
-     * Only positions in the first indexed field (field 0; positions below FIELD_POSITION_STRIDE)
-     * are considered. If every query-keyword group has at least one hit there, minSpan is the
-     * smallest window covering one occurrence of each group within that field. If any group is
-     * absent from the first field, minSpan is CROSS_FIELD_SPAN × (numGroups − 1) — the same
-     * constant used for cross-field windows — so title matches always rank above body-only ones.
+     * minSpan is the smallest token-position window (in indexed positions) that contains at
+     * least one occurrence of every query-keyword group. A "group" is the set of term IDs
+     * produced by one keyword — including prefix/fuzzy expansions — so "se" matching
+     * {sedan, seat} counts as a single group, not two independent constraints. A window whose
+     * words lie in different fields counts CROSS_FIELD_SPAN per word gap (each field has its
+     * own position slot, see tokenizeDocumentFields()), so a match inside one field ranks above
+     * one split across fields unless its words are further apart than that.
      *
-     * A "group" is the set of term IDs produced by one keyword — including prefix/fuzzy
-     * expansions — so "se" matching {sedan, seat} counts as a single group.
-     *
-     * Callers pass full matches only (every group in the document), so only the first field's
-     * positions are read: a range of the positions index per (document, term), which skips
-     * the longer later fields.
+     * Documents that do not have positions for every group (partial matches) are unchanged.
      *
      * @param array<int, float> $docScores  BM25 scores keyed by doc ID; modified in-place.
      * @param list<list<int>>   $termGroups One element per keyword; each is a list of term IDs.
@@ -5860,11 +5856,10 @@ class Index
     {
         /** @var list<int> $allTermIds */
         $allTermIds = array_values(array_unique(array_merge(...$termGroups)));
-        $positions  = $this->fetchPositionsForDocs(
-            array_keys($docScores),
-            $allTermIds,
-            self::FIELD_POSITION_STRIDE
-        );
+        $positions  = $this->fetchPositionsForDocs(array_keys($docScores), $allTermIds);
+        if ($positions === []) {
+            return;
+        }
 
         // Invert: term_id → group index, for O(1) lookup in the per-doc loop.
         /** @var array<int, int> $termToGroup */
@@ -5879,43 +5874,39 @@ class Index
         $boost          = $this->config->proximityBoost;
         $crossFieldSpan = self::CROSS_FIELD_SPAN * ($numGroups - 1);
 
-        foreach ($docScores as $docId => $_) {
-            // Positions in the first field per group.
-            /** @var array<int, list<int>> $firstField */
-            $firstField = array_fill(0, $numGroups, []);
-            foreach ($positions[$docId] ?? [] as $termId => $posList) {
+        foreach ($positions as $docId => $termPositions) {
+            // Partition positions into per-keyword-group buckets.
+            /** @var array<int, list<int>> $groupPositions */
+            $groupPositions = array_fill(0, $numGroups, []);
+            foreach ($termPositions as $termId => $posList) {
                 $g = $termToGroup[$termId] ?? null;
                 if ($g !== null) {
-                    array_push($firstField[$g], ...$posList);
+                    foreach ($posList as $pos) {
+                        $groupPositions[$g][] = $pos;
+                    }
                 }
             }
 
-            $allInTitle = true;
-            foreach ($firstField as $gp) {
+            // Skip docs missing positions for any group (partial BM25 matches).
+            foreach ($groupPositions as $gp) {
                 if ($gp === []) {
-                    $allInTitle = false;
-                    break;
+                    continue 2;
                 }
             }
 
-            if (!$allInTitle) {
-                // Some groups only appear in later fields: assign the cross-field penalty.
-                $docScores[$docId] *= 1.0 / (1.0 + $boost * $crossFieldSpan);
-                continue;
-            }
-
-            // All groups are in the first field: find the smallest window covering each group.
-            // Each entry is position × numGroups + group, so sort() orders by position with no
-            // PHP comparison callback (a usort() closure per document cost ~1 ms per 600 docs).
+            // Merge all groups' positions into one list sorted by position. Each entry is one
+            // integer, position × numGroups + group, so a native sort() orders it with no PHP
+            // comparison callback (a usort() closure per document cost ~1 ms per 600 documents).
             /** @var list<int> $merged */
             $merged = [];
-            foreach ($firstField as $g => $posList) {
+            foreach ($groupPositions as $g => $posList) {
                 foreach ($posList as $pos) {
                     $merged[] = $pos * $numGroups + $g;
                 }
             }
             sort($merged);
 
+            // Sliding-window minimum-span: smallest window covering all groups.
             $count   = array_fill(0, $numGroups, 0);
             $have    = 0;
             $left    = 0;
@@ -5929,12 +5920,17 @@ class Index
                 $count[$rightG]++;
 
                 while ($have === $numGroups) {
-                    $leftPos = intdiv($merged[$left], $numGroups);
-                    $span    = intdiv($right, $numGroups) - $leftPos;
+                    $leftEntry = $merged[$left];
+                    $leftPos   = intdiv($leftEntry, $numGroups);
+                    $rightPos  = intdiv($right, $numGroups);
+                    // A window across fields would span the gap between their position slots.
+                    $sameField = intdiv($leftPos, self::FIELD_POSITION_STRIDE)
+                        === intdiv($rightPos, self::FIELD_POSITION_STRIDE);
+                    $span      = $sameField ? $rightPos - $leftPos : $crossFieldSpan;
                     if ($span < $minSpan) {
                         $minSpan = $span;
                     }
-                    $leftG = $merged[$left] % $numGroups;
+                    $leftG = $leftEntry % $numGroups;
                     $count[$leftG]--;
                     if ($count[$leftG] === 0) {
                         $have--;
@@ -5954,10 +5950,9 @@ class Index
      *
      * @param  list<int> $docIds
      * @param  list<int> $termIds
-     * @param  int|null  $below    Only positions below this one (null = all fields).
      * @return array<int, array<int, list<int>>> doc_id → term_id → sorted position list
      */
-    private function fetchPositionsForDocs(array $docIds, array $termIds, ?int $below = null): array
+    private function fetchPositionsForDocs(array $docIds, array $termIds): array
     {
         if ($docIds === [] || $termIds === []) {
             return [];
@@ -5968,19 +5963,14 @@ class Index
         // arrive grouped by document; each (document, term) pair is one range of the covering
         // positions_doc_id index, in position order. Measured on ecom, 3,400 phrase candidates:
         // 6.1 ms, against 7.8 ms for IN lists and 8.3 ms with the terms as the outer loop.
-        // With $below, the position bound narrows each range (the index is (doc_id, term_id,
-        // position)), so proximity reads only the first field.
-        $sql = 'SELECT p.doc_id, p.term_id, p.position
-                  FROM json_each(?) d
-                  CROSS JOIN positions p ON p.doc_id = d.value
-                 WHERE p.term_id IN (SELECT value FROM json_each(?))';
-        $params = [json_encode($docIds), json_encode($termIds)];
-        if ($below !== null) {
-            $sql     .= ' AND p.position < ?';
-            $params[] = $below;
-        }
-        $stmt = $this->stmt($below === null ? 'fetchPositions' : 'fetchPositionsBelow', $sql);
-        $stmt->execute($params);
+        $stmt = $this->stmt(
+            'fetchPositions',
+            'SELECT p.doc_id, p.term_id, p.position
+               FROM json_each(?) d
+               CROSS JOIN positions p ON p.doc_id = d.value
+              WHERE p.term_id IN (SELECT value FROM json_each(?))'
+        );
+        $stmt->execute([json_encode($docIds), json_encode($termIds)]);
 
         /** @var array<int, array<int, list<int>>> $result */
         $result = [];
