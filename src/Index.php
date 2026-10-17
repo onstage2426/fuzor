@@ -7515,7 +7515,12 @@ class Index
                 }
             } else {
                 $params = is_array($filterValue) ? $filterValue : [$filterValue];
-                $sql    = '%1$s.value IN (' . $this->placeholders(count($params)) . ')';
+                // One value as "= ?": with "IN (?)" SQLite probes a bound value through
+                // facet_doc_id_index instead of the primary key, whose rows for one value are
+                // adjacent (amazon, 57k-row walk probing a category: 62 vs 20 ms).
+                $sql    = count($params) === 1
+                    ? '%1$s.value = ?'
+                    : '%1$s.value IN (' . $this->placeholders(count($params)) . ')';
             }
             $matchesNothing = $keyId === null || $params === [] && !$filterValue instanceof FacetRange;
             if ($exclude && $matchesNothing) {
