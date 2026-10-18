@@ -43,6 +43,36 @@ cost (whole-key counts on a shop page) is solved by a maintained `facet_counts` 
 **When to revisit:** if filtered (not whole-key) facet counts at the `maxFacetCountDocs` cap
 become the bottleneck on real catalogs, with measurements.
 
+**Revisited 2026-10-18, rejected again:** filtered counts at the cap were measured as the
+bottleneck (1.43M Amazon products, a category of 28.6k products with three facets: 26.7 ms
+for 10k of the matches). Dense bitmaps were prototyped next to the index for the fields with
+at most 64 values. Counting takes 0.37 ms per facet value at 1.43M documents (string `&`
+0.25 ms + `count_chars()` 0.12 ms on 178 KB; no gmp to count bits faster), so the cost
+follows the number of values, not of matches: 26 ms for 75 values, 100–120 ms for 282–322.
+Loading the bitmaps costs 12–50 ms (13–57 MB) on every request, because PHP keeps nothing
+between requests. A field with many values does not fit at all (reviews: 11,861 values,
+2.1 GB), and document IDs are chosen by the caller, so dense bitmaps would also need an
+internal ID. A packed row of value IDs per document (`doc_facets`) was chosen instead: exact
+counts over all 28.6k matches in 16 ms.
+
+**When to revisit:** if PHP gets a fast population count for strings, and with a way to keep
+bitmaps in memory across requests.
+
+## Rejected: integer value IDs in `facet_values` for filtered counts (2026-10-18)
+
+**Proposal:** replace the TEXT value in `facet_values` with an integer ID from a dictionary,
+so the per-document facet count join compares and reads integers.
+
+**Why rejected:** the join still reads one row per document and facet field, and that row
+count is the cost. Measured on a prototype with a covering `(doc_id, key_id, vid)` index:
+1.43M Amazon products, a category of 28.6k products with three facets: 57.5 ms against 76.0 ms
+for the TEXT join and 16.3 ms for one packed row per document (`doc_facets`); 45k ecom set,
+gender Men with five facets: 63.7 vs 85.0 vs 15.8 ms. The tables are smaller (240 vs 308 MB at
+1.43M), but range filters would still need the numeric value next to the row.
+
+**When to revisit:** if the size of `facet_values` and its doc index becomes the problem
+rather than counting speed.
+
 ## Rejected: field weights in `SchemaConfig` (2026-10-07)
 
 **Proposal:** declare per-field ranking weights in the schema at creation time (raised by the
@@ -125,6 +155,8 @@ any other attribute. A built-in key would reserve a field name and add special c
 `parseSortSpec()`, `sortRanks()`, and `browseSortedPage()`, for a consumer that reported
 nothing blocked on it. The 1.6.0 change was documented instead (`docs/search.md` § Custom
 sort, and the 1.6.0 changelog entry), and an undeclared `id:asc` already produces a warning.
+(Since 2.0: `id` is declared in `sortableFields`, and an undeclared sort field throws a
+`QueryException` instead of warning.)
 
 **When to revisit:** if the per-document facet row for `id` shows up as a measurable cost, or
 sorting by ID turns out to be common enough that declaring it is a recurring stumbling block.

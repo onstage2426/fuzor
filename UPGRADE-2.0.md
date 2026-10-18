@@ -3,7 +3,7 @@
 ## Recreate every index from your source data
 
 2.0 does not open index files written by 1.x (schema revisions 1 to 3). Opening one, also
-read-only or through `rebuild()`, throws a `QueryException`. An index is not a permanent store:
+read-only, throws a `QueryException`. An index is not a permanent store:
 recreate it and insert your documents again.
 
 ```php
@@ -14,7 +14,39 @@ $index->insert($documentsFromYourSource);
 `force: true` replaces the old file safely while other processes still have it open. Files
 written by a newer Fuzor are rejected the same way.
 
+`Index::rebuild($path, $callback, schema: ...)` also replaces a 1.x file: with both a callback and
+a schema it does not need to open the old index, and publishes the new one in its place (the old
+file's synonyms are not carried over; set them in the callback). Without a callback, or without a
+schema, it throws like opening the file does.
+
 The sections below list every change that needs a change in calling code.
+
+## A word also matches its typos when it exists
+
+In 1.x a query word only fell back to typo matching when the index had no exact (or prefix) match
+for it. Now every word long enough for a typo (`TypoTolerance`, 5+ characters by default) also
+matches the indexed words within its typo budget, as in Meilisearch: "bluetoth" finds "bluetooth"
+even when some product spells it "bluetoth". Results can therefore grow, and within a words
+bucket documents that match with fewer typos rank first, before `sort` fields. To keep words
+exact, list them in `TypoTolerance::$disableOnWords`, set `disableOnNumbers` for codes, or raise
+`minWordSizeForOneTypo`.
+
+## A language no longer filters stop words
+
+In 1.x, `SchemaConfig::$language` also switched on a bundled stop word list (1,298 English
+words, including product words such as `c`, `men`, `tv`, `case` and every two-letter code).
+Those words were left out of the index and of queries. 2.0 ships no lists: every word is indexed
+and searched unless you list it in the new `SchemaConfig::$stopWords`, which is empty by
+default.
+
+- To keep filtering words, pass them: `new SchemaConfig(language: 'en', stopWords: ['the', 'a', 'of'])`.
+  Each entry must be a single word; matching ignores case.
+- `Language::hasStopwords()` is removed. `QueryInspection::$stopwordsActive` is true when the
+  index has stop words.
+- Language tags that only had a stop word list (no stemmer, no n-grams) are no longer accepted:
+  `af`, `bg`, `bn`, `br`, `cs`, `fa`, `gl`, `gu`, `ha`, `he`, `hr`, `ku`, `la`, `lv`, `mr`, `ms`, `sk`,
+  `sl`, `so`, `st`, `sw`, `tl`, `uk`, `ur`, `vi`, `yo`, `zu`. Create those indexes with
+  `language: null`; indexing and search are the same apart from the stop words.
 
 ## `facetFields` is split into `filterableFields` and `sortableFields`
 
@@ -83,9 +115,40 @@ first.
 and the sort fields order documents within each group. In 1.x the sort fields decided the whole
 order.
 
+## Some results are ranked differently
+
+Four ranking fixes change the order of some results without any change on your side; tests
+that assert an exact order may need updating:
+
+- In a multi-word search where one word matches more than `Config::$maxDocs` documents,
+  documents found through the other words are now scored for the common word too, so documents
+  that contain every word rank as such.
+- A prefix that expands to words counting more documents together than the index holds no longer
+  ranks documents with more matching words last.
+- A typo'd word is matched against its closest candidates first, so it can find a match that
+  1.x missed when many words share its first letters.
+- Each field's word positions start on their own, so a quoted phrase no longer matches across
+  the end of one field and the start of the next. Proximity scoring measures the distance between
+  query words inside one field; words that only meet across two fields count a fixed cross-field
+  distance per gap. On a 44k-product catalog 99% of multi-word searches keep their top hit.
+
+## `inspectQuery()` reports negations separately
+
+Like `search()`, `inspectQuery()` splits `-word` and `-"phrase"` off the query first: they are no
+longer listed in `$tokens`, `$rawTokens`, or `$filteredTokens`, but in the new `$negations`.
+
 ## `SearchOptions::$limit` defaults to 20
 
 The default page size is 20 hits instead of 100. Pass `limit: 100` to keep the old size.
+
+## `Config::$maxFacetCountDocs` defaults to 50,000
+
+Facet counts over a filter or query are taken over at most `maxFacetCountDocs` matching
+documents. The default is 50,000 instead of 10,000, so pages with 10,001 to 50,000 matches now
+get exact counts (and no longer list their fields in `$approximateFacets`). Counting is cheaper
+in 2.0 (one row per document for all facet fields), so such a page is still faster than a
+capped one in 1.x. `facetSearch()` with a `query` also considers up to 50,000 candidates. Pass
+`maxFacetCountDocs: 10000` to keep the old cap.
 
 ## `facetSearch()` matches any word, ignoring accents
 
@@ -107,9 +170,11 @@ purge, so close results can be ordered slightly differently after deletes. Call 
 after a large deletion if you need exact statistics; it also runs by itself once 10% of the
 index is deleted.
 
-## `insert()` reads a generator in chunks
+## `insert()`, `update()` and `upsert()` read a generator in chunks
 
-A multi-document `insert()` no longer reads its whole input before writing (see
+A multi-document `insert()`, `update()` or `upsert()` no longer reads its whole input before writing (see
 `Config::$insertChunkSize`). For a generator, or any `Traversable` that is not `Countable`, the
 `progress` callback now receives `0` as `$total`; arrays and `Countable` inputs still get their
-size. A generator is read while the insert runs, so it should not depend on the index it feeds.
+size. A generator is read while the write runs, so it should not depend on the index it feeds.
+When an `update()` names IDs that do not exist, nothing is written as before, but the exception
+lists the missing IDs of the first chunk that has any, not all of them.

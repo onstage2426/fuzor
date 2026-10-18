@@ -6,13 +6,13 @@
 
 Fuzor is a dependency-free full-text search library for PHP. It tokenises your documents, stores an inverted index in a single SQLite file, and scores results with Okapi BM25 — no external services required.
 
-- BM25 ranked search with automatic typo tolerance
-- Boolean search with AND / OR / NOT operators
-- Faceted filtering, per-value counts, and facet value search
+- BM25 ranked search with automatic typo tolerance, ranked by how many query words match
+- Boolean search with AND / OR / NOT operators; `-word` and `-"phrase"` exclusions in plain search
+- Faceted filtering (including exclusions), per-value counts, and facet value search
 - Search-as-you-type prefix matching and phrase search
-- Stopword filtering and Snowball stemming for 62 languages
+- Snowball stemming for 31 languages, n-grams for Chinese, Japanese, Korean and Thai, optional stop words
 - Result highlighting and snippet extraction
-- One SQLite file per index — zero infrastructure
+- One SQLite file per index — zero infrastructure; atomic rebuilds, snapshots, and installs
 
 ## Installation
 
@@ -73,12 +73,12 @@ foreach ($facetResult as $hit) {
 
 ## Documentation
 
-- [Indexing](docs/indexing.md) — creating indexes, inserting, updating, facet fields, rebuild, snapshots
+- [Indexing](docs/indexing.md) — creating indexes, inserting, updating, deleting (also by filter), rebuild, snapshots, installing a file
 - [Search](docs/search.md) — BM25, boolean, phrases, typo tolerance, synonyms, facets, sorting, distinct
-- [Language](docs/language.md) — stopwords, stemming, CJK/Thai n-grams
+- [Language](docs/language.md) — stemming, stop words, CJK/Thai n-grams
 - [Formatting](docs/formatting.md) — result highlighting and snippet extraction
 - [Document store](docs/document-store.md) — storing and retrieving raw documents
-- [Tuning](docs/tuning.md) — BM25 parameters, typo tolerance, field boosting
+- [Tuning](docs/tuning.md) — BM25 parameters, typo tolerance, facets, field boosting, bulk loads
 - [Performance](docs/performance.md) — read/write index split, snapshots
 - [Inspect query](docs/inspect-query.md) — debug the query pipeline
 

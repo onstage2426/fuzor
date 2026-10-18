@@ -1,5 +1,91 @@
 # Changelog
 
+## 2.0.0 - unreleased
+
+See `UPGRADE-2.0.md` for what calling code has to change.
+
+Breaking:
+
+- Index files written by 1.x (schema revisions 1 to 3) are no longer opened: `new Index()` throws a `QueryException` that says how to recreate the index. `Index::rebuild()` with a callback and a schema replaces such a file without opening it. The same happens for a file written by a newer version. 2.0 writes schema revision 4; the code that kept older revisions working (the narrow facet index, `strip_tags()` for old `stripHtml` files, defaults for missing `info` keys) is gone.
+- `SchemaConfig::$facetFields` is replaced by `filterableFields` (fields for `filter`, `facets`, `distinct`, and `facetSearch()`) and `sortableFields` (fields for `sort`). `$index->facetFields` is replaced by `$index->filterableFields` and `$index->sortableFields`.
+- A field outside the matching list in `sort`, `filter`, `facets`, `distinct`, or a `FacetSearchQuery` now throws a `QueryException` naming the field and the declared fields, instead of being ignored with a warning.
+- `Config::$filterMaxDocs` is removed; it had no effect since 1.6.0.
+- `Config::$fuzzyMinWordLength` is replaced by `Config::$typoTolerance` (`TypoTolerance`): `enabled`, `minWordSizeForOneTypo` (5), `minWordSizeForTwoTypos` (9, was fixed), `disableOnNumbers`, and `disableOnWords`.
+- `SearchOptions::$matchingStrategy` (`MatchingStrategy::Last` default, `All`, `Frequency`): a multi-word `search()` returns documents containing the first word (`Last`), every word (`All`), or the rarest word (`Frequency`), ranked by how many words they match in that order. 1.x returned documents with any word. `sort` now applies after this words ranking instead of before it. `All` is exact when its rarest word is under `maxDocs`.
+- `SearchOptions::$limit` defaults to 20 (was 100).
+- A query word that exists in the index also matches its typos, as in Meilisearch (typo matching used to start only when the word had no match). Within a words bucket, documents that match with fewer typos rank first, before `sort`. On 1.43M Amazon products "bluetoth headphones" ("bluetoth" is in 20 titles) returns 792 hits instead of 20.
+- A `language` no longer enables a stop word list, and the bundled lists are removed: every word is indexed and searched, as in Meilisearch. Stop words are the new `SchemaConfig::$stopWords` (single words, empty by default), left out of the index and of queries. The English list held 1,298 words, among them `c`, `men`, `tv`, `case` and `computer`: `"usb c cable"` was searched as `"usb cable"` and "Men" was never indexed. `Language::hasStopwords()` is removed, and the 27 language tags that only had a list (`af`, `cs`, `he`, `uk`, `vi`, …) throw a `QueryException` at index creation.
+- `Config::$maxFacetCountDocs` defaults to 50,000 (was 10,000): facet counts over up to 50,000 matching documents are exact. A 28.6k-product category of 1.43M Amazon products with three facets counts all matches in 23 ms, where 1.7.1 took 35 ms for the first 10,000.
+- `inspectQuery()` lists `-word` / `-"phrase"` exclusions in the new `QueryInspection::$negations` (with their normalised tokens and whether `search()` applies them) instead of among the searched tokens.
+- String sort is case-insensitive: uppercase letters sort as if they were lowercase, so `"apple"` comes before `"Zebra"`. Accents are not folded. Sorting on string fields walks a new `sort_keys` table, written only for string values of sortable fields.
+- `search()` and `facetSearch()` queries support exclusions: `shirt -formal` leaves out documents containing "formal", `-"long sleeve"` a phrase, and a query of only exclusions returns every other document. In 1.x a leading `-` was ignored and the word was searched for.
+- `facetSearch()` matches `facetQuery` at the start of any word of a value and ignores case and Latin accents ("rosa cl" finds "rosa-clara" and "Rosa Clará"). It was a case-insensitive prefix of the whole value.
+- Facet values with equal counts are always listed in value order, so the same request returns the same distribution whichever way it was counted (also which values survive the `maxValuesPerFacet` cut).
+- Two swapped neighbouring characters count as one typo (`casaul` finds `casual`).
+- Each field's word positions start on their own instead of continuing from the previous field: a quoted phrase no longer matches across the end of one field and the start of the next. Proximity scoring measures the distance between query words inside one field; a window whose words lie in different fields counts a fixed cross-field distance per word gap. On the 44k catalog 99% of 300 multi-word searches keep their top hit (mean top-24 overlap 0.98).
+
+Added:
+
+- `SearchOptions::$sortFacetValuesBy` and `FacetSearchQuery::$sortFacetValuesBy` (`FacetOrder::Count` default, `Alpha`) order facet values; alphabetical order is applied before `maxValuesPerFacet` / `limit`.
+- `optimize(): int` purges the word index rows of deleted documents (see the `delete()` entry below) and returns how many documents it purged.
+- `deleteByFilter(array $filter): int` deletes every document that matches a filter (the shape of `SearchOptions::$filter`, filterable fields only) and returns how many; an empty filter throws.
+- `Index::remove($path)` deletes an index with everything Fuzor keeps next to it: the link at the path, every `{path}.v-{8 hex}` version, their `-wal`/`-shm` files, and temp files of builds that are no longer running. Unlinking the path alone, as before 1.7.1, leaves the version files behind.
+- `Index::install($file, $path, check: false)` puts an index file made elsewhere (a snapshot from another server) at a path: copied next to it, synced, rejected unless it is a complete Fuzor index this version opens (optionally `PRAGMA quick_check`), then published like `rebuild()`. A file with a non-empty `-wal` is refused.
+- A multi-document `insert()`, `update()` or `upsert()` tokenises and writes its documents in chunks of the new `Config::$insertChunkSize` (default 2,000) inside its single transaction, reading a generator one chunk at a time. On the 44k catalog, a streamed `insert()` peaks at 127 MB instead of 2 GB and `rebuild()` at about 150 MB instead of 2 GB, at the same speed. The `progress` callback's `$total` is `0` for a generator or other non-countable input.
+
+Performance (44k-product catalog, against 1.7.1):
+
+| Operation | 1.7.1 | 2.0 |
+|---|---|---|
+| Shop page: 5 facets, 4,025 products excluded | 37 ms | 13 ms |
+| Facets of an unfiltered page / price stats | 9.8 / 6.2 ms | 0.5 / 1.0 ms |
+| Price range sorted by price | 11.7 ms | 0.7 ms |
+| One gender sorted by price | 0.84 ms | 0.37 ms |
+
+Further improvements (this version, relative to 2.0 milestone builds):
+
+- Per-field term hit data moved into two columns on `doclist` (`field_id`, `field_split`); the separate `field_hits` table is gone. Index size −50 MB on the 44k catalog (319 → 269 MB). Field-boost pair read 1.3 → 0.9 ms.
+- Partial-text `update()` / `upsert()` now rewrites only the word-index rows that actually changed. Price-only update of 200 products 358 → 46 ms; title + one word 9,541 → 2,888 WAL pages, 780 → 278 ms.
+- Sorted, filtered browse pages choose between walking the sort field and sorting the matches by the expected walk length, and fall back to sorting when the walk runs long. On 1.43M products: a category sorted by price 33.6 → 17.8 ms, with a stars range sorted by reviews 73.8 → 32.2 ms, three categories 66.7 → 19.4 ms. Range filters count their rows from the facet counts (47 → 0.12 ms there).
+| Two genders sorted by price | 7.4 ms | 1.1 ms |
+| Listing: two genders, 6 facets, sort | 34 ms | 13 ms |
+| `distinct` browse / with filter and sort | 43 / 63 ms | 20 / 44 ms |
+| `facetSearch()` without query or filter | 4.1 ms | 0.2 ms |
+| `facetSearch()` with a filter | 11.0 ms | 9.6 ms |
+| Price-only `update()` of 200 products | 360–400 ms | 45–80 ms |
+| `delete()` of 50 products / of one | 260–390 / 3.9 ms | 12–25 / 0.5 ms |
+| `insert()` from a generator, all products | 25 s, 2.0 GB | 17 s, 138 MB |
+| `rebuild()` | 15 s, 2.0 GB | 15 s, 164 MB |
+| Multi-word search ("blue cotton shirt") | 1.7 ms | 5.7 ms |
+| Two-word search with a typo ("casaul shirt") | 0.7 ms | 4.0 ms |
+
+Multi-word searches are slower because 1.7.1 scored about half of their candidates as if a word were missing, and missed swapped-letter typos entirely (see Fixed); 2.0 ranks them correctly. `facetSearch()` with an accented `facetQuery` and a filter takes 12% longer (8.6 → 9.6 ms) and finds more values (word starts, accents folded). A single-word search sorted by a string field takes 1.2 → 1.4 ms. Every other read scenario is within ±7%.
+
+- `delete()` removes a document's own rows at once and marks its rows in the word index deleted; they are purged in bulk by the new `optimize()`, by `rebuild()` / `clear()`, or by `delete()` itself once deleted documents reach 10% of the index. On the 44k catalog a 50-document delete takes 13 ms instead of 250–340 ms (WAL 541 pages instead of 5,335) and a single delete 0.5 ms instead of 3.4 ms. Until the purge, BM25's per-word document counts include the deleted documents (with 10% deleted: same first hit, 97% of top-20 sets unchanged) and searches add a 0.1–1.3 ms filter.
+- `update()` and `upsert()` keep a document's word index entries when its searchable fields are unchanged (compared with the stored document, so only with the document store enabled) and rewrite only the stored document and its filterable / sortable values. On the 44k catalog a price-only update of 200 products takes 46 ms instead of 360 ms (WAL 1,046 pages instead of 8,284); an update that changes the titles costs the same as before.
+- Facet counts over the whole index, and the counts of a page whose only filters are exclusions, read a new `facet_counts` table kept exact on every write, instead of counting every document. On the 44k catalog: facets of an unfiltered page 9.9 → 0.6 ms, price stats 6.2 → 1.3 ms, a shop page with five facets hiding 4,025 products 37 → 13 ms (hiding 34,409: 60 → 45 ms), an unrestricted `facetSearch()` 4.1 → 0.2 ms. Writes stay within a few percent.
+- Filters on fields that never hold two values per document skip `DISTINCT` in their exact counts, and a range filter on the sort field of such a field seeks straight into the range: on the 44k catalog a price range sorted by price 11.5 → 0.8 ms, `gender: [Women, Men]` sorted by price 6.6 → 1.4 ms.
+- Field boosts (`Config::$fieldBoosts`) read per-field hits only for the term and document pairs a search found, instead of every term against every candidate: with a title boost, `sh` 3.7 → 2.1 ms, "blue jeans" 7.2 → 5.3 ms, "blue cotton shirt" 13.5 → 9.5 ms.
+- A filtered browse with facets reads its matching documents once for both the total and the facet counts, and text-only facets skip the numeric stats query. Exclusion-only facet counts on a large index subtract the excluded documents instead of scanning the kept ones whenever few are excluded: a shop page hiding 9% of a 533k catalog counts five facets in 171 ms instead of 714 ms.
+- `update()` and `upsert()` write only the word index rows that change when a document's searchable text changes, also without a document store: appending one word to the title of 200 products writes 2,888 WAL pages instead of 9,541 and takes 278 ms instead of 780 ms on the 44k catalog; a document whose text changes completely is rewritten as before, at the same speed. Without a document store, an update that leaves the text unchanged no longer touches the word index.
+- A browse filtered on one field whose documents hold one value each takes its total from the maintained facet counts instead of counting the matching rows: on the 44k catalog `gender: Men` sorted by price 0.79 → 0.29 ms (6.8 → 0.45 ms on a 533k catalog). Filter fields are also ordered by the same counts.
+- A browse that combines filters with exclusions that select fewer documents than the filters counts its total as the filter's matches minus the excluded ones among them: men without sports products, five facets, 34 → 26 ms on the 44k catalog, 149 → 59 ms on 533k.
+- A value list that selects most documents of a field every document has once (`gender: [Women, Men]`) is browsed as the exclusion of the other values when those hold at most `maxFacetCountDocs` documents. Its facet counts are then exact instead of approximate, and the 44k listing with six facets takes 13 ms instead of 21 ms.
+- `distinct` and sorting over many matches read the field's values with one scan of the field instead of one lookup per document, and numbers sort without string keys: `distinct` browse 42 → 20 ms, with a filter and sort 55 → 44 ms.
+- Exclusion-only facet counts subtract the excluded documents' counts whatever share of the index they exclude (was up to 25%, then a scan): `-shirt` with three facets 33 → 11 ms on the 44k catalog.
+- Filtered facet counts read one row per matching document for all facet fields instead of one row per document and field: each document's filterable values are stored together as packed IDs in a new `doc_facets` table (with a `facet_value_ids` dictionary). Same counts, about 0.6–1 µs per counted document. On the 44k catalog, gender Men with six facets 42.6 → 9.9 ms, Tshirts with six facets 31.6 → 8.1 ms; on 1.43M Amazon products, a 28.6k category with three facets 34.5 → 10.8 ms. Single-document updates cost up to 0.2 ms more, a full build 3–5% more, and the 1.43M index is 41.5 MB larger.
+- `facetSearch()` counts the values of a filtered or queried set in PHP instead of grouping them in SQL, from the documents' packed facet rows: 15–36% faster with a filter or a broad query (a 28.6k category of 1.43M products, stars: 23.7 → 15.2 ms).
+- A multi-word `search()` no longer loses documents that contain every word when each word is common. Each word still fetches its `maxDocs` best rows first; when those hold fewer full matches than the page needs (or with a filter, `-word` or `distinct`), the documents containing all words (then all but the last, …) are read exactly while the rarest word is in at most 50,000 documents. On 1.43M Amazon products "women cotton dress" returns 20 of 20 full matches instead of 1 (22 → 39 ms), `women "cotton dress"` 6 hits instead of 0. Completing a word for the candidates looks each document up instead of scanning the word's postings, so most multi-word searches got faster: "men running shoes" 19 → 10 ms, "women shoes" 20 → 8 ms, `"usb c cable"` 29 → 20 ms.
+- Proximity ranking runs after filtering and stops once the requested page is settled (with sort fields it only breaks ties on the page), so filtered and sorted multi-word searches no longer compute word distances for documents that are filtered out or never shown.
+
+Fixed:
+
+- A typo'd word could miss its match when more than `fuzzyMaxExpansions` (50) terms shared its first three letters, because the candidates were cut by frequency before their distance was checked. The cap now applies to the closest matches.
+- In a multi-word `search()` where a word matches more than `Config::$maxDocs` documents, documents found through another word were scored and ranked as if they lacked the common word, so documents matching all words could rank below documents matching one. Those documents are now scored for every word they contain ("casual shirt" on the 44k catalog: about half of the candidates gained the missing word).
+- A prefix whose expansions together count more documents than the index (`car` matching `cara`, `carb`, `carc`) got a negative IDF, which ranked documents with more matching words last.
+- After a write that failed and was rolled back (an `insert()` with a duplicate ID in a later chunk), the next writes on the same `Index` reused cached IDs of words, facet fields and field names that the rollback had removed, and the cached document count stayed raised: those documents could not be found by search or filter, also not from other connections.
+- `has()` on an existing document, a filtered browse, and `distinct` or sorting over 1,000 or more documents left a read open on the connection until its next query. Meanwhile another connection's `checkpoint()` or `close()` waited for the busy timeout (5 s by default), and the write-ahead log of a long-lived reader could not be reset.
+
 ## 1.7.1 - 2026-10-07
 
 Fixed:

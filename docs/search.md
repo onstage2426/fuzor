@@ -119,7 +119,7 @@ When no `sort` is specified, results are returned in insertion order, newest fir
 
 A browse is answered by SQL over the whole index, so `$totalHits`, the page, and the sort order are exact at any index size. As in Meilisearch, a sorted browse walks the sort field's index in order and stops once the page is full, so its cost follows the page position, not the index size. On a 45k-document index a sorted or filtered page takes well under 5 ms.
 
-Facet counts are exact when no filter applies to them, and when the only filters that apply are [exclusions](#excluding-values). With a positive filter they are counted over at most `Config::$maxFacetCountDocs` matching documents, the same cap as in `search()` — see [tuning.md](tuning.md#facets). `distinct` has to look at every matching document to count the surviving groups, so a browse with `distinct` costs time proportional to the number of matches.
+Facet counts are exact when no filter applies to them, and when the only filters that apply are [exclusions](#excluding-values). With a positive filter they are counted over at most `Config::$maxFacetCountDocs` matching documents, the same cap as in `search()` — see [tuning.md](tuning.md#facets). A value filter on a field that every document has exactly once counts as an exclusion when the values it leaves out hold at most `maxFacetCountDocs` documents (for example `gender: ['Women', 'Men']` when few products are for children), so its counts are exact too. `distinct` has to look at every matching document to count the surviving groups, so a browse with `distinct` costs time proportional to the number of matches.
 
 ## As-you-type prefix
 
@@ -140,7 +140,7 @@ $result = $index->search('"quick brown" sedan'); // mix phrase + free keyword
 $result = $index->search('"quick brown" "fast car"'); // multiple phrases
 ```
 
-Phrase words participate in BM25 scoring normally. `asYouType` applies to the last token even inside a phrase.
+Phrase words participate in BM25 scoring normally. `asYouType` applies to the last token even inside a phrase. A phrase matches within one field: the last word of the title followed by the first word of the description is not a phrase match.
 
 ## Matching strategy
 
@@ -204,6 +204,8 @@ $result = $index->search('economi'); // matches 'economy'
 
 A typo is one inserted, deleted, or replaced character, or two neighbouring characters swapped (`casaul` finds `casual`). The first three characters must be right (`Config::$fuzzyPrefixLength`).
 
+A word also matches its typos when it exists itself: "bluetoth" finds the products that really contain "bluetoth" and those with "bluetooth". Within a words bucket, documents that match with fewer typos rank first, before sort fields and relevance: an exact "bluetoth" comes before "bluetooth", whatever the price sort says.
+
 Change the word sizes, turn typos off for numbers or for specific words, or switch typo tolerance off with `Config::$typoTolerance`:
 
 ```php
@@ -220,7 +222,7 @@ $index = new Index('/path/to/products.db', config: new Config(typoTolerance: new
 
 See [tuning.md](tuning.md) for the other settings.
 
-**Compared with Meilisearch:** the same settings (`typoTolerance`: `enabled`, `minWordSizeForTypos.oneTypo` / `twoTypos`, `disableOnWords`, `disableOnNumbers`) with the same defaults. Differences: Fuzor requires the first three characters to match instead of counting a typo on the first character as two; a swap of neighbouring characters is one typo; `disableOnAttributes` is not available (the term dictionary is shared by all fields).
+**Compared with Meilisearch:** the same settings (`typoTolerance`: `enabled`, `minWordSizeForTypos.oneTypo` / `twoTypos`, `disableOnWords`, `disableOnNumbers`) with the same defaults. Like Meilisearch, every word within its budget matches its typo derivations, and the typo rule (fewer typos first) comes right after the words rule. Differences: Fuzor requires the first three characters to match instead of counting a typo on the first character as two; a swap of neighbouring characters is one typo; `disableOnAttributes` is not available (the term dictionary is shared by all fields).
 
 ## Boolean search
 
