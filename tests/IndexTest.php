@@ -4454,10 +4454,17 @@ class IndexTest extends TestCase
     public function testInstallCheckFindsADamagedPage(): void
     {
         $file = $this->snapshotFile(str_repeat('long description words ', 400));
-        // Overwrite the middle of the file, keeping its size: only an integrity check notices.
+        // Overwrite a B-tree page, keeping the size: only an integrity check notices. (Damage
+        // inside a stored text value would go unnoticed even by the check.)
+        $pdo  = new \PDO('sqlite:' . $file);
+        $root = $pdo->query("SELECT rootpage FROM sqlite_schema WHERE name = 'doclist'");
+        $size = $pdo->query('PRAGMA page_size');
+        \assert($root !== false && $size !== false);
+        $offset = ((int) $root->fetchColumn() - 1) * (int) $size->fetchColumn();
+        $root = $size = $pdo = null;
         $h = fopen($file, 'r+');
         assert($h !== false);
-        fseek($h, intdiv((int) filesize($file), 2));
+        fseek($h, $offset);
         fwrite($h, str_repeat("\xff", 4096));
         fclose($h);
         try {
@@ -9704,11 +9711,55 @@ class IndexTest extends TestCase
         );
     }
 
+    /**
+     * doc_facets must hold, per document, exactly the facet_value_ids of its facet_values rows
+     * of filterable keys (a number and a string with the same text are different IDs).
+     *
+     * @param list<string> $filterable
+     */
+    private function assertDocFacetsMatchFacetValues(string $when, array $filterable): void
+    {
+        $pdo  = new \PDO('sqlite:' . $this->dbPath);
+        $stmt = $pdo->prepare(
+            'SELECT fv.doc_id, fv.key_id, fv.value, fv.num_value IS NOT NULL
+               FROM facet_values fv JOIN facet_keys k ON k.id = fv.key_id
+              WHERE k.name IN (SELECT value FROM json_each(?))'
+        );
+        $stmt->execute([json_encode($filterable)]);
+        /** @var list<array{0: int, 1: int, 2: string, 3: int}> $rows */
+        $rows     = $stmt->fetchAll(\PDO::FETCH_NUM);
+        $expected = array_map(static fn(array $r): string => implode('|', $r), $rows);
+
+        $stmt = $pdo->query('SELECT vid, key_id, value, is_num FROM facet_value_ids');
+        \assert($stmt !== false);
+        /** @var list<array{0: int, 1: int, 2: string, 3: int}> $idRows */
+        $idRows = $stmt->fetchAll(\PDO::FETCH_NUM);
+        $ids    = [];
+        foreach ($idRows as [$vid, $keyId, $value, $isNum]) {
+            $ids[$vid] = "{$keyId}|{$value}|{$isNum}";
+        }
+        $stmt = $pdo->query('SELECT doc_id, vids, typeof(vids) FROM doc_facets');
+        \assert($stmt !== false);
+        /** @var list<array{0: int, 1: string, 2: string}> $docRows */
+        $docRows = $stmt->fetchAll(\PDO::FETCH_NUM);
+        $actual  = [];
+        foreach ($docRows as [$docId, $vids, $type]) {
+            $this->assertSame('blob', $type, $when);
+            /** @var array<int, int> $unpacked */
+            $unpacked = unpack('V*', $vids);
+            foreach ($unpacked as $vid) {
+                $actual[] = "{$docId}|{$ids[$vid]}";
+            }
+        }
+        sort($expected);
+        sort($actual);
+        $this->assertSame($expected, $actual, $when);
+    }
+
     public function testTiedFacetCountsAreOrderedByValueOnEveryCountingPath(): void
     {
-        // 2,100 docs: brands C, A, B inserted in that order, 700 each; a filter matching all of
-        // them goes through the per-key scan (one key, more than 2,000 docs), a smaller one
-        // through the doc-driven join, no filter through facet_counts.
+        // 2,100 docs: brands C, A, B inserted in that order, 700 each; filters matching all or
+        // a few of them count the documents' doc_facets rows, no filter reads facet_counts.
         $index = new Index($this->dbPath, schema: new SchemaConfig(filterableFields: ['brand', 'all', 'few']));
         $docs  = [];
         for ($id = 1; $id <= 2100; $id++) {
@@ -9737,27 +9788,66 @@ class IndexTest extends TestCase
             filterableFields: ['tags', 'size'],
             sortableFields: ['price'],
         ));
+        $check = function (string $when): void {
+            $this->assertFacetCountsMatchFacetValues($when);
+            $this->assertDocFacetsMatchFacetValues($when, ['tags', 'size']);
+        };
         $index->insert([['id' => 1, 'title' => 'a', 'tags' => ['x', 'y', 'x'], 'size' => 10, 'price' => 5]]);
-        $this->assertFacetCountsMatchFacetValues('single insert');
+        $check('single insert');
         $index->insert([
             ['id' => 2, 'title' => 'b', 'tags' => ['y', 'z'], 'size' => '10', 'price' => 5.5],
             ['id' => 3, 'title' => 'c', 'tags' => 'z', 'size' => [10, 12], 'price' => 7],
             ['id' => 4, 'title' => 'd', 'tags' => ['x'], 'size' => 9],
+            ['id' => 6, 'title' => 'f', 'price' => 1],
         ]);
-        $this->assertFacetCountsMatchFacetValues('bulk insert');
+        $check('bulk insert');
         $index->update([['id' => 1, 'title' => 'a', 'tags' => 'q', 'size' => 12]]);
-        $this->assertFacetCountsMatchFacetValues('single update');
+        $check('single update');
+        $index->update([['id' => 1, 'title' => 'a', 'tags' => 'w', 'size' => 11]]);
+        $check('single update, searchable input unchanged');
         $index->upsert([
             ['id' => 2, 'title' => 'b', 'tags' => ['x', 'q']],
             ['id' => 5, 'title' => 'e', 'tags' => 'z', 'price' => 5],
         ]);
-        $this->assertFacetCountsMatchFacetValues('bulk upsert');
+        $check('bulk upsert');
         $index->delete(3);
-        $this->assertFacetCountsMatchFacetValues('single delete');
+        $check('single delete');
         $index->delete(1, 4);
-        $this->assertFacetCountsMatchFacetValues('bulk delete');
+        $check('bulk delete');
+        $index->insert([['id' => 3, 'title' => 'c', 'tags' => 'z', 'size' => 9]]);
+        $check('insert of a deleted id');
+        $this->assertSame(1, $index->deleteByFilter(['size' => '9']));
+        $check('delete by filter');
+        $index->close();
+        Index::rebuild($this->dbPath);
+        $check('rebuild');
+        $index = new Index($this->dbPath);
         $index->clear();
-        $this->assertFacetCountsMatchFacetValues('clear');
+        $check('clear');
+        $index->insert([['id' => 7, 'title' => 'g', 'tags' => 'x', 'size' => 10]]);
+        $check('insert after clear');
+    }
+
+    public function testFilteredFacetCountsAfterARolledBackInsert(): void
+    {
+        // The first chunk resolves an ID for 'red', then the duplicate in the second chunk rolls
+        // the insert back: the ID must not stay cached for 'red' once another value has it.
+        $index = new Index(
+            $this->dbPath,
+            config: new Config(insertChunkSize: 1),
+            schema: new SchemaConfig(filterableFields: ['color', 'all']),
+        );
+        try {
+            $index->insert([['id' => 1, 'color' => 'red', 'all' => 'y'], ['id' => 1, 'color' => 'red', 'all' => 'y']]);
+            $this->fail('duplicate id accepted');
+        } catch (QueryException) {
+        }
+        $index->insert([['id' => 2, 'color' => 'blue', 'all' => 'y']]);
+        $index->insert([['id' => 3, 'color' => 'red', 'all' => 'y']]);
+
+        $result = $index->search('', new SearchOptions(filter: ['all' => 'y'], facets: ['color']));
+        $this->assertSame(['blue' => 1, 'red' => 1], $result->facetDistribution['color']);
+        $this->assertDocFacetsMatchFacetValues('after rollback', ['color', 'all']);
     }
 
     // --- matching strategies ---

@@ -64,7 +64,7 @@ class Index
 
     /**
      * facet_doc_id_index: leads with doc_id for DELETE-by-doc, and covers key_id, value and
-     * num_value so the facet count join in fetchAllFacetCountsJoin() runs index-only.
+     * num_value so the per-document filter probes (renderFacetProbes()) run index-only.
      */
     private const string FACET_DOC_INDEX_DDL
         = "CREATE INDEX IF NOT EXISTS 'main'.'facet_doc_id_index' ON facet_values (doc_id, key_id, value, num_value)";
@@ -102,14 +102,6 @@ class Index
 
 
     /**
-     * When N (result-set size) is at or below this threshold, facet counts are fetched
-     * with a single CROSS JOIN query driven from the doc ID side (O(N × avg_facets)) rather
-     * than one sequential PK scan per key (O(num_keys × K)). For narrow searches this is
-     * dramatically faster; for broad searches the sequential scan wins.
-     */
-    private const int FACET_JOIN_THRESHOLD = 2_000;
-
-    /**
      * Positions per field: field n's positions start at n × this (tokenizeDocumentFields()).
      * 2^20 keeps the stored position small (3-byte varints for the second field) while no
      * realistic field reaches a million tokens.
@@ -121,15 +113,6 @@ class Index
      * (applyProximityBoost()): far, but not as far as the positions are apart.
      */
     private const int CROSS_FIELD_SPAN = 8;
-
-    /**
-     * Exclusion-only facet counts subtract the excluded documents' rows (cost per excluded
-     * document) up to this share of the index, and scan the kept rows (cost per facet row)
-     * above it. Measured crossover: ~30% on a 533k index, ~39% on the 45k ecom set ("-shirt"
-     * with three facets, 30% excluded: 24.5 ms subtracted, 32.7 ms scanned; see
-     * collectFacetCountsExcluding()).
-     */
-    private const float EXCLUDED_SCAN_SHARE = 0.3;
 
     /**
      * fetchSortValues() scans all rows of the key instead of seeking each document's when the
@@ -237,6 +220,13 @@ class Index
 
     /** @var array<int, bool> facet key ID → facet_keys.multi_valued, read lazily; cleared with the caches. */
     private array $keyMultiValued = [];
+
+    /**
+     * @var array<int, array<int, array<string, int>>> key_id → is_num (0/1) → value → facet_value_ids.vid.
+     * IDs are append-only, so entries stay valid across connections' commits; cleared on
+     * connection change and on rollback (an ID inserted by a rolled-back write is reused).
+     */
+    private array $facetValueIdCache = [];
 
     /** @var array<string, true>|null TypoTolerance::$disableOnWords as normalised query terms; built on first use. */
     private ?array $typoExactWords = null;
@@ -1147,6 +1137,30 @@ class Index
                 PRIMARY KEY (key_id, value)
             ) WITHOUT ROWID, STRICT"
         );
+        // facet_value_ids: one integer ID per filterable (key, value), separate for a number and
+        // a string with the same text (is_num), so doc_facets can hold a document's values as
+        // packed integers. Append-only: IDs are never reused or removed (clear() keeps them), so
+        // a cached ID stays valid for any connection.
+        $pdo->exec(
+            "CREATE TABLE IF NOT EXISTS facet_value_ids (
+                vid       INTEGER PRIMARY KEY,
+                key_id    INTEGER NOT NULL,
+                value     TEXT    NOT NULL,
+                is_num    INTEGER NOT NULL,
+                num_value REAL,
+                UNIQUE (key_id, value, is_num)
+            ) STRICT"
+        );
+        // doc_facets: per document, the facet_value_ids of its filterable values as packed
+        // unsigned 32-bit little-endian integers. Filtered facet counts read one row per
+        // matching document instead of one facet_values row per document and key
+        // (countFacetValuesOfDocs()).
+        $pdo->exec(
+            "CREATE TABLE IF NOT EXISTS doc_facets (
+                doc_id INTEGER PRIMARY KEY,
+                vids   BLOB NOT NULL
+            ) STRICT"
+        );
         // sort_keys: case-folded string values of sortable fields (see sortKey()), clustered so a
         // sorted browse walks one key's values in sort order. Numbers sort via facet_numeric_index.
         $pdo->exec(
@@ -1383,6 +1397,7 @@ class Index
         $this->facetKeyCache   = [];
         $this->multiValuedKeys = [];
         $this->keyMultiValued  = [];
+        $this->facetValueIdCache = [];
         $this->fieldNameCache  = [];
         $this->synonymCache    = null;
         $this->hasDeleted      = null;
@@ -2068,6 +2083,7 @@ class Index
             }
             $pdo->exec('DELETE FROM facet_values');
             $pdo->exec('DELETE FROM facet_counts');
+            $pdo->exec('DELETE FROM doc_facets');
             $pdo->exec('DELETE FROM sort_keys');
             $pdo->exec('UPDATE facet_keys SET multi_valued = 0 WHERE multi_valued = 1');
             $pdo->exec('DELETE FROM deleted_docs');
@@ -4090,7 +4106,7 @@ class Index
 
     /**
      * Remove the per-document rows of documents: doc_lengths, the stored document, facet_values
-     * (with their facet_counts) and sort_keys. Their term-index rows are left to purgePostings().
+     * (with their facet_counts), doc_facets and sort_keys. Their term-index rows are left to purgePostings().
      *
      * @param list<int> $ids
      */
@@ -4109,6 +4125,7 @@ class Index
             /** @var list<array{0: int, 1: string, 2: float|null}> $removedRows */
             $removedRows = $removed->fetchAll(PDO::FETCH_NUM);
             $this->adjustFacetCounts(self::facetCountDeltas($removedRows, -1));
+            $this->prepare("DELETE FROM doc_facets   WHERE doc_id IN ({$placeholders})")->execute($chunk);
             $this->prepare("DELETE FROM sort_keys    WHERE doc_id IN ({$placeholders})")->execute($chunk);
         }
     }
@@ -6841,6 +6858,8 @@ class Index
         $valuesPerKey = [];
         /** @var list<array{0: int, 1: string, 2: float|null}> $inserted  one per new (key, value) row */
         $inserted = [];
+        /** @var list<array{0: int, 1: string, 2: float|null}> $filterable  the filterable part of $inserted */
+        $filterable = [];
         foreach ($rows as $row) {
             $keyId = $this->resolveFacetKeyId($row['name']);
             $stmt->execute([$keyId, $row['value'], $documentId, $row['numValue']]);
@@ -6848,6 +6867,9 @@ class Index
             // counted once.
             if (!isset($valuesPerKey[$keyId][$row['value']])) {
                 $inserted[] = [$keyId, $row['value'], $row['numValue']];
+                if (isset($this->filterableFieldSet[$row['name']])) {
+                    $filterable[] = [$keyId, $row['value'], $row['numValue']];
+                }
             }
             $valuesPerKey[$keyId][$row['value']] = true;
             if ($row['numValue'] === null && isset($this->sortableFieldSet[$row['name']])) {
@@ -6859,6 +6881,11 @@ class Index
             }
         }
         $this->adjustFacetCounts(self::facetCountDeltas($inserted, 1));
+        if ($filterable !== []) {
+            $this->resolveFacetValueIds($filterable);
+            $this->stmt('docFacetsSave', 'INSERT INTO doc_facets (doc_id, vids) VALUES (?, CAST(? AS BLOB))')
+                ->execute([$documentId, $this->packFacetValueIds($filterable)]);
+        }
         if (count($rows) > count($valuesPerKey)) {
             $multi = array_keys(array_filter($valuesPerKey, static fn(array $values): bool => count($values) > 1));
             $this->markMultiValued($multi);
@@ -6888,6 +6915,55 @@ class Index
             }
         }
         return array_values($deltas);
+    }
+
+    /**
+     * Make sure every (key, value, numeric or not) of $rows has a facet_value_ids entry in
+     * $facetValueIdCache, inserting the missing ones in batches.
+     *
+     * @param list<array{0: int, 1: string|int, 2: float|null}> $rows [key_id, value, num_value]
+     */
+    private function resolveFacetValueIds(array $rows): void
+    {
+        $missing = [];
+        foreach ($rows as [$keyId, $value, $num]) {
+            $value = (string) $value;
+            $isNum = $num === null ? 0 : 1;
+            if (!isset($this->facetValueIdCache[$keyId][$isNum][$value])) {
+                $missing[$keyId . "\0" . $isNum . "\0" . $value] = [$keyId, $value, $isNum, $num];
+            }
+        }
+        // DO UPDATE instead of DO NOTHING so RETURNING also reports values that already exist.
+        foreach (array_chunk(array_values($missing), self::CHUNK_4P) as $chunk) {
+            $sql = 'INSERT INTO facet_value_ids (key_id, value, is_num, num_value) VALUES '
+                . implode(',', array_fill(0, count($chunk), '(?,?,?,?)'))
+                . ' ON CONFLICT (key_id, value, is_num) DO UPDATE SET key_id = excluded.key_id
+                    RETURNING vid, key_id, value, is_num';
+            // One new value (a single-document write) is the common case: keep its statement.
+            $stmt = count($chunk) === 1 ? $this->stmt('facetValueIdUpsert', $sql) : $this->prepare($sql);
+            $stmt->execute(array_merge(...$chunk));
+            /** @var list<array{0: int, 1: int, 2: string, 3: int}> $returned */
+            $returned = $stmt->fetchAll(PDO::FETCH_NUM);
+            foreach ($returned as [$vid, $keyId, $value, $isNum]) {
+                $this->facetValueIdCache[$keyId][$isNum][(string) $value] = $vid;
+            }
+        }
+    }
+
+    /**
+     * One document's doc_facets.vids: the IDs of its values (resolved by resolveFacetValueIds()),
+     * packed as unsigned 32-bit little-endian integers. Bound as a string, so the INSERT casts it
+     * to BLOB (the column is STRICT).
+     *
+     * @param list<array{0: int, 1: string|int, 2: float|null}> $rows [key_id, value, num_value]
+     */
+    private function packFacetValueIds(array $rows): string
+    {
+        $vids = [];
+        foreach ($rows as [$keyId, $value, $num]) {
+            $vids[] = $this->facetValueIdCache[$keyId][$num === null ? 0 : 1][(string) $value];
+        }
+        return pack('V*', ...$vids);
     }
 
     /**
@@ -7059,7 +7135,58 @@ class Index
         }
         $this->adjustFacetCounts($deltas);
 
+        $this->bulkFlushDocFacets($kvdMap, array_intersect_key($facetBuffer, $this->filterableFieldSet));
         $this->bulkFlushSortKeys($kvdMap, array_intersect_key($facetBuffer, $this->sortableFieldSet));
+    }
+
+    /**
+     * Insert the doc_facets rows of the documents in a bulk buffer: the IDs of each document's
+     * filterable values, in doc_id order.
+     *
+     * @param array<int, array<int|string, array<int, float|null>>>    $kvdMap     key_id → value → docId → numValue
+     * @param array<string, array<int|string, array<int, float|null>>> $filterable filterable fields' part of the buffer
+     */
+    private function bulkFlushDocFacets(array $kvdMap, array $filterable): void
+    {
+        if ($filterable === []) {
+            return;
+        }
+        $pdo = $this->pdo;
+        assert($pdo instanceof \PDO);
+        /** @var array<int, list<array{0: int, 1: string|int, 2: float|null}>> $docRows docId → its rows */
+        $docRows = [];
+        $all     = [];
+        foreach (array_keys($filterable) as $name) {
+            $keyId = $this->facetKeyCache[$name];
+            foreach ($kvdMap[$keyId] as $value => $docs) {
+                foreach ($docs as $docId => $num) {
+                    $docRows[$docId][] = $all[] = [$keyId, $value, $num];
+                }
+            }
+        }
+        $this->resolveFacetValueIds($all);
+        ksort($docRows);
+
+        $rowCount = 0;
+        $params   = [];
+        foreach ($docRows as $docId => $rows) {
+            $params[] = $docId;
+            $params[] = $this->packFacetValueIds($rows);
+            if (++$rowCount === self::CHUNK_2P) {
+                ($this->bulkStmtCache['docFacetsChunk:' . self::CHUNK_2P] ??= $pdo->prepare(
+                    'INSERT INTO doc_facets (doc_id, vids) VALUES '
+                    . implode(',', array_fill(0, self::CHUNK_2P, '(?, CAST(? AS BLOB))'))
+                ))->execute($params);
+                $params   = [];
+                $rowCount = 0;
+            }
+        }
+        if ($rowCount > 0) {
+            $pdo->prepare(
+                'INSERT INTO doc_facets (doc_id, vids) VALUES '
+                . implode(',', array_fill(0, $rowCount, '(?, CAST(? AS BLOB))'))
+            )->execute($params);
+        }
     }
 
     /**
@@ -7987,14 +8114,11 @@ class Index
     /**
      * Count facet values for $nameToId over a document set and merge them into $distribution / $stats.
      *
-     * $docIds null counts over the whole index with one sequential primary-key scan per key —
-     * exact, with no membership test. Otherwise one join driven from the doc IDs counts all keys
-     * at once (O(N × keys) index lookups), or a per-key scan of the key's rows tests json_each
-     * membership (O(rows per key)). The join wins up to FACET_JOIN_THRESHOLD docs, and at any
-     * size for two or more keys once facet_doc_id_index is covering (schema revision 2): ~30%
-     * faster for three keys over 5k–20k docs on the 45k ecom set. On revision 1 each join row
-     * seeks into the table and the per-key scan stays ahead above the threshold.
-     * Distributions are capped at Config::$maxValuesPerFacet; keys with no values are omitted.
+     * $docIds null counts over the whole index from facet_counts (O(values) per key). Otherwise
+     * the documents' doc_facets rows are counted (fetchFacetCountsOfDocs()), one row per document
+     * for all keys. That beats a scan of the key's rows even for one key over half the index (45k
+     * ecom set, articleType over 22k docs: 18.6 vs 27.2 ms; gender over 34k: 25.5 vs 39.7 ms).
+     * Keys with no values are omitted.
      *
      * @param array<string, int>                           $nameToId     Facet key name → key_id.
      * @param list<int>|null                               $docIds
@@ -8006,14 +8130,10 @@ class Index
         if ($nameToId === [] || $docIds === []) {
             return;
         }
-        $useJoin = $docIds !== null && (
-            count($docIds) <= self::FACET_JOIN_THRESHOLD
-            || count($nameToId) > 1
-        );
-        $results = $useJoin
-            ? $this->fetchAllFacetCountsJoin($nameToId, $docIds)
+        $results = $docIds !== null
+            ? $this->fetchFacetCountsOfDocs($nameToId, $docIds)
             : array_map(
-                fn(int $keyId): array => self::summarizeFacetCounts($this->fetchFacetCountRows($keyId, $docIds)),
+                fn(int $keyId): array => self::summarizeFacetCounts($this->wholeKeyFacetCountRows($keyId)),
                 $nameToId,
             );
         $this->mergeFacetCounts($results, $distribution, $stats);
@@ -8023,15 +8143,13 @@ class Index
      * Count facet values over every document except those an exclusion-only filter removes.
      *
      * Visiting the kept documents one by one costs O(index size), so the counts are derived
-     * instead: each key's whole-index counts (facet_counts, as for an unfiltered browse) minus
-     * the counts over the excluded documents, aggregated once for all keys in SQL. That costs
-     * per excluded document; when more than EXCLUDED_SCAN_SHARE of the index is excluded, the
-     * kept rows of all keys are counted in one scan with doc_id NOT IN (excluded) instead, which
-     * costs per facet row. Both ways are exact.
-     *
-     * Measured, five keys: 45k ecom set 15 ms with 4,025 docs excluded (37 ms before
-     * facet_counts), 45 ms with 34,409 excluded (scan); 533k set, subtraction ~3 µs per excluded
-     * doc (28k: 79 ms, 48k: 141 ms, 413k: 1.7 s) against ~600 ms for the scan.
+     * instead, exactly: each key's whole-index counts (facet_counts, as for an unfiltered browse)
+     * minus the counts over the excluded documents, read from their doc_facets rows
+     * (facetValueCountsOfDocs()). That costs per excluded document, and still beats a scan of
+     * the kept rows with doc_id NOT IN (excluded) when nearly every document is excluded.
+     * Measured: 45k ecom set, five keys, 4,025 excluded 4.2 ms (scan 109 ms), 40,792 excluded
+     * (92%) 39.7 ms (scan 83.7 ms); 1.43M amazon set, three keys, 8,520 excluded 9.9 ms (scan
+     * 2.2 s), 1.42M excluded (99%) 673 ms (scan 1.9 s).
      *
      * @param array<string, int>                           $nameToId     Facet key name → key_id.
      * @param non-empty-list<FacetCondition>               $conditions   Exclusions only, none impossible.
@@ -8045,60 +8163,17 @@ class Index
         array &$stats,
     ): void {
         [$excludedSql, $excludedParams] = $this->excludedDocsSql($conditions);
-        $excluded = $this->countExcludedDocs($conditions);
-        $total    = (int) $this->getInfoValues(['total_documents'])['total_documents'];
 
-        if ($excluded > self::EXCLUDED_SCAN_SHARE * $total) {
-            // Most documents excluded: count the kept rows of every key in one scan, so the
-            // excluded set is materialised once instead of once per key.
-            $keyIds = array_values($nameToId);
-            $stmt   = $this->prepare(
-                'SELECT key_id, value,
-                        COUNT(*) AS n, MIN(num_value) AS min_num, MAX(num_value) AS max_num,
-                        COUNT(num_value) AS num_count
-                   FROM facet_values
-                  WHERE key_id IN (SELECT value FROM json_each(?))'
-                . " AND doc_id NOT IN ({$excludedSql})
-                  GROUP BY key_id, value ORDER BY key_id, n DESC, value"
-            );
-            $stmt->execute([json_encode($keyIds), ...$excludedParams]);
-            /** @var array<int, list<array{value: string, n: int, min_num: float|null, max_num: float|null, num_count: int}>> $byKey */
-            $byKey = [];
-            /** @var list<array{key_id: int, value: string, n: int, min_num: float|null, max_num: float|null, num_count: int}> $all */
-            $all = $stmt->fetchAll(PDO::FETCH_ASSOC);
-            foreach ($all as $row) {
-                $byKey[$row['key_id']][] = $row;
-            }
-            $results = [];
-            foreach ($nameToId as $keyName => $keyId) {
-                $results[$keyName] = self::summarizeFacetCounts($byKey[$keyId] ?? []);
-            }
-            $this->mergeFacetCounts($results, $distribution, $stats);
-            return;
-        }
-
-        // The excluded documents' rows per (key, value), aggregated in SQL so PHP gets one row per
-        // value instead of one per document and key. Driven from the distinct excluded documents
-        // (the exclusion SQL lists a document once per matching row) through the covering
-        // facet_doc_id_index.
-        $stmt = $this->prepare(
-            "SELECT fv.key_id, fv.value, COUNT(*), COUNT(fv.num_value)
-               FROM (SELECT DISTINCT doc_id FROM ({$excludedSql})) ex
-               CROSS JOIN facet_values fv ON fv.doc_id = ex.doc_id
-              WHERE fv.key_id IN (SELECT value FROM json_each(?))
-              GROUP BY fv.key_id, fv.value"
+        // The excluded documents' counts per (key, value), from their doc_facets rows. The
+        // exclusion SQL lists a document once per matching row, hence the DISTINCT.
+        $removed = $this->facetValueCountsOfDocs(
+            $nameToId,
+            "SELECT DISTINCT doc_id FROM ({$excludedSql})",
+            $excludedParams,
         );
-        $stmt->execute([...$excludedParams, json_encode(array_values($nameToId))]);
-        /** @var list<array{0: int, 1: string, 2: int, 3: int}> $removedRows */
-        $removedRows = $stmt->fetchAll(PDO::FETCH_NUM);
-        /** @var array<int, array<array-key, array{0: int, 1: int}>> $removed  key_id → value → [rows, numeric rows] */
-        $removed = [];
-        foreach ($removedRows as [$keyId, $value, $n, $numCount]) {
-            $removed[$keyId][$value] = [$n, $numCount];
-        }
         $results = [];
         foreach ($nameToId as $keyName => $keyId) {
-            $rows = $this->fetchFacetCountRows($keyId, null);
+            $rows = $this->wholeKeyFacetCountRows($keyId);
             if (isset($removed[$keyId])) {
                 $kept   = [];
                 $counts = [];
@@ -8259,66 +8334,118 @@ class Index
     }
 
     /**
-     * Fetch value counts for one or more facet keys in a single query driven from the doc IDs.
+     * Count facet values for one or more keys over a set of documents, from their doc_facets rows.
      *
-     * Uses CROSS JOIN with json_each(docIds) to force SQLite to drive the join from the doc_id
-     * side via facet_doc_id_index, giving O(N × avg_facets_per_doc) instead of the sequential
-     * O(K) PK scan per key. CROSS JOIN prevents the planner from flipping the join direction.
-     * Aggregation is done in PHP after fetching raw (key_id, value, num_value) rows.
+     * One row per document whatever the number of keys: the packed value IDs of the documents
+     * are unpacked in batches and counted with array_count_values(), then the IDs of the
+     * requested keys are mapped back to their values with one read of those keys'
+     * facet_value_ids. A join over facet_values instead reads one row per document and key.
+     * Measured (exact counts over every match, 2.0 GHz): 1.43M amazon products, category
+     * 28.6k docs, three keys 16.3 vs 76.0 ms; 45k ecom set, gender Men 22k docs, five keys
+     * 15.8 vs 85.0 ms.
      *
-     * Suitable when N ≤ FACET_JOIN_THRESHOLD; for larger N the sequential scan path is cheaper.
+     * @param  array<string, int> $nameToId Facet key name → key_id.
+     * @param  string             $docsSql  SELECT with a doc_id column, each document once.
+     * @param  list<mixed>        $params
+     * @return array<int, array<string, array{0: int, 1: int, 2: float|null}>>
+     *         key_id → value → [documents, numeric documents, num_value]
+     */
+    private function facetValueCountsOfDocs(array $nameToId, string $docsSql, array $params): array
+    {
+        $stmt = $this->prepare(
+            "SELECT df.vids FROM ({$docsSql}) d CROSS JOIN doc_facets df ON df.doc_id = d.doc_id"
+        );
+        $stmt->execute($params);
+        /** @var array<int, int> $vidCounts */
+        $vidCounts = [];
+        // Rows are counted in batches as they arrive, so memory stays flat however many
+        // documents match: 1.42M documents peak at 5 MB instead of 133 MB with fetchAll(),
+        // at the same speed.
+        $batch = [];
+        while (is_string($blob = $stmt->fetchColumn())) {
+            $batch[] = $blob;
+            if (count($batch) === 20_000) {
+                self::countPackedIds($batch, $vidCounts);
+                $batch = [];
+            }
+        }
+        self::countPackedIds($batch, $vidCounts);
+        if ($vidCounts === []) {
+            return [];
+        }
+        $stmt = $this->stmt(
+            'facetValueIdsOfKeys',
+            'SELECT vid, key_id, value, is_num, num_value FROM facet_value_ids
+              WHERE key_id IN (SELECT value FROM json_each(?))'
+        );
+        $stmt->execute([json_encode(array_values($nameToId))]);
+        /** @var list<array{0: int, 1: int, 2: string, 3: int, 4: float|null}> $ids */
+        $ids    = $stmt->fetchAll(PDO::FETCH_NUM);
+        $counts = [];
+        foreach ($ids as [$vid, $keyId, $value, $isNum, $num]) {
+            if (!isset($vidCounts[$vid])) {
+                continue;
+            }
+            $n     = $vidCounts[$vid];
+            $entry = $counts[$keyId][$value] ?? [0, 0, null];
+            $entry[0] += $n;
+            if ($isNum === 1) {
+                $entry[1] += $n;
+                $entry[2] ??= (float) $num;
+            }
+            $counts[$keyId][$value] = $entry;
+        }
+        return $counts;
+    }
+
+    /**
+     * Add the value IDs packed in $blobs (doc_facets.vids) to $vidCounts.
      *
-     * @param  array<string, int> $nameToId  Facet key name → key_id.
+     * @param list<string>   $blobs
+     * @param array<int, int> $vidCounts vid → documents; mutated in place.
+     */
+    private static function countPackedIds(array $blobs, array &$vidCounts): void
+    {
+        if ($blobs === []) {
+            return;
+        }
+        /** @var array<int, int> $unpacked */
+        $unpacked = unpack('V*', implode('', $blobs));
+        foreach (array_count_values($unpacked) as $vid => $n) {
+            $vidCounts[$vid] = ($vidCounts[$vid] ?? 0) + $n;
+        }
+    }
+
+    /**
+     * facetValueCountsOfDocs() over a list of document IDs, summarised per key name.
+     *
+     * @param  array<string, int> $nameToId Facet key name → key_id.
      * @param  list<int>          $docIds
      * @return array<string, array{distribution: array<array-key, int>, stats: array{min: float, max: float}|null}>
      */
-    private function fetchAllFacetCountsJoin(array $nameToId, array $docIds): array
+    private function fetchFacetCountsOfDocs(array $nameToId, array $docIds): array
     {
-        // Raw rows aggregated in PHP: a SQL GROUP BY over the joined rows sorts them through a
-        // temporary B-tree and measured ~7 ms slower on a 10k-document, five-key page.
-        $stmt = $this->stmt(
-            'facetCountsJoin',
-            'SELECT fv.key_id, fv.value, fv.num_value
-             FROM json_each(?) je
-             CROSS JOIN facet_values fv ON fv.doc_id = je.value
-             WHERE fv.key_id IN (SELECT value FROM json_each(?))'
+        $byKey  = $this->facetValueCountsOfDocs(
+            $nameToId,
+            'SELECT value AS doc_id FROM json_each(?)',
+            [json_encode($docIds)],
         );
-        $stmt->execute([json_encode($docIds), json_encode(array_values($nameToId))]);
-        /** @var list<array{0: int, 1: string, 2: float|null}> $rows */
-        $rows = $stmt->fetchAll(PDO::FETCH_NUM);
-
-        /** @var array<int, array<array-key, int>> $valueCounts */
-        $valueCounts = [];
-        /** @var array<int, array<array-key, int>> $numCounts */
-        $numCounts   = [];
-        /** @var array<int, array<array-key, float>> $numValues */
-        $numValues   = [];
-        foreach ($rows as [$keyId, $value, $rawNum]) {
-            $valueCounts[$keyId][$value] = ($valueCounts[$keyId][$value] ?? 0) + 1;
-            if ($rawNum !== null) {
-                $numCounts[$keyId][$value] = ($numCounts[$keyId][$value] ?? 0) + 1;
-                // All rows sharing (key_id, value) have the same num_value — store once.
-                $numValues[$keyId][$value] ??= (float) $rawNum;
-            }
-        }
-
         $counts = [];
         foreach ($nameToId as $keyName => $keyId) {
-            if (!isset($valueCounts[$keyId])) {
+            if (!isset($byKey[$keyId])) {
                 continue;
             }
             $keyRows = [];
-            foreach ($valueCounts[$keyId] as $value => $n) {
-                $num       = $numValues[$keyId][$value] ?? null;
+            foreach ($byKey[$keyId] as $value => [$n, $numCount, $num]) {
                 $keyRows[] = [
                     'value'     => (string) $value,
                     'n'         => $n,
                     'min_num'   => $num,
                     'max_num'   => $num,
-                    'num_count' => $numCounts[$keyId][$value] ?? 0,
+                    'num_count' => $numCount,
                 ];
             }
-            // Count desc, then value: the order facet_counts and the per-key scans give.
+            // Count desc, then value: the order facet_counts gives.
             $ns     = array_column($keyRows, 'n');
             $values = array_column($keyRows, 'value');
             array_multisort($ns, SORT_DESC, SORT_NUMERIC, $values, SORT_ASC, SORT_STRING, $keyRows);
@@ -8328,58 +8455,25 @@ class Index
     }
 
     /**
-     * Per-value counts of a single facet key over the given doc ID set, most frequent first.
+     * Per-value counts of a facet key over the whole index, most frequent first: the maintained
+     * facet_counts rows (O(values)) instead of a scan of every row of the key.
      *
-     * Uses json_each() as a WHERE IN subquery so the SQL is a fixed string (cacheable
-     * via stmt()). SQLite drives from the facet_values PK (sequential scan for key_id),
-     * materialises json_each into a hash set, then tests doc_id membership per row —
-     * identical execution plan to the original IN(?,?,?) but without variable-arity
-     * compilation overhead.
-     *
-     * With $docIds null the key is counted over the whole index from facet_counts (one row per
-     * value), or, when $excluded is given, over every document except those it selects (a scan
-     * of the key's rows with doc_id NOT IN, materialised once).
-     *
-     * @param  list<int>|null                         $docIds
-     * @param  array{0: string, 1: list<mixed>}|null $excluded SQL selecting doc IDs to skip; with $docIds null only.
      * @return list<array{value: string, n: int, min_num: float|null, max_num: float|null, num_count: int}>
      */
-    private function fetchFacetCountRows(int $keyId, ?array $docIds, ?array $excluded = null): array
+    private function wholeKeyFacetCountRows(int $keyId): array
     {
-        // Numeric aggregates only for keys that hold numbers: COUNT(*) alone is ~2x faster over a
-        // text key's rows (11.0 vs 4.9 ms per key on the 45k ecom set); the probe is one lookup in
-        // the partial facet_numeric_index.
-        $select = $this->keyHasNumbers($keyId)
-            ? 'SELECT value, COUNT(*) AS n, MIN(num_value) AS min_num, MAX(num_value) AS max_num,
-                      COUNT(num_value) AS num_count
-                 FROM facet_values WHERE key_id = ?'
-            : 'SELECT value, COUNT(*) AS n, NULL AS min_num, NULL AS max_num, 0 AS num_count
-                 FROM facet_values WHERE key_id = ?';
-        if ($excluded !== null) {
-            $stmt = $this->prepare(
-                $select . " AND doc_id NOT IN ({$excluded[0]}) GROUP BY value ORDER BY n DESC, value"
-            );
-            $stmt->execute([$keyId, ...$excluded[1]]);
-        } elseif ($docIds === null) {
-            // The whole key: read the maintained counts (O(values)) instead of scanning its rows.
-            $stmt = $this->stmt(
-                'facetCountsForKeyAll',
-                'SELECT value,
-                        count                                              AS n,
-                        CASE WHEN num_count > 0 THEN num_value END         AS min_num,
-                        CASE WHEN num_count > 0 THEN num_value END         AS max_num,
-                        num_count
-                   FROM facet_counts
-                  WHERE key_id = ?
-                  ORDER BY count DESC, value'
-            );
-            $stmt->execute([$keyId]);
-        } else {
-            $stmt = $this->prepare(
-                $select . ' AND doc_id IN (SELECT value FROM json_each(?)) GROUP BY value ORDER BY n DESC, value'
-            );
-            $stmt->execute([$keyId, json_encode($docIds)]);
-        }
+        $stmt = $this->stmt(
+            'facetCountsForKeyAll',
+            'SELECT value,
+                    count                                              AS n,
+                    CASE WHEN num_count > 0 THEN num_value END         AS min_num,
+                    CASE WHEN num_count > 0 THEN num_value END         AS max_num,
+                    num_count
+               FROM facet_counts
+              WHERE key_id = ?
+              ORDER BY count DESC, value'
+        );
+        $stmt->execute([$keyId]);
         /** @var list<array{value: string, n: int, min_num: float|null, max_num: float|null, num_count: int}> $rows */
         $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
         return $rows;
@@ -8395,22 +8489,10 @@ class Index
         return $count;
     }
 
-    /** Whether any document holds a number for this facet key (one probe of facet_numeric_index). */
-    private function keyHasNumbers(int $keyId): bool
-    {
-        $stmt = $this->stmt(
-            'facetKeyHasNumbers',
-            'SELECT EXISTS (SELECT 1 FROM facet_values WHERE key_id = ? AND num_value IS NOT NULL)'
-        );
-        $stmt->execute([$keyId]);
-        $has = (int) $stmt->fetchColumn() === 1;
-        $stmt->closeCursor();
-        return $has;
-    }
-
     /**
-     * Turn fetchFacetCountRows() rows into a value → count distribution (in row order) plus
-     * min/max stats when every counted row is numeric.
+     * Turn per-value count rows (wholeKeyFacetCountRows(), fetchFacetCountsOfDocs()) into a
+     * value → count distribution (in row order) plus min/max stats when every counted row is
+     * numeric.
      *
      * @param  list<array{value: string, n: int, min_num: float|null, max_num: float|null, num_count: int}> $rows
      * @return array{distribution: array<array-key, int>, stats: array{min: float, max: float}|null}
@@ -8520,6 +8602,8 @@ class Index
         } catch (\Throwable $e) {
             $pdo->exec('ROLLBACK');
             $this->dropDataCaches();
+            // Facet value IDs are append-only, so only a rollback can take one back.
+            $this->facetValueIdCache = [];
             throw $e;
         } finally {
             $this->inTransaction = false;
