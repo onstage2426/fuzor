@@ -10049,19 +10049,81 @@ class IndexTest extends TestCase
         $this->assertSame([1, 2, 4, 3], $result->getIds());
     }
 
-    public function testAllStrategyFindsAnSkuExactly(): void
+    private function typoIndex(): Index
+    {
+        $index = new Index($this->dbPath, schema: new SchemaConfig(sortableFields: ['price']));
+        $index->insert([
+            ['id' => 1, 'title' => 'bluetoth speaker', 'price' => 30],
+            ['id' => 2, 'title' => 'bluetooth bluetooth headphones', 'price' => 10],
+            ['id' => 3, 'title' => 'bluetooth speaker with a long cable and a case', 'price' => 20],
+        ]);
+        return $index;
+    }
+
+    public function testATypoThatIsIndexedStillFindsTheWord(): void
+    {
+        // "bluetoth" exists in doc 1, yet it also matches "bluetooth" (one typo), ranked after.
+        $result = $this->typoIndex()->search('bluetoth', new SearchOptions(asYouType: false));
+
+        $this->assertSame(1, $result->getIds()[0]);
+        $this->assertEqualsCanonicalizing([2, 3], array_slice($result->getIds(), 1));
+        $this->assertTrue($result->exhaustive);
+    }
+
+    public function testFewerTyposRankFirstWithinABucket(): void
+    {
+        $index = $this->typoIndex();
+
+        // Doc 2 scores higher for "bluetooth" (two hits) but every match is exact here, and
+        // the exact word ranks above its typo in doc 1.
+        $exact = $index->search('bluetooth', new SearchOptions(asYouType: false));
+        $this->assertSame(1, $exact->getIds()[2]);
+
+        // Both words: doc 3 matches them without typos, doc 1 with one; doc 2 lacks "speaker".
+        $both = $index->search('bluetooth speaker', new SearchOptions(asYouType: false));
+        $this->assertSame([3, 1, 2], $both->getIds());
+    }
+
+    public function testTyposRankBeforeSortFields(): void
+    {
+        // As in Meilisearch, the typo rule comes before sort: doc 1 (exact, most expensive) first.
+        $result = $this->typoIndex()->search('bluetoth', new SearchOptions(asYouType: false, sort: ['price:asc']));
+
+        $this->assertSame([1, 2, 3], $result->getIds());
+    }
+
+    public function testProximityRerankKeepsTypoTiers(): void
     {
         $index = new Index($this->dbPath);
         $index->insert([
+            ['id' => 1, 'title' => 'wireless one two three four five six seven eight mouse'],
+            ['id' => 2, 'title' => 'wirless mouse'],
+        ]);
+
+        // Doc 2 has the words next to each other, but with a typo: doc 1 still ranks first.
+        $result = $index->search('wireless mouse', new SearchOptions(asYouType: false, limit: 1));
+        $this->assertSame([1], $result->getIds());
+    }
+
+    public function testAllStrategyRanksTheExactSkuFirst(): void
+    {
+        $docs = [
             ['id' => 1, 'title' => 'FZ-04217 evening dress'],
             ['id' => 2, 'title' => 'FZ-04218 evening dress'],
             ['id' => 3, 'title' => 'gift card 04217'],
-        ]);
-
+        ];
         $options = new SearchOptions(asYouType: false, matchingStrategy: MatchingStrategy::All);
-        $result  = $index->search('FZ-04217', $options);
+        $index   = new Index($this->dbPath);
+        $index->insert($docs);
 
-        $this->assertSame([1], $result->getIds());
+        // "04218" is one typo from "04217": it matches too, ranked after the exact SKU.
+        $this->assertSame([1, 2], $index->search('FZ-04217', $options)->getIds());
+
+        $exact = new Index($this->dbPath, force: true, config: new Config(
+            typoTolerance: new TypoTolerance(disableOnNumbers: true),
+        ));
+        $exact->insert($docs);
+        $this->assertSame([1], $exact->search('FZ-04217', $options)->getIds());
     }
 
     public function testAllStrategyIsExactWhenTheRarestWordIsComplete(): void

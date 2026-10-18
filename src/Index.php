@@ -2698,7 +2698,7 @@ class Index
             $groups[$g]['rows'] = $this->fetchDocsByTermIds(
                 $groups[$g]['words'],
                 $this->config->maxDocs,
-                isset($groups[$g]['words'][0]['distance']),
+                array_filter($groups[$g]['words'], fn(array $w): bool => isset($w['distance'])) !== [],
                 $groups[$g]['idfK1p1'],
                 $k1_1mb,
                 $k1b_avgdl,
@@ -2781,12 +2781,21 @@ class Index
             $termGroups        = [];
             $termIdfMap        = [];
             $docContribTermIds = [];
+            /** @var array<int, int> $docTypos  Typos of the words a doc matched within its bucket (Meilisearch's typo rule). */
+            $docTypos          = [];
             $alive             = $candidates;
             foreach ($order as $position => $g) {
                 if ($alive === []) {
                     break;
                 }
                 $group = $groups[$g];
+                /** @var array<int, int> $termTypos  typo derivations of this group → their distance */
+                $termTypos = [];
+                foreach ($group['words'] as $word) {
+                    if (($word['distance'] ?? 0) > 0) {
+                        $termTypos[$word['id']] = $word['distance'];
+                    }
+                }
                 if ($group['truncated'] || !in_array($g, $fetch, true)) {
                     $unchecked = array_diff_key($alive, $checked[$g] ?? []);
                     array_push($group['rows'], ...$this->completeGroup($group, $unchecked, $k1_1mb, $k1b_avgdl));
@@ -2795,16 +2804,16 @@ class Index
                 }
                 /** @var array<int, true> $groupTermIds */
                 $groupTermIds = [];
-                /** @var array<int, true> $matched  Alive docs this group contains (prefix-expanded term IDs count once). */
+                /** @var array<int, int> $matched  Alive docs this group contains → fewest typos they match it with. */
                 $matched = [];
                 foreach ($group['rows'] as [$termId, $docId, $score]) {
                     if (!isset($alive[$docId])) {
                         continue;
                     }
+                    $matched[$docId] = min($matched[$docId] ?? PHP_INT_MAX, $termTypos[$termId] ?? 0);
                     /** @infection-ignore-all OneZeroFloat: ?? 0.0 is the additive identity; the fallback only applies on first encounter of a docId which always has score 0 before accumulation */
                     $docScores[$docId]     = ($docScores[$docId] ?? 0.0) + $score;
                     $groupTermIds[$termId] = true;
-                    $matched[$docId]       = true;
                     if ($useFieldBoosts) {
                         $termIdfMap[$termId]               ??= $group['idfK1p1'];
                         $docContribTermIds[$docId][$termId]  = true;
@@ -2813,7 +2822,12 @@ class Index
                 foreach (array_diff_key($alive, $matched) as $docId => $_) {
                     $docBucket[$docId] = $position;
                 }
-                $alive = $matched;
+                if ($termTypos !== []) {
+                    foreach ($matched as $docId => $typos) {
+                        $docTypos[$docId] = ($docTypos[$docId] ?? 0) + $typos;
+                    }
+                }
+                $alive = array_fill_keys(array_keys($matched), true);
                 if ($groupTermIds !== []) {
                     $termGroups[] = array_keys($groupTermIds);
                 }
@@ -2832,7 +2846,23 @@ class Index
                         break;
                     }
                 }
-                $members = array_map(fn(int $g): array => $groups[$g], array_slice($order, 0, $k));
+                // The bucket query reads each word's own terms: documents matching through a typo
+                // rank after them anyway (typo rule), and the derivations widen every group
+                // (amazon "black women dress": 70 → 276 ms with them). A word found only through
+                // typos keeps its derivations.
+                $members = array_map(function (int $g) use ($groups): array {
+                    $group = $groups[$g];
+                    $own   = array_values(array_filter(
+                        $group['words'],
+                        fn(array $w): bool => ($w['distance'] ?? 0) === 0,
+                    ));
+                    if ($own !== [] && count($own) < count($group['words'])) {
+                        $group['words']   = $own;
+                        $group['termIds'] = array_column($own, 'id');
+                        $group['df']      = (int) array_sum(array_column($own, 'num_docs'));
+                    }
+                    return $group;
+                }, array_slice($order, 0, $k));
                 $hits    = in_array([], array_column($members, 'termIds'), true)
                     ? []   // an unknown word: no document contains all k groups
                     : $this->exactBucketDocs($members);
@@ -2889,6 +2919,15 @@ class Index
         }
         // A bucket with unscored members is not ranked by score throughout.
         $candidatesCapped = $candidatesCapped || $unscored !== [];
+        // The order's leading key: words bucket desc, then typos asc (Meilisearch's words and typo
+        // rules); null for one word without typo matches (score order alone).
+        $docRank = null;
+        if (count($keywords) > 1 || $docTypos !== []) {
+            $docRank = [];
+            foreach ($docBucket as $docId => $bucket) {
+                $docRank[$docId] = $bucket * 1000 - ($docTypos[$docId] ?? 0);
+            }
+        }
 
         // Field boost re-scoring: replace uniform BM25 scores with field-weighted BM25.
         // Only executes when fieldBoosts is non-empty; the normal path is completely untouched.
@@ -2970,13 +3009,31 @@ class Index
         // With sort fields the proximity factor only breaks ties between documents with equal
         // sort values, so the sorted path reranks just the ties on the page (rerankSortedPageTies()).
         if ($proximity && ($limit > 0 || $distinct !== null) && ($sortSpecs === [] || $distinct !== null)) {
-            $this->applyProximityRanking(
-                $docScores,
-                $docBucket,
-                $termGroups,
-                count($keywords),
-                $sortSpecs === [] && $distinct === null ? $offset + $limit : null,
-            );
+            $topK = $sortSpecs === [] && $distinct === null ? $offset + $limit : null;
+            // Full matches rank by typos first, so each typo tier is reranked on its own, the
+            // page budget passing from one tier to the next (the early stop compares scores
+            // within a tier only).
+            /** @var array<int, list<int>> $tiers  typos → full matches */
+            $tiers = [];
+            foreach ($docScores as $docId => $_) {
+                if (($docBucket[$docId] ?? 0) >= count($keywords)) {
+                    $tiers[$docTypos[$docId] ?? 0][] = $docId;
+                }
+            }
+            ksort($tiers);
+            foreach ($tiers as $tier) {
+                if ($topK !== null && $topK <= 0) {
+                    break;
+                }
+                $this->applyProximityRanking(
+                    $docScores,
+                    count($tiers) === 1 ? $docBucket : array_fill_keys($tier, count($keywords)),
+                    $termGroups,
+                    count($keywords),
+                    $topK,
+                );
+                $topK = $topK === null ? null : $topK - count($tier);
+            }
         }
 
         /** @infection-ignore-all DecrementInteger: $total is count(); -1 is impossible, so the guard fires identically for any realistic input */
@@ -3003,10 +3060,10 @@ class Index
                     array_keys($docScores),
                     $sortSpecs,
                     $docScores,
-                    leading: count($keywords) > 1 ? $docBucket : null,
+                    leading: $docRank,
                 );
-            } elseif (count($keywords) > 1) {
-                $sortedIds = self::rankByBucketThenScore($docScores, $docBucket);
+            } elseif ($docRank !== null) {
+                $sortedIds = self::rankByBucketThenScore($docScores, $docRank);
             } else {
                 arsort($docScores);
                 $sortedIds = array_keys($docScores);
@@ -3059,7 +3116,7 @@ class Index
                 $sortSpecs,
                 $docScores,
                 $tieKeys,
-                count($keywords) > 1 ? $docBucket : null,
+                $docRank,
             );
             $pagedIds  = $proximity
                 ? $this->rerankSortedPageTies(
@@ -3073,8 +3130,8 @@ class Index
                     $limit,
                 )
                 : array_slice($sortedIds, $offset, $limit);
-        } elseif (count($keywords) > 1) {
-            $pagedIds = array_slice(self::rankByBucketThenScore($docScores, $docBucket), $offset, $limit);
+        } elseif ($docRank !== null) {
+            $pagedIds = array_slice(self::rankByBucketThenScore($docScores, $docRank), $offset, $limit);
         } else {
             // Single-keyword: all docs tie on match count; C-native arsort on scores alone.
             arsort($docScores);
@@ -6599,11 +6656,10 @@ class Index
         bool $allowFuzzy = true,
         bool &$truncated = false,
     ): array {
-        // Cache exact/prefix lookups by "keyword:isLastWord" key.
-        // Fuzzy results carry a distance key and are excluded from caching — Levenshtein
-        // distance is applied post-fetch, so cached rows could go stale after config changes.
+        // Cached by "keyword:isLastWord:allowFuzzy"; the config (and so the typo budget) is fixed
+        // per instance, and every write clears the cache.
         /** @infection-ignore-all CastInt,Concat,ConcatOperandRemoval: cache key format mutations only affect cache hit/miss rates, not correctness */
-        $cacheKey = "{$keyword}:" . (int) $isLastWord;
+        $cacheKey = "{$keyword}:" . (int) $isLastWord . ':' . (int) $allowFuzzy;
         /** @infection-ignore-all ReturnRemoval: skipping a cache hit only causes a redundant DB query; the same result is returned */
         if (isset($this->wordlistCache[$cacheKey])) {
             [$cachedRows, $cachedTruncated] = $this->wordlistCache[$cacheKey];
@@ -6639,12 +6695,18 @@ class Index
             $wordlistRows = array_slice($wordlistRows, 0, $maxExpansions);
         }
 
-        // Fall through to typo matching only when no exact/prefix match was found, typos are
-        // allowed at this call site, and TypoTolerance allows at least one for this word.
-        if ($allowFuzzy && !isset($wordlistRows[0])) {
+        // Like Meilisearch, a word within its typo budget also matches the indexed words that
+        // many typos away, whether or not it exists itself ("bluetoth" also finds "bluetooth").
+        // Those rows carry their distance; search() ranks fewer typos first within a bucket.
+        if ($allowFuzzy) {
             $maxTypos = $this->typoBudget($keyword);
             if ($maxTypos > 0) {
-                return $this->fuzzySearch($keyword, $maxTypos);
+                $seen = array_fill_keys(array_column($wordlistRows, 'id'), true);
+                foreach ($this->fuzzySearch($keyword, $maxTypos) as $row) {
+                    if ($row['distance'] > 0 && !isset($seen[$row['id']])) {
+                        $wordlistRows[] = $row;
+                    }
+                }
             }
         }
 
@@ -6790,13 +6852,13 @@ class Index
     /**
      * Fetch doclist rows for a set of wordlist term IDs, ordered by hit count.
      *
-     * When $isFuzzy is true, results are re-sorted by the relevance rank of $words
-     * (closest Levenshtein match first) after the DB fetch.
+     * When $isFuzzy is true (some of $words are typo derivations), rows are taken by typo
+     * distance first (the word's own terms are 0), then by hit count.
      *
      * @param  list<array{id: int, term: string, num_hits: int, num_docs: int, ...}> $words
-     *         Wordlist rows from getWordlistByKeyword() or fuzzySearch() (fuzzy rows also carry distance: int).
+     *         Wordlist rows from getWordlistByKeyword() (typo rows also carry distance: int).
      * @param  int  $limit   Maximum rows to return.
-     * @param  bool $isFuzzy When true, re-sort by fuzzy relevance rank; derived from $words carrying a distance key.
+     * @param  bool $isFuzzy Whether some of $words carry a distance key.
      * @return list<array{0: int, 1: int, 2: float}> Rows as [term_id, doc_id, bm25_score].
      */
     private function fetchDocsByTermIds(
@@ -6807,6 +6869,28 @@ class Index
         float $k1_1mb,
         float $k1b_avgdl,
     ): array {
+        if ($isFuzzy) {
+            // The word's own terms first, then its typo derivations by distance, each tier with
+            // the rows left: every tier takes the index-merge paths below (sorting all rows of
+            // every term by a CASE rank cost ~3 ms per word on the 44k ecom set).
+            $tiers = [];
+            foreach ($words as $word) {
+                $distance           = is_int($word['distance'] ?? null) ? $word['distance'] : 0;
+                $tiers[$distance][] = $word;
+            }
+            ksort($tiers);
+            $rows = [];
+            foreach ($tiers as $tier) {
+                if (count($rows) >= $limit) {
+                    break;
+                }
+                array_push(
+                    $rows,
+                    ...$this->fetchDocsByTermIds($tier, $limit - count($rows), false, $idfK1p1, $k1_1mb, $k1b_avgdl),
+                );
+            }
+            return $rows;
+        }
         $ids  = array_column($words, 'id');
         $n    = count($ids);
         $live = $this->liveDocsSql('doc_id');
@@ -6822,8 +6906,7 @@ class Index
         // sorted; SQLite merges streams without a temp B-tree and LIMIT stops early.
 
         // Single-term non-fuzzy: stable SQL shape — cache by stable key.
-        /** @infection-ignore-all LogicalNot: negating !$isFuzzy to $isFuzzy only switches between the single-term cached stmt and the multi-term/fuzzy paths; all return equivalent doc sets for non-fuzzy calls */
-        if ($n === 1 && !$isFuzzy) {
+        if ($n === 1) {
             $stmt = $this->stmt(
                 "fetchOneTermDocs{$tag}",
                 "SELECT sub.term_id, sub.doc_id,
@@ -6839,42 +6922,21 @@ class Index
             return $rows;
         }
 
-        // Multi-term non-fuzzy: UNION ALL of $n arms, SQL stable for a given $n — cache by arity.
-        /** @infection-ignore-all LogicalNot: negating !$isFuzzy only switches between UNION ALL and the fuzzy IN()+CASE path; result set membership is equivalent */
-        if (!$isFuzzy) {
-            $arms = implode(' UNION ALL ', array_fill(
-                /** @infection-ignore-all DecrementInteger,IncrementInteger: array_fill start index 0 vs ±1 only changes array keys; implode() ignores keys */
-                0,
-                $n,
-                "SELECT term_id, doc_id, hit_count FROM doclist WHERE term_id = ?{$live}"
-            ));
-            $stmt = $this->stmt(
-                "fetchNTermDocs:{$n}{$tag}",
-                "SELECT sub.term_id, sub.doc_id,
-                        ? * sub.hit_count / (? + ? * dl.length + sub.hit_count) AS score
-                  FROM ({$arms} ORDER BY hit_count DESC LIMIT ?) sub
-                  JOIN doc_lengths dl ON dl.doc_id = sub.doc_id"
-            );
-            $stmt->execute([$idfK1p1, $k1_1mb, $k1b_avgdl, ...$ids, $limit]);
-            /** @var list<array{0: int, 1: int, 2: float}> $rows */
-            $rows = $stmt->fetchAll(PDO::FETCH_NUM);
-            /** @infection-ignore-all ReturnRemoval: falling through to the fuzzy path returns the same doc set via an IN()+CASE query */
-            return $rows;
-        }
-
-        // Fuzzy: CASE expression encodes fuzzy relevance rank (closest match first).
-        // Uses IN() since the CASE sort cannot use the index-merge strategy.
-        $placeholders = $this->placeholders($n);
-        $cases        = implode(' ', array_map(fn(int $i): string => "WHEN ? THEN {$i}", range(0, $n - 1)));
-        $stmt         = $this->prepare(
+        // Multi-term: UNION ALL of $n arms, SQL stable for a given $n — cache by arity.
+        $arms = implode(' UNION ALL ', array_fill(
+            /** @infection-ignore-all DecrementInteger,IncrementInteger: array_fill start index 0 vs ±1 only changes array keys; implode() ignores keys */
+            0,
+            $n,
+            "SELECT term_id, doc_id, hit_count FROM doclist WHERE term_id = ?{$live}"
+        ));
+        $stmt = $this->stmt(
+            "fetchNTermDocs:{$n}{$tag}",
             "SELECT sub.term_id, sub.doc_id,
                     ? * sub.hit_count / (? + ? * dl.length + sub.hit_count) AS score
-              FROM (SELECT term_id, doc_id, hit_count FROM doclist
-                    WHERE term_id IN ({$placeholders}){$live}
-                    ORDER BY CASE term_id {$cases} END ASC, hit_count DESC LIMIT ?) sub
+              FROM ({$arms} ORDER BY hit_count DESC LIMIT ?) sub
               JOIN doc_lengths dl ON dl.doc_id = sub.doc_id"
         );
-        $stmt->execute([$idfK1p1, $k1_1mb, $k1b_avgdl, ...$ids, ...$ids, $limit]);
+        $stmt->execute([$idfK1p1, $k1_1mb, $k1b_avgdl, ...$ids, $limit]);
         /** @var list<array{0: int, 1: int, 2: float}> $rows */
         $rows = $stmt->fetchAll(PDO::FETCH_NUM);
         return $rows;
