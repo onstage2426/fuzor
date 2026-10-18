@@ -102,8 +102,25 @@ class Index
 
 
     /**
-     * A primary key probe counted against reading one row in sequence (completeGroup()'s choice
-     * between probing per document and the term-list shape).
+     * Largest posting list a words bucket is computed exactly from (search(), exactBucketDocs()).
+     * The bucket's rarest word is read and the other words are looked up per document: ~0.4–1 µs
+     * per row of that word on 1.43M amazon products ("women cotton dress", rarest 25k: 28 ms,
+     * all 88 full matches). Above it the bucket comes from each word's maxDocs best rows.
+     */
+    private const int EXACT_BUCKET_MAX_DRIVER = 50_000;
+
+    /**
+     * Most documents of one exact words bucket that are scored (BM25 needs each one's rows of
+     * every word; completeGroup() ~2–5 µs per document and word). A larger bucket scores the
+     * documents with the most hits of its rarest word and ranks the rest after them, still in
+     * the bucket: 45k ecom set, "men shirt" (10k full matches) 143 ms scoring all.
+     */
+    private const int EXACT_BUCKET_SCORED_DOCS = 500;
+
+    /**
+     * A primary key probe counted against reading one row in sequence: exactBucketDocs()'s
+     * choice between probing a group per document and reading it whole, and completeGroup()'s
+     * between probing per document and the term-list shape.
      */
     private const int PROBE_ROW_COST = 3;
 
@@ -2688,56 +2705,173 @@ class Index
             );
         }
 
+        // Bucket 0 (lacks the first required word) never matches; with All only full matches do.
+        $minBucket = $strategy === MatchingStrategy::All ? count($order) : 1;
+        // A document that lacks a word of a quoted phrase fails the phrase filter, so the buckets
+        // below the last such word (in strategy order) can never be returned. A phrase with a
+        // word the index lacks is skipped (filterDocsByPhrases()) and does not count.
+        $known = [];
+        foreach ($keywords as $i => $keyword) {
+            $known[$keyword] = ($known[$keyword] ?? false) || $groups[$i]['termIds'] !== [];
+        }
+        foreach ($phraseGroups as $phraseTokens) {
+            if (array_filter($phraseTokens, fn(string $t): bool => !($known[$t] ?? false)) !== []) {
+                continue;
+            }
+            foreach ($order as $position => $g) {
+                if (in_array($keywords[$g], $phraseTokens, true)) {
+                    $minBucket = max($minBucket, $position + 1);
+                }
+            }
+        }
+
         // Phase 3: walk the groups in order. A document's bucket is the number of leading groups
         // it contains; it is fixed at the first group it lacks, so later groups are never looked
         // up for it, and only the groups in its bucket add to its score (so how a word was cut at
         // maxDocs cannot reorder documents within a bucket). A group cut at maxDocs is completed
-        // for the documents still alive that it has not seen (completeGroup()).
-        /** @var array<int, true> $alive */
-        $alive = [];
+        // for the documents still alive that it has not seen (completeGroup()); the rows it adds
+        // are kept, so a second pass only looks up the documents added since.
+        //
+        // The candidates are each fetched group's maxDocs best rows. When every word is common
+        // those can hold too few full matches ("women cotton dress" on 1.43M products: 1 of 88
+        // found), so after the first pass the top buckets are read exactly where they fall short
+        // (exactBucketDocs(): the documents containing the first k groups, for k = all groups
+        // downwards, while the bucket's rarest word is at most EXACT_BUCKET_MAX_DRIVER documents),
+        // and the walk runs again. Without filters, phrases, negations or distinct a bucket is
+        // only read while the buckets above it hold fewer documents than the page; with them,
+        // matches can drop out later, so every needed bucket is read.
+        /** @var array<int, true> $candidates */
+        $candidates = [];
         foreach ($groups as $group) {
             foreach ($group['rows'] as [, $docId]) {
-                $alive[$docId] = true;
+                $candidates[$docId] = true;
             }
         }
-        foreach ($order as $position => $g) {
-            if ($alive === []) {
+        /** @var array<int, int> $unscored  Bucket members beyond EXACT_BUCKET_SCORED_DOCS → their bucket. */
+        $unscored     = [];
+        /** @var array<int, true> $exactDocs */
+        $exactDocs    = [];
+        $exactFrom    = count($order) + 1;   // buckets >= this hold every document they should
+        $fastComplete = !$candidatesCapped;   // every fetched group was read whole
+        $settles      = $filter === [] && $negations === [] && $distinct === null;
+        // Quoted phrases filter after scoring; for the settle checks the documents counted must
+        // pass them, so each document is checked once and the result kept for the phrase filter.
+        /** @var array<int, bool> $phraseOk */
+        $phraseOk = [];
+        $lastToken = end($keywords) ?: '';
+        $passing   = function (array $docIds) use (&$phraseOk, $phraseGroups, $lastToken, $asYouType): int {
+            if ($phraseGroups === []) {
+                return count($docIds);
+            }
+            $unknown = array_keys(array_diff_key($docIds, $phraseOk));
+            if ($unknown !== []) {
+                $phraseOk += array_fill_keys($unknown, false);
+                $matched   = $this->filterDocsByPhrases($unknown, $phraseGroups, $lastToken, $asYouType);
+                foreach ($matched as $docId) {
+                    $phraseOk[$docId] = true;
+                }
+            }
+            return count(array_filter(array_intersect_key($phraseOk, $docIds)));
+        };
+        /** @var array<int, array<int, true>> $checked  group → documents already completed for it */
+        $checked = [];
+        for ($pass = 0;; $pass++) {
+            $docScores         = [];
+            $docBucket         = [];
+            $termGroups        = [];
+            $termIdfMap        = [];
+            $docContribTermIds = [];
+            $alive             = $candidates;
+            foreach ($order as $position => $g) {
+                if ($alive === []) {
+                    break;
+                }
+                $group = $groups[$g];
+                if ($group['truncated'] || !in_array($g, $fetch, true)) {
+                    $unchecked = array_diff_key($alive, $checked[$g] ?? []);
+                    array_push($group['rows'], ...$this->completeGroup($group, $unchecked, $k1_1mb, $k1b_avgdl));
+                    $groups[$g]  = $group;
+                    $checked[$g] = ($checked[$g] ?? []) + $unchecked;
+                }
+                /** @var array<int, true> $groupTermIds */
+                $groupTermIds = [];
+                /** @var array<int, true> $matched  Alive docs this group contains (prefix-expanded term IDs count once). */
+                $matched = [];
+                foreach ($group['rows'] as [$termId, $docId, $score]) {
+                    if (!isset($alive[$docId])) {
+                        continue;
+                    }
+                    /** @infection-ignore-all OneZeroFloat: ?? 0.0 is the additive identity; the fallback only applies on first encounter of a docId which always has score 0 before accumulation */
+                    $docScores[$docId]     = ($docScores[$docId] ?? 0.0) + $score;
+                    $groupTermIds[$termId] = true;
+                    $matched[$docId]       = true;
+                    if ($useFieldBoosts) {
+                        $termIdfMap[$termId]               ??= $group['idfK1p1'];
+                        $docContribTermIds[$docId][$termId]  = true;
+                    }
+                }
+                foreach (array_diff_key($alive, $matched) as $docId => $_) {
+                    $docBucket[$docId] = $position;
+                }
+                $alive = $matched;
+                if ($groupTermIds !== []) {
+                    $termGroups[] = array_keys($groupTermIds);
+                }
+            }
+            foreach ($alive as $docId => $_) {
+                $docBucket[$docId] = count($order);
+            }
+            if ($pass > 0 || $fastComplete || count($order) < 2) {
                 break;
             }
-            $group = $groups[$g];
-            if ($group['truncated'] || !in_array($g, $fetch, true)) {
-                array_push($group['rows'], ...$this->completeGroup($group, $alive, $k1_1mb, $k1b_avgdl));
-            }
-            /** @var array<int, true> $groupTermIds */
-            $groupTermIds = [];
-            /** @var array<int, true> $matched  Alive docs this group contains (prefix-expanded term IDs count once). */
-            $matched = [];
-            foreach ($group['rows'] as [$termId, $docId, $score]) {
-                if (!isset($alive[$docId])) {
-                    continue;
+            $added = false;
+            for ($k = count($order); $k >= max(2, $minBucket); $k--) {
+                if ($settles) {
+                    $covered = $exactDocs + array_filter($docBucket, fn(int $bucket): bool => $bucket >= $k);
+                    if ($passing($covered) >= $offset + $limit) {
+                        break;
+                    }
                 }
-                /** @infection-ignore-all OneZeroFloat: ?? 0.0 is the additive identity; the fallback only applies on first encounter of a docId which always has score 0 before accumulation */
-                $docScores[$docId]     = ($docScores[$docId] ?? 0.0) + $score;
-                $groupTermIds[$termId] = true;
-                $matched[$docId]       = true;
-                if ($useFieldBoosts) {
-                    $termIdfMap[$termId]               ??= $group['idfK1p1'];
-                    $docContribTermIds[$docId][$termId]  = true;
+                $members = array_map(fn(int $g): array => $groups[$g], array_slice($order, 0, $k));
+                $hits    = in_array([], array_column($members, 'termIds'), true)
+                    ? []   // an unknown word: no document contains all k groups
+                    : $this->exactBucketDocs($members);
+                if ($hits === null) {
+                    break;
+                }
+                $exactDocs += array_fill_keys(array_keys($hits), true);
+                if (count($hits) > self::EXACT_BUCKET_SCORED_DOCS) {
+                    // Most hits of the rarest word first, then newest; the rest rank after them.
+                    $docIds = array_keys($hits);
+                    array_multisort($hits, SORT_DESC, SORT_NUMERIC, $docIds, SORT_DESC, SORT_NUMERIC);
+                    foreach (array_slice($docIds, self::EXACT_BUCKET_SCORED_DOCS) as $docId) {
+                        if (!isset($candidates[$docId])) {
+                            $unscored[$docId] ??= $k;
+                        }
+                    }
+                    $hits = array_fill_keys(array_slice($docIds, 0, self::EXACT_BUCKET_SCORED_DOCS), 0);
+                }
+                foreach ($hits as $docId => $_) {
+                    $added = $added || !isset($candidates[$docId]);
+                    $candidates[$docId] = true;
+                    unset($unscored[$docId]);
+                }
+                $exactFrom = $k;
+                if ($settles && $passing($exactDocs) >= $offset + $limit) {
+                    break;
                 }
             }
-            foreach (array_diff_key($alive, $matched) as $docId => $_) {
-                $docBucket[$docId] = $position;
-            }
-            $alive = $matched;
-            if ($groupTermIds !== []) {
-                $termGroups[] = array_keys($groupTermIds);
+            if (!$added) {
+                break;
             }
         }
-        foreach ($alive as $docId => $_) {
-            $docBucket[$docId] = count($order);
+        // Unscored members of a large exact bucket: in their bucket, after its scored documents.
+        foreach ($unscored as $docId => $bucket) {
+            if (!isset($docScores[$docId])) {
+                $docBucket[$docId] = $bucket;
+                $docScores[$docId] = 0.0;
+            }
         }
-        // Bucket 0 (lacks the first required word) never matches; with All only full matches do.
-        $minBucket = $strategy === MatchingStrategy::All ? count($order) : 1;
         foreach ($docBucket as $docId => $bucket) {
             if ($bucket < $minBucket) {
                 unset($docBucket[$docId], $docScores[$docId], $docContribTermIds[$docId]);
@@ -2747,6 +2881,14 @@ class Index
             // Driven from the complete rarest word: every document with all words was found.
             $candidatesCapped = false;
         }
+        if (count($order) > 1 && $candidatesCapped) {
+            // Complete: the buckets from $exactFrom up, and bucket 1 when its one group was read
+            // whole. Any other bucket the strategy returns may miss documents.
+            $candidatesCapped = $exactFrom > max(2, $minBucket)
+                || $minBucket === 1 && $groups[$order[0]]['truncated'];
+        }
+        // A bucket with unscored members is not ranked by score throughout.
+        $candidatesCapped = $candidatesCapped || $unscored !== [];
 
         // Field boost re-scoring: replace uniform BM25 scores with field-weighted BM25.
         // Only executes when fieldBoosts is non-empty; the normal path is completely untouched.
@@ -2786,9 +2928,8 @@ class Index
         // contiguous token sequence. Positions are only fetched for the candidate set, not the
         // entire doclist.
         if ($phraseGroups !== []) {
-            $lastToken = end($keywords) ?: '';
-            $matchIds  = $this->filterDocsByPhrases(array_keys($docScores), $phraseGroups, $lastToken, $asYouType);
-            $docScores = array_intersect_key($docScores, array_flip($matchIds));
+            $passing($docScores);
+            $docScores = array_intersect_key($docScores, array_filter($phraseOk));
         }
 
         // Apply facet filters: load per-key doc ID sets and intersect with the score map.
@@ -6511,6 +6652,75 @@ class Index
         $truncated = $truncated || $prefixTruncated;
 
         return $wordlistRows;
+    }
+
+    /**
+     * IDs of the live documents that contain every group in $members, or null when the bucket's
+     * driver is above EXACT_BUCKET_MAX_DRIVER documents (the bucket is then not read exactly).
+     *
+     * One statement. The driver (the group with the fewest rows to read) is read; another group
+     * of one term is a correlated primary key probe per document; a group of several terms
+     * (prefix, typo or synonym expansions) is read once and tested by membership, unless probing
+     * its terms for the documents expected to remain is cheaper (PROBE_ROW_COST; amazon "kitchen
+     * knife set": 84 → 6 ms). The CTEs are MATERIALIZED because the planner otherwise drives
+     * from the expanded group and probes the rarest one per document (amazon "women cotton
+     * dress": 90 vs 28 ms). Returning the rows from the same statement instead of completing the
+     * groups afterwards (completeGroup()) measured ~10% slower: fetching them row by row costs
+     * more than the probes it saves.
+     *
+     * @param  list<KeywordGroup> $members Groups with at least one term each.
+     * @return array<int, int>|null Document ID → its hits of the driver (rarest) group.
+     */
+    private function exactBucketDocs(array $members): ?array
+    {
+        if ($members === []) {
+            return [];
+        }
+        // Driver: the group with the fewest rows to read; one of several terms also needs grouping
+        // (a document listed once per matching term), counted as twice the rows.
+        $costs = array_map(fn(array $g): int => $g['df'] * (count($g['termIds']) > 1 ? 2 : 1), $members);
+        array_multisort($costs, SORT_ASC, SORT_NUMERIC, array_keys($members), $members);
+        $driver = array_shift($members);
+        if ($driver['df'] > self::EXACT_BUCKET_MAX_DRIVER) {
+            return null;
+        }
+        usort($members, fn(array $a, array $b): int => $a['df'] <=> $b['df']);
+        $total      = max(1, (int) $this->getInfoValues(['total_documents'])['total_documents']);
+        $ctes       = ['drv(doc_id, hc) AS MATERIALIZED (SELECT doc_id, hit_count FROM doclist WHERE term_id IN '
+            . '(SELECT value FROM json_each(?))' . $this->liveDocsSql('doc_id') . ')'];
+        $cteParams  = [json_encode($driver['termIds'])];
+        $checks     = [];
+        $termParams = [];
+        // Documents expected to reach each check (words taken as independent), rarest checks first.
+        $expected = (float) $driver['df'];
+        foreach ($members as $i => $group) {
+            $terms = $group['termIds'];
+            if (count($terms) === 1) {
+                $checks[]     = 'EXISTS (SELECT 1 FROM doclist x WHERE x.term_id = ? AND x.doc_id = drv.doc_id)';
+                $termParams[] = $terms[0];
+            } elseif ($group['df'] < $expected * count($terms) * self::PROBE_ROW_COST) {
+                // Reading the group once is cheaper than probing its terms per remaining document.
+                $ctes[]      = "g{$i}(doc_id) AS MATERIALIZED (SELECT doc_id FROM doclist WHERE term_id IN "
+                    . '(SELECT value FROM json_each(?)))';
+                $cteParams[] = json_encode($terms);
+                $checks[]    = "drv.doc_id IN g{$i}";
+            } else {
+                $checks[]     = 'EXISTS (SELECT 1 FROM doclist x WHERE x.term_id IN (SELECT value FROM json_each(?))'
+                    . ' AND x.doc_id = drv.doc_id)';
+                $termParams[] = json_encode($terms);
+            }
+            $expected *= min(1.0, $group['df'] / $total);
+        }
+        // The driver may list a document once per matching term: grouped.
+        $stmt = $this->prepare(
+            'WITH ' . implode(', ', $ctes) . ' SELECT drv.doc_id, SUM(drv.hc) FROM drv'
+            . ($checks === [] ? '' : ' WHERE ' . implode(' AND ', $checks)) . ' GROUP BY drv.doc_id'
+        );
+        // Every CTE parameter precedes the WHERE clause's in the statement text.
+        $stmt->execute([...$cteParams, ...$termParams]);
+        /** @var array<int, int> $hits */
+        $hits = $stmt->fetchAll(PDO::FETCH_KEY_PAIR);
+        return $hits;
     }
 
     /**

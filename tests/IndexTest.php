@@ -9464,7 +9464,102 @@ class IndexTest extends TestCase
         $result = $this->truncationIndex(3)->search('casual shirt', new SearchOptions(asYouType: false));
 
         $this->assertSame(6, $result->getIds()[0]);
+        // Both buckets are complete: the full matches are read exactly, and "casual" alone was
+        // read whole. Documents with only "shirt" are not results (MatchingStrategy::Last).
+        $this->assertTrue($result->exhaustive);
+    }
+
+    /**
+     * Every word's maxDocs (2) best rows are documents with that word only (repeated, so they rank
+     * first); the full matches 1 and 2 mention each word once, docs 3 and 4 have women + cotton.
+     */
+    private function commonWordsIndex(): Index
+    {
+        $index = new Index($this->dbPath, force: true, config: new Config(maxDocs: 2), schema: new SchemaConfig(
+            filterableFields: ['color'],
+        ));
+        $docs = [
+            ['id' => 1, 'title' => 'women cotton dress', 'color' => 'red'],
+            ['id' => 2, 'title' => 'cotton dress for women', 'color' => 'blue'],
+            ['id' => 3, 'title' => 'women cotton socks', 'color' => 'red'],
+            ['id' => 4, 'title' => 'cotton gloves women', 'color' => 'blue'],
+        ];
+        $id = 10;
+        foreach (['women', 'cotton', 'dress', 'dresser'] as $word) {
+            for ($i = 0; $i < 4; $i++) {
+                $docs[] = ['id' => $id++, 'title' => "{$word} {$word} {$word} {$word}", 'color' => 'red'];
+            }
+        }
+        $index->insert($docs);
+        return $index;
+    }
+
+    public function testFullMatchesOutsideEveryWordsBestRowsAreFound(): void
+    {
+        $result = $this->commonWordsIndex()->search('women cotton dress', new SearchOptions(asYouType: false));
+
+        // Words buckets: both full matches, then women + cotton, then women alone.
+        $this->assertEqualsCanonicalizing([1, 2], array_slice($result->getIds(), 0, 2));
+        $this->assertEqualsCanonicalizing([3, 4], array_slice($result->getIds(), 2, 2));
+        // "women" alone was cut at maxDocs, so its bucket (and the total) may miss documents.
         $this->assertFalse($result->exhaustive);
+    }
+
+    public function testAllStrategyCountsEveryFullMatchExactly(): void
+    {
+        $result = $this->commonWordsIndex()->search('women cotton dress', new SearchOptions(
+            asYouType: false,
+            matchingStrategy: MatchingStrategy::All,
+        ));
+
+        $this->assertEqualsCanonicalizing([1, 2], $result->getIds());
+        $this->assertSame(2, $result->totalHits);
+        $this->assertTrue($result->exhaustive);
+    }
+
+    public function testExactBucketsHoldUnderAFilterAndAPrefixWord(): void
+    {
+        $index = $this->commonWordsIndex();
+
+        // "dre" expands to dress and dresser (a group of several terms).
+        $prefix = $index->search('women cotton dre', new SearchOptions(matchingStrategy: MatchingStrategy::All));
+        $this->assertEqualsCanonicalizing([1, 2], $prefix->getIds());
+        $this->assertTrue($prefix->exhaustive);
+        // With a rare first word the expanded group is probed per document instead.
+        $index->insert([['id' => 5, 'title' => 'zebra dresser', 'color' => 'red'], ['id' => 6, 'title' => 'zebra']]);
+        $rare = $index->search('zebra dre', new SearchOptions(matchingStrategy: MatchingStrategy::All));
+        $this->assertSame([5], $rare->getIds());
+
+        // The filter leaves one full match; the women + cotton bucket follows exactly.
+        $red = $index->search('women cotton dress', new SearchOptions(asYouType: false, filter: ['color' => 'red']));
+        $this->assertSame([1, 3], array_slice($red->getIds(), 0, 2));
+    }
+
+    public function testPhraseMatchesOutsideEveryWordsBestRowsAreFound(): void
+    {
+        $result = $this->commonWordsIndex()->search('women "cotton dress"', new SearchOptions(asYouType: false));
+
+        $this->assertEqualsCanonicalizing([1, 2], $result->getIds());
+    }
+
+    public function testAPageInsideTheFullBucketIsExactWithoutLowerBuckets(): void
+    {
+        $index = $this->commonWordsIndex();
+
+        $page = $index->search('women cotton dress', new SearchOptions(asYouType: false, limit: 2));
+        $this->assertEqualsCanonicalizing([1, 2], $page->getIds());
+    }
+
+    public function testExactBucketsSkipDeletedDocuments(): void
+    {
+        $index = $this->commonWordsIndex();
+        $index->delete(1);
+
+        $result = $index->search('women cotton dress', new SearchOptions(
+            asYouType: false,
+            matchingStrategy: MatchingStrategy::All,
+        ));
+        $this->assertSame([2], $result->getIds());
     }
 
     public function testTruncatedRankingMatchesTheFullRankingForTheDocumentsItFinds(): void
