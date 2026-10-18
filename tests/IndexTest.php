@@ -9836,6 +9836,7 @@ class IndexTest extends TestCase
         $idRows = $stmt->fetchAll(\PDO::FETCH_NUM);
         $ids    = [];
         foreach ($idRows as [$vid, $keyId, $value, $isNum]) {
+            $this->assertSame($keyId, $vid >> 32, "{$when}: an ID carries its key");
             $ids[$vid] = "{$keyId}|{$value}|{$isNum}";
         }
         $stmt = $pdo->query('SELECT doc_id, vids, typeof(vids) FROM doc_facets');
@@ -9846,7 +9847,7 @@ class IndexTest extends TestCase
         foreach ($docRows as [$docId, $vids, $type]) {
             $this->assertSame('blob', $type, $when);
             /** @var array<int, int> $unpacked */
-            $unpacked = unpack('V*', $vids);
+            $unpacked = unpack('P*', $vids);
             foreach ($unpacked as $vid) {
                 $actual[] = "{$docId}|{$ids[$vid]}";
             }

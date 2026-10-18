@@ -110,6 +110,12 @@ class Index
     private const int EXACT_BUCKET_MAX_DRIVER = 50_000;
 
     /**
+     * facet_value_ids.vid = key_id << this | sequence: an ID names its key, so counting can drop
+     * other keys' values without a lookup (facetValueCountsOfDocs()); 2^32 values per key.
+     */
+    private const int FACET_VALUE_KEY_SHIFT = 32;
+
+    /**
      * Most documents of one exact words bucket that are scored (BM25 needs each one's rows of
      * every word; completeGroup() ~2–5 µs per document and word). A larger bucket scores the
      * documents with the most hits of its rarest word and ranks the rest after them, still in
@@ -253,6 +259,13 @@ class Index
      * connection change and on rollback (an ID inserted by a rolled-back write is reused).
      */
     private array $facetValueIdCache = [];
+
+    /**
+     * @var array<int, array{0: int, 1: int, 2: string, 3: int, 4: float|null}> facet_value_ids.vid →
+     * [vid, key_id, value, is_num, num_value], filled by facetValueCountsOfDocs(); cleared with
+     * $facetValueIdCache (the dictionary is append-only: only a rollback takes an ID back).
+     */
+    private array $facetValueCache = [];
 
     /** @var array<string, true>|null TypoTolerance::$disableOnWords as normalised query terms; built on first use. */
     private ?array $typoExactWords = null;
@@ -1170,8 +1183,9 @@ class Index
         );
         // facet_value_ids: one integer ID per filterable (key, value), separate for a number and
         // a string with the same text (is_num), so doc_facets can hold a document's values as
-        // packed integers. Append-only: IDs are never reused or removed (clear() keeps them), so
-        // a cached ID stays valid for any connection.
+        // packed integers. vid = key_id << FACET_VALUE_KEY_SHIFT | sequence, so an ID names its
+        // key. Append-only: IDs are never reused or removed (clear() keeps them), so a cached ID
+        // stays valid for any connection.
         $pdo->exec(
             "CREATE TABLE IF NOT EXISTS facet_value_ids (
                 vid       INTEGER PRIMARY KEY,
@@ -1183,7 +1197,7 @@ class Index
             ) STRICT"
         );
         // doc_facets: per document, the facet_value_ids of its filterable values as packed
-        // unsigned 32-bit little-endian integers. Filtered facet counts read one row per
+        // 64-bit little-endian integers. Filtered facet counts read one row per
         // matching document instead of one facet_values row per document and key
         // (countFacetValuesOfDocs()).
         $pdo->exec(
@@ -1432,6 +1446,7 @@ class Index
         $this->multiValuedKeys = [];
         $this->keyMultiValued  = [];
         $this->facetValueIdCache = [];
+        $this->facetValueCache   = [];
         $this->fieldNameCache  = [];
         $this->synonymCache    = null;
         $this->hasDeleted      = null;
@@ -7215,27 +7230,55 @@ class Index
                 $missing[$keyId . "\0" . $isNum . "\0" . $value] = [$keyId, $value, $isNum, $num];
             }
         }
-        // DO UPDATE instead of DO NOTHING so RETURNING also reports values that already exist.
-        foreach (array_chunk(array_values($missing), self::CHUNK_4P) as $chunk) {
-            $sql = 'INSERT INTO facet_value_ids (key_id, value, is_num, num_value) VALUES '
-                . implode(',', array_fill(0, count($chunk), '(?,?,?,?)'))
-                . ' ON CONFLICT (key_id, value, is_num) DO UPDATE SET key_id = excluded.key_id
-                    RETURNING vid, key_id, value, is_num';
-            // One new value (a single-document write) is the common case: keep its statement.
-            $stmt = count($chunk) === 1 ? $this->stmt('facetValueIdUpsert', $sql) : $this->prepare($sql);
-            $stmt->execute(array_merge(...$chunk));
-            /** @var list<array{0: int, 1: int, 2: string, 3: int}> $returned */
-            $returned = $stmt->fetchAll(PDO::FETCH_NUM);
-            foreach ($returned as [$vid, $keyId, $value, $isNum]) {
-                $this->facetValueIdCache[$keyId][$isNum][(string) $value] = $vid;
+        if ($missing === []) {
+            return;
+        }
+        // Values written before (by any connection) keep their ID.
+        $stmt = $this->stmt(
+            'facetValueIdsFind',
+            "SELECT f.vid, f.key_id, f.value, f.is_num FROM json_each(?) j
+               CROSS JOIN facet_value_ids f
+                 ON f.key_id = j.value ->> 0 AND f.value = j.value ->> 1 AND f.is_num = j.value ->> 2"
+        );
+        $stmt->execute([json_encode(array_map(fn(array $m): array => [$m[0], $m[1], $m[2]], array_values($missing)))]);
+        /** @var list<array{0: int, 1: int, 2: string, 3: int}> $existing */
+        $existing = $stmt->fetchAll(PDO::FETCH_NUM);
+        foreach ($existing as [$vid, $keyId, $value, $isNum]) {
+            $this->facetValueIdCache[$keyId][$isNum][(string) $value] = $vid;
+            unset($missing[$keyId . "\0" . $isNum . "\0" . $value]);
+        }
+        // New values: the next IDs in their key's range (key_id << FACET_VALUE_KEY_SHIFT), inside
+        // the caller's write transaction, so no other writer takes them in between.
+        $next = [];
+        $rows = [];
+        foreach ($missing as [$keyId, $value, $isNum, $num]) {
+            if (!isset($next[$keyId])) {
+                $max = $this->stmt(
+                    'facetValueIdMax',
+                    'SELECT MAX(vid) FROM facet_value_ids WHERE vid BETWEEN ? AND ?'
+                );
+                $base = $keyId << self::FACET_VALUE_KEY_SHIFT;
+                $max->execute([$base, $base + (1 << self::FACET_VALUE_KEY_SHIFT) - 1]);
+                $next[$keyId] = max((int) $max->fetchColumn(), $base) + 1;
+                $max->closeCursor();
             }
+            $vid = $next[$keyId]++;
+            $this->facetValueIdCache[$keyId][$isNum][$value] = $vid;
+            $rows[] = [$vid, $keyId, $value, $isNum, $num];
+        }
+        foreach (array_chunk($rows, self::CHUNK_5P) as $chunk) {
+            $sql = 'INSERT INTO facet_value_ids (vid, key_id, value, is_num, num_value) VALUES '
+                . implode(',', array_fill(0, count($chunk), '(?,?,?,?,?)'));
+            // One new value (a single-document write) is the common case: keep its statement.
+            $stmt = count($chunk) === 1 ? $this->stmt('facetValueIdInsert', $sql) : $this->prepare($sql);
+            $stmt->execute(array_merge(...$chunk));
         }
     }
 
     /**
      * One document's doc_facets.vids: the IDs of its values (resolved by resolveFacetValueIds()),
-     * packed as unsigned 32-bit little-endian integers. Bound as a string, so the INSERT casts it
-     * to BLOB (the column is STRICT).
+     * packed as 64-bit little-endian integers (an ID carries its key, see FACET_VALUE_KEY_SHIFT).
+     * Bound as a string, so the INSERT casts it to BLOB (the column is STRICT).
      *
      * @param list<array{0: int, 1: string|int, 2: float|null}> $rows [key_id, value, num_value]
      */
@@ -7245,7 +7288,7 @@ class Index
         foreach ($rows as [$keyId, $value, $num]) {
             $vids[] = $this->facetValueIdCache[$keyId][$num === null ? 0 : 1][(string) $value];
         }
-        return pack('V*', ...$vids);
+        return pack('P*', ...$vids);
     }
 
     /**
@@ -8619,9 +8662,9 @@ class Index
      * Count facet values for one or more keys over a set of documents, from their doc_facets rows.
      *
      * One row per document whatever the number of keys: the packed value IDs of the documents
-     * are unpacked in batches and counted with array_count_values(), then the IDs of the
-     * requested keys are mapped back to their values with one read of those keys'
-     * facet_value_ids. A join over facet_values instead reads one row per document and key.
+     * are unpacked in batches and counted with array_count_values(), then the counted IDs of the
+     * requested keys are mapped back to their values (by rowid, or by reading those keys' values
+     * when that is cheaper). A join over facet_values instead reads one row per document and key.
      * Measured (exact counts over every match, 2.0 GHz): 1.43M amazon products, category
      * 28.6k docs, three keys 16.3 vs 76.0 ms; 45k ecom set, gender Men 22k docs, five keys
      * 15.8 vs 85.0 ms.
@@ -8655,14 +8698,39 @@ class Index
         if ($vidCounts === []) {
             return [];
         }
-        $stmt = $this->stmt(
-            'facetValueIdsOfKeys',
-            'SELECT vid, key_id, value, is_num, num_value FROM facet_value_ids
-              WHERE key_id IN (SELECT value FROM json_each(?))'
-        );
-        $stmt->execute([json_encode(array_values($nameToId))]);
-        /** @var list<array{0: int, 1: int, 2: string, 3: int, 4: float|null}> $ids */
-        $ids    = $stmt->fetchAll(PDO::FETCH_NUM);
+        // Only the counted IDs are looked up, each by rowid, and kept for the connection (the
+        // dictionary is append-only, so an entry never changes): reading every value of the
+        // requested keys instead made a key with a value per document (a price) the cost of the
+        // request (30k products, "jurk" with three facets 5.8 → 22.7 ms), and a page's facet
+        // groups count mostly the same IDs.
+        // An ID carries its key: the other keys' values (a doc holds all its filterable values)
+        // are dropped here, before any lookup.
+        $wanted = array_flip($nameToId);
+        foreach ($vidCounts as $vid => $_) {
+            if (!isset($wanted[$vid >> self::FACET_VALUE_KEY_SHIFT])) {
+                unset($vidCounts[$vid]);
+            }
+        }
+        $missing = array_keys(array_diff_key($vidCounts, $this->facetValueCache));
+        if ($missing !== []) {
+            $stmt = $this->stmt(
+                'facetValueIdsCounted',
+                'SELECT f.vid, f.key_id, f.value, f.is_num, f.num_value
+                   FROM json_each(?) j CROSS JOIN facet_value_ids f ON f.vid = j.value'
+            );
+            $stmt->execute([json_encode($missing)]);
+            /** @var list<array{0: int, 1: int, 2: string, 3: int, 4: float|null}> $found */
+            $found = $stmt->fetchAll(PDO::FETCH_NUM);
+            foreach ($found as $entry) {
+                $this->facetValueCache[$entry[0]] = $entry;
+            }
+        }
+        $ids = [];
+        foreach ($vidCounts as $vid => $_) {
+            if (isset($this->facetValueCache[$vid])) {
+                $ids[] = $this->facetValueCache[$vid];
+            }
+        }
         $counts = [];
         foreach ($ids as [$vid, $keyId, $value, $isNum, $num]) {
             if (!isset($vidCounts[$vid])) {
@@ -8692,7 +8760,7 @@ class Index
             return;
         }
         /** @var array<int, int> $unpacked */
-        $unpacked = unpack('V*', implode('', $blobs));
+        $unpacked = unpack('P*', implode('', $blobs));
         foreach (array_count_values($unpacked) as $vid => $n) {
             $vidCounts[$vid] = ($vidCounts[$vid] ?? 0) + $n;
         }
@@ -8886,6 +8954,7 @@ class Index
             $this->dropDataCaches();
             // Facet value IDs are append-only, so only a rollback can take one back.
             $this->facetValueIdCache = [];
+            $this->facetValueCache   = [];
             throw $e;
         } finally {
             $this->inTransaction = false;
