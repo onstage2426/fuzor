@@ -102,6 +102,12 @@ class Index
 
 
     /**
+     * A primary key probe counted against reading one row in sequence (completeGroup()'s choice
+     * between probing per document and the term-list shape).
+     */
+    private const int PROBE_ROW_COST = 3;
+
+    /**
      * Positions per field: field n's positions start at n × this (tokenizeDocumentFields()).
      * 2^20 keeps the stored position small (3-byte varints for the second field) while no
      * realistic field reaches a million tokens.
@@ -6535,19 +6541,30 @@ class Index
         }
         $unseenIds = array_keys($unseen);
         sort($unseenIds);
-        // Both lists as json_each IN-lists: SQLite seeks each (term, document) pair on the doclist
-        // primary key and reads doc_lengths only for the matches. Sorted document IDs keep
-        // consecutive seeks on neighbouring pages (0.38 ms vs 0.69 ms unsorted, driven from
-        // json_each). Never write +d.term_id: it turns the seeks into a scan of every document's
-        // terms (41 ms).
-        $stmt = $this->stmt(
-            'completeTermGroup',
-            'SELECT d.term_id, d.doc_id, ? * d.hit_count / (? + ? * dl.length + d.hit_count)
-               FROM doclist d
-               CROSS JOIN doc_lengths dl ON dl.doc_id = d.doc_id
-              WHERE d.term_id IN (SELECT value FROM json_each(?))
-                AND d.doc_id IN (SELECT value FROM json_each(?))'
-        );
+        // Driven from the documents, one primary key probe per (document, term) pair through
+        // doc_id_index: amazon "women" (134k documents) completed for 87 documents 12.6 → 0.07 ms;
+        // with the word's term list first SQLite scans all of its rows and tests membership.
+        // That scan stays the cheaper shape when the pairs outnumber the word's rows (a prefix
+        // group of many terms over many documents). Sorted IDs keep consecutive probes on
+        // neighbouring pages. Never write +d.term_id: it turns the probes into a scan of every
+        // document's terms (41 ms).
+        $probe = count($unseenIds) * count($group['termIds']) * self::PROBE_ROW_COST <= $group['df'];
+        $stmt  = $probe
+            ? $this->stmt(
+                'completeTermGroupProbe',
+                'SELECT d.term_id, d.doc_id, ?1 * d.hit_count / (?2 + ?3 * dl.length + d.hit_count)
+                   FROM json_each(?5) j
+                   CROSS JOIN doclist d ON d.doc_id = j.value AND d.term_id IN (SELECT value FROM json_each(?4))
+                   CROSS JOIN doc_lengths dl ON dl.doc_id = d.doc_id'
+            )
+            : $this->stmt(
+                'completeTermGroup',
+                'SELECT d.term_id, d.doc_id, ? * d.hit_count / (? + ? * dl.length + d.hit_count)
+                   FROM doclist d
+                   CROSS JOIN doc_lengths dl ON dl.doc_id = d.doc_id
+                  WHERE d.term_id IN (SELECT value FROM json_each(?))
+                    AND d.doc_id IN (SELECT value FROM json_each(?))'
+            );
         $stmt->execute([
             $group['idfK1p1'],
             $k1_1mb,
