@@ -1703,7 +1703,9 @@ class Index
             $id    = $this->extractId($document['id']);
             $check = $this->stmt('docExistsCheck', 'SELECT 1 FROM doc_lengths WHERE doc_id = :id LIMIT 1');
             $check->execute([':id' => $id]);
-            if ($check->fetchColumn() !== false) {
+            $exists = $check->fetchColumn() !== false;
+            $check->closeCursor();
+            if ($exists) {
                 throw new QueryException("Document {$id} already exists. Use update() to replace it.");
             }
             /** @infection-ignore-all MethodCallRemoval: closeCursor is a resource-management call; omitting it leaves the cursor open but does not affect WAL-mode write correctness */
@@ -2219,7 +2221,11 @@ class Index
     {
         $stmt = $this->stmt('hasOne', 'SELECT 1 FROM doc_lengths WHERE doc_id = ?');
         $stmt->execute([$id]);
-        return $stmt->fetchColumn() !== false;
+        $has = $stmt->fetchColumn() !== false;
+        // An open cursor on a cached statement keeps a read transaction open, which blocks
+        // other connections' checkpoints until this statement runs again.
+        $stmt->closeCursor();
+        return $has;
     }
 
     /**
@@ -3502,6 +3508,7 @@ class Index
             $stmt->execute([json_encode($values['values']), $keyId]);
             /** @var array{0: int, 1: int} $rows */
             $rows = $stmt->fetch(PDO::FETCH_NUM);
+            $stmt->closeCursor();
             $otherRows = $rows[0] - $rows[1];
             if (
                 $rows[0] !== $totalDocuments
@@ -6806,6 +6813,7 @@ class Index
         );
         $stmt->execute([$name]);
         $id = $stmt->fetchColumn();
+        $stmt->closeCursor();
         if ($id === false) {
             return null;
         }
@@ -7698,7 +7706,9 @@ class Index
             $stmt = $this->prepare('SELECT COUNT(*) ' . sprintf($condition['rows'], 'ff'));
             $stmt->execute($condition['params']);
         }
-        return (int) $stmt->fetchColumn();
+        $count = (int) $stmt->fetchColumn();
+        $stmt->closeCursor();
+        return $count;
     }
 
     /**
@@ -8380,7 +8390,9 @@ class Index
     {
         $stmt = $this->stmt('keyRowCount', 'SELECT COALESCE(SUM(count), 0) FROM facet_counts WHERE key_id = ?');
         $stmt->execute([$keyId]);
-        return (int) $stmt->fetchColumn();
+        $count = (int) $stmt->fetchColumn();
+        $stmt->closeCursor();
+        return $count;
     }
 
     /** Whether any document holds a number for this facet key (one probe of facet_numeric_index). */

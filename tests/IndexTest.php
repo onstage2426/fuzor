@@ -10180,6 +10180,44 @@ class IndexTest extends TestCase
         }
     }
 
+    /** @return array<string, array{0: 'has'|'one value'|'value list'|'distinct'}> */
+    public static function readProvider(): array
+    {
+        return [
+            'has'                        => ['has'],
+            'one filter value'           => ['one value'],
+            'values most documents have' => ['value list'],
+            'distinct over 1,000 docs'   => ['distinct'],
+        ];
+    }
+
+    /** @param 'has'|'one value'|'value list'|'distinct' $read */
+    #[DataProvider('readProvider')]
+    public function testReadsLeaveNoReadTransactionOpen(string $read): void
+    {
+        // A cursor left open on a cached statement keeps the reader's read transaction, so a
+        // writer's checkpoint (close() runs one too) waits for the busy timeout, here 0.
+        $writer = new Index($this->dbPath, config: new Config(busyTimeoutMs: 0), schema: new SchemaConfig(
+            filterableFields: ['color', 'size'],
+        ));
+        $docs = [];
+        for ($id = 1; $id <= 1200; $id++) {
+            $docs[] = ['id' => $id, 'title' => 'sedan', 'color' => $id % 10 === 0 ? 'blue' : 'red', 'size' => $id % 7];
+        }
+        $writer->insert($docs);
+        $reader = new Index($this->dbPath);
+        match ($read) {
+            'has'        => $reader->has(1),
+            'one value'  => $reader->search('', new SearchOptions(filter: ['color' => 'blue'])),
+            'value list' => $reader->search('', new SearchOptions(filter: ['color' => ['red', 'green']])),
+            'distinct'   => $reader->search('', new SearchOptions(distinct: 'size')),
+        };
+        $writer->insert([['id' => 5000, 'title' => 'coupe']]);
+
+        $this->assertSame(0, $writer->checkpoint()['busy']);
+        $reader->close();
+    }
+
     public function testCheckpointRejectsUnknownMode(): void
     {
         $index = new Index($this->dbPath);
