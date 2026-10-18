@@ -3250,61 +3250,44 @@ class Index
             return new FacetSearchResult([], $query->facetQuery, $warnings, $exhaustive);
         }
 
-        // --- Step 3: Query facet_values GROUP BY value ---
-        // A restricted count is driven from the matching documents: one covering-index lookup
-        // per document for this key, instead of scanning every row of the key and testing
-        // membership. Measured on the 45k ecom set it is 10–20% faster for broad restrictions
-        // and far faster for narrow ones. Without any restriction the key's rows are scanned.
+        // --- Step 3: Count the key's values ---
+        // A restricted count is driven from the matching documents: one doc_facets row per
+        // document, counted in PHP, instead of scanning every row of the key and testing
+        // membership (SQL would also group and order joined rows through two temporary B-trees).
+        // On 1.43M amazon products, "black" (50k candidates) by category: 76 ms joined over
+        // facet_values, 49 ms from doc_facets. Without a restriction the key's counts are read,
+        // and with only exclusions its rows are scanned skipping the excluded documents.
         $facetQuery = $query->facetQuery;
-        $params     = [];
-        if ($ftsCandidates !== null) {
-            $from     = 'json_each(?) m CROSS JOIN facet_values fv ON fv.doc_id = m.value';
-            $params[] = json_encode(array_keys($ftsCandidates));
-        } elseif ($match !== null) {
-            $from   = "({$match[0]}) m CROSS JOIN facet_values fv ON fv.doc_id = m.doc_id";
-            $params = $match[1];
-        } else {
-            $from = 'facet_values fv';
-        }
-        $where    = 'fv.key_id = ?';
-        $params[] = $keyId;
-        if ($excludedSql !== null) {
-            $where .= " AND fv.doc_id NOT IN ({$excludedSql[0]})";
-            array_push($params, ...$excludedSql[1]);
-        }
-
-        $byCount = $query->sortFacetValuesBy === FacetOrder::Count;
-        $needle  = self::facetMatchKey($facetQuery);
-        $driven  = $from !== 'facet_values fv';
-        if (!$driven && $facetQuery === '' && $byCount) {
+        $byCount    = $query->sortFacetValuesBy === FacetOrder::Count;
+        $needle     = self::facetMatchKey($facetQuery);
+        $scan       = 'SELECT value, COUNT(*) AS count FROM facet_values WHERE key_id = ? AND doc_id NOT IN (%s)
+                       GROUP BY value';
+        if ($ftsCandidates === null && $match === null && $facetQuery === '' && $byCount) {
             // Nothing to match in PHP: let SQL order and cut (the key's maintained counts, one
-            // row per value, or its rows grouped in primary key order).
+            // row per value, or its kept rows grouped in primary key order).
             $stmt = $this->prepare(
                 ($excludedSql === null
-                    ? 'SELECT value, count FROM facet_counts fv WHERE key_id = ?'
-                    : "SELECT fv.value, COUNT(*) AS count FROM {$from} WHERE {$where} GROUP BY fv.value")
-                . ' ORDER BY count DESC, fv.value LIMIT ?'
+                    ? 'SELECT value, count FROM facet_counts WHERE key_id = ?'
+                    : sprintf($scan, $excludedSql[0]))
+                . ' ORDER BY count DESC, value LIMIT ?'
             );
-            $stmt->execute([...$params, $query->limit]);
+            $stmt->execute([$keyId, ...($excludedSql[1] ?? []), $query->limit]);
             /** @var array<array-key, int> $counts */
             $counts = $stmt->fetchAll(PDO::FETCH_KEY_PAIR);
         } else {
-            if ($driven) {
-                // Driven from the documents, the joined rows arrive in document order: SQL would
-                // group and order them through two temporary B-trees, counting them here is
-                // cheaper (gender Men, brandName: 9.3 → 8.3 ms on the 45k ecom set).
-                $stmt = $this->prepare("SELECT fv.value FROM {$from} WHERE {$where}");
-                $stmt->execute($params);
-                /** @var list<string> $values */
-                $values = $stmt->fetchAll(PDO::FETCH_COLUMN);
-                $counts = array_count_values($values);
+            if ($ftsCandidates !== null || $match !== null) {
+                [$docsSql, $docsParams] = $ftsCandidates !== null
+                    ? ['SELECT value AS doc_id FROM json_each(?)', [json_encode(array_keys($ftsCandidates))]]
+                    : ["SELECT doc_id FROM ({$match[0]})", $match[1]];
+                $byKey  = $this->facetValueCountsOfDocs([$query->facetName => $keyId], $docsSql, $docsParams);
+                $counts = array_map(static fn(array $entry): int => $entry[0], $byKey[$keyId] ?? []);
             } else {
                 $stmt = $this->prepare(
                     $excludedSql === null
                         ? 'SELECT value, count FROM facet_counts WHERE key_id = ?'
-                        : "SELECT fv.value, COUNT(*) AS count FROM {$from} WHERE {$where} GROUP BY fv.value"
+                        : sprintf($scan, $excludedSql[0])
                 );
-                $stmt->execute($params);
+                $stmt->execute([$keyId, ...($excludedSql[1] ?? [])]);
                 /** @var array<array-key, int> $counts */
                 $counts = $stmt->fetchAll(PDO::FETCH_KEY_PAIR);
             }
@@ -3490,11 +3473,10 @@ class Index
      * keeps its positive meaning for disjunctive facet counts ('selection'). Listed values
      * that cover every document match everything, so the condition is dropped.
      *
-     * Counting through the excluded documents costs per excluded document (~2–3 µs), so the
-     * other values may hold at most maxFacetCountDocs rows: the work stays within what the
-     * capped count of the listed values costs. Measured on the 45k ecom set, gender Women or
-     * Men (40.8k docs, 3.6k others), six facets and a sort: 21.1 ms with five of the facets
-     * approximate, 14.0 ms exact (80.5 ms exact the other way).
+     * Counting through the excluded documents costs per excluded document (as counting the
+     * listed ones would), so the other values may hold at most maxFacetCountDocs rows: the work
+     * stays within what the capped count of the listed values costs. Measured on the 45k ecom
+     * set, gender Women or Men (40.8k docs, 3.6k others), six facets: 9.9 ms exact.
      *
      * @param  list<FacetCondition> $conditions From facetFilterConditions().
      * @return list<FacetCondition>
