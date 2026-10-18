@@ -31,8 +31,9 @@ final readonly class Config
         public float $proximityBoost = 1.0,
         /** Maximum matching doc IDs included in facet counting — for search() / searchBoolean(),
          *  a filtered browse, and facetSearch() with a query. Counts are approximate when more
-         *  documents match. Counts with no filter and no query are always exact. */
-        public int $maxFacetCountDocs = 10_000,
+         *  documents match. Counts with no filter and no query are always exact. Counting costs
+         *  about 0.6–1 µs per document, so the default bounds it near 50 ms per facet group. */
+        public int $maxFacetCountDocs = 50_000,
         /**
          * Maximum number of values returned per facet field in $facetDistribution.
          * Values are ordered by count descending; the tail is truncated.
