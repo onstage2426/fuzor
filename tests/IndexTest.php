@@ -3992,6 +3992,31 @@ class IndexTest extends TestCase
         $index->insert(self::generate(array_slice(self::chunkDocs(), 0, 9)));
     }
 
+    public function testWritesAfterARolledBackInsertStayFindable(): void
+    {
+        // The first chunk creates the term 'zebra' and the facet key 'color', the duplicate in
+        // the second chunk rolls both back: IDs cached for them must not be reused.
+        $index = new Index(
+            $this->dbPath,
+            config: new Config(insertChunkSize: 1),
+            schema: new SchemaConfig(filterableFields: ['color']),
+        );
+        try {
+            $index->insert([['id' => 1, 'title' => 'zebra', 'color' => 'red'], ['id' => 1, 'title' => 'zebra']]);
+            $this->fail('Expected a QueryException');
+        } catch (QueryException) {
+        }
+        $this->assertSame(0, $index->count());
+        $index->insert([['id' => 2, 'title' => 'zebra', 'color' => 'red']]);
+
+        $red = new SearchOptions(filter: ['color' => 'red']);
+        $this->assertSame([2], $index->search('zebra')->getIds());
+        $this->assertSame(1, $index->count());
+        $reopened = new Index($this->dbPath);
+        $this->assertSame([2], $reopened->search('zebra')->getIds());
+        $this->assertSame([2], $reopened->search('', $red)->getIds());
+    }
+
     public function testGeneratorWithOneDocumentIsInserted(): void
     {
         $index = $this->chunkIndex($this->dbPath, 3);

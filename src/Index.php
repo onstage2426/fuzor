@@ -1415,17 +1415,28 @@ class Index
             return;
         }
         if ($this->dataVersion !== null) {
-            $this->infoCache      = null;
-            $this->wordlistCache  = [];
-            $this->termIdCache    = [];
-            $this->facetKeyCache   = [];
-            $this->multiValuedKeys = [];
-            $this->keyMultiValued  = [];
-            $this->fieldNameCache  = [];
-            $this->synonymCache    = null;
-            $this->hasDeleted      = null;
+            $this->dropDataCaches();
         }
         $this->dataVersion = $version;
+    }
+
+    /**
+     * Drop every cache of database content: after another connection's commit
+     * (checkDataVersion()), and after a rollback, which takes back rows this connection cached
+     * on write (term, facet key and field name IDs, which SQLite hands out again) and the stats
+     * adjustStats() moved in place.
+     */
+    private function dropDataCaches(): void
+    {
+        $this->infoCache       = null;
+        $this->wordlistCache   = [];
+        $this->termIdCache     = [];
+        $this->facetKeyCache   = [];
+        $this->multiValuedKeys = [];
+        $this->keyMultiValued  = [];
+        $this->fieldNameCache  = [];
+        $this->synonymCache    = null;
+        $this->hasDeleted      = null;
     }
 
     // --- Public write operations --------------------------------------------
@@ -8496,6 +8507,7 @@ class Index
             $pdo->exec('COMMIT');
         } catch (\Throwable $e) {
             $pdo->exec('ROLLBACK');
+            $this->dropDataCaches();
             throw $e;
         } finally {
             $this->inTransaction = false;
