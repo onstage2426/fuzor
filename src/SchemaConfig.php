@@ -8,7 +8,7 @@ namespace Fuzor;
 final readonly class SchemaConfig
 {
     public function __construct(
-        /** BCP 47 language tag (e.g. 'en'); null disables stopword filtering and stemming. */
+        /** BCP 47 language tag (e.g. 'en'): Snowball stemming and CJK/Thai n-grams; null for neither. */
         public ?string $language = null,
         /** Enable the document store so raw documents can be retrieved by ID. */
         public bool $store = true,
@@ -36,6 +36,13 @@ final readonly class SchemaConfig
         public ?array $searchableFields = null,
         /** Strip HTML tags from field values before tokenisation. */
         public bool $stripHtml = false,
+        /**
+         * Words left out of the index and of queries (matched case-insensitively, before
+         * stemming). Empty by default: every word counts. Each entry must be a single word.
+         *
+         * @var list<string>
+         */
+        public array $stopWords = [],
     ) {
     }
 }

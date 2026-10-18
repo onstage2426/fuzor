@@ -5,60 +5,35 @@ declare(strict_types=1);
 namespace Fuzor;
 
 /**
- * Stopword filter for a single language.
- *
- * The word list is loaded from a PHP file on first use and cached on the instance.
- * The PHP opcode cache ensures the underlying file is only parsed once per process.
+ * Stop word filter for an index's SchemaConfig::$stopWords.
  *
  * @internal
  */
 final class Stopwords
 {
-    /** @var array<string, true>|null Associative map for O(1) lookup; null until first use. */
-    private ?array $words = null;
+    /** @var array<string, true> */
+    private readonly array $words;
 
-    /** BCP 47 language tag for the loaded stopword list. */
-    private readonly string $lang;
-
-    /**
-     * @param string $lang BCP 47 language tag (e.g. 'en', 'fr', 'de').
-     * @throws \InvalidArgumentException If no stopword list exists for the given language.
-     */
-    public function __construct(string $lang = 'en')
+    /** @param list<string> $words Lowercased single-token words (see Index::normalizeStopWords()). */
+    public function __construct(array $words)
     {
-        if (!self::supports($lang)) {
-            throw new \InvalidArgumentException("No stopword list for language: '{$lang}'");
-        }
-        $this->lang = $lang;
-    }
-
-    /** Whether a stopword list exists for the given BCP 47 language tag. */
-    public static function supports(string $lang): bool
-    {
-        return Language::hasStopwords($lang);
+        $this->words = array_fill_keys($words, true);
     }
 
     /**
-     * Remove stopwords from a token list.
+     * Remove stop words from a token list.
      *
      * @param  list<string> $tokens Lowercased tokens from the tokeniser.
-     * @return list<string>         Tokens with stopwords removed, re-indexed.
+     * @return list<string>         Tokens with stop words removed, re-indexed.
      */
     public function filter(array $tokens): array
     {
-        if ($this->words === null) {
-            /** @var array<string, true> $words */
-            $words = require __DIR__ . '/../resources/stopwords/' . $this->lang . '.php';
-            $this->words = $words;
-        }
-
         $out = [];
         foreach ($tokens as $t) {
             if (!isset($this->words[$t])) {
                 $out[] = $t;
             }
         }
-
         return $out;
     }
 }

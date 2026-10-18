@@ -17,7 +17,7 @@ Read-only: makes no writes and does not affect search results.
 |---|---|---|
 | `rawTokens` | `list<string>` | Tokens before stopword filtering and stemming |
 | `filteredTokens` | `list<string>` | Tokens after stopword filtering and stemming |
-| `stopwordsActive` | `bool` | Whether a stopword filter is active on this index |
+| `stopwordsActive` | `bool` | Whether the index has stop words (`SchemaConfig::$stopWords`) |
 | `stemmerActive` | `bool` | Whether a stemmer is active on this index |
 | `allStripped` | `bool` | `true` if every token was a stopword (fallback to raw tokens fires) |
 | `totalDocuments` | `int` | Total documents in the index at query time |
@@ -60,7 +60,7 @@ $result = $index->inspectQuery('fast connections');
 
 $result->rawTokens;      // ['fast', 'connections']
 $result->filteredTokens; // ['fast', 'connect']  (stemmed)
-$result->stopwordsActive; // true
+$result->stopwordsActive; // false: SchemaConfig::$stopWords is empty
 $result->stemmerActive;   // true
 $result->allStripped;     // false
 

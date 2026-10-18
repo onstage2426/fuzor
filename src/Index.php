@@ -186,7 +186,7 @@ class Index
     /** Search tuning; immutable after construction. */
     private readonly Config $config;
 
-    /** BCP 47 language tag active on this index; null means no stopword filtering or stemming. */
+    /** BCP 47 language tag active on this index (stemming, CJK/Thai n-grams); null for neither. */
     public private(set) ?string $language = null;
 
     /** Whether the optional document store is active on this index. */
@@ -203,6 +203,9 @@ class Index
 
     /** When true, each field value is converted from HTML to text before tokenisation (see HtmlText). */
     public private(set) bool $stripHtml = false;
+
+    /** @var list<string> Words left out of the index and of queries, lowercased; see SchemaConfig. */
+    public private(set) array $stopWords = [];
 
     /** On-disk schema revision of the open index; see CURRENT_SCHEMA_VERSION. */
     public private(set) int $schemaVersion = self::CURRENT_SCHEMA_VERSION;
@@ -294,8 +297,9 @@ class Index
      * @param  bool             $readonly Open in read-only mode; all write methods throw IOException.
      * @param  SchemaConfig|null $schema   Schema persisted at creation time; ignored when opening an existing index.
      * @throws IOException    If the parent directory does not exist, or readonly is true and the file does not exist.
-     * @throws QueryException If $schema->language is set but has no stopword list or stemmer,
+     * @throws QueryException If $schema->language is set but not supported (Language::supports()),
      *                        or if both $readonly and $force are true.
+     * @throws \InvalidArgumentException If an entry of $schema->stopWords is not exactly one word.
      */
     public function __construct(
         string $path,
@@ -311,8 +315,10 @@ class Index
             throw new QueryException("Cannot force-create a readonly index.");
         }
         if ($schema->language !== null && !Language::supports($schema->language)) {
-            throw new QueryException("No stopword list or stemmer for language: '{$schema->language}'");
+            throw new QueryException("Unsupported language: '{$schema->language}'");
         }
+        // Validated before any file exists; createIndex() normalises them again.
+        self::normalizeStopWords($schema->stopWords, $schema->language);
         $resolved   = self::resolvePath($path);
         $this->path = $resolved;
         if ($this->readonly && !file_exists($resolved)) {
@@ -502,6 +508,7 @@ class Index
                 sortableFields:   $existing->sortableFields,
                 searchableFields: $existing->searchableFields,
                 stripHtml:        $existing->stripHtml,
+                stopWords:        $existing->stopWords,
             );
         }
 
@@ -1017,6 +1024,7 @@ class Index
         $store            = $schema->store;
         $searchableFields = $schema->searchableFields;
         $stripHtml        = $schema->stripHtml;
+        $stopWords        = self::normalizeStopWords($schema->stopWords, $language);
 
         $pdo = new PDO('sqlite:' . $this->path);
         $this->pdo = $pdo;
@@ -1196,10 +1204,12 @@ class Index
         $schemaStmt->execute(['sortable_fields',   json_encode($schema->sortableFields)]);
         $schemaStmt->execute(['searchable_fields', $searchableFields !== null ? json_encode($searchableFields) : '']);
         $schemaStmt->execute(['strip_html',        $stripHtml ? '1' : '0']);
+        $schemaStmt->execute(['stop_words',        json_encode($stopWords)]);
         $this->applyFieldLists($schema->filterableFields, $schema->sortableFields);
         $this->searchableFields   = $searchableFields;
         $this->searchableFieldSet = $searchableFields !== null ? array_flip($searchableFields) : null;
         $this->stripHtml          = $stripHtml;
+        $this->applyStopWords($stopWords);
         $this->schemaVersion      = self::CURRENT_SCHEMA_VERSION;
 
         if ($language !== null) {
@@ -1239,7 +1249,7 @@ class Index
         $stmt  = $pdo->query(
             "SELECT key, value FROM info"
             . " WHERE key IN ('language', 'has_document_store', 'filterable_fields', 'sortable_fields',"
-            . " 'searchable_fields', 'strip_html', 'schema_version')"
+            . " 'searchable_fields', 'strip_html', 'stop_words', 'schema_version')"
         );
         $infoRows = [];
         if ($stmt) {
@@ -1265,6 +1275,7 @@ class Index
             : self::decodeStringList($infoRows['searchable_fields']);
         $this->searchableFieldSet   = $this->searchableFields !== null ? array_flip($this->searchableFields) : null;
         $this->stripHtml            = $infoRows['strip_html'] === '1';
+        $this->applyStopWords(self::decodeStringList($infoRows['stop_words']));
     }
 
     /**
@@ -8623,21 +8634,49 @@ class Index
     }
 
     /**
-     * Instantiate Stopwords and Stemmer for the given BCP 47 tag on this connection.
+     * Instantiate the Stemmer for the given BCP 47 tag on this connection.
      *
-     * Called internally by createIndex() and selectIndex(). Passing null clears both.
+     * Called internally by createIndex() and selectIndex(). Passing null clears it.
      *
-     * @throws QueryException If $language is set but has no stopword list or stemmer.
+     * @throws QueryException If $language is set but not supported (Language::supports()).
      */
     private function applyLanguage(?string $language): void
     {
         if ($language !== null && !Language::supports($language)) {
-            throw new QueryException("No stopword list or stemmer for language: '{$language}'");
+            throw new QueryException("Unsupported language: '{$language}'");
         }
         $this->language  = $language;
-        $this->stopwords = $language !== null && Language::hasStopwords($language) ? new Stopwords($language) : null;
         $this->stemmer   = $language !== null && Language::hasStemmer($language) ? new Stemmer($language) : null;
         $this->typoExactWords = null;
+    }
+
+    /** @param list<string> $words From normalizeStopWords() or the info table. */
+    private function applyStopWords(array $words): void
+    {
+        $this->stopWords = $words;
+        $this->stopwords = $words === [] ? null : new Stopwords($words);
+    }
+
+    /**
+     * SchemaConfig::$stopWords as the tokeniser sees words: lowercased, without duplicates.
+     *
+     * @param  list<string> $words
+     * @return list<string>
+     * @throws \InvalidArgumentException If an entry is not exactly one word.
+     */
+    private static function normalizeStopWords(array $words, ?string $language): array
+    {
+        $normalized = [];
+        foreach ($words as $word) {
+            $tokens = Tokenizer::tokenize($word, $language);
+            if (count($tokens) !== 1) {
+                throw new \InvalidArgumentException("Stop words must be single words; got '{$word}'.");
+            }
+            if (!in_array($tokens[0], $normalized, true)) {
+                $normalized[] = $tokens[0];
+            }
+        }
+        return $normalized;
     }
 
     /**

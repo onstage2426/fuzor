@@ -6,6 +6,7 @@ namespace Fuzor\Tests;
 
 use Fuzor\Index;
 use Fuzor\SchemaConfig;
+use Fuzor\SearchOptions;
 use Fuzor\Exceptions\QueryException;
 use Fuzor\Stopwords;
 use PHPUnit\Framework\TestCase;
@@ -28,66 +29,23 @@ class StopwordsTest extends TestCase
         }
     }
 
-    // --- Stopwords::supports ---
-
-    public function testSupportsReturnsTrueForKnownLanguage(): void
-    {
-        $this->assertTrue(Stopwords::supports('en'));
-        $this->assertTrue(Stopwords::supports('fr'));
-    }
-
-    public function testSupportsReturnsFalseForUnknownLanguage(): void
-    {
-        $this->assertFalse(Stopwords::supports('xx'));
-        $this->assertFalse(Stopwords::supports('ne')); // stemmer-only
-    }
-
     // --- Stopwords class ---
 
-    public function testFilterRemovesEnglishStopwords(): void
+    public function testFilterRemovesListedWords(): void
     {
-        $sw = new Stopwords('en');
-        $this->assertSame(['quick', 'brown', 'fox'], $sw->filter(['the', 'quick', 'brown', 'fox']));
-    }
-
-    public function testFilterPreservesNonStopwords(): void
-    {
-        $sw = new Stopwords('en');
-        $this->assertSame(['elephant', 'jazz', 'cryptography'], $sw->filter(['elephant', 'jazz', 'cryptography']));
+        $sw = new Stopwords(['the', 'a']);
+        $this->assertSame(['quick', 'brown', 'fox'], $sw->filter(['the', 'quick', 'a', 'brown', 'fox']));
     }
 
     public function testFilterReindexesResult(): void
     {
-        $sw     = new Stopwords('en');
-        $result = $sw->filter(['the', 'cat']);
-        $this->assertArrayHasKey(0, $result);
-        $this->assertSame('cat', $result[0]);
+        $result = new Stopwords(['the'])->filter(['the', 'cat']);
+        $this->assertSame(['cat'], $result);
     }
 
     public function testFilterEmptyArray(): void
     {
-        $sw = new Stopwords('en');
-        $this->assertSame([], $sw->filter([]));
-    }
-
-    public function testFilterAllStopwords(): void
-    {
-        $sw = new Stopwords('en');
-        $this->assertSame([], $sw->filter(['the', 'and', 'or', 'a', 'is']));
-    }
-
-    public function testDifferentLanguage(): void
-    {
-        $sw     = new Stopwords('fr');
-        $result = $sw->filter(['le', 'renard', 'brun', 'rapide']);
-        $this->assertNotContains('le', $result);
-        $this->assertContains('renard', $result);
-    }
-
-    public function testUnknownLanguageThrows(): void
-    {
-        $this->expectException(\InvalidArgumentException::class);
-        new Stopwords('xx');
+        $this->assertSame([], new Stopwords(['the'])->filter([]));
     }
 
     // --- Index integration ---
@@ -119,22 +77,65 @@ class StopwordsTest extends TestCase
         new Index($this->dbPath, schema: new SchemaConfig(language: 'xx'));
     }
 
-    public function testStopwordsExcludedFromIndex(): void
+    public function testLanguageAloneFiltersNoWords(): void
     {
+        // Like Meilisearch: no stop words unless the schema lists them. "c" and "men" are
+        // product words ("usb c cable", "men shirt").
         $index = new Index($this->dbPath, schema: new SchemaConfig(language: 'en'));
-        $index->insert([['id' => 1, 'body' => 'the quick brown fox']]);
+        $index->insert([['id' => 1, 'body' => 'the usb c cable for men']]);
 
-        // 'the' is a stopword — searching for it should return no results
-        $this->assertSame([], $index->search('the')->getIds());
-
-        // content terms should still be findable
-        $this->assertContains(1, $index->search('fox')->getIds());
+        $this->assertSame([], $index->stopWords);
+        $this->assertSame([1], $index->search('the')->getIds());
+        $this->assertSame([1], $index->search('men', new SearchOptions(asYouType: false))->getIds());
+        $this->assertSame(['usb', 'c', 'cabl'], $index->inspectQuery('usb c cable')->filteredTokens);
     }
 
-    public function testWithoutLanguageStopwordsAreIndexed(): void
+    public function testListedStopWordsAreLeftOutOfIndexAndQueries(): void
+    {
+        $index = new Index($this->dbPath, schema: new SchemaConfig(language: 'en', stopWords: ['The', 'of']));
+        $index->insert([['id' => 1, 'body' => 'the quick brown fox'], ['id' => 2, 'body' => 'a bag of the fox']]);
+
+        $this->assertSame(['the', 'of'], $index->stopWords);
+        $this->assertSame([], $index->search('the')->getIds());
+        // Left out of the query too, so "the fox" matches both documents fully.
+        $this->assertSame(['fox'], $index->inspectQuery('the fox')->filteredTokens);
+        $this->assertEqualsCanonicalizing([1, 2], $index->search('the fox')->getIds());
+        $this->assertTrue($index->inspectQuery('the fox')->stopwordsActive);
+    }
+
+    public function testStopWordsAreRestoredOnOpenAndKeptByRebuild(): void
+    {
+        $index = new Index($this->dbPath, schema: new SchemaConfig(stopWords: ['the']));
+        $index->insert([['id' => 1, 'body' => 'the fox']]);
+        $index->close();
+
+        $this->assertSame(['the'], new Index($this->dbPath)->stopWords);
+        Index::rebuild($this->dbPath);
+        $rebuilt = new Index($this->dbPath);
+        $this->assertSame(['the'], $rebuilt->stopWords);
+        $this->assertSame([], $rebuilt->search('the')->getIds());
+    }
+
+    public function testNumericStopWordStaysAString(): void
+    {
+        $index = new Index($this->dbPath, schema: new SchemaConfig(stopWords: ['2', '2']));
+        $this->assertSame(['2'], $index->stopWords);
+    }
+
+    public function testStopWordOfSeveralWordsThrowsBeforeCreatingTheFile(): void
+    {
+        try {
+            new Index($this->dbPath, schema: new SchemaConfig(stopWords: ['t-shirt']));
+            $this->fail('Expected an InvalidArgumentException');
+        } catch (\InvalidArgumentException $e) {
+            $this->assertStringContainsString('t-shirt', $e->getMessage());
+        }
+        $this->assertFileDoesNotExist($this->dbPath);
+    }
+
+    public function testWithoutStopWordsEveryWordIsIndexed(): void
     {
         $index = new Index($this->dbPath);
-        // no language set — 'the' is indexed normally
         $index->insert([['id' => 1, 'body' => 'the quick brown fox']]);
 
         $this->assertContains(1, $index->search('the')->getIds());
@@ -142,14 +143,13 @@ class StopwordsTest extends TestCase
 
     public function testAllStopwordQueryDoesNotCrash(): void
     {
-        // With language='en', stopwords are filtered from both inserts and queries.
-        // A query made up entirely of stopwords must not crash or throw; the fallback
+        // A query made up entirely of stop words must not crash or throw; the fallback
         // in filterQueryTokens re-enables the original tokens when all are stripped.
-        $index = new Index($this->dbPath, schema: new SchemaConfig(language: 'en'));
+        $index = new Index($this->dbPath, schema: new SchemaConfig(stopWords: ['the', 'and', 'or']));
         $index->insert([['id' => 1, 'body' => 'quick brown fox']]);
 
         $result = $index->search('the and or');
-        // 'the', 'and', 'or' are stopwords and were never indexed — no matches expected
+        // never indexed, so no matches
         $this->assertSame([], $result->getIds());
     }
 }

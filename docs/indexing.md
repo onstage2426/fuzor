@@ -20,7 +20,7 @@ $index = new Index('/path/to/articles.db', force: true);
 
 The empty index is published the same way as a rebuild, so processes that still have the old file open are not affected: see [Index files after a rebuild or snapshot](#index-files-after-a-rebuild-or-snapshot).
 
-Pass a BCP 47 `language` tag to enable stopword filtering and stemming at creation time:
+Pass a BCP 47 `language` tag to enable stemming at creation time (see [Language](language.md); stop words are a separate, empty-by-default list):
 
 ```php
 use Fuzor\SchemaConfig;
@@ -90,12 +90,13 @@ Passing `schema:` when opening an existing file throws `QueryException`. Use `In
 
 | `SchemaConfig` property | Default | Effect |
 |-------------------------|---------|--------|
-| `language` | `null` | BCP 47 language tag; `null` disables stopwords and stemming |
+| `language` | `null` | BCP 47 language tag: stemming, CJK/Thai n-grams; `null` for neither |
 | `store` | `true` | Enable the document store |
 | `filterableFields` | `[]` | Fields usable in `filter`, `facets`, `distinct`, and `facetSearch()` |
 | `sortableFields` | `[]` | Fields usable in `sort` |
 | `searchableFields` | `null` | Fields tokenised for FTS; `null` = all fields that are neither filterable nor sortable |
 | `stripHtml` | `false` | Convert HTML field values to text before tokenisation |
+| `stopWords` | `[]` | Single words left out of the index and of queries, case-insensitive; see [Language](language.md#stop-words) |
 
 ## Inserting
 

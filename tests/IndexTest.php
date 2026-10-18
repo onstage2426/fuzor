@@ -2719,7 +2719,7 @@ class IndexTest extends TestCase
 
     public function testInspectQueryReportsNegationsApartFromTheSearchedWords(): void
     {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(language: 'en'));
+        $index = new Index($this->dbPath, schema: new SchemaConfig(language: 'en', stopWords: ['t', 'long', 'the']));
         $index->insert([
             ['id' => 1, 'title' => 'casual cotton shirt'],
             ['id' => 2, 'title' => 'formal shirt with long sleeves'],
@@ -2727,7 +2727,7 @@ class IndexTest extends TestCase
 
         $info = $index->inspectQuery('shirt -formal -"long sleeves" -zzzunknown -the t-shirt');
 
-        // "t-shirt" is not a negation ("t" itself is an English stopword).
+        // "t-shirt" is not a negation ("t" itself is a stop word).
         $this->assertSame(['shirt', 'shirt'], $info->filteredTokens);
         $this->assertSame(['shirt', 'shirt'], array_map(fn(QueryToken $t): string => $t->processed, $info->tokens));
         $this->assertSame([
@@ -2765,11 +2765,16 @@ class IndexTest extends TestCase
         $this->assertFalse($result->stemmerActive);
     }
 
-    public function testInspectQueryStopwordsActiveWhenLanguageSet(): void
+    public function testInspectQueryStopwordsActiveWithStopWords(): void
+    {
+        $index = new Index($this->dbPath, schema: new SchemaConfig(stopWords: ['the']));
+        $this->assertTrue($index->inspectQuery('hello world')->stopwordsActive);
+    }
+
+    public function testInspectQueryStopwordsInactiveWithALanguageOnly(): void
     {
         $index = new Index($this->dbPath, schema: new SchemaConfig(language: 'en'));
-        $result = $index->inspectQuery('hello world');
-        $this->assertTrue($result->stopwordsActive);
+        $this->assertFalse($index->inspectQuery('hello world')->stopwordsActive);
     }
 
     public function testInspectQueryStemmerActiveWhenLanguageSet(): void
@@ -2781,7 +2786,7 @@ class IndexTest extends TestCase
 
     public function testInspectQueryFilteredTokensDropsStopwords(): void
     {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(language: 'en'));
+        $index = new Index($this->dbPath, schema: new SchemaConfig(language: 'en', stopWords: ['the']));
         $result = $index->inspectQuery('the quick');
         $this->assertNotContains('the', $result->filteredTokens);
         $this->assertContains('the', $result->rawTokens);
@@ -2791,14 +2796,14 @@ class IndexTest extends TestCase
     {
         // Single-token all-stopword query: filterQueryTokens only strips when count > 1,
         // so use two stopwords to trigger the all-stripped fallback.
-        $index = new Index($this->dbPath, schema: new SchemaConfig(language: 'en'));
+        $index = new Index($this->dbPath, schema: new SchemaConfig(stopWords: ['the', 'and']));
         $result = $index->inspectQuery('the and');
         $this->assertTrue($result->allStripped);
         // Fallback fires — filtered_tokens equals raw_tokens.
         $this->assertSame($result->rawTokens, $result->filteredTokens);
     }
 
-    public function testInspectQueryAllStrippedFalseWithNoLanguage(): void
+    public function testInspectQueryAllStrippedFalseWithoutStopWords(): void
     {
         $index = new Index($this->dbPath);
         $result = $index->inspectQuery('the and');

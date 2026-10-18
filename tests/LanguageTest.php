@@ -6,6 +6,7 @@ use Fuzor\Index;
 use Fuzor\Language;
 use Fuzor\Stemmers\SnowballEnglish;
 use Fuzor\Stemmers\SnowballStemmer;
+use Fuzor\Tokenizer;
 use PHPUnit\Framework\TestCase;
 
 class LanguageTest extends TestCase
@@ -21,18 +22,28 @@ class LanguageTest extends TestCase
         $this->assertSame('Chinese', $languages['zh']);
     }
 
-    public function testAllContainsStopwordOnlyLanguages(): void
+    public function testAllContainsNgramLanguagesWithoutAStemmer(): void
     {
         $languages = Language::all();
-        // Languages with stopwords but no stemmer
-        $this->assertArrayHasKey('af', $languages);
-        $this->assertArrayHasKey('ja', $languages);
+        foreach (['zh', 'ja', 'ko', 'th'] as $tag) {
+            $this->assertArrayHasKey($tag, $languages);
+        }
     }
 
-    public function testAllContainsStemmerOnlyLanguages(): void
+    public function testAllLeavesOutLanguagesWithNothingToApply(): void
+    {
+        // Neither a stemmer nor n-grams: the tag would change nothing.
+        $languages = Language::all();
+        $this->assertArrayNotHasKey('af', $languages);
+        $this->assertArrayNotHasKey('cs', $languages);
+        foreach (array_keys($languages) as $tag) {
+            $this->assertTrue(Language::hasStemmer($tag) || Tokenizer::ngramSize($tag) > 0, $tag);
+        }
+    }
+
+    public function testAllContainsStemmerLanguages(): void
     {
         $languages = Language::all();
-        // Languages with stemmer but no stopwords
         $this->assertArrayHasKey('ne', $languages);
         $this->assertArrayHasKey('sr', $languages);
         $this->assertArrayHasKey('ta', $languages);
@@ -53,7 +64,7 @@ class LanguageTest extends TestCase
     {
         $this->assertTrue(Language::supports('en'));
         $this->assertTrue(Language::supports('zh'));
-        $this->assertTrue(Language::supports('ne')); // stemmer only
+        $this->assertTrue(Language::supports('ne'));
     }
 
     public function testSupportsReturnsFalseForUnknownLanguage(): void
@@ -63,40 +74,17 @@ class LanguageTest extends TestCase
         $this->assertFalse(Language::supports('en-GB'));
     }
 
-    // --- Language::hasStopwords ---
-
-    public function testHasStopwordsReturnsTrueForLanguagesWithStopwordList(): void
-    {
-        $this->assertTrue(Language::hasStopwords('en'));
-        $this->assertTrue(Language::hasStopwords('fr'));
-        $this->assertTrue(Language::hasStopwords('zh'));
-    }
-
-    public function testHasStopwordsReturnsFalseForStemmerOnlyLanguages(): void
-    {
-        $this->assertFalse(Language::hasStopwords('ne'));
-        $this->assertFalse(Language::hasStopwords('sr'));
-        $this->assertFalse(Language::hasStopwords('ta'));
-        $this->assertFalse(Language::hasStopwords('yi'));
-    }
-
-    public function testHasStopwordsReturnsFalseForUnknownLanguage(): void
-    {
-        $this->assertFalse(Language::hasStopwords('xx'));
-    }
-
     // --- Language::hasStemmer ---
 
     public function testHasStemmerReturnsTrueForLanguagesWithStemmer(): void
     {
         $this->assertTrue(Language::hasStemmer('en'));
         $this->assertTrue(Language::hasStemmer('fr'));
-        $this->assertTrue(Language::hasStemmer('ne')); // stemmer only
+        $this->assertTrue(Language::hasStemmer('ne'));
     }
 
-    public function testHasStemmerReturnsFalseForStopwordsOnlyLanguages(): void
+    public function testHasStemmerReturnsFalseForNgramLanguages(): void
     {
-        $this->assertFalse(Language::hasStemmer('af'));
         $this->assertFalse(Language::hasStemmer('zh'));
         $this->assertFalse(Language::hasStemmer('ja'));
     }
@@ -115,9 +103,8 @@ class LanguageTest extends TestCase
         $this->assertSame(SnowballEnglish::class, $class);
     }
 
-    public function testStemmerClassReturnsNullForStopwordsOnlyLanguage(): void
+    public function testStemmerClassReturnsNullForNgramLanguage(): void
     {
-        $this->assertNull(Language::stemmerClass('af'));
         $this->assertNull(Language::stemmerClass('zh'));
     }
 

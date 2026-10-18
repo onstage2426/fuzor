@@ -40,77 +40,51 @@ use Fuzor\Stemmers\SnowballYiddish;
 /**
  * Unified language registry.
  *
- * Single source of truth for supported BCP 47 language tags, their display names,
- * and which features (stopwords, stemming) are available per language.
+ * Single source of truth for supported BCP 47 language tags and their display names: the
+ * languages with a Snowball stemmer, plus Chinese, Japanese, Korean and Thai, which are split
+ * into n-grams (Tokenizer::ngramSize()).
  */
 final class Language
 {
     /**
-     * @var array<string, array{name: string, stopwords: bool, stemmer: class-string<SnowballStemmer>|null}>
+     * @var array<string, array{name: string, stemmer: class-string<SnowballStemmer>|null}>
      */
     private const array LANG_MAP = [
-        'af' => ['name' => 'Afrikaans',  'stopwords' => true,  'stemmer' => null],
-        'ar' => ['name' => 'Arabic',     'stopwords' => true,  'stemmer' => SnowballArabic::class],
-        'bg' => ['name' => 'Bulgarian',  'stopwords' => true,  'stemmer' => null],
-        'bn' => ['name' => 'Bengali',    'stopwords' => true,  'stemmer' => null],
-        'br' => ['name' => 'Breton',     'stopwords' => true,  'stemmer' => null],
-        'ca' => ['name' => 'Catalan',    'stopwords' => true,  'stemmer' => SnowballCatalan::class],
-        'cs' => ['name' => 'Czech',      'stopwords' => true,  'stemmer' => null],
-        'da' => ['name' => 'Danish',     'stopwords' => true,  'stemmer' => SnowballDanish::class],
-        'de' => ['name' => 'German',     'stopwords' => true,  'stemmer' => SnowballGerman::class],
-        'el' => ['name' => 'Greek',      'stopwords' => true,  'stemmer' => SnowballGreek::class],
-        'en' => ['name' => 'English',    'stopwords' => true,  'stemmer' => SnowballEnglish::class],
-        'eo' => ['name' => 'Esperanto',  'stopwords' => true,  'stemmer' => SnowballEsperanto::class],
-        'es' => ['name' => 'Spanish',    'stopwords' => true,  'stemmer' => SnowballSpanish::class],
-        'et' => ['name' => 'Estonian',   'stopwords' => true,  'stemmer' => SnowballEstonian::class],
-        'eu' => ['name' => 'Basque',     'stopwords' => true,  'stemmer' => SnowballBasque::class],
-        'fa' => ['name' => 'Persian',    'stopwords' => true,  'stemmer' => null],
-        'fi' => ['name' => 'Finnish',    'stopwords' => true,  'stemmer' => SnowballFinnish::class],
-        'fr' => ['name' => 'French',     'stopwords' => true,  'stemmer' => SnowballFrench::class],
-        'ga' => ['name' => 'Irish',      'stopwords' => true,  'stemmer' => SnowballIrish::class],
-        'gl' => ['name' => 'Galician',   'stopwords' => true,  'stemmer' => null],
-        'gu' => ['name' => 'Gujarati',   'stopwords' => true,  'stemmer' => null],
-        'ha' => ['name' => 'Hausa',      'stopwords' => true,  'stemmer' => null],
-        'he' => ['name' => 'Hebrew',     'stopwords' => true,  'stemmer' => null],
-        'hi' => ['name' => 'Hindi',      'stopwords' => true,  'stemmer' => SnowballHindi::class],
-        'hr' => ['name' => 'Croatian',   'stopwords' => true,  'stemmer' => null],
-        'hu' => ['name' => 'Hungarian',  'stopwords' => true,  'stemmer' => SnowballHungarian::class],
-        'hy' => ['name' => 'Armenian',   'stopwords' => true,  'stemmer' => SnowballArmenian::class],
-        'id' => ['name' => 'Indonesian', 'stopwords' => true,  'stemmer' => SnowballIndonesian::class],
-        'it' => ['name' => 'Italian',    'stopwords' => true,  'stemmer' => SnowballItalian::class],
-        'ja' => ['name' => 'Japanese',   'stopwords' => true,  'stemmer' => null],
-        'ko' => ['name' => 'Korean',     'stopwords' => true,  'stemmer' => null],
-        'ku' => ['name' => 'Kurdish',    'stopwords' => true,  'stemmer' => null],
-        'la' => ['name' => 'Latin',      'stopwords' => true,  'stemmer' => null],
-        'lt' => ['name' => 'Lithuanian', 'stopwords' => true,  'stemmer' => SnowballLithuanian::class],
-        'lv' => ['name' => 'Latvian',    'stopwords' => true,  'stemmer' => null],
-        'mr' => ['name' => 'Marathi',    'stopwords' => true,  'stemmer' => null],
-        'ms' => ['name' => 'Malay',      'stopwords' => true,  'stemmer' => null],
-        'ne' => ['name' => 'Nepali',     'stopwords' => false, 'stemmer' => SnowballNepali::class],
-        'nl' => ['name' => 'Dutch',      'stopwords' => true,  'stemmer' => SnowballDutch::class],
-        'no' => ['name' => 'Norwegian',  'stopwords' => true,  'stemmer' => SnowballNorwegian::class],
-        'pl' => ['name' => 'Polish',     'stopwords' => true,  'stemmer' => SnowballPolish::class],
-        'pt' => ['name' => 'Portuguese', 'stopwords' => true,  'stemmer' => SnowballPortuguese::class],
-        'ro' => ['name' => 'Romanian',   'stopwords' => true,  'stemmer' => SnowballRomanian::class],
-        'ru' => ['name' => 'Russian',    'stopwords' => true,  'stemmer' => SnowballRussian::class],
-        'sk' => ['name' => 'Slovak',     'stopwords' => true,  'stemmer' => null],
-        'sl' => ['name' => 'Slovenian',  'stopwords' => true,  'stemmer' => null],
-        'so' => ['name' => 'Somali',     'stopwords' => true,  'stemmer' => null],
-        'sr' => ['name' => 'Serbian',    'stopwords' => false, 'stemmer' => SnowballSerbian::class],
-        'st' => ['name' => 'Sotho',      'stopwords' => true,  'stemmer' => null],
-        'sv' => ['name' => 'Swedish',    'stopwords' => true,  'stemmer' => SnowballSwedish::class],
-        'sw' => ['name' => 'Swahili',    'stopwords' => true,  'stemmer' => null],
-        'ta' => ['name' => 'Tamil',      'stopwords' => false, 'stemmer' => SnowballTamil::class],
-        'th' => ['name' => 'Thai',       'stopwords' => true,  'stemmer' => null],
-        'tl' => ['name' => 'Tagalog',    'stopwords' => true,  'stemmer' => null],
-        'tr' => ['name' => 'Turkish',    'stopwords' => true,  'stemmer' => SnowballTurkish::class],
-        'uk' => ['name' => 'Ukrainian',  'stopwords' => true,  'stemmer' => null],
-        'ur' => ['name' => 'Urdu',       'stopwords' => true,  'stemmer' => null],
-        'vi' => ['name' => 'Vietnamese', 'stopwords' => true,  'stemmer' => null],
-        'yi' => ['name' => 'Yiddish',    'stopwords' => false, 'stemmer' => SnowballYiddish::class],
-        'yo' => ['name' => 'Yoruba',     'stopwords' => true,  'stemmer' => null],
-        'zh' => ['name' => 'Chinese',    'stopwords' => true,  'stemmer' => null],
-        'zu' => ['name' => 'Zulu',       'stopwords' => true,  'stemmer' => null],
+        'ar' => ['name' => 'Arabic',     'stemmer' => SnowballArabic::class],
+        'ca' => ['name' => 'Catalan',    'stemmer' => SnowballCatalan::class],
+        'da' => ['name' => 'Danish',     'stemmer' => SnowballDanish::class],
+        'de' => ['name' => 'German',     'stemmer' => SnowballGerman::class],
+        'el' => ['name' => 'Greek',      'stemmer' => SnowballGreek::class],
+        'en' => ['name' => 'English',    'stemmer' => SnowballEnglish::class],
+        'eo' => ['name' => 'Esperanto',  'stemmer' => SnowballEsperanto::class],
+        'es' => ['name' => 'Spanish',    'stemmer' => SnowballSpanish::class],
+        'et' => ['name' => 'Estonian',   'stemmer' => SnowballEstonian::class],
+        'eu' => ['name' => 'Basque',     'stemmer' => SnowballBasque::class],
+        'fi' => ['name' => 'Finnish',    'stemmer' => SnowballFinnish::class],
+        'fr' => ['name' => 'French',     'stemmer' => SnowballFrench::class],
+        'ga' => ['name' => 'Irish',      'stemmer' => SnowballIrish::class],
+        'hi' => ['name' => 'Hindi',      'stemmer' => SnowballHindi::class],
+        'hu' => ['name' => 'Hungarian',  'stemmer' => SnowballHungarian::class],
+        'hy' => ['name' => 'Armenian',   'stemmer' => SnowballArmenian::class],
+        'id' => ['name' => 'Indonesian', 'stemmer' => SnowballIndonesian::class],
+        'it' => ['name' => 'Italian',    'stemmer' => SnowballItalian::class],
+        'ja' => ['name' => 'Japanese',   'stemmer' => null],
+        'ko' => ['name' => 'Korean',     'stemmer' => null],
+        'lt' => ['name' => 'Lithuanian', 'stemmer' => SnowballLithuanian::class],
+        'ne' => ['name' => 'Nepali',     'stemmer' => SnowballNepali::class],
+        'nl' => ['name' => 'Dutch',      'stemmer' => SnowballDutch::class],
+        'no' => ['name' => 'Norwegian',  'stemmer' => SnowballNorwegian::class],
+        'pl' => ['name' => 'Polish',     'stemmer' => SnowballPolish::class],
+        'pt' => ['name' => 'Portuguese', 'stemmer' => SnowballPortuguese::class],
+        'ro' => ['name' => 'Romanian',   'stemmer' => SnowballRomanian::class],
+        'ru' => ['name' => 'Russian',    'stemmer' => SnowballRussian::class],
+        'sr' => ['name' => 'Serbian',    'stemmer' => SnowballSerbian::class],
+        'sv' => ['name' => 'Swedish',    'stemmer' => SnowballSwedish::class],
+        'ta' => ['name' => 'Tamil',      'stemmer' => SnowballTamil::class],
+        'th' => ['name' => 'Thai',       'stemmer' => null],
+        'tr' => ['name' => 'Turkish',    'stemmer' => SnowballTurkish::class],
+        'yi' => ['name' => 'Yiddish',    'stemmer' => SnowballYiddish::class],
+        'zh' => ['name' => 'Chinese',    'stemmer' => null],
     ];
 
     private function __construct()
@@ -127,16 +101,10 @@ final class Language
         return array_map(fn(array $v): string => $v['name'], self::LANG_MAP);
     }
 
-    /** Whether the language has any support (stopwords or stemming). */
+    /** Whether the language is supported (a stemmer, or n-gram tokenisation). */
     public static function supports(string $lang): bool
     {
         return isset(self::LANG_MAP[$lang]);
-    }
-
-    /** Whether a stopword list is available for the given language. */
-    public static function hasStopwords(string $lang): bool
-    {
-        return self::LANG_MAP[$lang]['stopwords'] ?? false;
     }
 
     /** Whether a Snowball stemmer is available for the given language. */
