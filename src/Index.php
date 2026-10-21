@@ -52,7 +52,7 @@ use PDO;
  *     rows: list<array{0: int, 1: int, 2: float}>,
  * }
  */
-class Index
+final class Index implements \Countable
 {
     /**
      * On-disk schema revision written by createIndex() into info.schema_version.
@@ -2447,13 +2447,13 @@ class Index
     // --- Public API: info & factories ----------------------------------------
 
     /**
-     * Return the total number of documents in the index.
+     * Return the total number of documents in the index (also count($index)).
      */
     public function count(): int
     {
         $this->checkDataVersion();
         /** @infection-ignore-all DecrementInteger|IncrementInteger: ?? fallback is only reached on a corrupt/missing info table row; all writes keep total_documents consistent, so this path is unreachable in tests */
-        return (int) ($this->getInfoValues(['total_documents'])['total_documents'] ?? 0);
+        return max(0, (int) ($this->getInfoValues(['total_documents'])['total_documents'] ?? 0));
     }
 
     /**

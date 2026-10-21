@@ -337,6 +337,7 @@ Returns the total number of indexed documents. Reads from the cached `info` tabl
 
 ```php
 $index->count(); // int
+count($index);  // the same: Index implements \Countable
 ```
 
 ## Streaming all documents

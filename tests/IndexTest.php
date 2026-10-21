@@ -844,6 +844,7 @@ class IndexTest extends TestCase
         $result = $index->search('', new SearchOptions(facets: ['color']));
         $this->assertSame(['blue' => 2, 'green' => 1], $result->facetDistribution['color']);
         $this->assertSame(3, $index->count());
+        $this->assertCount(3, $index);
         $this->assertEqualsWithDelta(13 / 3, $index->inspectQuery('car')->avgDocLength, 0.01);
     }
 
