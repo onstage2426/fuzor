@@ -14,18 +14,18 @@ final readonly class SchemaConfig
         public bool $store = true,
         /**
          * Fields usable in `filter`, `facets`, `distinct`, and facetSearch(). Stored in the facet
-         * index; not FTS-indexed unless also in $searchableFields.
+         * index; not FTS-indexed unless also in $searchableAttributes.
          *
          * @var list<string>
          */
-        public array $filterableFields = [],
+        public array $filterableAttributes = [],
         /**
          * Fields usable in `sort`. Stored in the facet index like filterable fields; a field may be
-         * in both lists. Not FTS-indexed unless also in $searchableFields.
+         * in both lists. Not FTS-indexed unless also in $searchableAttributes.
          *
          * @var list<string>
          */
-        public array $sortableFields = [],
+        public array $sortableAttributes = [],
         /**
          * Whitelist of fields to tokenise for FTS.
          * null (default) tokenises all fields that are neither filterable nor sortable.
@@ -33,7 +33,7 @@ final readonly class SchemaConfig
          *
          * @var list<string>|null
          */
-        public ?array $searchableFields = null,
+        public ?array $searchableAttributes = null,
         /** Strip HTML tags from field values before tokenisation. */
         public bool $stripHtml = false,
         /**

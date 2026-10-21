@@ -43,9 +43,9 @@ use Fuzor\SchemaConfig;
 $index = new Index('/path/to/articles.db', schema: new SchemaConfig(store: false));
 ```
 
-The facet index is always enabled. Declare at creation time which fields can be used to filter (`filterableFields`: `filter`, `facets`, `distinct`, `facetSearch()`) and which to sort by (`sortableFields`). A field may be in both lists. Their values are stored in a separate index table; using any other field in those options throws a `QueryException`. See [search.md](search.md) for querying and filtering by facets.
+The facet index is always enabled. Declare at creation time which fields can be used to filter (`filterableAttributes`: `filter`, `facets`, `distinct`, `facetSearch()`) and which to sort by (`sortableAttributes`). A field may be in both lists. Their values are stored in a separate index table; using any other field in those options throws a `QueryException`. See [search.md](search.md) for querying and filtering by facets.
 
-By default every field except `id` and the filterable and sortable fields is tokenised for full-text. Pass `searchableFields` to restrict FTS to an explicit list of fields — any field not in either list is stored but not indexed.
+By default every field except `id` and the filterable and sortable fields is tokenised for full-text. Pass `searchableAttributes` to restrict FTS to an explicit list of fields — any field not in either list is stored but not indexed.
 
 ```php
 use Fuzor\SchemaConfig;
@@ -53,9 +53,9 @@ use Fuzor\SchemaConfig;
 // Watches index: four filterable fields, two of them also sortable, two searchable fields;
 // image_url and sku are stored-only automatically.
 $index = new Index('/path/to/watches.db', schema: new SchemaConfig(
-    filterableFields: ['brand', 'price', 'category', 'gender'],
-    sortableFields:   ['price', 'brand'],
-    searchableFields: ['title', 'body'],
+    filterableAttributes: ['brand', 'price', 'category', 'gender'],
+    sortableAttributes:   ['price', 'brand'],
+    searchableAttributes: ['title', 'body'],
 ));
 ```
 
@@ -92,9 +92,9 @@ Passing `schema:` when opening an existing file throws `QueryException`. Use `In
 |-------------------------|---------|--------|
 | `language` | `null` | BCP 47 language tag: stemming, CJK/Thai n-grams; `null` for neither |
 | `store` | `true` | Enable the document store |
-| `filterableFields` | `[]` | Fields usable in `filter`, `facets`, `distinct`, and `facetSearch()` |
-| `sortableFields` | `[]` | Fields usable in `sort` |
-| `searchableFields` | `null` | Fields tokenised for FTS; `null` = all fields that are neither filterable nor sortable |
+| `filterableAttributes` | `[]` | Fields usable in `filter`, `facets`, `distinct`, and `facetSearch()` |
+| `sortableAttributes` | `[]` | Fields usable in `sort` |
+| `searchableAttributes` | `null` | Fields tokenised for FTS; `null` = all fields that are neither filterable nor sortable |
 | `stripHtml` | `false` | Convert HTML field values to text before tokenisation |
 | `stopWords` | `[]` | Single words left out of the index and of queries, case-insensitive; see [Language](language.md#stop-words) |
 
@@ -154,14 +154,14 @@ Two ways to avoid that risk:
 
 ### Facet values
 
-Fields listed in `filterableFields` or `sortableFields` at creation time are automatically routed to the facet index. They are never tokenised for full-text — `search()` and `searchBoolean()` will not match against their contents — unless the field is also listed in `searchableFields`.
+Fields listed in `filterableAttributes` or `sortableAttributes` at creation time are automatically routed to the facet index. They are never tokenised for full-text — `search()` and `searchBoolean()` will not match against their contents — unless the field is also listed in `searchableAttributes`.
 
 ```php
 use Fuzor\SchemaConfig;
 
 $index = new Index('/path/to/watches.db', schema: new SchemaConfig(
-    filterableFields: ['brand', 'gender', 'category', 'price'],
-    sortableFields:   ['price'],
+    filterableAttributes: ['brand', 'gender', 'category', 'price'],
+    sortableAttributes:   ['price'],
 ));
 
 $index->insert([
@@ -196,14 +196,14 @@ Documents that omit a filterable or sortable field are indexed normally for full
 
 ### Stored-only fields
 
-A field that is in none of `filterableFields`, `sortableFields`, and `searchableFields` (when `searchableFields` is set) is stored in the document store but never indexed — neither for full-text nor for facets. This is the right place for URLs, image paths, internal SKUs, and timestamps you want to retrieve but not search on.
+A field that is in none of `filterableAttributes`, `sortableAttributes`, and `searchableAttributes` (when `searchableAttributes` is set) is stored in the document store but never indexed — neither for full-text nor for facets. This is the right place for URLs, image paths, internal SKUs, and timestamps you want to retrieve but not search on.
 
 ```php
 use Fuzor\SchemaConfig;
 
 $index = new Index('/path/to/watches.db', schema: new SchemaConfig(
-    filterableFields: ['brand', 'price'],
-    searchableFields: ['title', 'body'],
+    filterableAttributes: ['brand', 'price'],
+    searchableAttributes: ['title', 'body'],
     // image_url and sku are stored-only automatically
 ));
 
@@ -227,7 +227,7 @@ use Fuzor\HtmlText;
 use Fuzor\SchemaConfig;
 
 $index = new Index('/path/to/posts.db', schema: new SchemaConfig(
-    searchableFields: ['title', 'content'], // content_html is stored-only
+    searchableAttributes: ['title', 'content'], // content_html is stored-only
 ));
 
 $index->insert([[
@@ -415,9 +415,9 @@ use Fuzor\SchemaConfig;
 
 Index::rebuild('/path/to/articles.db', schema: new SchemaConfig(
     language:         'en',
-    filterableFields: ['brand', 'price', 'category'],
-    sortableFields:   ['price'],
-    searchableFields: ['title', 'body'],
+    filterableAttributes: ['brand', 'price', 'category'],
+    sortableAttributes:   ['price'],
+    searchableAttributes: ['title', 'body'],
 ));
 ```
 
@@ -534,7 +534,7 @@ Index::rebuild('/path/to/articles.db',
 Index::rebuild('/path/to/articles.db',
     fn (Index $new) => $new->insert($docs),
     schema: new SchemaConfig(
-        searchableFields: ['title', 'body'],
+        searchableAttributes: ['title', 'body'],
         store: false,
     ),
 );

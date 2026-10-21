@@ -155,7 +155,7 @@ any other attribute. A built-in key would reserve a field name and add special c
 `parseSortSpec()`, `sortRanks()`, and `browseSortedPage()`, for a consumer that reported
 nothing blocked on it. The 1.6.0 change was documented instead (`docs/search.md` § Custom
 sort, and the 1.6.0 changelog entry), and an undeclared `id:asc` already produces a warning.
-(Since 2.0: `id` is declared in `sortableFields`, and an undeclared sort field throws a
+(Since 2.0: `id` is declared in `sortableAttributes`, and an undeclared sort field throws a
 `QueryException` instead of warning.)
 
 **When to revisit:** if the per-document facet row for `id` shows up as a measurable cost, or

@@ -49,15 +49,15 @@ When the document store is disabled, `$hits` contains id-only stubs: `[['id' => 
 
 ### Undeclared fields
 
-`sort` only accepts fields declared in `sortableFields`; `filter`, `facets`, `distinct`, and `facetSearch()`'s `facetName` and `filter` only accept fields declared in `filterableFields`. Any other field throws a `QueryException` naming the field and the declared list:
+`sort` only accepts fields declared in `sortableAttributes`; `filter`, `facets`, `distinct`, and `facetSearch()`'s `facetName` and `filter` only accept fields declared in `filterableAttributes`. Any other field throws a `QueryException` naming the field and the declared list:
 
 ```php
 $index->search('watch', new SearchOptions(sort: ['title:asc']));
-// QueryException: Sort field 'title' is not sortable. Declare it in SchemaConfig::$sortableFields
+// QueryException: Sort field 'title' is not sortable. Declare it in SchemaConfig::$sortableAttributes
 // when creating the index (declared: price).
 ```
 
-When these options come from user input (a `sort=` query parameter), check them against `$index->sortableFields` and `$index->filterableFields` first, or catch the exception. A declared field that no document has a value for yet is not an error: it simply has no values.
+When these options come from user input (a `sort=` query parameter), check them against `$index->sortableAttributes` and `$index->filterableAttributes` first, or catch the exception. A declared field that no document has a value for yet is not an error: it simply has no values.
 
 ### Approximate results
 
@@ -317,7 +317,7 @@ See [formatting.md](formatting.md) for the full option reference and standalone 
 
 ## Facet filtering
 
-Pass a `filter` map to restrict results to documents matching specific facet values. Fields must be declared in `filterableFields` at index creation — see [indexing.md](indexing.md).
+Pass a `filter` map to restrict results to documents matching specific facet values. Fields must be declared in `filterableAttributes` at index creation — see [indexing.md](indexing.md).
 
 ```php
 // Single value
@@ -336,7 +336,7 @@ $result = $index->search('watch', new SearchOptions(
 ));
 ```
 
-Filtering on a field that is not declared in `filterableFields` throws a `QueryException` (see [Undeclared fields](#undeclared-fields)).
+Filtering on a field that is not declared in `filterableAttributes` throws a `QueryException` (see [Undeclared fields](#undeclared-fields)).
 
 ### Numeric range filters
 
@@ -376,7 +376,7 @@ new FacetExclude(FacetRange::max(0));                              // hide free 
 
 - A document passes when **none** of its values for the field matches. A multi-value document is excluded as soon as one of its values matches, which a positive filter cannot express: listing every other category (`['shoes', 'shirts', …]`) still keeps a document tagged both `shoes` and `sale`, while `new FacetExclude('sale')` removes it.
 - A document that does not have the field at all passes — it has nothing to exclude.
-- An exclusion on a field that is not declared in `filterableFields` throws a `QueryException`, like a positive filter, so a typo in a filter meant to hide something cannot pass silently.
+- An exclusion on a field that is not declared in `filterableAttributes` throws a `QueryException`, like a positive filter, so a typo in a filter meant to hide something cannot pass silently.
 - An exclusion on a declared field that no document has a value for yet, or with an empty list, excludes nothing.
 - One key holds one condition, so a field cannot be both included and excluded in the same filter. Listing the values to include already excludes the rest.
 
@@ -507,7 +507,7 @@ $result->toJSON();
 
 | Property | Default | Description |
 |---|---|---|
-| `facetName` | _(required)_ | Field to search; must be declared in `filterableFields` at index creation |
+| `facetName` | _(required)_ | Field to search; must be declared in `filterableAttributes` at index creation |
 | `facetQuery` | `''` | Matched at the start of any word of a value, ignoring case and accents; empty string returns all values |
 | `query` | `''` | FTS phrase to restrict candidate documents (phrases and `-` exclusions as in `search()`); empty string means all documents |
 | `filter` | `[]` | Facet filters applied before counting; same type as `SearchOptions::$filter` |
@@ -516,21 +516,21 @@ $result->toJSON();
 
 ## Custom sort
 
-Override relevance order with one or more field values. Fields must be declared in `sortableFields` at index creation.
+Override relevance order with one or more field values. Fields must be declared in `sortableAttributes` at index creation.
 
 ```php
 $result = $index->search('watch', new SearchOptions(sort: ['price:asc']));
 $result = $index->search('watch', new SearchOptions(sort: ['brand:asc', 'price:asc']));
 ```
 
-Each spec is `'field:asc'` or `'field:desc'` (case-insensitive). A malformed spec throws `\InvalidArgumentException`. A spec naming a field that is not declared in `sortableFields` throws a `QueryException` (see [Undeclared fields](#undeclared-fields)).
+Each spec is `'field:asc'` or `'field:desc'` (case-insensitive). A malformed spec throws `\InvalidArgumentException`. A spec naming a field that is not declared in `sortableAttributes` throws a `QueryException` (see [Undeclared fields](#undeclared-fields)).
 
-The document ID is not a sort field by default either. To sort by it, declare `id` in `sortableFields` like any other field; this stores one facet value per document:
+The document ID is not a sort field by default either. To sort by it, declare `id` in `sortableAttributes` like any other field; this stores one facet value per document:
 
 ```php
 $index = new Index('/path/to/products.db', schema: new SchemaConfig(
-    filterableFields: ['brand'],
-    sortableFields:   ['id', 'price'],
+    filterableAttributes: ['brand'],
+    sortableAttributes:   ['id', 'price'],
 ));
 
 $result = $index->search('', new SearchOptions(sort: ['id:asc'])); // lowest ID first
@@ -552,8 +552,8 @@ To also fold accents, store a normalized copy as its own sortable field and sort
 use Fuzor\Tokenizer;
 
 $index = new Index('/path/to/products.db', schema: new SchemaConfig(
-    filterableFields: ['brand'],
-    sortableFields:   ['price', 'title_sort'],
+    filterableAttributes: ['brand'],
+    sortableAttributes:   ['price', 'title_sort'],
 ));
 $index->insert([[
     'id'         => 1,
@@ -566,7 +566,7 @@ $result = $index->search('', new SearchOptions(sort: ['title_sort:asc']));
 
 When two documents share the same sort value, BM25 score is used as a tiebreaker in `search()`. Boolean search breaks ties by document ID ascending.
 
-**Compared with Meilisearch:** the type order, case-insensitive string order without accent folding, and missing-values-last rule match Meilisearch, and so does declaring sort fields up front (`sortableFields` is Meilisearch's `sortableAttributes`, which also requires the primary key to be listed before sorting on it). As in Meilisearch, `sort` applies after the words bucket (see [Matching strategy](#matching-strategy)); within a bucket the sort fields decide the order and relevance breaks ties, whereas Meilisearch's default rules also put typo, proximity, and attribute ranking before `sort`.
+**Compared with Meilisearch:** the type order, case-insensitive string order without accent folding, and missing-values-last rule match Meilisearch, and so does declaring sort fields up front (`sortableAttributes` is Meilisearch's `sortableAttributes`, which also requires the primary key to be listed before sorting on it). As in Meilisearch, `sort` applies after the words bucket (see [Matching strategy](#matching-strategy)); within a bucket the sort fields decide the order and relevance breaks ties, whereas Meilisearch's default rules also put typo, proximity, and attribute ranking before `sort`.
 
 ```php
 $result = $index->searchBoolean('sedan or coupe', new SearchOptions(sort: ['price:asc']));
@@ -584,7 +584,7 @@ $result = $index->search('shirt', new SearchOptions(distinct: 'brand'));
 $result = $index->search('shirt', new SearchOptions(distinct: 'brand', distinctCount: 2));
 ```
 
-The field must be declared in `filterableFields` (as in Meilisearch); any other field throws a `QueryException`. For a multi-value field, each document is grouped by its smallest value.
+The field must be declared in `filterableAttributes` (as in Meilisearch); any other field throws a `QueryException`. For a multi-value field, each document is grouped by its smallest value.
 
 When `sort` is also set, sort order determines which document wins per group instead of BM25 score:
 

@@ -34,8 +34,8 @@ use Fuzor\FacetSearchQuery;
 // Create an index — declare filterable and sortable fields at creation time
 $index = new Index('/path/to/products.db', schema: new SchemaConfig(
     language:         'en',
-    filterableFields: ['type', 'price'],
-    sortableFields:   ['price'],
+    filterableAttributes: ['type', 'price'],
+    sortableAttributes:   ['price'],
 ));
 
 $index->insert([

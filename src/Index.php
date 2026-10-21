@@ -227,13 +227,13 @@ class Index
     public private(set) bool $documentStoreEnabled = false;
 
     /** @var list<string> Fields usable in filter, facets, distinct, and facetSearch(); see SchemaConfig. */
-    public private(set) array $filterableFields = [];
+    public private(set) array $filterableAttributes = [];
 
     /** @var list<string> Fields usable in sort; see SchemaConfig. */
-    public private(set) array $sortableFields = [];
+    public private(set) array $sortableAttributes = [];
 
     /** @var list<string>|null null = all non-facet fields are FTS-indexed; non-null = only these fields. */
-    public private(set) ?array $searchableFields = null;
+    public private(set) ?array $searchableAttributes = null;
 
     /** When true, each field value is converted from HTML to text before tokenisation (see HtmlText). */
     public private(set) bool $stripHtml = false;
@@ -281,13 +281,13 @@ class Index
     /** @var array<string, int> isset-lookup set of every field stored in the facet index (filterable ∪ sortable). */
     private array $facetFieldSet = [];
 
-    /** @var array<string, int> isset-lookup set of $filterableFields. */
+    /** @var array<string, int> isset-lookup set of $filterableAttributes. */
     private array $filterableFieldSet = [];
 
-    /** @var array<string, int> isset-lookup set of $sortableFields. */
+    /** @var array<string, int> isset-lookup set of $sortableAttributes. */
     private array $sortableFieldSet = [];
 
-    /** @var array<string, int>|null Pre-computed isset-lookup set derived from searchableFields (array_flip); null means all non-facet fields. */
+    /** @var array<string, int>|null Pre-computed isset-lookup set derived from searchableAttributes (array_flip); null means all non-facet fields. */
     private ?array $searchableFieldSet = null;
 
     /** Active stopword filter; null when no language is set or language has no stopword list. */
@@ -469,7 +469,7 @@ class Index
      *
      * When $callback is omitted (null), the existing index must have the document store enabled;
      * all stored documents are streamed into the new index automatically. This lets you re-index
-     * with a different SchemaConfig (e.g. new searchableFields or filterableFields) without maintaining
+     * with a different SchemaConfig (e.g. new searchableAttributes or filterableAttributes) without maintaining
      * a separate copy of the source data.
      *
      * If the callback throws, or if the automatic streaming path fails, the temporary file is
@@ -545,9 +545,9 @@ class Index
             $schema = new SchemaConfig(
                 language:         $existing->language,
                 store:            $existing->documentStoreEnabled,
-                filterableFields: $existing->filterableFields,
-                sortableFields:   $existing->sortableFields,
-                searchableFields: $existing->searchableFields,
+                filterableAttributes: $existing->filterableAttributes,
+                sortableAttributes:   $existing->sortableAttributes,
+                searchableAttributes: $existing->searchableAttributes,
                 stripHtml:        $existing->stripHtml,
                 stopWords:        $existing->stopWords,
             );
@@ -1063,7 +1063,7 @@ class Index
     {
         $language         = $schema->language;
         $store            = $schema->store;
-        $searchableFields = $schema->searchableFields;
+        $searchableAttributes = $schema->searchableAttributes;
         $stripHtml        = $schema->stripHtml;
         $stopWords        = self::normalizeStopWords($schema->stopWords, $language);
 
@@ -1242,14 +1242,17 @@ class Index
 
         $schemaStmt = $pdo->prepare("INSERT INTO info (key, value) VALUES (?, ?)");
         $schemaStmt->execute(['schema_version',    (string) self::CURRENT_SCHEMA_VERSION]);
-        $schemaStmt->execute(['filterable_fields', json_encode($schema->filterableFields)]);
-        $schemaStmt->execute(['sortable_fields',   json_encode($schema->sortableFields)]);
-        $schemaStmt->execute(['searchable_fields', $searchableFields !== null ? json_encode($searchableFields) : '']);
+        $schemaStmt->execute(['filterable_fields', json_encode($schema->filterableAttributes)]);
+        $schemaStmt->execute(['sortable_fields',   json_encode($schema->sortableAttributes)]);
+        $schemaStmt->execute([
+            'searchable_fields',
+            $searchableAttributes !== null ? json_encode($searchableAttributes) : '',
+        ]);
         $schemaStmt->execute(['strip_html',        $stripHtml ? '1' : '0']);
         $schemaStmt->execute(['stop_words',        json_encode($stopWords)]);
-        $this->applyFieldLists($schema->filterableFields, $schema->sortableFields);
-        $this->searchableFields   = $searchableFields;
-        $this->searchableFieldSet = $searchableFields !== null ? array_flip($searchableFields) : null;
+        $this->applyFieldLists($schema->filterableAttributes, $schema->sortableAttributes);
+        $this->searchableAttributes   = $searchableAttributes;
+        $this->searchableFieldSet = $searchableAttributes !== null ? array_flip($searchableAttributes) : null;
         $this->stripHtml          = $stripHtml;
         $this->applyStopWords($stopWords);
         $this->schemaVersion      = self::CURRENT_SCHEMA_VERSION;
@@ -1312,10 +1315,12 @@ class Index
             self::decodeStringList($infoRows['filterable_fields']),
             self::decodeStringList($infoRows['sortable_fields']),
         );
-        $this->searchableFields     = $infoRows['searchable_fields'] === ''
+        $this->searchableAttributes     = $infoRows['searchable_fields'] === ''
             ? null
             : self::decodeStringList($infoRows['searchable_fields']);
-        $this->searchableFieldSet   = $this->searchableFields !== null ? array_flip($this->searchableFields) : null;
+        $this->searchableFieldSet   = $this->searchableAttributes !== null
+            ? array_flip($this->searchableAttributes)
+            : null;
         $this->stripHtml            = $infoRows['strip_html'] === '1';
         $this->applyStopWords(self::decodeStringList($infoRows['stop_words']));
     }
@@ -1329,8 +1334,8 @@ class Index
      */
     private function applyFieldLists(array $filterable, array $sortable): void
     {
-        $this->filterableFields   = $filterable;
-        $this->sortableFields     = $sortable;
+        $this->filterableAttributes   = $filterable;
+        $this->sortableAttributes     = $sortable;
         $this->filterableFieldSet = array_flip($filterable);
         $this->sortableFieldSet   = array_flip($sortable);
         $this->facetFieldSet      = $this->filterableFieldSet + $this->sortableFieldSet;
@@ -2037,7 +2042,7 @@ class Index
      * @param  array<string, FacetExclude|FacetRange|list<string>|string> $filter
      * @return int The number of documents deleted.
      * @throws \InvalidArgumentException If $filter is empty (clear() removes every document).
-     * @throws QueryException            If a field is not declared in filterableFields.
+     * @throws QueryException            If a field is not declared in filterableAttributes.
      * @throws IOException               If the index is read-only.
      */
     public function deleteByFilter(array $filter): int
@@ -4768,7 +4773,7 @@ class Index
      * Tokenise all non-id fields of a document and accumulate per-term counts and positions.
      *
      * Each field's positions start at its own slot, field number × FIELD_POSITION_STRIDE (the
-     * schema's searchableFields order, else the document's field order; a skipped field keeps
+     * schema's searchableAttributes order, else the document's field order; a skipped field keeps
      * its slot), so an edit in one field does not move the positions of the others, and a
      * phrase cannot join the end of one field to the start of the next. A field longer than
      * the stride pushes the next field one position further. Shared by processDocument() and
@@ -4789,7 +4794,7 @@ class Index
         $length        = 0;
         $position      = 0;
         if ($this->searchableFieldSet !== null) {
-            // When searchableFields is declared, iterate ONLY those keys — avoids scanning every
+            // When searchableAttributes is declared, iterate ONLY those keys — avoids scanning every
             // document field when most are non-searchable (e.g. 1 searchable out of 16 total).
             $fieldNo = 0;
             foreach ($this->searchableFieldSet as $key => $_) {
@@ -4805,7 +4810,7 @@ class Index
                 );
             }
         } else {
-            // searchableFields is null → all non-facet fields are searchable; iterate full doc.
+            // searchableAttributes is null → all non-facet fields are searchable; iterate full doc.
             $fieldNo = 0;
             foreach ($fields as $key => $col) {
                 if ($key === 'id' || isset($this->facetFieldSet[$key])) {
@@ -7645,7 +7650,7 @@ class Index
         foreach ($specs as $spec) {
             if (!isset($this->sortableFieldSet[$spec['field']])) {
                 throw new QueryException(
-                    self::undeclaredFieldMessage('Sort', $spec['field'], 'sortable', $this->sortableFields),
+                    self::undeclaredFieldMessage('Sort', $spec['field'], 'sortable', $this->sortableAttributes),
                 );
             }
         }
@@ -7666,7 +7671,7 @@ class Index
         foreach ($fields as $field) {
             if (!isset($this->filterableFieldSet[$field])) {
                 throw new QueryException(
-                    self::undeclaredFieldMessage($option, (string) $field, 'filterable', $this->filterableFields),
+                    self::undeclaredFieldMessage($option, (string) $field, 'filterable', $this->filterableAttributes),
                 );
             }
         }
@@ -7676,7 +7681,7 @@ class Index
     private static function undeclaredFieldMessage(string $option, string $field, string $kind, array $declared): string
     {
         $list = $declared === [] ? 'none' : implode(', ', $declared);
-        return "{$option} field '{$field}' is not {$kind}. Declare it in SchemaConfig::\${$kind}Fields"
+        return "{$option} field '{$field}' is not {$kind}. Declare it in SchemaConfig::\${$kind}Attributes"
             . " when creating the index (declared: {$list}).";
     }
 
