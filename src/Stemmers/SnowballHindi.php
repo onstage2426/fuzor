@@ -4,7 +4,8 @@ namespace Fuzor\Stemmers;
 
 // Generated from hindi.sbl by Snowball 3.0.0 - https://snowballstem.org/
 
-class SnowballHindi extends SnowballStemmer
+/** @internal Generated Snowball stemmer; Fuzor picks it from SchemaConfig::$language. */
+final class SnowballHindi extends SnowballStemmer
 {
     private const array A_0 = [
         ["\u{0940}", -1, -1],

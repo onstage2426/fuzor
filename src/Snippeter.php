@@ -29,6 +29,8 @@ final readonly class Snippeter
      * @param string  $ellipsis    Separator placed between windows and at truncation boundaries.
      * @param ?string $language    BCP 47 tag; drives stemming and n-gram tokenisation. Null disables both.
      * @param bool    $escape      Escape the returned excerpt for safe inclusion in HTML.
+     *
+     * @internal Use Index::snippeter(), which passes the index language.
      */
     public function __construct(
         private int $windowSize = 200,

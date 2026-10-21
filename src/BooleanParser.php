@@ -12,8 +12,12 @@ namespace Fuzor;
  *
  * @internal
  */
-class BooleanParser
+final class BooleanParser
 {
+    private function __construct()
+    {
+    }
+
     /**
      * Convert a boolean query expression to postfix notation.
      *

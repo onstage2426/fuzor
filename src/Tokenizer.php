@@ -67,6 +67,8 @@ final class Tokenizer
      * single-character searches are supported. ASCII tokens pass through unchanged.
      *
      * @return list<string>
+     *
+     * @internal Fuzor's own tokenisation; only sortKey() is public API.
      */
     public static function tokenize(
         string $text,
@@ -88,6 +90,8 @@ final class Tokenizer
      * from higher bigram/trigram density. Pass true when single-character lookups matter.
      *
      * @return list<array{0: string, 1: int<0, max>}>
+     *
+     * @internal Fuzor's own tokenisation; only sortKey() is public API.
      */
     public static function tokenizeWithOffsets(
         string $text,
@@ -110,6 +114,8 @@ final class Tokenizer
      * mb_strtolower, both of which carry significant overhead.
      *
      * @return list<string>
+     *
+     * @internal Fuzor's own tokenisation; only sortKey() is public API.
      */
     public static function split(string $text): array
     {
@@ -125,6 +131,8 @@ final class Tokenizer
      * Same as split(), but also returns the byte offset of each token within $text.
      *
      * @return list<array{0: string, 1: int<0, max>}>
+     *
+     * @internal Fuzor's own tokenisation; only sortKey() is public API.
      */
     public static function splitWithOffsets(string $text): array
     {
@@ -147,6 +155,8 @@ final class Tokenizer
      * codepoint is also emitted so single-character searches work.
      *
      * @return list<string>
+     *
+     * @internal Fuzor's own tokenisation; only sortKey() is public API.
      */
     public static function ngram(string $text, int $n, bool $includeUnigrams = false): array
     {
@@ -176,6 +186,8 @@ final class Tokenizer
      * so callers receive a monotonically increasing offset stream.
      *
      * @return list<array{0: string, 1: int<0, max>}>
+     *
+     * @internal Fuzor's own tokenisation; only sortKey() is public API.
      */
     public static function ngramWithOffsets(string $text, int $n, bool $includeUnigrams = false): array
     {
@@ -209,6 +221,8 @@ final class Tokenizer
     /**
      * Returns the n-gram window size for the given BCP 47 language tag,
      * or 0 if standard whitespace tokenisation should be used.
+     *
+     * @internal Fuzor's own tokenisation; only sortKey() is public API.
      */
     public static function ngramSize(?string $language): int
     {
@@ -218,6 +232,8 @@ final class Tokenizer
     /**
      * Returns true when $token contains characters from a script that requires
      * n-gram tokenisation (CJK unified ideographs, Hiragana/Katakana, Hangul, Thai).
+     *
+     * @internal Fuzor's own tokenisation; only sortKey() is public API.
      */
     public static function isNgramToken(string $token): bool
     {

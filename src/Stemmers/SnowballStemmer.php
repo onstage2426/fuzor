@@ -2,6 +2,7 @@
 
 namespace Fuzor\Stemmers;
 
+/** @internal Base of the generated Snowball stemmers; Fuzor picks one from SchemaConfig::$language. */
 abstract class SnowballStemmer
 {
     protected string $current = '';

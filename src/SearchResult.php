@@ -5,7 +5,7 @@ declare(strict_types=1);
 namespace Fuzor;
 
 /** @implements \IteratorAggregate<int, array<string, mixed>> */
-class SearchResult implements \Countable, \IteratorAggregate
+final class SearchResult implements \Countable, \IteratorAggregate
 {
     /** @var list<array<string, mixed>> Documents in relevance order; stubs with only 'id' when store is disabled. */
     public readonly array $hits;
@@ -81,6 +81,8 @@ class SearchResult implements \Countable, \IteratorAggregate
      * @param array<string, array{min: float, max: float}> $facetStats
      * @param list<string>                                 $warnings
      * @param list<string>                                 $approximateFacets
+     *
+     * @internal Built by Index::search() / searchBoolean().
      */
     public function __construct(
         array $ids,

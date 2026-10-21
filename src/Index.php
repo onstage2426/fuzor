@@ -27,6 +27,11 @@ use PDO;
  *
  * Requires SQLite 3.46.0+ (for STRICT tables, RETURNING, CTEs in DML, and PRAGMA optimize enhancements).
  *
+ * Errors (docs/indexing.md#errors): QueryException and IOException (both FuzorException) for
+ * domain and file problems, \InvalidArgumentException for malformed arguments, \LogicException
+ * after close(), and \PDOException / \JsonException from SQLite (busy past busyTimeoutMs, disk
+ * full) and from documents that cannot be stored as JSON.
+ *
  * @phpstan-type FacetCondition array{
  *     name: string,
  *     rows: string,
@@ -323,9 +328,9 @@ class Index
     /**
      * Open an existing index or create a new one.
      *
-     * If the file at $path already exists and $force is false, the index is opened
-     * and the stored language is restored automatically — $language is ignored.
-     * If the file does not exist, or $force is true, a new index is created.
+     * If the file at $path already exists and $force is false, the index is opened with the
+     * schema stored in it (passing $schema then throws). If the file does not exist, or $force
+     * is true, a new index is created with $schema.
      *
      * @param  string           $path     Absolute or relative path to the SQLite index file.
      * @param  bool             $force    Overwrite any existing file at $path.
@@ -493,7 +498,7 @@ class Index
      * @param  SchemaConfig|null $schema   Schema for the new index; null inherits from the existing index.
      * @return self               Open index pointing at the rebuilt file.
      * @throws \InvalidArgumentException If $callback is null and the existing index has no document store.
-     * @throws IOException        If the rename fails or the parent directory does not exist.
+     * @throws IOException        If publishing the new file fails or the parent directory does not exist.
      * @throws QueryException     If the existing index has another schema revision and $callback or
      *                            $schema is missing.
      */
@@ -853,10 +858,10 @@ class Index
      * Temp files left by earlier rebuild() or snapshotTo() runs that were killed are swept
      * before the new temp file is created (see cleanupTempFiles(); a run in progress in
      * another process is never touched). The new temp file is removed if the VACUUM INTO or
-     * rename fails.
+     * publishing fails.
      *
      * @param  string $path Absolute or relative path for the snapshot file.
-     * @throws IOException If the rename fails or the parent directory does not exist.
+     * @throws IOException If publishing fails or the parent directory does not exist.
      */
     public function snapshotTo(string $path): void
     {
@@ -1396,11 +1401,11 @@ class Index
     /**
      * Reopen the underlying connection when the index file was replaced on disk.
      *
-     * snapshotTo() and rebuild() publish by atomically renaming a new file over the
-     * index path. An already-open connection keeps reading the old inode and would
-     * never see the new data (and keeps the old file's disk space allocated). This
-     * method compares the path's device/inode against the values captured at open
-     * and reopens the connection — same mode, fresh caches — when they differ.
+     * snapshotTo(), rebuild(), install() and force: true publish a new file by atomically
+     * swapping the symlink at the index path (publishVersion()). An already-open connection
+     * keeps reading the old inode and would never see the new data (and keeps the old file's
+     * disk space allocated). This method compares the path's device/inode against the values
+     * captured at open and reopens the connection — same mode, fresh caches — when they differ.
      *
      * Intended for long-lived instances in worker-mode runtimes, called once per
      * request: the unchanged case costs a single stat() and keeps all caches warm.
@@ -2585,10 +2590,11 @@ class Index
     /**
      * Run a BM25 ranked full-text search.
      *
-     * Typo tolerance is automatic: words of at least 5 codepoints fall through to Levenshtein
-     * matching when no exact or prefix match is found; 1 typo allowed for 5–8 codepoints,
-     * 2 for 9+. Respects Config::$fuzzyPrefixLength and $fuzzyMaxExpansions.
-     * Shorter words use exact + optional as-you-type prefix matching only.
+     * Typo tolerance is automatic (Config::$typoTolerance): a word of at least 5 codepoints
+     * also matches the indexed words one typo away, from 9 codepoints two typos, whether or not
+     * the word itself is indexed; within a words bucket fewer typos rank first. Respects
+     * Config::$fuzzyPrefixLength and $fuzzyMaxExpansions. Shorter words use exact + optional
+     * as-you-type prefix matching only.
      *
      * A word or quoted phrase prefixed with '-' ("shirt -formal", 'dress -"long sleeve"') removes
      * the documents that contain it (exact match after stemming; see extractNegations()). A query

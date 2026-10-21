@@ -9,6 +9,8 @@ final readonly class QueryToken
 {
     /**
      * @param list<array{term: string, numHits: int, numDocs: int, distance: int|null}> $wordlistRows
+     *
+     * @internal Built by Index::inspectQuery().
      */
     public function __construct(
         /** Original input word before stopword filtering and stemming. */

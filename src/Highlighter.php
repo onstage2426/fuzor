@@ -27,6 +27,8 @@ final readonly class Highlighter
      * @param bool    $asYouType When true, the last query token is matched as a word prefix.
      * @param ?string $language  BCP 47 tag; drives n-gram tokenisation. Null for whitespace-delimited languages.
      * @param bool    $escape    Treat the input as plain text and return safe HTML (see class docblock).
+     *
+     * @internal Use Index::highlighter(), which passes the index language.
      */
     public function __construct(
         private string $open = '<mark>',

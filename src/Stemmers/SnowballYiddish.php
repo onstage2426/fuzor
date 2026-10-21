@@ -4,7 +4,8 @@ namespace Fuzor\Stemmers;
 
 // Generated from yiddish.sbl by Snowball 3.0.0 - https://snowballstem.org/
 
-class SnowballYiddish extends SnowballStemmer
+/** @internal Generated Snowball stemmer; Fuzor picks it from SchemaConfig::$language. */
+final class SnowballYiddish extends SnowballStemmer
 {
     private const array A_0 = [
         ["\u{05D5}\u{05D5}", -1, 1],

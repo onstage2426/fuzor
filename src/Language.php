@@ -117,6 +117,7 @@ final class Language
      * Snowball stemmer class for the given language, or null if none exists.
      * Used internally by Stemmer to instantiate the correct implementation.
      *
+     * @internal
      * @return class-string<SnowballStemmer>|null
      */
     public static function stemmerClass(string $lang): ?string

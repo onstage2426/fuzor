@@ -17,6 +17,8 @@ final readonly class QueryInspection
      *        The query's '-word' / '-"phrase"' negations as search() reads them: as typed, normalised
      *        like a quoted phrase, and whether they exclude anything (search() drops a negation
      *        unless every token is in the index). Not part of $tokens.
+     *
+     * @internal Built by Index::inspectQuery().
      */
     public function __construct(
         public array $rawTokens,

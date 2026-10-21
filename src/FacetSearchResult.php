@@ -43,6 +43,8 @@ final class FacetSearchResult implements \Countable, \IteratorAggregate
      * @param list<array{value: string, count: int}> $facetHits
      * @param string       $facetQuery
      * @param list<string> $warnings
+     *
+     * @internal Built by Index::facetSearch().
      */
     public function __construct(
         array $facetHits,

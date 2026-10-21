@@ -4,7 +4,8 @@ namespace Fuzor\Stemmers;
 
 // Generated from tamil.sbl by Snowball 3.0.0 - https://snowballstem.org/
 
-class SnowballTamil extends SnowballStemmer
+/** @internal Generated Snowball stemmer; Fuzor picks it from SchemaConfig::$language. */
+final class SnowballTamil extends SnowballStemmer
 {
     private const array A_0 = [
         ["\u{0BB5}\u{0BC1}", -1, 3],

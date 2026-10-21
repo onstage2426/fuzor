@@ -4,7 +4,8 @@ namespace Fuzor\Stemmers;
 
 // Generated from spanish.sbl by Snowball 3.0.0 - https://snowballstem.org/
 
-class SnowballSpanish extends SnowballStemmer
+/** @internal Generated Snowball stemmer; Fuzor picks it from SchemaConfig::$language. */
+final class SnowballSpanish extends SnowballStemmer
 {
     private const array A_0 = [
         ["", -1, 6],
