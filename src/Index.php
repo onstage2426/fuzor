@@ -2488,11 +2488,11 @@ class Index
             $rows   = $this->getWordlistByKeyword($processed, $isLast);
 
             $matchType = match (true) {
-                $rows === []                                                     => 'none',
-                isset($rows[0]['distance'])                                      => 'fuzzy',
+                $rows === []                                                     => MatchType::None,
+                isset($rows[0]['distance'])                                      => MatchType::Fuzzy,
                 /** @infection-ignore-all LogicalAnd: non-last words are always exact matches (wordlist lookup uses isLastWord=false), so term===processed; neither && mutation fires on real data */
-                $isLast && $rows[0]['term'] !== $processed                       => 'prefix',
-                default                                                          => 'exact',
+                $isLast && $rows[0]['term'] !== $processed                       => MatchType::Prefix,
+                default                                                          => MatchType::Exact,
             };
 
             $wordlistRows = array_map(

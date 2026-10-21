@@ -21,8 +21,8 @@ final readonly class QueryToken
         public bool $isLast,
         /** Whether the token matched anything in the wordlist. */
         public bool $found,
-        /** How the token matched: 'exact', 'prefix', 'fuzzy', or 'none'. */
-        public string $matchType,
+        /** How the token matched the index. */
+        public MatchType $matchType,
         /** Matching wordlist entries. */
         public array $wordlistRows,
         /** Total hit count across all matching wordlist entries. */

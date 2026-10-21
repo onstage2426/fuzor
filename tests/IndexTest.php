@@ -8,6 +8,7 @@ use Fuzor\FacetOrder;
 use Fuzor\FacetRange;
 use Fuzor\FacetSearchQuery;
 use Fuzor\Index;
+use Fuzor\MatchType;
 use Fuzor\MatchingStrategy;
 use Fuzor\QueryToken;
 use Fuzor\SchemaConfig;
@@ -2845,7 +2846,7 @@ class IndexTest extends TestCase
         $index = new Index($this->dbPath);
         $result = $index->inspectQuery('zzznomatch', asYouType: false);
         $this->assertFalse($result->tokens[0]->found);
-        $this->assertSame('none', $result->tokens[0]->matchType);
+        $this->assertSame(MatchType::None, $result->tokens[0]->matchType);
         $this->assertSame(0, $result->tokens[0]->numDocs);
         $this->assertSame(0, $result->tokens[0]->numHits);
     }
@@ -2855,7 +2856,7 @@ class IndexTest extends TestCase
         $index = new Index($this->dbPath);
         $index->insert([['id' => 1, 'body' => 'sedan']]);
         $result = $index->inspectQuery('sedan', asYouType: false);
-        $this->assertSame('exact', $result->tokens[0]->matchType);
+        $this->assertSame(MatchType::Exact, $result->tokens[0]->matchType);
     }
 
     public function testInspectQueryMatchTypePrefix(): void
@@ -2863,7 +2864,7 @@ class IndexTest extends TestCase
         $index = new Index($this->dbPath);
         $index->insert([['id' => 1, 'body' => 'sedan']]);
         $result = $index->inspectQuery('sed');
-        $this->assertSame('prefix', $result->tokens[0]->matchType);
+        $this->assertSame(MatchType::Prefix, $result->tokens[0]->matchType);
         $terms = array_column($result->tokens[0]->wordlistRows, 'term');
         $this->assertContains('sedan', $terms);
     }
@@ -2873,7 +2874,7 @@ class IndexTest extends TestCase
         $index = new Index($this->dbPath);
         $index->insert([['id' => 1, 'body' => 'sedan']]);
         $result = $index->inspectQuery('sedaan', asYouType: false);
-        $this->assertSame('fuzzy', $result->tokens[0]->matchType);
+        $this->assertSame(MatchType::Fuzzy, $result->tokens[0]->matchType);
         $this->assertNotNull($result->tokens[0]->wordlistRows[0]['distance']);
     }
 
@@ -2882,7 +2883,7 @@ class IndexTest extends TestCase
         $index = new Index($this->dbPath);
         $index->insert([['id' => 1, 'body' => 'sedan']]);
         $result = $index->inspectQuery('zzznomatch', asYouType: false);
-        $this->assertSame('none', $result->tokens[0]->matchType);
+        $this->assertSame(MatchType::None, $result->tokens[0]->matchType);
     }
 
     public function testInspectQueryPrefixExpandsMultipleTerms(): void
@@ -2984,7 +2985,7 @@ class IndexTest extends TestCase
         // Mutation TrueValue: gate removed → fuzzy fires → 'sedn' matches 'sedan' → 'fuzzy'.
         // Original: gate blocks → no match → 'none'.
         $result = $index->inspectQuery('sedn', asYouType: false);
-        $this->assertSame('none', $result->tokens[0]->matchType);
+        $this->assertSame(MatchType::None, $result->tokens[0]->matchType);
     }
 
     public function testInspectQueryExactMatchIsNotFuzzyType(): void
@@ -2994,7 +2995,7 @@ class IndexTest extends TestCase
 
         // Exact wordlist hit has no 'distance' key → match_type must be 'exact', not 'fuzzy'.
         $result = $index->inspectQuery('sedan', asYouType: false);
-        $this->assertSame('exact', $result->tokens[0]->matchType);
+        $this->assertSame(MatchType::Exact, $result->tokens[0]->matchType);
     }
 
     public function testInspectQueryWordlistRowsHaveExactKeys(): void

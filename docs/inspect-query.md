@@ -37,7 +37,7 @@ Each entry in `$tokens` is a `QueryToken` value object:
 | `processed` | `string` | Token after stopword filtering and stemming |
 | `isLast` | `bool` | `true` when this is the last token and `asYouType` prefix matching is active |
 | `found` | `bool` | Whether the token matched anything in the wordlist |
-| `matchType` | `string` | `'exact'`, `'prefix'`, `'fuzzy'`, or `'none'` |
+| `matchType` | `MatchType` | `MatchType::Exact`, `Prefix`, `Fuzzy`, or `None` (string-backed: `->value` is `'exact'` …) |
 | `wordlistRows` | `list<WordlistMatch>` | Matching wordlist entries |
 | `numHits` | `int` | Total hit count across all matching wordlist entries |
 | `numDocs` | `int` | Total document count across all matching wordlist entries |
@@ -67,7 +67,7 @@ $result->allStripped;     // false
 $token = $result->tokens[1];
 $token->raw;       // 'connections'
 $token->processed; // 'connect'
-$token->matchType; // 'exact'
+$token->matchType; // MatchType::Exact
 $token->found;     // true
 $token->numHits;   // 18
 $token->numDocs;   // 5
@@ -78,7 +78,7 @@ $token->wordlistRows[0]['distance']; // null
 
 ## Common use cases
 
-**Term not found** — `found: false` and `matchType: 'none'` means the term has no entry in the wordlist. The document either was never indexed, or the term was filtered out at index time.
+**Term not found** — `found: false` and `matchType: MatchType::None` means the term has no entry in the wordlist. The document either was never indexed, or the term was filtered out at index time.
 
 **Unexpected stemming** — compare `raw` vs `processed` per token to see what the stemmer did to the query.
 
