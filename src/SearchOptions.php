@@ -44,7 +44,7 @@ final readonly class SearchOptions
      *                              tags inserted — only safe to render as HTML if that text is trusted.
      * @param array<string, FacetOrder> $sortFacetValuesBy Value order per facet field in
      *                              $facetDistribution, applied before Config::$maxValuesPerFacet;
-     *                              '*' sets the default for the others. Unlisted fields: Count.
+     *                              '*' sets the default for the others. Unlisted fields: Alpha (as in Meilisearch).
      * @param MatchingStrategy $matchingStrategy search() only: which documents a multi-word query
      *                              returns and how they rank first (see MatchingStrategy). Ignored by
      *                              searchBoolean() and facetSearch() (which requires every word).

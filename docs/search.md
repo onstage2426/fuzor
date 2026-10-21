@@ -402,20 +402,20 @@ $result->facetStats;
 
 ### Value order
 
-Values are ordered by count, most documents first. Use `sortFacetValuesBy` to order fields alphabetically instead (`'*'` sets the order for all other fields):
+Values are ordered alphabetically. Use `sortFacetValuesBy` to order fields by count instead, most documents first (`'*'` sets the order for all other fields):
 
 ```php
 use Fuzor\FacetOrder;
 
 $result = $index->search('watch', new SearchOptions(
     facets:            ['brand', 'category', 'size'],
-    sortFacetValuesBy: ['*' => FacetOrder::Alpha, 'brand' => FacetOrder::Count],
+    sortFacetValuesBy: ['*' => FacetOrder::Count, 'size' => FacetOrder::Alpha],
 ));
 ```
 
 `FacetOrder::Alpha` puts numbers first, by value, then strings ignoring case. The order is applied before `Config::$maxValuesPerFacet` (100) cuts the list, so with `Alpha` a field with more values returns the first ones alphabetically, not the most used ones.
 
-**Compared with Meilisearch:** the same setting and orders, per query instead of per index. Meilisearch's default is `alpha`; Fuzor keeps `count`, because with the 100-value cap an alphabetical default drops the most used values.
+**Compared with Meilisearch:** the same setting, orders and default (`alpha`), per query instead of per index. For a field with more values than the cap, ask for `Count` to keep the most used ones.
 
 ### Disjunctive counting
 
@@ -445,7 +445,7 @@ An [exclusion](#excluding-values) is not a selection among alternatives, so it a
 ```php
 use Fuzor\FacetSearchQuery;
 
-// All values for 'genre', ordered by count descending
+// All values for 'genre', in alphabetical order
 $result = $index->facetSearch(new FacetSearchQuery(facetName: 'genre'));
 
 foreach ($result as $hit) {
@@ -468,7 +468,7 @@ $result = $index->facetSearch(new FacetSearchQuery(
 // "rosa cl" and "CLARA" both match "rosa-clara" and "Rosa Clará"
 ```
 
-Results are ordered by count; pass `sortFacetValuesBy: FacetOrder::Alpha` for alphabetical order (applied before `limit`).
+Results are ordered alphabetically, as in Meilisearch; pass `sortFacetValuesBy: FacetOrder::Count` to put the values with the most documents first (applied before `limit`).
 
 **Compared with Meilisearch:** Meilisearch matches only the start of the value's first word; Fuzor matches any word, so slugs (`rosa-clara`) and multi-word names can be found by any of their words. Fuzor has no typo tolerance on facet values.
 
@@ -512,7 +512,7 @@ $result->toJSON();
 | `q` | `''` | FTS phrase to restrict candidate documents (Meilisearch's `q`) (phrases and `-` exclusions as in `search()`); empty string means all documents |
 | `filter` | `[]` | Facet filters applied before counting; same type as `SearchOptions::$filter` |
 | `limit` | `100` | Maximum number of values to return |
-| `sortFacetValuesBy` | `FacetOrder::Count` | `Count` (most documents first) or `Alpha` |
+| `sortFacetValuesBy` | `FacetOrder::Alpha` | `Alpha` (numbers by value, then strings ignoring case) or `Count` (most documents first) |
 
 ## Custom sort
 

@@ -1724,7 +1724,7 @@ class IndexTest extends TestCase
         $this->assertSame(28, $index->count());
         $this->assertNotContains(1, $index->search('product1')->getIds());
         $facets = $index->search('', new SearchOptions(facets: ['brand']))->facetDistribution['brand'];
-        $this->assertSame(['globex' => 24, 'acme' => 4], $facets);
+        $this->assertSame(['acme' => 4, 'globex' => 24], $facets);
         // Under 10% of the index: marked deleted, not purged yet.
         $this->assertSame(2, $this->scalarQuery('SELECT COUNT(*) FROM deleted_docs'));
     }
@@ -6015,7 +6015,10 @@ class IndexTest extends TestCase
             ['id' => 4, 'title' => 'car', 'color' => 'green'],
         ]);
 
-        $result = $index->search('car', new SearchOptions(facets: ['color']));
+        $result = $index->search('car', new SearchOptions(
+            facets: ['color'],
+            sortFacetValuesBy: ['*' => FacetOrder::Count],
+        ));
         // Top 2 by count: red (2), then one of blue/green (1 each)
         $this->assertCount(2, $result->facetDistribution['color']);
         $this->assertSame(2, $result->facetDistribution['color']['red']);
@@ -7016,7 +7019,7 @@ class IndexTest extends TestCase
         $this->assertSame([3, 2], $browse->getIds());
         $this->assertSame(['Adidas' => 1, 'Nike' => 1], $browse->facetDistribution['brand']);
         $this->assertSame(
-            [['value' => 'Nike', 'count' => 2], ['value' => 'Adidas', 'count' => 1]],
+            [['value' => 'Adidas', 'count' => 1], ['value' => 'Nike', 'count' => 2]],
             $index->facetSearch(new FacetSearchQuery(facetName: 'brand'))->facetHits,
         );
     }
@@ -7487,7 +7490,7 @@ class IndexTest extends TestCase
             ['id' => 3, 'title' => 'c', 'color' => 'red'],
         ]);
         $result = $index->search('', new SearchOptions(facets: ['color']));
-        $this->assertSame(['red' => 2, 'blue' => 1], $result->facetDistribution['color']);
+        $this->assertSame(['blue' => 1, 'red' => 2], $result->facetDistribution['color']);
     }
 
     public function testBrowseViaBooleanSearch(): void
@@ -7560,7 +7563,7 @@ class IndexTest extends TestCase
         $this->assertSame(['blue' => 8, 'red' => 4], $filtered->facetDistribution['color']);
 
         $unfiltered = $index->search('', new SearchOptions(facets: ['brand']));
-        $this->assertSame(['Zeta' => 8, 'Acme' => 4], $unfiltered->facetDistribution['brand']);
+        $this->assertSame(['Acme' => 4, 'Zeta' => 8], $unfiltered->facetDistribution['brand']);
     }
 
     public function testBrowseFilteredFacetCountsUnderCapAreExact(): void
@@ -7573,7 +7576,7 @@ class IndexTest extends TestCase
 
         $result = $index->search('', new SearchOptions(filter: ['color' => 'blue'], facets: ['brand', 'color']));
 
-        $this->assertSame(['Zeta' => 5, 'Acme' => 3], $result->facetDistribution['brand']);
+        $this->assertSame(['Acme' => 3, 'Zeta' => 5], $result->facetDistribution['brand']);
         $this->assertSame(['blue' => 8, 'red' => 4], $result->facetDistribution['color']);
     }
 
@@ -8082,6 +8085,7 @@ class IndexTest extends TestCase
             facets: array_keys($facets),
             sort: $sort,
             limit: 20,
+            sortFacetValuesBy: ['*' => FacetOrder::Count],
         ));
 
         $this->assertSame($ids, $result->getIds());
@@ -9770,11 +9774,20 @@ class IndexTest extends TestCase
     {
         $index = $this->facetValuesIndex();
 
-        $count = $index->search('dress', $this->facetOrderOptions([]))->facetDistribution;
+        // Alphabetical unless asked otherwise, as in Meilisearch.
+        $this->assertSame(
+            $index->search('dress', $this->facetOrderOptions(['*' => FacetOrder::Alpha]))->facetDistribution,
+            $index->search('dress', $this->facetOrderOptions([]))->facetDistribution,
+        );
+
+        $count = $index->search('dress', $this->facetOrderOptions(['*' => FacetOrder::Count]))->facetDistribution;
         $this->assertSame([36 => 3, 9 => 2, 10 => 1, 12 => 1], $count['size']);
         $this->assertSame('Pronovias', array_key_first($count['brand']));
 
-        $alpha = $index->search('dress', $this->facetOrderOptions(['size' => FacetOrder::Alpha]))->facetDistribution;
+        $alpha = $index->search(
+            'dress',
+            $this->facetOrderOptions(['*' => FacetOrder::Count, 'size' => FacetOrder::Alpha]),
+        )->facetDistribution;
         $this->assertSame([9 => 2, 10 => 1, 12 => 1, 36 => 3], $alpha['size']);
         $this->assertSame('Pronovias', array_key_first($alpha['brand']));
 
@@ -10233,7 +10246,7 @@ class IndexTest extends TestCase
         $sorted = $index->search('-"slim fit"', new SearchOptions(sort: ['price:asc'], facets: ['color']));
         $this->assertSame([6, 4, 1, 2, 5], $sorted->getIds());
         $this->assertSame(5, $sorted->totalHits);
-        $this->assertSame(['blue' => 2, 'black' => 1, 'red' => 1, 'white' => 1], $sorted->facetDistribution['color']);
+        $this->assertSame(['black' => 1, 'blue' => 2, 'red' => 1, 'white' => 1], $sorted->facetDistribution['color']);
     }
 
     public function testNegationsApplyToFacetCountsOfASearch(): void

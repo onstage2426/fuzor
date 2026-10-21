@@ -24,7 +24,8 @@ final readonly class FacetSearchQuery
      * @param array<string, string|list<string>|FacetRange|FacetExclude> $filter Facet filters applied before counting;
      *                           same type as SearchOptions::$filter.
      * @param int    $limit      Maximum number of facet values to return.
-     * @param FacetOrder $sortFacetValuesBy Order of the returned values (applied before $limit).
+     * @param FacetOrder $sortFacetValuesBy Order of the returned values (applied before $limit); Alpha
+     *                           by default, as in Meilisearch.
      */
     public function __construct(
         public readonly string $facetName,
@@ -32,7 +33,7 @@ final readonly class FacetSearchQuery
         public readonly string $q = '',
         public readonly array $filter = [],
         public readonly int $limit = 100,
-        public readonly FacetOrder $sortFacetValuesBy = FacetOrder::Count,
+        public readonly FacetOrder $sortFacetValuesBy = FacetOrder::Alpha,
     ) {
     }
 }

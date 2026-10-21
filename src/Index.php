@@ -8571,7 +8571,7 @@ class Index
     {
         $maxValues = $this->config->maxValuesPerFacet;
         foreach ($distribution as $field => $counts) {
-            if (($sortBy[$field] ?? $sortBy['*'] ?? FacetOrder::Count) === FacetOrder::Alpha) {
+            if (($sortBy[$field] ?? $sortBy['*'] ?? FacetOrder::Alpha) === FacetOrder::Alpha) {
                 $counts = self::alphaOrder($counts);
             }
             if ($maxValues > 0 && count($counts) > $maxValues) {
