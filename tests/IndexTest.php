@@ -5678,12 +5678,12 @@ class IndexTest extends TestCase
         $filter = ['visibility' => new FacetExclude('exclude-from-search')];
 
         foreach (['', 'shoe'] as $query) {
-            $result = $index->facetSearch(new FacetSearchQuery(facetName: 'brand', query: $query, filter: $filter));
+            $result = $index->facetSearch(new FacetSearchQuery(facetName: 'brand', q: $query, filter: $filter));
             $counts = array_column($result->facetHits, 'count', 'value');
             ksort($counts);
             $this->assertSame(['Adidas' => 1, 'Nike' => 1, 'Puma' => 2], $counts, "query '{$query}'");
 
-            $own = $index->facetSearch(new FacetSearchQuery(facetName: 'visibility', query: $query, filter: $filter));
+            $own = $index->facetSearch(new FacetSearchQuery(facetName: 'visibility', q: $query, filter: $filter));
             $this->assertNotContains('exclude-from-search', array_column($own->facetHits, 'value'), "query '{$query}'");
         }
     }
@@ -6237,7 +6237,7 @@ class IndexTest extends TestCase
             ['id' => 2, 'title' => 'drama film',      'genre' => 'Drama'],
         ]);
 
-        $result = $index->facetSearch(new FacetSearchQuery(facetName: 'genre', query: 'adventure'));
+        $result = $index->facetSearch(new FacetSearchQuery(facetName: 'genre', q: 'adventure'));
 
         $this->assertCount(1, $result);
         $this->assertSame('Action', $result->facetHits[0]['value']);
@@ -6256,7 +6256,7 @@ class IndexTest extends TestCase
             ['id' => 3, 'title' => 'time adventure',  'genre' => 'Comedy'],   // matches 'adventure' only
         ]);
 
-        $result = $index->facetSearch(new FacetSearchQuery(facetName: 'genre', query: 'space adventure'));
+        $result = $index->facetSearch(new FacetSearchQuery(facetName: 'genre', q: 'space adventure'));
 
         $values = array_column($result->facetHits, 'value');
         $this->assertContains('Action', $values);
@@ -6275,7 +6275,7 @@ class IndexTest extends TestCase
             ['id' => 2, 'title' => 'fiction about science', 'genre' => 'Drama'],  // words present but not adjacent
         ]);
 
-        $result = $index->facetSearch(new FacetSearchQuery(facetName: 'genre', query: '"science fiction"'));
+        $result = $index->facetSearch(new FacetSearchQuery(facetName: 'genre', q: '"science fiction"'));
 
         $values = array_column($result->facetHits, 'value');
         $this->assertContains('Sci-Fi', $values);
@@ -6292,7 +6292,7 @@ class IndexTest extends TestCase
             ['id' => 1, 'title' => 'adventure', 'genre' => 'Action'],
         ]);
 
-        $result = $index->facetSearch(new FacetSearchQuery(facetName: 'genre', query: 'zzznomatch'));
+        $result = $index->facetSearch(new FacetSearchQuery(facetName: 'genre', q: 'zzznomatch'));
 
         $this->assertSame([], $result->facetHits);
     }
@@ -6308,7 +6308,7 @@ class IndexTest extends TestCase
             ['id' => 2, 'title' => 'doc', 'genre' => 'Drama'],
         ]);
 
-        $result = $index->facetSearch(new FacetSearchQuery(facetName: 'genre', query: '   '));
+        $result = $index->facetSearch(new FacetSearchQuery(facetName: 'genre', q: '   '));
 
         $this->assertCount(2, $result);
     }
@@ -6367,7 +6367,7 @@ class IndexTest extends TestCase
         $result = $index->facetSearch(new FacetSearchQuery(
             facetName: 'genre',
             facetQuery: 'sc',
-            query: 'space adventure',
+            q: 'space adventure',
             filter: ['year' => FacetRange::min(2000)],
         ));
 
@@ -6426,7 +6426,7 @@ class IndexTest extends TestCase
 
         $result = $index->facetSearch(new FacetSearchQuery(
             facetName: 'genre',
-            query:     'nothingmatches',
+            q:     'nothingmatches',
             filter:    ['color' => 'red'],
         ));
 
@@ -6986,7 +6986,7 @@ class IndexTest extends TestCase
             "Filter field 'color' is not filterable",
         ];
         yield 'exclusion undeclared' => [
-            new FacetSearchQuery(facetName: 'brand', query: 'product', filter: ['tags' => new FacetExclude('x')]),
+            new FacetSearchQuery(facetName: 'brand', q: 'product', filter: ['tags' => new FacetExclude('x')]),
             "Filter field 'tags' is not filterable",
         ];
     }
@@ -8591,7 +8591,7 @@ class IndexTest extends TestCase
         );
         $index->insert($this->sameWordDocs(3));
 
-        $capped  = $index->facetSearch(new FacetSearchQuery(facetName: 'color', query: 'widget'));
+        $capped  = $index->facetSearch(new FacetSearchQuery(facetName: 'color', q: 'widget'));
         $noQuery = $index->facetSearch(new FacetSearchQuery(facetName: 'color'));
 
         $this->assertFalse($capped->exhaustive);
@@ -10289,11 +10289,11 @@ class IndexTest extends TestCase
 
         $this->assertSame(
             [['value' => 'blue', 'count' => 2], ['value' => 'white', 'count' => 1]],
-            $index->facetSearch(new FacetSearchQuery(facetName: 'color', query: 'shirt -slim'))->facetHits,
+            $index->facetSearch(new FacetSearchQuery(facetName: 'color', q: 'shirt -slim'))->facetHits,
         );
         $this->assertSame(
             [['value' => 'blue', 'count' => 3], ['value' => 'red', 'count' => 1]],
-            $index->facetSearch(new FacetSearchQuery(facetName: 'color', query: '-formal'))->facetHits,
+            $index->facetSearch(new FacetSearchQuery(facetName: 'color', q: '-formal'))->facetHits,
         );
     }
 

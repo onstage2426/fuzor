@@ -63,7 +63,7 @@ $result->facetDistribution;  // ['type' => ['sedan' => 1, 'suv' => 1]]
 $facetResult = $index->facetSearch(new FacetSearchQuery(
     facetName:  'type',
     facetQuery: 'se',      // matches the start of any word of a value: 'sedan', 'Sport Sedan'
-    query:      'car',     // restrict to docs matching this FTS query
+    q:      'car',     // restrict to docs matching this FTS query
 ));
 
 foreach ($facetResult as $hit) {

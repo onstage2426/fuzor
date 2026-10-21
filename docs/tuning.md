@@ -48,7 +48,7 @@ A typo is an inserted, deleted, or replaced character, or two neighbouring chara
 
 | Property | Default | Effect |
 |---|---|---|
-| `maxFacetCountDocs` | `50000` | Max matching documents included in facet counting, for `search()`, `searchBoolean()`, a filtered browse, and `facetSearch()` with a `query`. Counts are approximate above this cap, and the field is listed in `$approximateFacets`. Facet counts with no filter and no query are always exact, and so are those whose only filters are `FacetExclude` exclusions, or value filters on a field every document has once that leave out at most this many documents. |
+| `maxFacetCountDocs` | `50000` | Max matching documents included in facet counting, for `search()`, `searchBoolean()`, a filtered browse, and `facetSearch()` with a `q`. Counts are approximate above this cap, and the field is listed in `$approximateFacets`. Facet counts with no filter and no query are always exact, and so are those whose only filters are `FacetExclude` exclusions, or value filters on a field every document has once that leave out at most this many documents. |
 | `maxValuesPerFacet` | `100` | Max values returned per facet field in `$facetDistribution`, after ordering them (`SearchOptions::$sortFacetValuesBy`, count by default). `0` returns all values. |
 
 ## Field boosting

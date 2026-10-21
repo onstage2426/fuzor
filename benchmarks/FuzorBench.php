@@ -337,7 +337,7 @@ class FuzorBench
     #[ParamProviders('provideFacetSearchQueries')]
     public function benchFacetSearchWithFtsQuery(array $params): void
     {
-        $this->index->facetSearch(new FacetSearchQuery(facetName: 'genre', query: (string) $params['query']));
+        $this->index->facetSearch(new FacetSearchQuery(facetName: 'genre', q: (string) $params['query']));
     }
 
     /** @return iterable<string, array{query: string}> */

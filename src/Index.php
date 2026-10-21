@@ -3425,7 +3425,7 @@ class Index
         $ftsCandidates    = null; // null = no FTS restriction
         $candidatesCapped = false;
         $prefixCapped     = false;
-        ['phrase' => $positive, 'conditions' => $negations] = $this->extractNegations($query->query);
+        ['phrase' => $positive, 'conditions' => $negations] = $this->extractNegations($query->q);
         if (trim($positive) !== '') {
             $parsed       = $this->filterQueryTokens($positive);
             $keywords     = $parsed['filtered'];

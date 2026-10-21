@@ -76,7 +76,7 @@ if (!$result->exhaustive) {
 }
 ```
 
-Each cap that was hit also adds a line to `$warnings`. A browse (empty query) is always exhaustive; only its filtered facet counts can be approximate. `FacetSearchResult::$exhaustive` is `false` when the `query` restricting a facet search was capped.
+Each cap that was hit also adds a line to `$warnings`. A browse (empty query) is always exhaustive; only its filtered facet counts can be approximate. `FacetSearchResult::$exhaustive` is `false` when the `q` restricting a facet search was capped.
 
 This mirrors Meilisearch's split between `estimatedTotalHits` and an exhaustive `totalHits`: the numbers stay cheap to compute, and callers can tell when they are estimates.
 
@@ -164,7 +164,7 @@ With `Last`, a document with "big" and "cat" but not "fat" is in the "big" bucke
 
 `All` is also exact: when the rarest word matches at most `Config::$maxDocs` documents, every document containing all words is found and `exhaustive` is `true`, even if the other words are very common.
 
-`searchBoolean()` keeps its own operators and ignores `matchingStrategy`; `facetSearch()` with a `query` requires every word.
+`searchBoolean()` keeps its own operators and ignores `matchingStrategy`; `facetSearch()` with a `q` requires every word.
 
 **Compared with Meilisearch:** the same three strategies and default. Meilisearch describes relaxing the query "when there are not enough results to satisfy `limit`"; Fuzor returns all buckets in order, which shows the same documents on the first pages and counts every returned document in `totalHits`. Within a bucket Fuzor ranks by `sort`, then BM25 with proximity, instead of Meilisearch's typo, proximity, attribute, and exactness rules.
 
@@ -182,7 +182,7 @@ $result = $index->search('-sale');                   // every document except th
 - Excluded words are matched exactly, after the same stemming as other query words (`-formals` also excludes `formal`). No typo tolerance, prefix matching, or synonyms apply, also for a last word still being typed: `shirt -wor` does not hide `word`.
 - A word that no document contains, or a stopword, excludes nothing.
 - A query of only exclusions works like an empty query: it returns every other document, with exact totals, sort, and facet counts.
-- Exclusions also apply to facet counts and to `facetSearch()`'s `query`. They are not highlighted.
+- Exclusions also apply to facet counts and to `facetSearch()`'s `q`. They are not highlighted.
 
 `searchBoolean()` has its own `-` / `~` operator; see [Boolean search](#boolean-search).
 
@@ -474,13 +474,13 @@ Results are ordered by count; pass `sortFacetValuesBy: FacetOrder::Alpha` for al
 
 ### Restricting to a document set
 
-Use `query` to restrict candidates via FTS and `filter` to apply facet filters before counting:
+Use `q` to restrict candidates via FTS and `filter` to apply facet filters before counting:
 
 ```php
 $result = $index->facetSearch(new FacetSearchQuery(
     facetName:  'genre',
     facetQuery: 'sc',
-    query:      'adventure',
+    q:      'adventure',
     filter:     ['year' => FacetRange::min(2000)],
     limit:      10,
 ));
@@ -496,7 +496,7 @@ Only values that appear on documents satisfying both the FTS query and all filte
 $result->facetHits;        // list<array{value: string, count: int}>
 $result->facetQuery;       // the facetQuery that was searched
 $result->warnings;         // list<string> — limits that made the result approximate
-$result->exhaustive;       // false when the `query` candidates were capped (maxFacetCountDocs)
+$result->exhaustive;       // false when the `q` candidates were capped (maxFacetCountDocs)
 count($result);            // number of values returned
 foreach ($result as $hit) { ... }
 $result->toArray();        // serialisable snapshot
@@ -509,7 +509,7 @@ $result->toJSON();
 |---|---|---|
 | `facetName` | _(required)_ | Field to search; must be declared in `filterableAttributes` at index creation |
 | `facetQuery` | `''` | Matched at the start of any word of a value, ignoring case and accents; empty string returns all values |
-| `query` | `''` | FTS phrase to restrict candidate documents (phrases and `-` exclusions as in `search()`); empty string means all documents |
+| `q` | `''` | FTS phrase to restrict candidate documents (Meilisearch's `q`) (phrases and `-` exclusions as in `search()`); empty string means all documents |
 | `filter` | `[]` | Facet filters applied before counting; same type as `SearchOptions::$filter` |
 | `limit` | `100` | Maximum number of values to return |
 | `sortFacetValuesBy` | `FacetOrder::Count` | `Count` (most documents first) or `Alpha` |
