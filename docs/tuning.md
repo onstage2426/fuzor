@@ -18,7 +18,7 @@ All properties have sensible defaults — you only need to set what differs from
 
 | Property | Default | Effect |
 |---|---|---|
-| `maxDocs` | `500` | Documents fetched per keyword before scoring (its best matches by term frequency). Higher = better ranking inside large result sets; lower = faster queries. When those candidates hold fewer documents matching all words than the page needs (or with a filter, `-word` or `distinct`), the documents containing all words are read exactly, as long as the rarest word is in at most 50,000 documents, so full matches are not lost when every word is common. When a keyword matches more, the result reports `exhaustive: false`. |
+| `maxDocs` | `500` | Documents fetched per keyword before scoring (its best matches by term frequency). Higher = better ranking inside large result sets; lower = faster queries. When those candidates hold fewer documents matching all words than the page needs (or with a filter, `-word`, `distinct` or `sort`), the documents containing all words are read exactly, as long as the rarest word is in at most 50,000 documents, so full matches are not lost when every word is common. When a keyword matches more, the result reports `exhaustive: false`. |
 | `k1` | `1.2` | Term frequency saturation. Lower values reduce the advantage of repeated terms. |
 | `b` | `0.75` | Length normalisation weight. `0` disables it; `1` fully penalises long documents. |
 | `proximityBoost` | `1.0` | How much to reward terms that appear close together. `0` disables proximity ranking. Words in different fields count as 8 positions apart per word gap, so a document with the words close together in one field ranks above one that has them only across fields. |

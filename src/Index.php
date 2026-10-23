@@ -2763,9 +2763,10 @@ final class Index implements \Countable
         // found), so after the first pass the top buckets are read exactly where they fall short
         // (exactBucketDocs(): the documents containing the first k groups, for k = all groups
         // downwards, while the bucket's rarest word is at most EXACT_BUCKET_MAX_DRIVER documents),
-        // and the walk runs again. Without filters, phrases, negations or distinct a bucket is
-        // only read while the buckets above it hold fewer documents than the page; with them,
-        // matches can drop out later, so every needed bucket is read.
+        // and the walk runs again. Without filters, negations, distinct or sort fields a bucket is
+        // only read while the buckets above it hold fewer documents than the page (phrases count
+        // the documents that pass them); with them, matches can drop out later or a document
+        // outside the candidates can sort first, so every needed bucket is read.
         /** @var array<int, true> $candidates */
         $candidates = [];
         foreach ($groups as $group) {
@@ -2779,7 +2780,8 @@ final class Index implements \Countable
         $exactDocs    = [];
         $exactFrom    = count($order) + 1;   // buckets >= this hold every document they should
         $fastComplete = !$candidatesCapped;   // every fetched group was read whole
-        $settles      = $filter === [] && $negations === [] && $distinct === null;
+        // Sort fields pick the page from every full match, not from the candidates' best rows.
+        $settles      = $filter === [] && $negations === [] && $distinct === null && $sortSpecs === [];
         // Quoted phrases filter after scoring; for the settle checks the documents counted must
         // pass them, so each document is checked once and the result kept for the phrase filter.
         /** @var array<int, bool> $phraseOk */

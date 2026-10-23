@@ -9578,6 +9578,33 @@ class IndexTest extends TestCase
         $this->assertEqualsCanonicalizing([1, 2], $page->getIds());
     }
 
+    public function testASortedPageComesFromEveryFullMatch(): void
+    {
+        // Each word's maxDocs (2) best rows are docs 1 and 2: full matches that already fill the
+        // page. The cheapest full match, doc 3, mentions each word once and is not among them.
+        $index = new Index($this->dbPath, config: new Config(maxDocs: 2), schema: new SchemaConfig(
+            sortableAttributes: ['price'],
+        ));
+        $index->insert([
+            ['id' => 1, 'title' => 'blue shirt blue shirt blue shirt', 'price' => 50],
+            ['id' => 2, 'title' => 'blue shirt blue shirt blue shirt', 'price' => 60],
+            ['id' => 3, 'title' => 'blue shirt', 'price' => 10],
+        ]);
+
+        $page = $index->search('blue shirt', new SearchOptions(asYouType: false, sort: ['price:asc'], limit: 2));
+        $this->assertSame([3, 1], $page->getIds());
+
+        $all = $index->search('blue shirt', new SearchOptions(
+            asYouType: false,
+            sort: ['price:asc'],
+            limit: 2,
+            matchingStrategy: MatchingStrategy::All,
+        ));
+        $this->assertSame([3, 1], $all->getIds());
+        $this->assertSame(3, $all->totalHits);
+        $this->assertTrue($all->exhaustive);
+    }
+
     public function testExactBucketsSkipDeletedDocuments(): void
     {
         $index = $this->commonWordsIndex();
