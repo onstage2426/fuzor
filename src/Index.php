@@ -2969,18 +2969,15 @@ final class Index implements \Countable
                 $members = array_map(fn(int $g): array => $groups[$g], array_slice($order, 0, $k));
                 $hits    = in_array([], array_column($members, 'termIds'), true)
                     ? []   // an unknown word: no document contains all k groups
-                    : $this->exactBucketDocs($members, $scoredDocs + 1);
+                    : $this->exactBucketDocs($members);
                 if ($hits === null) {
                     break;
                 }
-                if (count($hits) > $scoredDocs) {
-                    if ($settles) {
-                        $covered = $exactDocs + array_filter($docBucket, fn(int $bucket): bool => $bucket >= $k);
-                        if ($passing($covered) >= $offset + $limit) {
-                            break;
-                        }
+                if (count($hits) > $scoredDocs && $settles) {
+                    $covered = $exactDocs + array_filter($docBucket, fn(int $bucket): bool => $bucket >= $k);
+                    if ($passing($covered) >= $offset + $limit) {
+                        break;
                     }
-                    $hits = $this->exactBucketDocs($members) ?? [];
                 }
                 $exactDocs += array_fill_keys(array_keys($hits), true);
                 if (count($hits) > $scoredDocs) {
@@ -7065,10 +7062,9 @@ final class Index implements \Countable
      * measured ~10% slower: fetching them row by row costs more than the probes it saves.
      *
      * @param  list<KeywordGroup> $members Groups with at least one term each.
-     * @return array<int, int>|null Document ID → its hits of the driver (rarest) group, by ID;
-     *         with $limit only the first $limit of them.
+     * @return array<int, int>|null Document ID → its hits of the driver (rarest) group, by ID.
      */
-    private function exactBucketDocs(array $members, ?int $limit = null): ?array
+    private function exactBucketDocs(array $members): ?array
     {
         if ($members === []) {
             return [];
@@ -7121,7 +7117,7 @@ final class Index implements \Countable
             $hits    = array_intersect_key($hits, array_flip($holding));
         }
         ksort($hits);
-        return $limit === null ? $hits : array_slice($hits, 0, $limit, true);
+        return $hits;
     }
 
     /**
