@@ -6825,14 +6825,18 @@ final class Index implements \Countable
     }
 
     /**
-     * The rows of a keyword group for the documents in $docIds that the group has not seen yet.
+     * The rows of a keyword group for the documents in $docIds that the group has not read yet.
      *
      * A group whose document frequency exceeds maxDocs (or that was not fetched at all, see
      * search()) holds only some of its rows. A document found through another group may still
      * contain it; this looks those rows up, scored with the group's IDF exactly as
-     * fetchDocsByTermIds() scores them. Measured on the 45k ecom set ("casual shirt": of 469
-     * unseen candidates ~250 contained the other word): ~0.4 ms for one term and ~900 unseen
-     * documents, ~2 ms for a 50-term prefix group.
+     * fetchDocsByTermIds() scores them. Only the terms whose rows were cut are looked up (a term
+     * read whole has no other documents), for every document in $docIds, also one the group
+     * holds a row of: a document found through one term of a multi-term group (a typo
+     * derivation, a prefix, a synonym) can contain another term past the cut, which adds to its
+     * score and decides its typos. Rows already held are not returned again. Measured on the 45k
+     * ecom set ("casual shirt": of 469 unseen candidates ~250 contained the other word): ~0.4 ms
+     * for one term and ~900 unseen documents, ~2 ms for a 50-term prefix group.
      *
      * @param  KeywordGroup     $group
      * @param  array<int, true> $docIds
@@ -6840,26 +6844,77 @@ final class Index implements \Countable
      */
     private function completeGroup(array $group, array $docIds, float $k1_1mb, float $k1b_avgdl): array
     {
-        if ($group['termIds'] === []) {
+        if ($group['termIds'] === [] || $docIds === []) {
             return [];
         }
-        $unseen = $docIds;
-        foreach ($group['rows'] as [, $docId]) {
-            unset($unseen[$docId]);
+        /** @var array<int, int> $read  term → rows held */
+        $read = [];
+        /** @var array<int, array<int, true>> $held  document → terms held */
+        $held = [];
+        foreach ($group['rows'] as [$termId, $docId]) {
+            $read[$termId]         = ($read[$termId] ?? 0) + 1;
+            $held[$docId][$termId] = true;
         }
-        if ($unseen === []) {
+        /** @var array<int, int> $cut  terms whose rows were cut → their document frequency */
+        $cut = [];
+        foreach ($group['words'] as $word) {
+            if (($read[$word['id']] ?? 0) < $word['num_docs']) {
+                $cut[$word['id']] = $word['num_docs'];
+            }
+        }
+        // Documents the group holds no row of are looked up for every cut term; a held one only
+        // for the cut terms it lacks (none for a one-term group; for a word with typo derivations,
+        // found through its own term, the derivations, which hold few rows).
+        $unseen  = [];
+        $lacking = [];
+        $heldIds = [];
+        foreach ($docIds as $docId => $_) {
+            if (!isset($held[$docId])) {
+                $unseen[] = $docId;
+                continue;
+            }
+            $missing = array_diff_key($cut, $held[$docId]);
+            if ($missing !== []) {
+                $lacking  += $missing;
+                $heldIds[] = $docId;
+            }
+        }
+        $rows = $this->groupRowsOfDocs($group, $cut, $unseen, $k1_1mb, $k1b_avgdl);
+        if ($heldIds !== []) {
+            $rows = [
+                ...$rows,
+                ...array_filter(
+                    $this->groupRowsOfDocs($group, $lacking, $heldIds, $k1_1mb, $k1b_avgdl),
+                    fn(array $row): bool => !isset($held[$row[1]][$row[0]]),
+                ),
+            ];
+        }
+        return $rows;
+    }
+
+    /**
+     * The doclist rows of the terms in $terms for the documents in $docIds, scored like
+     * fetchDocsByTermIds(); completeGroup()'s lookup.
+     *
+     * @param  KeywordGroup     $group
+     * @param  array<int, int>  $terms  term → document frequency
+     * @param  list<int>        $docIds
+     * @return list<array{0: int, 1: int, 2: float}>
+     */
+    private function groupRowsOfDocs(array $group, array $terms, array $docIds, float $k1_1mb, float $k1b_avgdl): array
+    {
+        if ($terms === [] || $docIds === []) {
             return [];
         }
-        $unseenIds = array_keys($unseen);
-        sort($unseenIds);
+        sort($docIds);
         // Driven from the documents, one primary key probe per (document, term) pair through
         // doc_id_index: amazon "women" (134k documents) completed for 87 documents 12.6 → 0.07 ms;
         // with the word's term list first SQLite scans all of its rows and tests membership.
-        // That scan stays the cheaper shape when the pairs outnumber the word's rows (a prefix
+        // That scan stays the cheaper shape when the pairs outnumber the terms' rows (a prefix
         // group of many terms over many documents). Sorted IDs keep consecutive probes on
         // neighbouring pages. Never write +d.term_id: it turns the probes into a scan of every
         // document's terms (41 ms).
-        $probe = count($unseenIds) * count($group['termIds']) * self::PROBE_ROW_COST <= $group['df'];
+        $probe = count($docIds) * count($terms) * self::PROBE_ROW_COST <= array_sum($terms);
         $stmt  = $probe
             ? $this->stmt(
                 'completeTermGroupProbe',
@@ -6880,8 +6935,8 @@ final class Index implements \Countable
             $group['idfK1p1'],
             $k1_1mb,
             $k1b_avgdl,
-            json_encode($group['termIds']),
-            json_encode($unseenIds),
+            json_encode(array_keys($terms)),
+            json_encode($docIds),
         ]);
         /** @var list<array{0: int, 1: int, 2: float}> $rows */
         $rows = $stmt->fetchAll(PDO::FETCH_NUM);

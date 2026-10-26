@@ -9678,6 +9678,30 @@ class IndexTest extends TestCase
         $this->assertSame(4, $result->getIds()[0]);
     }
 
+    public function testCompletedGroupAddsTermsPastTheCutForADocumentItHolds(): void
+    {
+        $docs = [
+            // Doc 2 has "shoe" once: its row ranks below the fillers' and is cut at maxDocs.
+            ['id' => 1, 'title' => 'red shoes shoes shoes shoes shoes blue', 'color' => 'red'],
+            ['id' => 2, 'title' => 'red shoes shoes shoes shoes shoes shoe', 'color' => 'red'],
+        ];
+        for ($id = 3; $id <= 7; $id++) {
+            $docs[] = ['id' => $id, 'title' => 'shoe shoe shoe shoe', 'color' => 'red'];
+        }
+        $schema = new SchemaConfig(filterableAttributes: ['color']);
+        new Index($this->dbPath, schema: $schema)->insert($docs);
+        // A filter reads the full-match bucket exactly, so the capped result claims to be exhaustive.
+        $options = new SearchOptions(filter: ['color' => 'red']);
+
+        $capped = new Index($this->dbPath, config: new Config(maxDocs: 3))->search('red sho', $options);
+        $full   = new Index($this->dbPath, config: new Config(maxDocs: 1000))->search('red sho', $options);
+
+        // Doc 2 also contains "shoe", so it scores above doc 1 (same length) in both.
+        $this->assertSame([2, 1], $full->getIds());
+        $this->assertTrue($capped->exhaustive);
+        $this->assertSame($full->getIds(), $capped->getIds());
+    }
+
     /** 300 documents containing both words at varying distances, with a 'grade' of 1–4 (big ties). */
     private function proximityCorpus(): Index
     {
