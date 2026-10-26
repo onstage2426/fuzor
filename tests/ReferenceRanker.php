@@ -17,7 +17,7 @@ use Fuzor\Tokenizer;
  *
  * Covers what SearchInvariantTest uses: no language, no stop words, no synonyms, no field
  * boosts, proximity off (Config::$proximityBoost = 0.0), string filters and FacetExclude of
- * strings, numeric sort fields that every document has.
+ * strings, numeric sort fields that every document has, distinct on a single-valued field.
  */
 final class ReferenceRanker
 {
@@ -70,7 +70,8 @@ final class ReferenceRanker
     }
 
     /**
-     * Every match in rank order with its rank key, and the facet counts of the result set.
+     * Every match in rank order (with distinct: the ones it keeps) with its rank key, and the
+     * facet counts of the result set.
      *
      * @return array{ids: list<int>, keys: array<int, list<float|int>>,
      *               facets: array<string, array<string, int>>}
@@ -192,6 +193,19 @@ final class ReferenceRanker
             }
             return $a <=> $b;
         });
+        if ($o->distinct !== null) {
+            // At most distinctCount documents per value, in rank order; those without it all kept.
+            $seen = [];
+            $ids  = array_values(array_filter($ids, function (int $id) use ($o, &$seen): bool {
+                $value = $this->doc($id)[$o->distinct] ?? null;
+                if ($value === null) {
+                    return true;
+                }
+                $key        = self::str($value);
+                $seen[$key] = ($seen[$key] ?? 0) + 1;
+                return $seen[$key] <= $o->distinctCount;
+            }));
+        }
 
         $facets = [];
         foreach ($o->facets as $field) {

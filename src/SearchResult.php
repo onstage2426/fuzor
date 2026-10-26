@@ -55,8 +55,8 @@ final class SearchResult implements \Countable, \IteratorAggregate
      * than Config::$maxDocs documents, or the last keyword's prefix matched more than
      * Config::$fuzzyMaxExpansions terms. $hits then come from the best candidates, so the page
      * may differ from a full ranking; $totalHits is still counted exactly (up to
-     * Config::$maxTotalHits, see $totalHitsCapped), except over a capped prefix expansion or
-     * with distinct. Always true for a browse (empty query). Facet counts are reported
+     * Config::$maxTotalHits, see $totalHitsCapped), also with distinct, except over a capped
+     * prefix expansion. Always true for a browse (empty query). Facet counts are reported
      * separately in $approximateFacets.
      */
     public readonly bool $exhaustive;

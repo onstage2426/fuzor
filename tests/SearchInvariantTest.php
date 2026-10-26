@@ -78,6 +78,7 @@ class SearchInvariantTest extends TestCase
             'negated' => new SearchOptions(asYouType: false, limit: 10, facets: ['color']),
             'sort'    => new SearchOptions(asYouType: false, limit: 10, sort: ['price:asc']),
             'all'     => new SearchOptions(asYouType: false, limit: 10, matchingStrategy: MatchingStrategy::All),
+            'distinct' => new SearchOptions(asYouType: false, limit: 10, distinct: 'price'),
         ];
     }
 
@@ -379,6 +380,8 @@ class SearchInvariantTest extends TestCase
             filter: $o->filter,
             sort: $o->sort,
             matchingStrategy: $o->matchingStrategy,
+            distinct: $o->distinct,
+            distinctCount: $o->distinctCount,
             showRankingScoreDetails: $details,
         );
     }

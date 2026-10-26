@@ -10895,6 +10895,33 @@ class IndexTest extends TestCase
         $reopened->reopenIfChanged();
     }
 
+    public function testDistinctTotalIsExactWhenCandidatesAreCut(): void
+    {
+        $index = new Index(
+            $this->dbPath,
+            config: new Config(maxDocs: 1),
+            schema: new SchemaConfig(filterableAttributes: ['tag']),
+        );
+        // Bucket 1 ("red" without "lamp") is ranked from the candidates, so most matches are
+        // not among them. A multi-valued document collapses on its smallest value ("a" < "b").
+        $index->insert([
+            ['id' => 1, 'title' => 'red lamp', 'tag' => ['x', 'a']],
+            ['id' => 2, 'title' => 'red', 'tag' => 'a'],
+            ['id' => 3, 'title' => 'red', 'tag' => 'b'],
+            ['id' => 4, 'title' => 'red'],
+            ['id' => 5, 'title' => 'red', 'tag' => ['b', 'a']],
+            ['id' => 6, 'title' => 'red'],
+        ]);
+
+        $one = $index->search('red lamp', new SearchOptions(asYouType: false, distinct: 'tag'));
+        $this->assertFalse($one->exhaustive);
+        // a, b, and both documents without a tag.
+        $this->assertSame(4, $one->totalHits);
+        $two = $index->search('red lamp', new SearchOptions(asYouType: false, distinct: 'tag', distinctCount: 2));
+        // a twice (of 1, 2, 5), b once, both without a tag.
+        $this->assertSame(5, $two->totalHits);
+    }
+
     // --- Ranking score details ---
 
     /** @param list<string> $sort */

@@ -3229,6 +3229,13 @@ final class Index implements \Countable
                 $offset,
                 $limit,
             );
+            if ($candidatesCapped) {
+                // The candidates hold only part of the matches: collapse all of them in SQL.
+                $conditions   = [...$baseConditions, ...$this->facetFilterConditions($filter)];
+                $distinctHits = $keyId === null
+                    ? $this->countSearchMatches($required, $conditions, $this->config->maxTotalHits + 1)
+                    : $this->countDistinctMatches($required, $conditions, $keyId, $distinctCount);
+            }
             $result = new SearchResult(
                 ids: $pagedIds,
                 totalHits: $distinctHits,
@@ -7060,6 +7067,50 @@ final class Index implements \Countable
         $stmt = $this->prepare("SELECT COUNT(*) FROM ({$match[0]} LIMIT ?)");
         $stmt->execute([...$match[1], $limit]);
         return (int) $stmt->fetchColumn();
+    }
+
+    /**
+     * The distinct total of a search whose candidates were cut: the documents of
+     * searchMatchesSql() collapsed like applyDistinctPagination(), at most $distinctCount per
+     * value of the key, documents without it all kept. A document's value is the one
+     * fetchSortValues() gives distinct: its smallest number, else its smallest string by bytes;
+     * values are grouped by their PHP string form, as there. Reads every match (no early stop:
+     * the values decide how many survive), grouped in SQL.
+     *
+     * @param  list<KeywordGroup>   $groups
+     * @param  list<FacetCondition> $conditions
+     */
+    private function countDistinctMatches(array $groups, array $conditions, int $keyId, int $distinctCount): int
+    {
+        $match = $this->searchMatchesSql($groups, $conditions);
+        if ($match === null) {
+            return 0;
+        }
+        $stmt = $this->prepare(
+            "SELECT v, COUNT(*) FROM (
+                SELECT CASE WHEN MIN(f.num_value) IS NOT NULL THEN MIN(f.num_value) ELSE MIN(f.value) END AS v
+                  FROM ({$match[0]}) m
+                  LEFT JOIN facet_values f ON f.doc_id = m.doc_id AND f.key_id = ?
+                 GROUP BY m.doc_id
+             ) GROUP BY v"
+        );
+        $stmt->execute([...$match[1], $keyId]);
+        $total = 0;
+        /** @var array<string, int> $perValue */
+        $perValue = [];
+        /** @var list<array{0: float|string|null, 1: int}> $rows */
+        $rows = $stmt->fetchAll(PDO::FETCH_NUM);
+        foreach ($rows as [$value, $n]) {
+            if ($value === null) {
+                $total += $n;
+            } else {
+                $perValue[(string) $value] = ($perValue[(string) $value] ?? 0) + $n;
+            }
+        }
+        foreach ($perValue as $n) {
+            $total += min($n, $distinctCount);
+        }
+        return $total;
     }
 
     /**

@@ -66,7 +66,7 @@ Fuzor bounds the work behind a query with a few caps (see [tuning.md](tuning.md)
 
 | Flag | Set when | Effect |
 |---|---|---|
-| `$exhaustive === false` | A keyword matched more than `Config::$maxDocs` documents, or the last keyword's prefix matched more than `Config::$fuzzyMaxExpansions` terms | Hits come from the best candidates, so the page can differ from a full ranking. `search()` still counts `$totalHits` and facet counts exactly over every match; `searchBoolean()`'s total, a `distinct` total and a capped prefix's total are estimates |
+| `$exhaustive === false` | A keyword matched more than `Config::$maxDocs` documents, or the last keyword's prefix matched more than `Config::$fuzzyMaxExpansions` terms | Hits come from the best candidates, so the page can differ from a full ranking. `search()` still counts `$totalHits` (also with `distinct`) and facet counts exactly over every match; `searchBoolean()`'s total and a capped prefix's total are estimates |
 | `$totalHitsCapped === true` | More documents match than `Config::$maxTotalHits` (1000) | `$totalHits` is the cap; no hit past it can be paged to |
 | `$approximateFacets` lists a field | That field's counts covered more than `Config::$maxFacetCountDocs` matching documents | Its counts in `$facetDistribution` / `$facetStats` are approximate |
 
@@ -642,7 +642,9 @@ $countOnly = $index->search('shirt', new SearchOptions(limit: 0, distinct: 'bran
 $distinctGroups = $countOnly->totalHits;
 ```
 
-Documents with no value for the distinct field are never collapsed — each passes through independently.
+Documents with no value for the distinct field are never collapsed — each passes through independently. A document with several values collapses on its smallest (numbers before strings).
+
+`$totalHits` counts the hits left after collapsing. When the words match more than `Config::$maxDocs` documents (`exhaustive: false`), the page comes from the best candidates, but the total is counted over every match, so it costs time proportional to the number of matches (on the 44k catalog a distinct search takes 57 ms instead of 41). `searchBoolean()` with `distinct` counts its candidates only.
 
 ## SearchOptions reference
 
