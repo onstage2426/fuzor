@@ -1211,7 +1211,7 @@ final class Index implements \Countable
         // doc_facets: per document, the facet_value_ids of its filterable values as packed
         // 64-bit little-endian integers. Filtered facet counts read one row per
         // matching document instead of one facet_values row per document and key
-        // (countFacetValuesOfDocs()).
+        // (facetValueCountsOfDocs()).
         $pdo->exec(
             "CREATE TABLE IF NOT EXISTS doc_facets (
                 doc_id INTEGER PRIMARY KEY,
