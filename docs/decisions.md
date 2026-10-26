@@ -3,6 +3,53 @@
 Records of options that were evaluated and rejected, with the evidence, so they
 are not re-attempted without new information.
 
+## Rejected: other shapes for the exact `searchBoolean()` total (2026-10-26)
+
+**Proposal:** count the matches of a boolean query whose terms were cut at `maxDocs` with a
+cheaper shape than walking the rarest side with an `EXISTS` probe per term per document.
+
+**Why rejected:** measured on the 44k ecom catalog (laptop at 2.0 GHz, `casual shirt -formal`,
+whose terms expand to 2, 4 and 6 terms through typos; the walk reaches the 1,001 matches it
+needs after about 2,500 documents): the current walk 7.0 ms. Reading every term's documents and
+evaluating the expression with PHP hash sets 5.0 ms for the full count (26k rows read; the walk's
+early stop is lost, so broad OR queries get slower); `INTERSECT` / `EXCEPT` of the terms' rows
+in SQL 5.3 ms with the limit; the negated word as a materialised `NOT IN` set 6.0 ms here but
+up to 55% slower on other queries (`kurta -cotton` 5.4 → 8.3 ms); probing through
+`doc_id_index` instead of the primary key 9.4 ms. None is a clear win across queries.
+
+**When to revisit:** if boolean totals become a measured bottleneck in a deployment, or if the
+page itself is computed exactly (the same set would then serve the total).
+
+## Rejected: pruning the by-score read of a word by a hit-count bound (2026-10-26)
+
+**Proposal:** a document's length is at least its hit count, so a row's BM25 score is bounded by
+a function of `hit_count` alone. Any 500 rows give a lower bound for the 500th best score, and
+rows whose bound is below it can be skipped through the `(term_id, hit_count DESC)` index, so the
+read of a first word's best rows by score (`fetchDocsByTermIds(…, byScore: true)`) would read
+fewer rows with the same result.
+
+**Why rejected:** the result is identical, but the first pass that finds the bound (the 2,000
+rows with the most hits) costs 2–6 ms, and on many words it skips nothing because their 500th
+best score is reached by documents with one hit (laptop, ecom): `sh` 18.5 → 13.3 ms and `ca`
+15.1 → 9.5 ms, but `bl` 16.5 → 22.9 ms, `men` 7.1 → 10.3 ms, `black` 6.2 → 9.1 ms.
+
+**When to revisit:** with a cheap bound that needs no first pass (for example stored per-term
+statistics), or if as-you-type prefixes of two letters dominate a workload.
+
+## Rejected: deduplicating the result set's driver in PHP for facet counts (2026-10-26)
+
+**Proposal:** stream the result set of a capped search to the facet counter from the driver word's
+document IDs read and deduplicated in PHP, in document order, instead of `SELECT DISTINCT` over the
+word's terms (a temporary B-tree in index order); only when the driver cannot exceed
+`maxFacetCountDocs`, where the order decides which documents are counted.
+
+**Why rejected:** same counts, but only 2 ms of 22.7 ms saved (laptop, ecom `shirt` minus Sports,
+12,090 matches): the probes of the other conditions and the `doc_facets` read per match dominate,
+and the `DISTINCT` it replaces costs 7.4 ms against 4.8 ms for reading the IDs into PHP.
+
+**When to revisit:** together with a design that evaluates the filter conditions on the same pass
+(the `doc_facets` row already holds every filterable value of the document).
+
 ## Rejected: a stored BM25 key to pick each word's candidates (2026-10-26)
 
 **Proposal:** store each word's BM25 factor for a document, `tf / (tf + k1 · (1 − b + b · dl / avgdl))`,
