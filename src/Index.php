@@ -7040,18 +7040,18 @@ final class Index implements \Countable
      * IDs of the live documents that contain every group in $members, or null when the bucket's
      * driver is above EXACT_BUCKET_MAX_DRIVER documents (the bucket is then not read exactly).
      *
-     * One statement. The driver (the group with the fewest rows to read) is read; another group
-     * of one term is a correlated primary key probe per document; a group of several terms
-     * (prefix, typo or synonym expansions) is read once and tested by membership, unless probing
-     * its terms for the documents expected to remain is cheaper (PROBE_ROW_COST; amazon "kitchen
-     * knife set": 84 → 6 ms). The CTEs are MATERIALIZED because the planner otherwise drives
-     * from the expanded group and probes the rarest one per document (amazon "women cotton
-     * dress": 90 vs 28 ms). Returning the rows from the same statement instead of completing the
-     * groups afterwards (completeGroup()) measured ~10% slower: fetching them row by row costs
-     * more than the probes it saves.
+     * The driver (the group with the fewest rows to read) is read, then the other groups narrow
+     * it down rarest first: each is read once and intersected with the documents left, unless
+     * probing its terms for them is cheaper (PROBE_ROW_COST; amazon "kitchen knife set": 84 →
+     * 6 ms). Set operations run in PHP on the read IDs: the same in one SQL statement (materialised
+     * groups tested by membership, GROUP BY) cost about twice as much (ecom "blue cotton shirt"
+     * 22.6 → 8.9 ms), and deciding per group on the documents actually left replaces an estimate.
+     * Returning the rows from here instead of completing the groups afterwards (completeGroup())
+     * measured ~10% slower: fetching them row by row costs more than the probes it saves.
      *
      * @param  list<KeywordGroup> $members Groups with at least one term each.
-     * @return array<int, int>|null Document ID → its hits of the driver (rarest) group.
+     * @return array<int, int>|null Document ID → its hits of the driver (rarest) group, by ID;
+     *         with $limit only the first $limit of them.
      */
     private function exactBucketDocs(array $members, ?int $limit = null): ?array
     {
@@ -7067,43 +7067,46 @@ final class Index implements \Countable
             return null;
         }
         usort($members, fn(array $a, array $b): int => $a['df'] <=> $b['df']);
-        $total      = max(1, (int) $this->getInfoValues(['total_documents'])['total_documents']);
-        $ctes       = ['drv(doc_id, hc) AS MATERIALIZED (SELECT doc_id, hit_count FROM doclist WHERE term_id IN '
-            . '(SELECT value FROM json_each(?))' . $this->liveDocsSql('doc_id') . ')'];
-        $cteParams  = [json_encode($driver['termIds'])];
-        $checks     = [];
-        $termParams = [];
-        // Documents expected to reach each check (words taken as independent), rarest checks first.
-        $expected = (float) $driver['df'];
-        foreach ($members as $i => $group) {
-            $terms = $group['termIds'];
-            if (count($terms) === 1) {
-                $checks[]     = 'EXISTS (SELECT 1 FROM doclist x WHERE x.term_id = ? AND x.doc_id = drv.doc_id)';
-                $termParams[] = $terms[0];
-            } elseif ($group['df'] < $expected * count($terms) * self::PROBE_ROW_COST) {
-                // Reading the group once is cheaper than probing its terms per remaining document.
-                $ctes[]      = "g{$i}(doc_id) AS MATERIALIZED (SELECT doc_id FROM doclist WHERE term_id IN "
-                    . '(SELECT value FROM json_each(?)))';
-                $cteParams[] = json_encode($terms);
-                $checks[]    = "drv.doc_id IN g{$i}";
-            } else {
-                $checks[]     = 'EXISTS (SELECT 1 FROM doclist x WHERE x.term_id IN (SELECT value FROM json_each(?))'
-                    . ' AND x.doc_id = drv.doc_id)';
-                $termParams[] = json_encode($terms);
-            }
-            $expected *= min(1.0, $group['df'] / $total);
-        }
-        // The driver may list a document once per matching term: grouped.
-        $stmt = $this->prepare(
-            'WITH ' . implode(', ', $ctes) . ' SELECT drv.doc_id, SUM(drv.hc) FROM drv'
-            . ($checks === [] ? '' : ' WHERE ' . implode(' AND ', $checks)) . ' GROUP BY drv.doc_id'
-            . ($limit === null ? '' : ' LIMIT ?')
+        $live = $this->liveDocsSql('d.doc_id');
+        $stmt = $this->stmt(
+            'exactBucketDriver' . ($live === '' ? '' : ':live'),
+            "SELECT d.doc_id, d.hit_count FROM json_each(?) t CROSS JOIN doclist d ON d.term_id = t.value{$live}"
         );
-        // Every CTE parameter precedes the WHERE clause's in the statement text.
-        $stmt->execute([...$cteParams, ...$termParams, ...($limit === null ? [] : [$limit])]);
+        $stmt->execute([json_encode($driver['termIds'])]);
         /** @var array<int, int> $hits */
-        $hits = $stmt->fetchAll(PDO::FETCH_KEY_PAIR);
-        return $hits;
+        $hits = [];
+        /** @var list<array{0: int, 1: int}> $rows */
+        $rows = $stmt->fetchAll(PDO::FETCH_NUM);
+        foreach ($rows as [$docId, $hitCount]) {
+            $hits[$docId] = ($hits[$docId] ?? 0) + $hitCount;
+        }
+        foreach ($members as $group) {
+            if ($hits === []) {
+                break;
+            }
+            $terms = json_encode($group['termIds']);
+            if ($group['df'] <= count($hits) * count($group['termIds']) * self::PROBE_ROW_COST) {
+                $stmt = $this->stmt(
+                    'exactBucketGroup',
+                    'SELECT d.doc_id FROM json_each(?) t CROSS JOIN doclist d ON d.term_id = t.value'
+                );
+                $stmt->execute([$terms]);
+            } else {
+                $docIds = array_keys($hits);
+                sort($docIds);
+                $stmt = $this->stmt(
+                    'exactBucketProbe',
+                    'SELECT j.value FROM json_each(?) j WHERE EXISTS (SELECT 1 FROM doclist x'
+                    . ' WHERE x.term_id IN (SELECT value FROM json_each(?)) AND x.doc_id = j.value)'
+                );
+                $stmt->execute([json_encode($docIds), $terms]);
+            }
+            /** @var list<int> $holding */
+            $holding = $stmt->fetchAll(PDO::FETCH_COLUMN);
+            $hits    = array_intersect_key($hits, array_flip($holding));
+        }
+        ksort($hits);
+        return $limit === null ? $hits : array_slice($hits, 0, $limit, true);
     }
 
     /**
