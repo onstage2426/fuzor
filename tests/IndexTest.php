@@ -4309,6 +4309,37 @@ class IndexTest extends TestCase
         }
     }
 
+    public function testRemoveRefusesAFileThatIsNoDatabase(): void
+    {
+        file_put_contents($this->dbPath, str_repeat('not a database, just text. ', 10));
+        try {
+            $this->expectExceptionMessage('Not a Fuzor index');
+            Index::remove($this->dbPath);
+        } finally {
+            $this->assertFileExists($this->dbPath);
+        }
+    }
+
+    public function testReadonlyOpenAndRemoveWorkUnderOpenBasedir(): void
+    {
+        $index = new Index($this->dbPath);
+        $index->insert([['id' => 1, 'title' => 'sedan']]);
+        $index->close();
+
+        // PHP's SQLite driver refuses every file: URI under open_basedir, also an allowed one.
+        $script = 'require ' . var_export(dirname(__DIR__) . '/vendor/autoload.php', true) . ';'
+            . '$path = ' . var_export($this->dbPath, true) . ';'
+            . '$read = new Fuzor\Index($path, readonly: true);'
+            . 'echo json_encode($read->search("sedan")->getIds()); $read->close();'
+            . 'echo count(Fuzor\Index::remove($path)) > 0 ? " removed" : " kept";';
+        $allowed = dirname(__DIR__) . PATH_SEPARATOR . dirname($this->dbPath);
+        $command = [PHP_BINARY, '-d', 'open_basedir=' . $allowed, '-r', $script];
+        $output  = [];
+        exec(implode(' ', array_map(escapeshellarg(...), $command)) . ' 2>&1', $output);
+
+        $this->assertSame('[1] removed', implode("\n", $output));
+    }
+
     public function testRemoveLeavesOtherIndexesAndALiveBuildAlone(): void
     {
         $sibling = $this->dbPath . '2';   // shares the prefix, is another index

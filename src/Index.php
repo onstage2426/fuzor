@@ -678,7 +678,8 @@ final class Index implements \Countable
      * @param  string       $path Index path, as passed to new Index().
      * @return list<string>       Deleted paths, sorted.
      * @throws IOException  If the directory does not exist, or $path holds a file that is not a
-     *                      Fuzor index (it is left untouched).
+     *                      Fuzor index or cannot be read (permissions, open_basedir); it is left
+     *                      untouched.
      */
     public static function remove(string $path): array
     {
@@ -1280,11 +1281,12 @@ final class Index implements \Countable
         // stale identity makes the next reopenIfChanged() do one redundant reopen
         // (harmless) instead of serving the old file until the following rotation.
         $this->captureFileIdentity();
-        $encodedPath         = implode('/', array_map(rawurlencode(...), explode('/', $this->path)));
-        $dsn                 = $this->readonly
-            ? 'sqlite:file://' . $encodedPath . '?mode=ro'
-            : 'sqlite:' . $this->path;
-        $this->pdo = new PDO($dsn);
+        // Read-only by open flag, not a file: URI (?mode=ro): with open_basedir set, PHP's SQLite
+        // driver refuses every URI filename, also one inside the allowed directories.
+        $this->pdo = new PDO(
+            'sqlite:' . $this->path,
+            options: $this->readonly ? [\Pdo\Sqlite::ATTR_OPEN_FLAGS => \Pdo\Sqlite::OPEN_READONLY] : [],
+        );
         $this->resetConnectionCaches();
         /** @infection-ignore-all MethodCallRemoval: applyPragmas sets WAL/cache/case_sensitive_like; all terms are stored/queried in lowercase so LIKE correctness is unaffected without it */
         $this->applyPragmas();
@@ -1345,14 +1347,19 @@ final class Index implements \Countable
      * The schema revision stored in a Fuzor index file, read without opening it as an Index;
      * null when the file is not a Fuzor index. Files before 1.5.0 have no schema_version key and
      * are revision 1. Opened read-only, like a readonly Index: it only reads one value.
+     *
+     * @throws IOException If the file cannot be read at all (permissions, open_basedir): that
+     *                     says nothing about what it holds.
      */
     private static function storedRevision(string $resolved): ?int
     {
         try {
-            $encoded = implode('/', array_map(rawurlencode(...), explode('/', $resolved)));
             $pdo     = new \PDO(
-                'sqlite:file://' . $encoded . '?mode=ro',
-                options: [\PDO::ATTR_ERRMODE => \PDO::ERRMODE_EXCEPTION],
+                'sqlite:' . $resolved,
+                options: [
+                    \PDO::ATTR_ERRMODE           => \PDO::ERRMODE_EXCEPTION,
+                    \Pdo\Sqlite::ATTR_OPEN_FLAGS => \Pdo\Sqlite::OPEN_READONLY,
+                ],
             );
             $tables  = $pdo->query(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('info', 'wordlist')"
@@ -1363,8 +1370,12 @@ final class Index implements \Countable
             $stmt = $pdo->query("SELECT value FROM info WHERE key = 'schema_version'");
             $value = $stmt === false ? false : $stmt->fetchColumn();
             return $value === false ? 1 : (int) $value;
-        } catch (\PDOException) {
-            return null;
+        } catch (\PDOException $e) {
+            // SQLITE_NOTADB: the file is something else.
+            if (($e->errorInfo[1] ?? null) === 26) {
+                return null;
+            }
+            throw new IOException("Cannot read {$resolved}: {$e->getMessage()}", 0, $e);
         }
     }
 
