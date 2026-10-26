@@ -165,6 +165,13 @@ final class Index implements \Countable
     private const int COMPLETE_PROBE_ROWS = 16;
 
     /**
+     * loadFacetKeySets(): a value list's rows read in sequence per candidate read from doc_facets
+     * (ecom: ~0.13 µs per row, ~0.4 µs per candidate in the membership list either way, ~0.85 µs
+     * per candidate row read and tested).
+     */
+    private const int KEY_SET_SCAN_ROWS = 3;
+
+    /**
      * Positions per field: field n's positions start at n × this (tokenizeDocumentFields()).
      * 2^20 keeps the stored position small (3-byte varints for the second field) while no
      * realistic field reaches a million tokens.
@@ -9141,20 +9148,31 @@ final class Index implements \Countable
     {
         $sets          = [];
         $excluded      = [];
-        $candidateJson = json_encode($candidateDocIds);
+        $candidateJson = json_encode($candidateDocIds, JSON_THROW_ON_ERROR);
         foreach ([...$this->facetFilterConditions($filter), ...$extra] as $condition) {
             $name = $condition['name'];
             if ($condition['impossible'] || $candidateDocIds === []) {
                 $sets[$name] = [];
                 continue;
             }
-            $stmt = $this->prepare(
-                'SELECT ff.doc_id ' . sprintf($condition['rows'], 'ff')
-                . ' AND ff.doc_id IN (SELECT value FROM json_each(?))'
-            );
-            $stmt->execute([...$condition['params'], $candidateJson]);
-            /** @var list<int> $ids */
-            $ids = $stmt->fetchAll(PDO::FETCH_COLUMN);
+            // A value list is read from the candidates' doc_facets rows, one per candidate, or, when
+            // its values have few rows, by reading those rows in sequence (+doc_id: not probed per
+            // candidate). Probing every candidate × value in the primary key cost more than either
+            // (ecom, 4,593 candidates: gender Women|Men 7.7 → 4.0 ms, articleType Tshirts 5.4 → 3.4 ms).
+            // Other conditions (ranges, query negations) are probed per candidate.
+            $scan = isset($condition['values'])
+                && $this->conditionRowCount($condition) <= count($candidateDocIds) * self::KEY_SET_SCAN_ROWS;
+            if (isset($condition['values']) && !$scan) {
+                $ids = $this->candidatesHoldingValues($condition['values'], $candidateJson);
+            } else {
+                $stmt = $this->prepare(
+                    'SELECT ff.doc_id ' . sprintf($condition['rows'], 'ff')
+                    . ' AND ' . ($scan ? '+' : '') . 'ff.doc_id IN (SELECT value FROM json_each(?))'
+                );
+                $stmt->execute([...$condition['params'], $candidateJson]);
+                /** @var list<int> $ids */
+                $ids = $stmt->fetchAll(PDO::FETCH_COLUMN);
+            }
             if ($condition['exclude']) {
                 $excluded += array_fill_keys($ids, true);
             } else {
@@ -9162,6 +9180,37 @@ final class Index implements \Countable
             }
         }
         return [$sets, $excluded];
+    }
+
+    /**
+     * The candidates (a JSON list) whose doc_facets row holds one of a key's values.
+     *
+     * @param  array{keyId: int, values: list<mixed>} $values
+     * @return list<int>
+     */
+    private function candidatesHoldingValues(array $values, string $candidateJson): array
+    {
+        $packed = array_map(
+            fn(int $vid): string => pack('P', $vid),
+            $this->facetValueIdsOf($values['keyId'], $values['values']),
+        );
+        if ($packed === []) {
+            return [];
+        }
+        $stmt = $this->stmt(
+            'candidateFacetRows',
+            'SELECT df.doc_id, df.vids FROM json_each(?) j CROSS JOIN doc_facets df ON df.doc_id = j.value'
+        );
+        $stmt->execute([$candidateJson]);
+        $ids = [];
+        /** @var list<array{0: int, 1: string}> $rows */
+        $rows = $stmt->fetchAll(PDO::FETCH_NUM);
+        foreach ($rows as [$docId, $blob]) {
+            if (self::holdsAnyPackedId($blob, $packed)) {
+                $ids[] = $docId;
+            }
+        }
+        return $ids;
     }
 
     /**
