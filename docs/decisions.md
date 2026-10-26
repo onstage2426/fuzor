@@ -3,6 +3,36 @@
 Records of options that were evaluated and rejected, with the evidence, so they
 are not re-attempted without new information.
 
+## Rejected: a stored BM25 key to pick each word's candidates (2026-10-26)
+
+**Proposal:** store each word's BM25 factor for a document, `tf / (tf + k1 · (1 − b + b · dl / avgdl))`,
+as a `doclist` column when it is written, and index `(term_id, key DESC)` instead of
+`(term_id, hit_count DESC)`. A search then reads each word's `maxDocs` best documents by BM25
+straight from the index, instead of those with the most occurrences, and the extra sorted read
+of the first word (when a page reaches the documents with only that word) is no longer needed.
+Scores stay computed at query time; the key only picks the candidates.
+
+**Why rejected:** prototyped and measured on the 44k ecom catalog (300 searches, 12 option
+variants):
+
+- Pages identical to the uncapped ranking improved by 1–4 points on a fresh build (plain
+  89 → 93%, typo 89 → 92%, `MatchingStrategy::All` 92 → 95%; sort, exclusion and `distinct`
+  unchanged).
+- Most searches got slower: plain +10%, three facets +16%, sorted +14%, prefix +10%, All +12%;
+  only typo searches got faster (−20%). An integer key (2 bytes instead of 8) was about as slow,
+  so the extra size is not the main cause.
+- Index +15% (363 → 418 MB; 381 MB with the integer key), build +13% (34.6 → 39.1 s).
+- The key depends on `avgdl` when the row is written, and goes stale as the index changes.
+  Re-keying every row of an edited document makes an update of 200 titles 156 → 713 ms
+  (246 → 3,510 WAL pages); keeping old keys is cheap (162 ms), but after a shift in document
+  lengths (built shortest documents first) the keys were up to 61% off and pages fell below
+  today's: typo 72% (now 89%), page 10 76% (now 84%), plain 88% (now 89%).
+- `k1` and `b` are per-connection `Config`; a stored key would tie them to the build.
+
+**When to revisit:** if search cost is dominated by reading candidates rather than by completing
+and counting them, or if `k1`/`b` move into the schema for another reason. Numbers and harness:
+`dataflow.md` §21 item 28.
+
 ## Rejected: one document per variation with per-product facet counts (2026-10-07)
 
 **Proposal:** index each product variation (size, colour) as its own document and have facet
