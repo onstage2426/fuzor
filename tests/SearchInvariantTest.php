@@ -212,6 +212,124 @@ class SearchInvariantTest extends TestCase
     }
 
     /**
+     * The uncapped search equals a brute-force ranker that shares no ranking code with Index
+     * (ReferenceRanker): totals, every page position's rank key, facet counts. Proximity is off,
+     * which the brute force does not model.
+     */
+    #[DataProvider('seeds')]
+    public function testUncappedSearchEqualsBruteForce(int $seed): void
+    {
+        [, , $queries, $docs] = $this->build($seed);
+        $index  = $this->openWithoutProximity(100_000_000);
+        $ranker = new ReferenceRanker($docs, ['title', 'body'], $index);
+        foreach (self::bruteForceCases($queries) as [$name, $q, $options]) {
+            $this->assertMatchesBruteForce($ranker, $index, $name, $q, $options, facets: true);
+        }
+    }
+
+    /** An exhaustive result of the capped search equals the brute-force ranking too. */
+    #[DataProvider('seeds')]
+    public function testExhaustiveCappedSearchEqualsBruteForce(int $seed): void
+    {
+        [, , $queries, $docs] = $this->build($seed);
+        $index   = $this->openWithoutProximity(5);
+        $ranker  = new ReferenceRanker($docs, ['title', 'body'], $index);
+        $checked = 0;
+        foreach (self::bruteForceCases($queries) as [$name, $q, $options]) {
+            if ($index->search($q, $options)->exhaustive) {
+                $checked++;
+                $this->assertMatchesBruteForce($ranker, $index, $name, $q, $options, facets: false);
+            }
+        }
+        $this->assertGreaterThan(0, $checked, 'no exhaustive result to compare');
+    }
+
+    /**
+     * Every variant, plus negations, quoted phrases and MatchingStrategy::Frequency.
+     *
+     * @param  list<string> $queries
+     * @return \Generator<array{string, string, SearchOptions}>
+     */
+    private static function bruteForceCases(array $queries): \Generator
+    {
+        $exact = new SearchOptions(asYouType: false, limit: 10, facets: ['color']);
+        foreach ($queries as $q) {
+            foreach (self::variants() as $name => $options) {
+                yield [$name, $q, $options];
+            }
+            $words = explode(' ', $q);
+            yield ['negated', "$q -shirt -\"cotton shirt\"", $exact];
+            yield ['phrase', '"' . $words[0] . ' ' . $words[1] . '"' . (isset($words[2]) ? " $words[2]" : ''), $exact];
+            yield ['frequency', $q, new SearchOptions(
+                asYouType: false,
+                limit: 10,
+                matchingStrategy: MatchingStrategy::Frequency,
+            )];
+        }
+    }
+
+    /** Pages at offsets 0, 10 and 20 hold, position by position, documents with the reference's rank key. */
+    private function assertMatchesBruteForce(
+        ReferenceRanker $ranker,
+        Index $index,
+        string $name,
+        string $q,
+        SearchOptions $options,
+        bool $facets,
+    ): void {
+        $expected = $ranker->search($q, $options);
+        $label    = "$name \"$q\"";
+        foreach ([0, 10, 20] as $offset) {
+            $result = $index->search($q, self::page($options, $offset, 10));
+            $this->assertSame(count($expected['ids']), $result->totalHits, "$label: totalHits");
+            $want = array_slice($expected['ids'], $offset, 10);
+            $got  = $result->getIds();
+            $this->assertCount(count($want), $got, "$label offset $offset: page size");
+            foreach ($got as $i => $id) {
+                $this->assertArrayHasKey($id, $expected['keys'], "$label offset $offset: doc $id is no match");
+                $a = $expected['keys'][$id];
+                $b = $expected['keys'][$want[$i]];
+                $same = count($a) === count($b);
+                foreach ($a as $k => $x) {
+                    $same = $same && ReferenceRanker::near($x, $b[$k]);
+                }
+                $this->assertTrue($same, sprintf(
+                    '%s offset %d position %d: doc %d (key %s) where the reference has doc %d (key %s)',
+                    $label,
+                    $offset,
+                    $i,
+                    $id,
+                    json_encode($a),
+                    $want[$i],
+                    json_encode($b),
+                ));
+            }
+        }
+        if ($facets) {
+            $distribution = $index->search($q, $options)->facetDistribution;
+            $actual       = [];
+            foreach ($distribution as $field => $counts) {
+                $counts = array_combine(array_map('strval', array_keys($counts)), $counts);
+                ksort($counts);
+                $actual[$field] = $counts;
+            }
+            ksort($actual);
+            $want = $expected['facets'];
+            ksort($want);
+            $this->assertSame($want, $actual, "$label: facets");
+        }
+    }
+
+    private function openWithoutProximity(int $maxDocs): Index
+    {
+        return new Index(
+            $this->dbPath,
+            config: new Config(maxDocs: $maxDocs, maxFacetCountDocs: 100_000_000, proximityBoost: 0.0),
+            readonly: true,
+        );
+    }
+
+    /**
      * A property that does not hold yet: report the first counterexample as incomplete instead
      * of failing. Remove the call (use an assertion) once the property holds.
      */
@@ -238,7 +356,7 @@ class SearchInvariantTest extends TestCase
      * A random index (Zipf-like word frequencies, so a few words are in most documents) opened
      * twice: with maxDocs 5 and uncapped.
      *
-     * @return array{Index, Index, list<string>}
+     * @return array{Index, Index, list<string>, list<array<string, mixed>>}
      */
     private function build(int $seed): array
     {
@@ -282,6 +400,6 @@ class SearchInvariantTest extends TestCase
         while (count($queries) < self::QUERIES) {
             $queries[$words(2, 3)] = true;
         }
-        return [$capped, $reference, array_map('strval', array_keys($queries))];
+        return [$capped, $reference, array_map('strval', array_keys($queries)), $docs];
     }
 }
