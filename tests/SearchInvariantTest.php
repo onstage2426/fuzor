@@ -61,8 +61,21 @@ class SearchInvariantTest extends TestCase
         return [
             'plain'   => new SearchOptions(asYouType: false, limit: 10),
             'prefix'  => new SearchOptions(limit: 10),
-            'filter'  => new SearchOptions(asYouType: false, limit: 10, filter: ['color' => ['red', 'blue']]),
-            'exclude' => new SearchOptions(asYouType: false, limit: 10, filter: ['color' => new FacetExclude('red')]),
+            'facets'  => new SearchOptions(asYouType: false, limit: 10, facets: ['color', 'price']),
+            // A filter on a counted field: its counts leave that filter out (disjunctive).
+            'filter'  => new SearchOptions(
+                asYouType: false,
+                limit: 10,
+                filter: ['color' => ['red', 'blue']],
+                facets: ['price', 'color'],
+            ),
+            'exclude' => new SearchOptions(
+                asYouType: false,
+                limit: 10,
+                filter: ['color' => new FacetExclude('red')],
+                facets: ['color'],
+            ),
+            'negated' => new SearchOptions(asYouType: false, limit: 10, facets: ['color']),
             'sort'    => new SearchOptions(asYouType: false, limit: 10, sort: ['price:asc']),
             'all'     => new SearchOptions(asYouType: false, limit: 10, matchingStrategy: MatchingStrategy::All),
         ];
@@ -111,6 +124,26 @@ class SearchInvariantTest extends TestCase
                     $capped->search($q, $options)->totalHits,
                     "$name \"$q\"",
                 );
+            }
+        }
+    }
+
+    /** Facet counts cover the whole result set, not the candidates maxDocs left. */
+    #[DataProvider('seeds')]
+    public function testFacetCountsEqualUncappedCounts(int $seed): void
+    {
+        [$capped, $reference, $queries] = $this->build($seed);
+        foreach (self::variants() as $name => $options) {
+            if ($options->facets === []) {
+                continue;
+            }
+            foreach ($queries as $q) {
+                $q = $name === 'negated' ? "$q -shirt" : $q;
+                $a = $capped->search($q, $options);
+                $b = $reference->search($q, $options);
+                $this->assertSame($b->facetDistribution, $a->facetDistribution, "$name \"$q\"");
+                $this->assertSame($b->facetStats, $a->facetStats, "$name \"$q\"");
+                $this->assertSame([], $a->approximateFacets);
             }
         }
     }
@@ -240,7 +273,7 @@ class SearchInvariantTest extends TestCase
         $reference = new Index(
             $this->dbPath,
             config: new Config(maxDocs: 100_000_000, maxFacetCountDocs: 100_000_000),
-            schema: new SchemaConfig(filterableAttributes: ['color'], sortableAttributes: ['price']),
+            schema: new SchemaConfig(filterableAttributes: ['color', 'price'], sortableAttributes: ['price']),
         );
         $reference->insert($docs);
         $capped = new Index($this->dbPath, config: new Config(maxDocs: 5), readonly: true);

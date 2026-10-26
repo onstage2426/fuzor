@@ -8579,6 +8579,36 @@ class IndexTest extends TestCase
         $this->assertSame(3, $count('"red widget"', 'red'));   // 1, 4, 7: the words in order
     }
 
+    public function testCappedSearchCountsFacetsOverEveryMatch(): void
+    {
+        $schema = new SchemaConfig(filterableAttributes: ['color']);
+        $index  = new Index($this->dbPath, config: new Config(maxDocs: 2), schema: $schema);
+        $index->insert($this->sameWordDocs(7));
+
+        $all  = $index->search('widget', new SearchOptions(facets: ['color']));
+        $blue = $index->search('widget', new SearchOptions(filter: ['color' => 'blue'], facets: ['color']));
+
+        $this->assertFalse($all->exhaustive);
+        $this->assertSame(['blue' => 3, 'red' => 4], $all->facetDistribution['color']);
+        $this->assertSame([], $all->approximateFacets);
+        // Its own filter left out (disjunctive): every value stays visible.
+        $this->assertSame(['blue' => 3, 'red' => 4], $blue->facetDistribution['color']);
+        $this->assertSame(3, $blue->totalHits);
+    }
+
+    public function testCappedSearchFacetsOverMaxFacetCountDocsAreApproximate(): void
+    {
+        $schema = new SchemaConfig(filterableAttributes: ['color']);
+        $config = new Config(maxDocs: 2, maxFacetCountDocs: 5);
+        $index  = new Index($this->dbPath, config: $config, schema: $schema);
+        $index->insert($this->sameWordDocs(7));
+
+        $result = $index->search('widget', new SearchOptions(facets: ['color']));
+
+        $this->assertSame(['color'], $result->approximateFacets);
+        $this->assertSame(5, array_sum($result->facetDistribution['color']));
+    }
+
     public function testSearchKeywordExactlyAtMaxDocsIsExhaustive(): void
     {
         $index = new Index($this->dbPath, config: new Config(maxDocs: 3));

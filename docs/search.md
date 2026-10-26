@@ -66,7 +66,7 @@ Fuzor bounds the work behind a query with a few caps (see [tuning.md](tuning.md)
 
 | Flag | Set when | Effect |
 |---|---|---|
-| `$exhaustive === false` | A keyword matched more than `Config::$maxDocs` documents, or the last keyword's prefix matched more than `Config::$fuzzyMaxExpansions` terms | Hits come from the best candidates, so the page can differ from a full ranking. `search()` still counts `$totalHits` exactly; `searchBoolean()`'s total, a `distinct` total and a capped prefix's total are estimates |
+| `$exhaustive === false` | A keyword matched more than `Config::$maxDocs` documents, or the last keyword's prefix matched more than `Config::$fuzzyMaxExpansions` terms | Hits come from the best candidates, so the page can differ from a full ranking. `search()` still counts `$totalHits` and facet counts exactly over every match; `searchBoolean()`'s total, a `distinct` total and a capped prefix's total are estimates |
 | `$totalHitsCapped === true` | More documents match than `Config::$maxTotalHits` (1000) | `$totalHits` is the cap; no hit past it can be paged to |
 | `$approximateFacets` lists a field | That field's counts covered more than `Config::$maxFacetCountDocs` matching documents | Its counts in `$facetDistribution` / `$facetStats` are approximate |
 

@@ -150,8 +150,10 @@ new Index($path, config: new Config(maxTotalHits: 10_000));
 
 Below the cap, `search()` now counts `$totalHits` exactly also when a word matches more than
 `Config::$maxDocs` documents (`exhaustive: false`); 1.x reported the number of candidates it had
-scored, often a quarter of the real number or less. `searchBoolean()` and `distinct` totals stay
-estimates in that case.
+scored, often a quarter of the real number or less. Facet counts of such a search are taken over
+every match too (up to `Config::$maxFacetCountDocs`), not over the scored candidates; on the 44k
+catalog they were off by 76% at the median. `searchBoolean()` and `distinct` totals stay estimates
+in that case.
 
 ## `SearchOptions::$limit` defaults to 20
 

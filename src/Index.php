@@ -3030,18 +3030,33 @@ final class Index implements \Countable
             $docScores = array_intersect_key($docScores, $globalFilter);
         }
 
-        // Compute disjunctive facet counts on the full filtered result set.
+        // The result set beyond the candidates, when maxDocs cut them: the documents with the
+        // groups up to minBucket, through any of their terms (typos, prefix, synonyms), that
+        // pass the quoted phrases, negations and filters.
+        $required       = array_map(fn(int $g): array => $groups[$g], array_slice($order, 0, $minBucket));
+        $baseConditions = $candidatesCapped
+            ? [...$this->phraseConditions($phraseGroups, $lastToken, $asYouType), ...$negations]
+            : [];
+        // Disjunctive facet counts over the whole filtered result set.
         [
             'distribution' => $facetDistribution,
             'stats'        => $facetStats,
             'approximate'  => $approximateFacets,
-        ] = $this->computeFacetCounts(
-            $facets,
-            $filterSets,
-            $rawDocScores,
-            $docScores,
-            $this->config->maxFacetCountDocs,
-        );
+        ] = $candidatesCapped && $facets !== []
+            ? $this->resultSetFacetCounts(
+                $facets,
+                $required,
+                $baseConditions,
+                $this->facetFilterConditions($filter),
+                $this->config->maxFacetCountDocs,
+            )
+            : $this->computeFacetCounts(
+                $facets,
+                $filterSets,
+                $rawDocScores,
+                $docScores,
+                $this->config->maxFacetCountDocs,
+            );
         $facetDistribution = $this->orderFacetValues($facetDistribution, $options->sortFacetValuesBy);
         $exhaustive = !$candidatesCapped && !$prefixCapped;
         $warnings   = [
@@ -3052,16 +3067,10 @@ final class Index implements \Countable
         $total = count($docScores);
         if ($candidatesCapped && $distinct === null) {
             // The candidates hold only part of the matches: count them in SQL, up to one past
-            // maxTotalHits (the result is capped there). The result set is every document with
-            // the groups up to minBucket, through any of their terms (typos, prefix, synonyms),
-            // that passes the quoted phrases, negations and filters.
+            // maxTotalHits (the result is capped there).
             $total = $this->countSearchMatches(
-                array_map(fn(int $g): array => $groups[$g], array_slice($order, 0, $minBucket)),
-                [
-                    ...$this->phraseConditions($phraseGroups, $lastToken, $asYouType),
-                    ...$negations,
-                    ...$this->facetFilterConditions($filter),
-                ],
+                $required,
+                [...$baseConditions, ...$this->facetFilterConditions($filter)],
                 $this->config->maxTotalHits + 1,
             );
         }
@@ -6860,22 +6869,41 @@ final class Index implements \Countable
      * Number of documents that contain every group in $groups (through any of its terms) and
      * satisfy $conditions, counted up to $limit.
      *
-     * Driven from the group with the fewest documents, the other groups and the conditions as
-     * correlated EXISTS probes (doclist via doc_id_index, facet rows via facet_doc_id_index);
-     * the LIMIT stops the walk once the cap is reached, so a broad query reads about $limit
-     * matches and a narrow one the driver's rows.
-     *
      * @param  list<KeywordGroup>   $groups
      * @param  list<FacetCondition> $conditions
      */
     private function countSearchMatches(array $groups, array $conditions, int $limit): int
     {
-        if ($groups === [] || in_array([], array_column($groups, 'termIds'), true)) {
+        $match = $this->searchMatchesSql($groups, $conditions);
+        if ($match === null) {
             return 0;
+        }
+        $stmt = $this->prepare("SELECT COUNT(*) FROM ({$match[0]} LIMIT ?)");
+        $stmt->execute([...$match[1], $limit]);
+        return (int) $stmt->fetchColumn();
+    }
+
+    /**
+     * `SELECT DISTINCT d.doc_id …` of the documents that contain every group in $groups (through
+     * any of its terms) and satisfy $conditions, with its parameters; null when none can.
+     *
+     * Driven from the group with the fewest documents, the other groups and the conditions as
+     * correlated EXISTS probes (doclist via doc_id_index, facet rows via facet_doc_id_index);
+     * a LIMIT on it stops the walk once reached, so a broad query reads about that many matches
+     * and a narrow one the driver's rows.
+     *
+     * @param  list<KeywordGroup>   $groups
+     * @param  list<FacetCondition> $conditions
+     * @return array{0: string, 1: list<mixed>}|null
+     */
+    private function searchMatchesSql(array $groups, array $conditions): ?array
+    {
+        if ($groups === [] || in_array([], array_column($groups, 'termIds'), true)) {
+            return null;
         }
         usort($groups, fn(array $a, array $b): int => $a['df'] <=> $b['df']);
         $driver = array_shift($groups);
-        $sql    = 'SELECT COUNT(*) FROM (SELECT DISTINCT d.doc_id FROM doclist d WHERE d.term_id IN ('
+        $sql    = 'SELECT DISTINCT d.doc_id FROM doclist d WHERE d.term_id IN ('
             . $this->placeholders(count($driver['termIds'])) . ')' . $this->liveDocsSql('d.doc_id');
         $params = $driver['termIds'];
         foreach ($groups as $i => $group) {
@@ -6885,17 +6913,82 @@ final class Index implements \Countable
         }
         $probes = $this->renderFacetProbes($conditions, 'd.doc_id');
         if ($probes === null) {
-            return 0;
+            return null;
         }
-        $sql     .= $probes[0] . ' LIMIT ?)';
-        $params   = [...$params, ...$probes[1], $limit];
-        $stmt     = $this->prepare($sql);
-        $stmt->execute($params);
-        return (int) $stmt->fetchColumn();
+        return [$sql . $probes[0], [...$params, ...$probes[1]]];
     }
 
     /**
-     * The quoted phrases as conditions for countSearchMatches(): a document passes when it has
+     * Disjunctive facet counts over the whole result set of a search whose candidates were cut
+     * at maxDocs (computeFacetCounts() counts the candidates, which are then only part of it):
+     * each group's documents come from searchMatchesSql(), up to $maxDocs; a key with a positive
+     * filter of its own is counted without that filter (exclusions always apply).
+     *
+     * @param  list<string>         $facetKeys
+     * @param  list<KeywordGroup>   $groups     Groups every result contains.
+     * @param  list<FacetCondition> $base       Phrase and negation conditions.
+     * @param  list<FacetCondition> $filters    facetFilterConditions() of the filter.
+     * @return array{
+     *     distribution: array<string, array<array-key, int>>,
+     *     stats: array<string, array{min: float, max: float}>,
+     *     approximate: list<string>,
+     * }
+     */
+    private function resultSetFacetCounts(
+        array $facetKeys,
+        array $groups,
+        array $base,
+        array $filters,
+        int $maxDocs,
+    ): array {
+        $distribution = [];
+        $stats        = [];
+        $approximate  = [];
+        /** @var array<string, array<string, int>> $byGroup  own-filter key ('' = common) → name → key ID */
+        $byGroup = [];
+        foreach ($facetKeys as $keyName) {
+            $keyId = $this->lookupFacetKeyId($keyName);
+            if ($keyId === null) {
+                continue;
+            }
+            $own = array_filter($filters, fn(array $c): bool => !$c['exclude'] && $c['name'] === $keyName) !== [];
+            $byGroup[$own ? $keyName : ''][$keyName] = $keyId;
+        }
+        // Keys with a filter of their own first, then the others, as computeFacetCounts() merges them.
+        if (isset($byGroup[''])) {
+            $common = $byGroup[''];
+            unset($byGroup['']);
+            $byGroup[''] = $common;
+        }
+        foreach ($byGroup as $own => $nameToId) {
+            $conditions = array_values(array_filter(
+                $filters,
+                fn(array $c): bool => $c['exclude'] || $c['name'] !== $own,
+            ));
+            $match = $this->searchMatchesSql($groups, [...$base, ...$conditions]);
+            if ($match === null) {
+                continue;
+            }
+            // Driven from the result set's SQL: its documents stream into the count without
+            // a round trip through PHP.
+            $truncated = false;
+            $results   = $this->facetCountsOfDocsSql(
+                $nameToId,
+                "{$match[0]} LIMIT ?",
+                [...$match[1], $maxDocs + 1],
+                $maxDocs,
+                $truncated,
+            );
+            if ($truncated) {
+                array_push($approximate, ...array_keys($nameToId));
+            }
+            $this->mergeFacetCounts($results, $distribution, $stats);
+        }
+        return ['distribution' => $distribution, 'stats' => $stats, 'approximate' => $approximate];
+    }
+
+    /**
+     * The quoted phrases as conditions for searchMatchesSql(): a document passes when it has
      * the phrase's words at consecutive positions (as docMatchesPhrase(); the last slot is a
      * prefix when it is the query's as-you-type word). A phrase with a word the index lacks is
      * skipped, as in filterDocsByPhrases().
@@ -8865,17 +8958,25 @@ final class Index implements \Countable
      * 28.6k docs, three keys 16.3 vs 76.0 ms; 45k ecom set, gender Men 22k docs, five keys
      * 15.8 vs 85.0 ms.
      *
+     * With $maxDocs, only the first $maxDocs documents of $docsSql are counted and $truncated
+     * tells whether it holds more ($docsSql should then end in LIMIT $maxDocs + 1).
+     *
      * @param  array<string, int> $nameToId Facet key name → key_id.
      * @param  string             $docsSql  SELECT with a doc_id column, each document once.
      * @param  list<mixed>        $params
      * @return array<int, array<string, array{0: int, 1: int, 2: float|null}>>
      *         key_id → value → [documents, numeric documents, num_value]
      */
-    private function facetValueCountsOfDocs(array $nameToId, string $docsSql, array $params): array
-    {
-        $stmt = $this->prepare(
-            "SELECT df.vids FROM ({$docsSql}) d CROSS JOIN doc_facets df ON df.doc_id = d.doc_id"
-        );
+    private function facetValueCountsOfDocs(
+        array $nameToId,
+        string $docsSql,
+        array $params,
+        ?int $maxDocs = null,
+        bool &$truncated = false,
+    ): array {
+        // With a cap every document is a row (no facet values: NULL), so the rows count them.
+        $join = $maxDocs === null ? 'CROSS JOIN' : 'LEFT JOIN';
+        $stmt = $this->prepare("SELECT df.vids FROM ({$docsSql}) d {$join} doc_facets df ON df.doc_id = d.doc_id");
         $stmt->execute($params);
         /** @var array<int, int> $vidCounts */
         $vidCounts = [];
@@ -8883,7 +8984,16 @@ final class Index implements \Countable
         // documents match: 1.42M documents peak at 5 MB instead of 133 MB with fetchAll(),
         // at the same speed.
         $batch = [];
-        while (is_string($blob = $stmt->fetchColumn())) {
+        $rows  = 0;
+        while (($blob = $stmt->fetchColumn()) !== false) {
+            if ($maxDocs !== null && ++$rows > $maxDocs) {
+                $truncated = true;
+                $stmt->closeCursor();
+                break;
+            }
+            if (!is_string($blob)) {
+                continue;
+            }
             $batch[] = $blob;
             if (count($batch) === 20_000) {
                 self::countPackedIds($batch, $vidCounts);
@@ -8971,11 +9081,29 @@ final class Index implements \Countable
      */
     private function fetchFacetCountsOfDocs(array $nameToId, array $docIds): array
     {
-        $byKey  = $this->facetValueCountsOfDocs(
+        return $this->facetCountsOfDocsSql(
             $nameToId,
             'SELECT value AS doc_id FROM json_each(?)',
             [json_encode($docIds)],
         );
+    }
+
+    /**
+     * fetchFacetCountsOfDocs() over the documents a SELECT returns (see facetValueCountsOfDocs()
+     * for $maxDocs and $truncated).
+     *
+     * @param  array<string, int> $nameToId
+     * @param  list<mixed>        $params
+     * @return array<string, array{distribution: array<array-key, int>, stats: array{min: float, max: float}|null}>
+     */
+    private function facetCountsOfDocsSql(
+        array $nameToId,
+        string $docsSql,
+        array $params,
+        ?int $maxDocs = null,
+        bool &$truncated = false,
+    ): array {
+        $byKey  = $this->facetValueCountsOfDocs($nameToId, $docsSql, $params, $maxDocs, $truncated);
         $counts = [];
         foreach ($nameToId as $keyName => $keyId) {
             if (!isset($byKey[$keyId])) {
