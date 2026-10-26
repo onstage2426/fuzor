@@ -7030,7 +7030,30 @@ final class Index implements \Countable
             unset($byGroup['']);
             $byGroup[''] = $common;
         }
+        // The common group is the first value-list group's documents that hold one of its
+        // filter values: counted in the same read as that group (one pass over the wider set
+        // instead of two), unless the wider set is cut at $maxDocs.
+        /** @var array{vids: list<int>, nameToId: array<string, int>}|null $subset */
+        $subset  = null;
+        $carrier = null;
+        if (isset($byGroup[''])) {
+            foreach ($filters as $c) {
+                if (!$c['exclude'] && isset($c['values'], $byGroup[$c['name']])) {
+                    $subset  = [
+                        'vids'     => $this->facetValueIdsOf($c['values']['keyId'], $c['values']['values']),
+                        'nameToId' => $byGroup[''],
+                    ];
+                    $carrier = $c['name'];
+                    break;
+                }
+            }
+        }
+        $common = null;
         foreach ($byGroup as $own => $nameToId) {
+            if ($own === '' && $common !== null) {
+                $this->mergeFacetCounts($common, $distribution, $stats);
+                continue;
+            }
             $conditions = array_values(array_filter(
                 $filters,
                 fn(array $c): bool => $c['exclude'] || $c['name'] !== $own,
@@ -7041,20 +7064,45 @@ final class Index implements \Countable
             }
             // Driven from the result set's SQL: its documents stream into the count without
             // a round trip through PHP.
-            $truncated = false;
-            $results   = $this->facetCountsOfDocsSql(
+            $truncated    = false;
+            $subsetCounts = [];
+            $results      = $this->facetCountsOfDocsSql(
                 $nameToId,
                 "{$match[0]} LIMIT ?",
                 [...$match[1], $maxDocs + 1],
                 $maxDocs,
                 $truncated,
+                $own === $carrier ? $subset : null,
+                $subsetCounts,
             );
             if ($truncated) {
                 array_push($approximate, ...array_keys($nameToId));
+            } elseif ($own === $carrier) {
+                $common = $subsetCounts;
             }
             $this->mergeFacetCounts($results, $distribution, $stats);
         }
         return ['distribution' => $distribution, 'stats' => $stats, 'approximate' => $approximate];
+    }
+
+    /**
+     * The facet_value_ids of a key's values (number and string entries alike, as a filter's
+     * `value = ?` matches both).
+     *
+     * @param  list<mixed> $values
+     * @return list<int>
+     */
+    private function facetValueIdsOf(int $keyId, array $values): array
+    {
+        $stmt = $this->stmt(
+            'facetValueIdsOfValues',
+            'SELECT vid FROM facet_value_ids WHERE key_id = ? AND value IN (SELECT value FROM json_each(?))'
+        );
+        $texts = array_map(fn(mixed $v): string => is_scalar($v) ? (string) $v : '', $values);
+        $stmt->execute([$keyId, json_encode($texts)]);
+        /** @var list<int> $vids */
+        $vids = $stmt->fetchAll(PDO::FETCH_COLUMN);
+        return $vids;
     }
 
     /**
@@ -9055,9 +9103,15 @@ final class Index implements \Countable
      * With $maxDocs, only the first $maxDocs documents of $docsSql are counted and $truncated
      * tells whether it holds more ($docsSql should then end in LIMIT $maxDocs + 1).
      *
+     * With $subset, the documents holding any of its value IDs are counted a second time, for
+     * the keys in its nameToId, into $subsetCounts: the common group of a disjunctive count is the
+     * documents of a wider group that pass that group's own filter (one read instead of two).
+     *
      * @param  array<string, int> $nameToId Facet key name → key_id.
      * @param  string             $docsSql  SELECT with a doc_id column, each document once.
      * @param  list<mixed>        $params
+     * @param  array{vids: list<int>, nameToId: array<string, int>}|null $subset
+     * @param  array<int, array<string, array{0: int, 1: int, 2: float|null}>> $subsetCounts
      * @return array<int, array<string, array{0: int, 1: int, 2: float|null}>>
      *         key_id → value → [documents, numeric documents, num_value]
      */
@@ -9067,6 +9121,8 @@ final class Index implements \Countable
         array $params,
         ?int $maxDocs = null,
         bool &$truncated = false,
+        ?array $subset = null,
+        array &$subsetCounts = [],
     ): array {
         // With a cap every document is a row (no facet values: NULL), so the rows count them.
         $join = $maxDocs === null ? 'CROSS JOIN' : 'LEFT JOIN';
@@ -9074,11 +9130,15 @@ final class Index implements \Countable
         $stmt->execute($params);
         /** @var array<int, int> $vidCounts */
         $vidCounts = [];
+        /** @var array<int, int> $subsetVidCounts */
+        $subsetVidCounts = [];
+        $packed          = array_map(fn(int $vid): string => pack('P', $vid), $subset['vids'] ?? []);
         // Rows are counted in batches as they arrive, so memory stays flat however many
         // documents match: 1.42M documents peak at 5 MB instead of 133 MB with fetchAll(),
         // at the same speed.
-        $batch = [];
-        $rows  = 0;
+        $batch       = [];
+        $subsetBatch = [];
+        $rows        = 0;
         while (($blob = $stmt->fetchColumn()) !== false) {
             if ($maxDocs !== null && ++$rows > $maxDocs) {
                 $truncated = true;
@@ -9089,12 +9149,52 @@ final class Index implements \Countable
                 continue;
             }
             $batch[] = $blob;
+            if ($packed !== [] && self::holdsAnyPackedId($blob, $packed)) {
+                $subsetBatch[] = $blob;
+            }
             if (count($batch) === 20_000) {
                 self::countPackedIds($batch, $vidCounts);
-                $batch = [];
+                self::countPackedIds($subsetBatch, $subsetVidCounts);
+                $batch       = [];
+                $subsetBatch = [];
             }
         }
         self::countPackedIds($batch, $vidCounts);
+        self::countPackedIds($subsetBatch, $subsetVidCounts);
+        if ($subset !== null) {
+            $subsetCounts = $this->valueCountsOfIds($subset['nameToId'], $subsetVidCounts);
+        }
+        return $this->valueCountsOfIds($nameToId, $vidCounts);
+    }
+
+    /**
+     * Whether a doc_facets blob holds one of the packed value IDs (at an 8-byte boundary).
+     *
+     * @param list<string> $packed pack('P', vid) each
+     */
+    private static function holdsAnyPackedId(string $blob, array $packed): bool
+    {
+        foreach ($packed as $needle) {
+            $at = 0;
+            while (($at = strpos($blob, $needle, $at)) !== false) {
+                if ($at % 8 === 0) {
+                    return true;
+                }
+                $at++;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Counted value IDs → values of the requested keys (facetValueCountsOfDocs()).
+     *
+     * @param  array<string, int> $nameToId
+     * @param  array<int, int>    $vidCounts vid → documents
+     * @return array<int, array<string, array{0: int, 1: int, 2: float|null}>>
+     */
+    private function valueCountsOfIds(array $nameToId, array $vidCounts): array
+    {
         if ($vidCounts === []) {
             return [];
         }
@@ -9184,10 +9284,13 @@ final class Index implements \Countable
 
     /**
      * fetchFacetCountsOfDocs() over the documents a SELECT returns (see facetValueCountsOfDocs()
-     * for $maxDocs and $truncated).
+     * for $maxDocs, $truncated and $subset; $subsetCounts gets the subset's summary).
      *
      * @param  array<string, int> $nameToId
      * @param  list<mixed>        $params
+     * @param  array{vids: list<int>, nameToId: array<string, int>}|null $subset
+     * @param  array<string, array{distribution: array<array-key, int>,
+     *                              stats: array{min: float, max: float}|null}> $subsetCounts
      * @return array<string, array{distribution: array<array-key, int>, stats: array{min: float, max: float}|null}>
      */
     private function facetCountsOfDocsSql(
@@ -9196,8 +9299,34 @@ final class Index implements \Countable
         array $params,
         ?int $maxDocs = null,
         bool &$truncated = false,
+        ?array $subset = null,
+        array &$subsetCounts = [],
     ): array {
-        $byKey  = $this->facetValueCountsOfDocs($nameToId, $docsSql, $params, $maxDocs, $truncated);
+        $subsetByKey = [];
+        $byKey       = $this->facetValueCountsOfDocs(
+            $nameToId,
+            $docsSql,
+            $params,
+            $maxDocs,
+            $truncated,
+            $subset,
+            $subsetByKey,
+        );
+        if ($subset !== null) {
+            $subsetCounts = self::summarizeKeyCounts($subset['nameToId'], $subsetByKey);
+        }
+        return self::summarizeKeyCounts($nameToId, $byKey);
+    }
+
+    /**
+     * facetValueCountsOfDocs() rows summarised per key name, count desc then value.
+     *
+     * @param  array<string, int> $nameToId
+     * @param  array<int, array<string, array{0: int, 1: int, 2: float|null}>> $byKey
+     * @return array<string, array{distribution: array<array-key, int>, stats: array{min: float, max: float}|null}>
+     */
+    private static function summarizeKeyCounts(array $nameToId, array $byKey): array
+    {
         $counts = [];
         foreach ($nameToId as $keyName => $keyId) {
             if (!isset($byKey[$keyId])) {
