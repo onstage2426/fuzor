@@ -154,10 +154,15 @@ final class Index implements \Countable
 
     /**
      * A primary key probe counted against reading one row in sequence: exactBucketDocs()'s
-     * choice between probing a group per document and reading it whole, and completeGroup()'s
-     * between probing per document and the term-list shape.
+     * choice between probing a group per document and reading it whole.
      */
     private const int PROBE_ROW_COST = 3;
+
+    /**
+     * groupRowsOfDocs(): a (document, term) probe counted against reading one of the terms' rows
+     * in sequence (ecom: ~0.9 µs per probe, ~0.05 µs per row read).
+     */
+    private const int COMPLETE_PROBE_ROWS = 16;
 
     /**
      * Positions per field: field n's positions start at n × this (tokenizeDocumentFields()).
@@ -7597,13 +7602,16 @@ final class Index implements \Countable
         }
         sort($docIds);
         // Driven from the documents, one primary key probe per (document, term) pair through
-        // doc_id_index: amazon "women" (134k documents) completed for 87 documents 12.6 → 0.07 ms;
-        // with the word's term list first SQLite scans all of its rows and tests membership.
-        // That scan stays the cheaper shape when the pairs outnumber the terms' rows (a prefix
-        // group of many terms over many documents). Sorted IDs keep consecutive probes on
+        // doc_id_index: amazon "women" (134k documents) completed for 87 documents 12.6 → 0.07 ms.
+        // Reading the terms' rows in sequence and testing membership is cheaper while they number
+        // fewer than COMPLETE_PROBE_ROWS per pair (ecom "black jean", 1,581 documents × 3 terms,
+        // 12.7k rows: 7.1 → 3.0 ms); it is driven from the term list, as a term_id IN (…) list
+        // left SQLite free to probe per document anyway. Sorted IDs keep consecutive probes on
         // neighbouring pages. Never write +d.term_id: it turns the probes into a scan of every
         // document's terms (41 ms).
-        $probe = count($docIds) * count($terms) * self::PROBE_ROW_COST <= array_sum($terms);
+        $termIds = array_keys($terms);
+        sort($termIds);
+        $probe = count($docIds) * count($terms) * self::COMPLETE_PROBE_ROWS <= array_sum($terms);
         $stmt  = $probe
             ? $this->stmt(
                 'completeTermGroupProbe',
@@ -7614,21 +7622,25 @@ final class Index implements \Countable
             )
             : $this->stmt(
                 'completeTermGroup',
-                'SELECT d.term_id, d.doc_id, ' . self::bm25Sql('d') . '
-                   FROM doclist d
+                'SELECT d.term_id, d.doc_id, ' . self::bm25Sql('d', '?1', '?2', '?3') . '
+                   FROM json_each(?4) t
+                   CROSS JOIN doclist d ON d.term_id = t.value
                    CROSS JOIN doc_lengths dl ON dl.doc_id = d.doc_id
-                  WHERE d.term_id IN (SELECT value FROM json_each(?))
-                    AND d.doc_id IN (SELECT value FROM json_each(?))'
+                  WHERE d.doc_id IN (SELECT value FROM json_each(?5))'
             );
         $stmt->execute([
             $group['idfK1p1'],
             $k1_1mb,
             $k1b_avgdl,
-            json_encode(array_keys($terms)),
+            json_encode($termIds),
             json_encode($docIds),
         ]);
         /** @var list<array{0: int, 1: int, 2: float}> $rows */
         $rows = $stmt->fetchAll(PDO::FETCH_NUM);
+        if (!$probe && $rows !== []) {
+            // The probes' order (document, then term): a document's scores are summed in it.
+            array_multisort(array_column($rows, 1), SORT_ASC, array_column($rows, 0), SORT_ASC, $rows);
+        }
         return $rows;
     }
 
