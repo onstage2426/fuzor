@@ -2656,7 +2656,7 @@ final class Index implements \Countable
         $this->checkDataVersion();
         ['phrase' => $positive, 'conditions' => $negations] = $this->extractNegations($phrase);
         if (trim($positive) === '') {
-            return $this->browse($phrase, $options, $negations);
+            return $this->withSortDetails($this->browse($phrase, $options, $negations), $options);
         }
         $asYouType     = $options->asYouType;
         $limit         = $options->limit;
@@ -3148,6 +3148,17 @@ final class Index implements \Countable
         // last. Without sort or distinct only the first offset + limit documents are shown, and
         // the rerank can stop early (see applyProximityRanking()).
         $proximity = count($termGroups) >= 2 && $this->config->proximityBoost > 0.0;
+        $details   = $options->showRankingScoreDetails;
+        // Typos each words bucket allows: the budgets of its groups, in strategy order.
+        $maxTypos  = function () use ($order, $keywords): array {
+            $max = [0];
+            foreach ($order as $g) {
+                $max[] = end($max) + $this->typoBudget($keywords[$g]);
+            }
+            return $max;
+        };
+        /** @var array<int, float> $bm25  Scores before the proximity factor (ranking details). */
+        $bm25      = $details ? $docScores : [];
         // With sort fields the proximity factor only breaks ties between documents with equal
         // sort values, so the sorted path reranks just the ties on the page (rerankSortedPageTies()).
         if ($proximity && ($limit > 0 || $distinct !== null) && ($sortSpecs === [] || $distinct !== null)) {
@@ -3218,7 +3229,7 @@ final class Index implements \Countable
                 $offset,
                 $limit,
             );
-            return new SearchResult(
+            $result = new SearchResult(
                 ids: $pagedIds,
                 totalHits: $distinctHits,
                 documents: $this->hydrateAndFormat($pagedIds, $positive, $options),
@@ -3231,6 +3242,17 @@ final class Index implements \Countable
                 exhaustive: $exhaustive,
                 approximateFacets: $approximateFacets,
             );
+            return $details ? $result->withRankingScoreDetails($this->rankingScoreDetails(
+                $pagedIds,
+                $sortSpecs,
+                [
+                    'bucket'   => $docBucket,
+                    'typos'    => $docTypos,
+                    'maxTypos' => $maxTypos(),
+                    'bm25'     => $bm25,
+                    'scores'   => $docScores,
+                ],
+            )) : $result;
         }
 
         if ($limit === 0) {
@@ -3249,6 +3271,8 @@ final class Index implements \Countable
             );
         }
 
+        /** @var array<int, float>|null $reranked  Page ties reranked by proximity (sorted search). */
+        $reranked = null;
         if ($sortSpecs !== []) {
             // Words bucket first (MatchingStrategy), then the sort fields, then BM25 score, then
             // doc ID as the final deterministic key.
@@ -3270,6 +3294,7 @@ final class Index implements \Countable
                     count($keywords),
                     $offset,
                     $limit,
+                    $reranked,
                 )
                 : array_slice($sortedIds, $offset, $limit);
         } elseif ($docRank !== null) {
@@ -3279,7 +3304,7 @@ final class Index implements \Countable
             arsort($docScores);
             $pagedIds = array_slice(array_keys($docScores), $offset, $limit);
         }
-        return new SearchResult(
+        $result = new SearchResult(
             ids: $pagedIds,
             totalHits: $total,
             documents: $this->hydrateAndFormat($pagedIds, $positive, $options),
@@ -3291,6 +3316,84 @@ final class Index implements \Countable
             warnings: $warnings,
             exhaustive: $exhaustive,
             approximateFacets: $approximateFacets,
+        );
+        return $details ? $result->withRankingScoreDetails($this->rankingScoreDetails(
+            $pagedIds,
+            $sortSpecs,
+            [
+                'bucket'   => $docBucket,
+                'typos'    => $docTypos,
+                'maxTypos' => $maxTypos(),
+                'bm25'     => $bm25,
+                'scores'   => array_replace($docScores, $reranked ?? []),
+            ],
+        )) : $result;
+    }
+
+    /**
+     * SearchOptions::$showRankingScoreDetails: per document of the page the keys it was ranked by,
+     * in rank order, with the values the ranking compared. With $relevance (search() with a
+     * query): 'words' (its bucket), 'typo' (typos within the bucket; maxTypoCount = the bucket's
+     * typo budgets), one entry per sort spec, 'bm25' (score before the proximity factor, and the
+     * factor; a member of a bucket too large to score has score 0). Without it only the sort
+     * entries. Sort values are the ones compared: a multi-value field's first value in the sort
+     * direction, numbers as floats, null when the document lacks the field.
+     *
+     * @param  list<int>                             $ids
+     * @param  list<array{field: string, asc: bool}> $sortSpecs
+     * @param  array{bucket: array<int, int>, typos: array<int, int>, maxTypos: list<int>,
+     *               bm25: array<int, float>, scores: array<int, float>}|null $relevance
+     *               maxTypos: typo budget of the first k groups, by k.
+     * @return array<int, array<string, array<string, mixed>>>
+     */
+    private function rankingScoreDetails(array $ids, array $sortSpecs, ?array $relevance = null): array
+    {
+        $details = array_fill_keys($ids, []);
+        if ($relevance !== null) {
+            foreach ($ids as $id) {
+                $bucket                = $relevance['bucket'][$id] ?? 0;
+                $details[$id]['words'] = [
+                    'order'            => 0,
+                    'matchingWords'    => $bucket,
+                    'maxMatchingWords' => count($relevance['maxTypos']) - 1,
+                ];
+                $details[$id]['typo']  = [
+                    'order'        => 1,
+                    'typoCount'    => $relevance['typos'][$id] ?? 0,
+                    'maxTypoCount' => $relevance['maxTypos'][$bucket] ?? 0,
+                ];
+            }
+        }
+        $order = $relevance === null ? 0 : 2;
+        foreach ($sortSpecs as ['field' => $field, 'asc' => $asc]) {
+            $values = $this->fetchSortValues($ids, $this->lookupFacetKeyId($field), $asc, fold: true, raw: true);
+            $rule   = $field . ($asc ? ':asc' : ':desc');
+            foreach ($ids as $id) {
+                $details[$id][$rule] = ['order' => $order, 'value' => $values[$id]];
+            }
+            $order++;
+        }
+        if ($relevance !== null) {
+            foreach ($ids as $id) {
+                $bm25                 = $relevance['bm25'][$id] ?? 0.0;
+                $details[$id]['bm25'] = [
+                    'order'           => $order,
+                    'score'           => $bm25,
+                    'proximityFactor' => $bm25 > 0.0 ? ($relevance['scores'][$id] ?? $bm25) / $bm25 : 1.0,
+                ];
+            }
+        }
+        return $details;
+    }
+
+    /** $result with the sort-only ranking details of an empty query or searchBoolean(), when asked for. */
+    private function withSortDetails(SearchResult $result, SearchOptions $options): SearchResult
+    {
+        if (!$options->showRankingScoreDetails) {
+            return $result;
+        }
+        return $result->withRankingScoreDetails(
+            $this->rankingScoreDetails($result->getIds(), $this->parseSortSpec($options->sort)),
         );
     }
 
@@ -3310,7 +3413,8 @@ final class Index implements \Countable
         string $phrase,
         SearchOptions $options = new SearchOptions(),
     ): SearchResult {
-        return $this->booleanSearch($phrase, $this->clampPage($options))
+        $options = $this->clampPage($options);
+        return $this->withSortDetails($this->booleanSearch($phrase, $options), $options)
             ->withTotalHitsCap($this->config->maxTotalHits);
     }
 
@@ -6230,6 +6334,8 @@ final class Index implements \Countable
      * @param  array<int, float>  $docScores
      * @param  array<int, int>    $docBucket
      * @param  list<list<int>>    $termGroups
+     * @param  array<int, float>|null $reranked Set to the reranked documents' scores.
+     * @param-out array<int, float> $reranked
      * @return list<int>
      */
     private function rerankSortedPageTies(
@@ -6241,7 +6347,9 @@ final class Index implements \Countable
         int $numKeywords,
         int $offset,
         int $limit,
+        ?array &$reranked = null,
     ): array {
+        $reranked = [];
         $n     = count($sortedIds);
         $start = min($offset, $n);
         $end   = min($n, $offset + $limit);
@@ -6280,7 +6388,8 @@ final class Index implements \Countable
             return array_slice($sortedIds, $offset, $limit);
         }
         $this->applyProximityBoost($boostSet, $termGroups);
-        $scores = array_replace($docScores, $boostSet);
+        $reranked = $boostSet;
+        $scores   = array_replace($docScores, $boostSet);
 
         $ordered = [];
         foreach ($groups as $group) {
@@ -8121,15 +8230,21 @@ final class Index implements \Countable
      * 33 → 11 ms.
      *
      * With $fold, strings are returned as their sortKey(), the form sorting compares; without
-     * it (distinct grouping) as stored.
+     * it (distinct grouping) as stored. $raw returns the stored value of the one picked by the
+     * folded comparison (ranking details).
      *
      * @param  list<int> $docIds
      * @param  int|null  $keyId   null = unknown field; all docs return null
      * @param  bool      $asc     Direction used to pick the representative of a multi-value field.
      * @return array<int, float|string|null>
      */
-    private function fetchSortValues(array $docIds, ?int $keyId, bool $asc = true, bool $fold = false): array
-    {
+    private function fetchSortValues(
+        array $docIds,
+        ?int $keyId,
+        bool $asc = true,
+        bool $fold = false,
+        bool $raw = false,
+    ): array {
         $result = array_fill_keys($docIds, null);
         if ($keyId === null) {
             return $result;
@@ -8155,14 +8270,19 @@ final class Index implements \Countable
         /** @var list<array{0: int, 1: float|null, 2: string}> $sortRows */
         $sortRows = $stmt->fetchAll(PDO::FETCH_NUM);
         $folded = [];
+        /** @var array<int, float|string> $compared  With $raw: the compared (folded) value per doc. */
+        $compared = [];
         foreach ($sortRows as [$docId, $numValue, $strValue]) {
             if ($scan && !array_key_exists($docId, $result)) {
                 continue;
             }
             $value   = $numValue ?? ($fold ? $folded[$strValue] ??= self::sortKey($strValue) : $strValue);
-            $current = $result[$docId];
+            $current = $raw ? $compared[$docId] ?? null : $result[$docId];
             if ($current === null || self::compareSortValues($value, $current, $asc) < 0) {
-                $result[$docId] = $value;
+                $result[$docId] = $raw ? $numValue ?? $strValue : $value;
+                if ($raw) {
+                    $compared[$docId] = $value;
+                }
             }
         }
         return $result;

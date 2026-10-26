@@ -241,6 +241,24 @@ final class SearchResult implements \Countable, \IteratorAggregate
         ]);
     }
 
+    /**
+     * This result with '_rankingScoreDetails' added to each hit (SearchOptions::$showRankingScoreDetails).
+     *
+     * @param array<int, array<string, array<string, mixed>>> $details Doc ID → rule → details.
+     *
+     * @internal Built by Index.
+     */
+    public function withRankingScoreDetails(array $details): self
+    {
+        return clone($this, [
+            'hits' => array_map(
+                fn(array $hit, int $id): array => [...$hit, '_rankingScoreDetails' => $details[$id] ?? []],
+                $this->hits,
+                $this->ids,
+            ),
+        ]);
+    }
+
     /** @return array<string, mixed> */
     public function toArray(): array
     {

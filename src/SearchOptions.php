@@ -48,6 +48,13 @@ final readonly class SearchOptions
      * @param MatchingStrategy $matchingStrategy search() only: which documents a multi-word query
      *                              returns and how they rank first (see MatchingStrategy). Ignored by
      *                              searchBoolean() and facetSearch() (which requires every word).
+     * @param bool $showRankingScoreDetails Add '_rankingScoreDetails' to each hit: the keys it was
+     *                              ranked by, in rank order. search() with a query: 'words'
+     *                              {order, matchingWords, maxMatchingWords}, 'typo' {order, typoCount,
+     *                              maxTypoCount}, one 'field:asc' / 'field:desc' entry per sort spec
+     *                              {order, value}, and 'bm25' {order, score, proximityFactor}. An empty
+     *                              query and searchBoolean() rank by sort fields only, so they give the
+     *                              sort entries alone ([] without sort). Off by default (no cost).
      */
     public function __construct(
         public readonly bool $asYouType = true,
@@ -68,6 +75,7 @@ final readonly class SearchOptions
         public readonly bool $escapeFormatted = false,
         public readonly MatchingStrategy $matchingStrategy = MatchingStrategy::Last,
         public readonly array $sortFacetValuesBy = [],
+        public readonly bool $showRankingScoreDetails = false,
     ) {
     }
 

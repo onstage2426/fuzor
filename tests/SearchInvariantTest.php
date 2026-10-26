@@ -305,7 +305,7 @@ class SearchInvariantTest extends TestCase
         $expected = $ranker->search($q, $options);
         $label    = "$name \"$q\"";
         foreach ([0, 10, 20] as $offset) {
-            $result = $index->search($q, self::page($options, $offset, 10));
+            $result = $index->search($q, self::page($options, $offset, 10, details: true));
             $this->assertSame(count($expected['ids']), $result->totalHits, "$label: totalHits");
             $want = array_slice($expected['ids'], $offset, 10);
             $got  = $result->getIds();
@@ -328,6 +328,11 @@ class SearchInvariantTest extends TestCase
                     $want[$i],
                     json_encode($b),
                 ));
+                $this->assertSame(
+                    json_encode(self::rankKey($result->hits[$i]['_rankingScoreDetails'])),
+                    json_encode(array_map(fn(float|int $x): float => round((float) $x, 9), $a)),
+                    "$label offset $offset: ranking details of doc $id",
+                );
             }
         }
         if ($facets) {
@@ -365,7 +370,7 @@ class SearchInvariantTest extends TestCase
         }
     }
 
-    private static function page(SearchOptions $o, int $offset, int $limit): SearchOptions
+    private static function page(SearchOptions $o, int $offset, int $limit, bool $details = false): SearchOptions
     {
         return new SearchOptions(
             asYouType: $o->asYouType,
@@ -374,7 +379,83 @@ class SearchInvariantTest extends TestCase
             filter: $o->filter,
             sort: $o->sort,
             matchingStrategy: $o->matchingStrategy,
+            showRankingScoreDetails: $details,
         );
+    }
+
+    /**
+     * A hit's ranking details as ReferenceRanker's rank key: −bucket, typos, sort values
+     * (negated for desc), −score × proximity factor; rounded so near-equal floats compare equal.
+     *
+     * @return list<float>
+     */
+    private static function rankKey(mixed $details): array
+    {
+        if (!is_array($details)) {
+            throw new \LogicException('hit without ranking details');
+        }
+        $key = [];
+        foreach ($details as $rule => $d) {
+            $number = fn(string $field): float => is_array($d) && (is_int($d[$field]) || is_float($d[$field]))
+                ? (float) $d[$field]
+                : throw new \LogicException("$rule.$field is not a number");
+            $key[] = round(match (true) {
+                $rule === 'words'             => -$number('matchingWords'),
+                $rule === 'typo'              => $number('typoCount'),
+                $rule === 'bm25'              => -$number('score') * $number('proximityFactor'),
+                str_ends_with($rule, ':desc') => -$number('value'),
+                default                       => $number('value'),
+            }, 9);
+        }
+        return $key;
+    }
+
+    /**
+     * Every page, capped or not, is in the order of its own ranking details: they report the
+     * keys the ranking compared, also for approximate results and with proximity on.
+     */
+    #[DataProvider('seeds')]
+    public function testPagesAreOrderedByTheirRankingDetails(int $seed): void
+    {
+        [$capped, $reference, $queries] = $this->build($seed);
+        $approximate = 0;
+        foreach ([$capped, $reference] as $index) {
+            foreach (self::variants() as $name => $options) {
+                foreach ($queries as $q) {
+                    foreach ([0, 10] as $offset) {
+                        $result = $index->search($q, self::page($options, $offset, 10, details: true));
+                        $approximate += $result->exhaustive ? 0 : 1;
+                        $keys = array_map(
+                            fn(array $hit): array => self::rankKey($hit['_rankingScoreDetails']),
+                            $result->hits,
+                        );
+                        foreach ($keys as $i => $key) {
+                            $this->assertSame(
+                                count($options->sort) + 3,
+                                count($key),
+                                "$name \"$q\": rules of hit $i",
+                            );
+                            if ($i > 0) {
+                                $this->assertLessThanOrEqual(
+                                    0,
+                                    $keys[$i - 1] <=> $key,
+                                    sprintf(
+                                        '%s "%s" offset %d: hit %d %s before %s',
+                                        $name,
+                                        $q,
+                                        $offset,
+                                        $i,
+                                        json_encode($keys[$i - 1]),
+                                        json_encode($key),
+                                    ),
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        $this->assertGreaterThan(0, $approximate, 'no approximate result checked');
     }
 
     /**

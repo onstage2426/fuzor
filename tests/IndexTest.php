@@ -10894,4 +10894,169 @@ class IndexTest extends TestCase
         $this->expectException(IOException::class);
         $reopened->reopenIfChanged();
     }
+
+    // --- Ranking score details ---
+
+    /** @param list<string> $sort */
+    private static function detailsOptions(array $sort = [], ?string $distinct = null, int $limit = 20): SearchOptions
+    {
+        return new SearchOptions(
+            asYouType: false,
+            limit: $limit,
+            sort: $sort,
+            distinct: $distinct,
+            attributesToRetrieve: [],
+            showRankingScoreDetails: true,
+        );
+    }
+
+    /** @return array<int, array<string, array<mixed>>> doc ID → rule → details, in page order */
+    private static function rankingDetails(SearchResult $result): array
+    {
+        $details = [];
+        foreach ($result->hits as $hit) {
+            $id    = $hit['id'];
+            $rules = $hit['_rankingScoreDetails'] ?? null;
+            if (!is_int($id) || !is_array($rules)) {
+                throw new \LogicException('hit without ranking details');
+            }
+            $details[$id] = [];
+            foreach ($rules as $rule => $entry) {
+                $details[$id][(string) $rule] = is_array($entry) ? $entry : throw new \LogicException('bad entry');
+            }
+        }
+        return $details;
+    }
+
+    private static function float(mixed $value): float
+    {
+        return is_float($value) ? $value : throw new \LogicException('float expected');
+    }
+
+    public function testRankingScoreDetailsAreOffByDefault(): void
+    {
+        $result = $this->strategyIndex()->search('big fat cat', new SearchOptions(asYouType: false));
+
+        foreach ($result->hits as $hit) {
+            $this->assertArrayNotHasKey('_rankingScoreDetails', $hit);
+        }
+    }
+
+    public function testRankingScoreDetailsListTheRulesInRankOrder(): void
+    {
+        $result = $this->strategyIndex()->search('big fat cat', self::detailsOptions(['price:desc']));
+
+        $this->assertSame([1, 2, 3, 4], $result->getIds());
+        $details = array_values(self::rankingDetails($result));
+        $this->assertSame(['words', 'typo', 'price:desc', 'bm25'], array_keys($details[0]));
+        $this->assertSame([0, 1, 2, 3], array_column($details[0], 'order'));
+        $this->assertSame(['order' => 0, 'matchingWords' => 3, 'maxMatchingWords' => 3], $details[0]['words']);
+        $this->assertSame(['order' => 1, 'typoCount' => 0, 'maxTypoCount' => 0], $details[0]['typo']);
+        $this->assertSame(['order' => 2, 'value' => 50.0], $details[0]['price:desc']);
+        // Doc 3 ("big cat") lacks "fat": bucket 1, ranked by price within it before doc 4.
+        $this->assertSame(1, $details[2]['words']['matchingWords']);
+        $this->assertSame(30.0, $details[2]['price:desc']['value']);
+        foreach ($details as $d) {
+            $this->assertGreaterThan(0.0, $d['bm25']['score']);
+        }
+    }
+
+    public function testRankingScoreDetailsCountTyposWithinTheBucket(): void
+    {
+        $index = new Index($this->dbPath);
+        $index->insert([
+            ['id' => 1, 'title' => 'brown leather boots'],
+            ['id' => 2, 'title' => 'brown leathr boots'],
+        ]);
+
+        $result  = $index->search('brown leather', self::detailsOptions());
+        $details = self::rankingDetails($result);
+
+        $this->assertSame([1, 2], $result->getIds());
+        // "brown" (5 letters) and "leather" (7) may each have one typo.
+        $this->assertSame(['order' => 1, 'typoCount' => 0, 'maxTypoCount' => 2], $details[1]['typo']);
+        $this->assertSame(['order' => 1, 'typoCount' => 1, 'maxTypoCount' => 2], $details[2]['typo']);
+    }
+
+    public function testRankingScoreDetailsSeparateBm25FromTheProximityFactor(): void
+    {
+        $index = new Index($this->dbPath, schema: new SchemaConfig(sortableAttributes: ['price']));
+        $index->insert([
+            ['id' => 1, 'title' => 'red shoes', 'price' => 10],
+            ['id' => 2, 'title' => 'red heavy leather walking shoes', 'price' => 10],
+            ['id' => 3, 'title' => 'red', 'price' => 10],
+        ]);
+
+        // Unsorted, and sorted with the proximity factor breaking the price tie.
+        foreach ([[], ['price:asc']] as $sort) {
+            $result  = $index->search('red shoes', self::detailsOptions($sort));
+            $details = self::rankingDetails($result);
+            $this->assertSame([1, 2, 3], $result->getIds());
+            $near = self::float($details[1]['bm25']['proximityFactor']);
+            $far  = self::float($details[2]['bm25']['proximityFactor']);
+            $this->assertLessThan(1.0, $near);
+            $this->assertLessThan($near, $far);
+            // A partial match is not reordered by proximity.
+            $this->assertEqualsWithDelta(1.0, $details[3]['bm25']['proximityFactor'], 1e-12);
+            $this->assertGreaterThan(
+                self::float($details[2]['bm25']['score']) * $far,
+                self::float($details[1]['bm25']['score']) * $near,
+            );
+        }
+    }
+
+    public function testRankingScoreDetailsReportTheSortValueThatWasCompared(): void
+    {
+        $index = new Index($this->dbPath, schema: new SchemaConfig(
+            filterableAttributes: ['tag'],
+            sortableAttributes: ['tag'],
+        ));
+        $index->insert([
+            ['id' => 1, 'title' => 'lamp', 'tag' => ['Zeta', 'alpha']],
+            ['id' => 2, 'title' => 'lamp', 'tag' => 'beta'],
+            ['id' => 3, 'title' => 'lamp'],
+        ]);
+
+        // Strings compare case-insensitively; the stored value is reported.
+        $asc = $index->search('lamp', self::detailsOptions(['tag:asc']));
+        $this->assertSame([1, 2, 3], $asc->getIds());
+        $this->assertSame(['alpha', 'beta', null], array_values(array_map(
+            fn(array $rules): mixed => $rules['tag:asc']['value'],
+            self::rankingDetails($asc),
+        )));
+        $desc = $index->search('lamp', self::detailsOptions(['tag:desc']));
+        $this->assertSame([1, 2, 3], $desc->getIds());
+        $this->assertSame('Zeta', self::rankingDetails($desc)[1]['tag:desc']['value']);
+    }
+
+    public function testRankingScoreDetailsOfBrowseAndBooleanSearchHoldOnlySortEntries(): void
+    {
+        $index = $this->strategyIndex();
+        $sorted = self::detailsOptions(['price:asc'], limit: 2);
+
+        $cases = [
+            [$index->search('', $sorted), [5.0, 10.0]],
+            [$index->searchBoolean('big', $sorted), [20.0, 30.0]],
+            [$index->search('-cat', $sorted), [20.0, 40.0]],   // negations only: a browse
+        ];
+        foreach ($cases as $i => [$result, $prices]) {
+            $this->assertSame(
+                array_map(fn(float $p): array => ['price:asc' => ['order' => 0, 'value' => $p]], $prices),
+                array_values(self::rankingDetails($result)),
+                "case $i",
+            );
+        }
+        $boolean = $index->searchBoolean('big fat cat', self::detailsOptions());
+        $this->assertSame([1 => []], self::rankingDetails($boolean));
+    }
+
+    public function testRankingScoreDetailsWithDistinct(): void
+    {
+        $result = $this->strategyIndex()->search('big', self::detailsOptions(distinct: 'color'));
+
+        $this->assertCount(2, $result->hits);
+        foreach (self::rankingDetails($result) as $rules) {
+            $this->assertSame(['words', 'typo', 'bm25'], array_keys($rules));
+        }
+    }
 }

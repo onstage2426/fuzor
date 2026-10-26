@@ -27,7 +27,7 @@ When the document store is disabled, `$hits` contains id-only stubs: `[['id' => 
 
 | Member | Type | Description |
 |---|---|---|
-| `$hits` | `list<array>` | Documents in relevance order; gains `_formatted` when formatting options are set |
+| `$hits` | `list<array>` | Documents in relevance order; gains `_formatted` when formatting options are set, `_rankingScoreDetails` with `showRankingScoreDetails` |
 | `$hitsCount` | `int` | Documents in this page (≤ limit) |
 | `$totalHits` | `int\|null` | Total matches across all pages, up to `Config::$maxTotalHits` (1000) — see [Pagination](#pagination) |
 | `$query` | `string` | Original query string |
@@ -168,7 +168,7 @@ With `Last`, a document with "big" and "cat" but not "fat" is in the "big" bucke
 
 `searchBoolean()` keeps its own operators and ignores `matchingStrategy`; `facetSearch()` with a `q` requires every word.
 
-**Compared with Meilisearch:** the same three strategies and default. Meilisearch describes relaxing the query "when there are not enough results to satisfy `limit`"; Fuzor returns all buckets in order, which shows the same documents on the first pages and counts every returned document in `totalHits`. Within a bucket Fuzor ranks by `sort`, then BM25 with proximity, instead of Meilisearch's typo, proximity, attribute, and exactness rules.
+**Compared with Meilisearch:** the same three strategies and default. Meilisearch describes relaxing the query "when there are not enough results to satisfy `limit`"; Fuzor returns all buckets in order, which shows the same documents on the first pages and counts every returned document in `totalHits`. Within a bucket Fuzor ranks by typos (as Meilisearch), then `sort`, then BM25 with proximity, instead of Meilisearch's proximity, attribute, and exactness rules. `showRankingScoreDetails` shows these keys per hit (see [Ranking details](#ranking-details)).
 
 ## Excluding words and phrases
 
@@ -225,6 +225,36 @@ $index = new Index('/path/to/products.db', config: new Config(typoTolerance: new
 See [tuning.md](tuning.md) for the other settings.
 
 **Compared with Meilisearch:** the same settings (`typoTolerance`: `enabled`, `minWordSizeForTypos.oneTypo` / `twoTypos`, `disableOnWords`, `disableOnNumbers`) with the same defaults. Like Meilisearch, every word within its budget matches its typo derivations, and the typo rule (fewer typos first) comes right after the words rule. Differences: Fuzor requires the first three characters to match instead of counting a typo on the first character as two; a swap of neighbouring characters is one typo; `disableOnAttributes` is not available (the term dictionary is shared by all fields).
+
+## Ranking details
+
+`showRankingScoreDetails: true` adds `_rankingScoreDetails` to each hit: the keys the hit was ranked by, in rank order (`order`), with the values the ranking compared. Use it to see why one hit comes before another.
+
+```php
+$result = $index->search('blue cotton shirt', new SearchOptions(
+    sort: ['price:asc'],
+    showRankingScoreDetails: true,
+));
+
+$result->hits[0]['_rankingScoreDetails'];
+// [
+//     'words'     => ['order' => 0, 'matchingWords' => 3, 'maxMatchingWords' => 3],
+//     'typo'      => ['order' => 1, 'typoCount' => 0, 'maxTypoCount' => 2],
+//     'price:asc' => ['order' => 2, 'value' => 12.0],
+//     'bm25'      => ['order' => 3, 'score' => 0.845, 'proximityFactor' => 0.333],
+// ]
+```
+
+| Rule | Fields | Meaning |
+|---|---|---|
+| `words` | `matchingWords`, `maxMatchingWords` | The hit's words bucket (see [Matching strategy](#matching-strategy)) and the number of query words; more first |
+| `typo` | `typoCount`, `maxTypoCount` | Typos of the matched words, and the most their typo budgets allow; fewer first |
+| `field:asc` / `field:desc` | `value` | One per sort spec: the value compared (a multi-value field's first in the sort direction, numbers as floats, `null` when the document lacks the field) |
+| `bm25` | `score`, `proximityFactor` | BM25 over the words of the bucket, and the proximity factor it is multiplied by (`1.0` when proximity does not apply); higher product first |
+
+Documents with equal keys are ordered by document ID. On an approximate result (`exhaustive: false`) the values are still the ones the ranking used; a document of a words bucket too large to score has `score` 0. An empty query and `searchBoolean()` rank by sort fields only, so they give just the sort entries (an empty array without `sort`). Off by default; when off it costs nothing.
+
+**Compared with Meilisearch:** the same option name, key, and the `words`, `typo`, and sort entries (`order`, `matchingWords`, `maxMatchingWords`, `typoCount`, `maxTypoCount`, `value`). Fuzor has no `_rankingScore` and no per-rule `score` between 0 and 1: its relevance is BM25, not Meilisearch's rule scores, so it reports the BM25 score and the proximity factor in a Fuzor-specific `bm25` entry instead of `proximity`, `attribute`, and `exactness` entries.
 
 ## Boolean search
 
@@ -635,3 +665,4 @@ Documents with no value for the distinct field are never collapsed — each pass
 | `cropLength` | `200` | Excerpt window size in characters |
 | `cropMarker` | `'…'` | Inserted at crop boundaries |
 | `escapeFormatted` | `false` | Make every `_formatted` value safe HTML (stored text escaped, tags verbatim) — see [formatting.md](formatting.md#rendering-_formatted-as-html) |
+| `showRankingScoreDetails` | `false` | Add `_rankingScoreDetails` (the keys each hit was ranked by) to every hit — see [Ranking details](#ranking-details) |
