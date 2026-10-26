@@ -8545,6 +8545,35 @@ final class Index implements \Countable
         // Below 1,000 documents either way costs under a millisecond; no row count is read.
         $scan = count($docIds) >= 1000
             && count($docIds) >= self::SORT_VALUE_SCAN_SHARE * $this->keyRowCount($keyId);
+        if (!$this->isMultiValuedKey($keyId)) {
+            // One row per document: its value is the number, else the string, read as one column
+            // into a document → value map (no reduction per row).
+            $stmt = $scan
+                ? $this->stmt(
+                    'fetchKeySingleValues',
+                    'SELECT doc_id, COALESCE(num_value, value) FROM facet_values WHERE key_id = ?'
+                )
+                : $this->stmt(
+                    'fetchSingleValues',
+                    'SELECT doc_id, COALESCE(num_value, value) FROM facet_values
+                      WHERE key_id = ? AND doc_id IN (SELECT value FROM json_each(?))'
+                );
+            $stmt->execute($scan ? [$keyId] : [$keyId, json_encode($docIds)]);
+            /** @var array<int, float|string> $values */
+            $values = $stmt->fetchAll(PDO::FETCH_KEY_PAIR);
+            if ($scan) {
+                $values = array_intersect_key($values, $result);
+            }
+            if ($fold && !$raw) {
+                $folded = [];
+                foreach ($values as $docId => $value) {
+                    if (is_string($value)) {
+                        $values[$docId] = $folded[$value] ??= self::sortKey($value);
+                    }
+                }
+            }
+            return array_replace($result, $values);
+        }
         if ($scan) {
             $stmt = $this->stmt(
                 'fetchKeySortValues',
