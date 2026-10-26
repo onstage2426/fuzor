@@ -105,21 +105,27 @@ for the file layout this creates.
 Measured on a 533k-product catalog (the 44k test catalog copied twelve times with varied titles,
 prices, years and brands; 3.8 GB index), Fuzor 2.0, one PHP process:
 
-| Operation | 44k products | 533k products |
+| Operation | 44k products | 533k products* |
 |---|---|---|
-| Bulk `insert()` from a generator | 17 s, 138 MB peak | ~150 s, 136 MB peak |
-| Search, one to three words (incl. typos) | 1–6 ms | 1–13 ms |
-| Search + filter + sort + 6 facets | 6.4 ms | 8.6 ms |
-| Browse page, sorted or filtered | 0.15–8 ms | 0.2–15 ms |
-| Listing: 2 genders + 6 facets + sort | 13 ms (exact counts) | 23 ms |
-| Facets of the whole index | 0.5 ms | 1.9 ms |
-| Shop page: 5 facets, excluding 9% of products | 13 ms | 170 ms |
-| `facetSearch()` with a filter only | 9.6 ms | 120 ms |
-| `distinct` browse | 20–44 ms | 0.3–0.7 s |
+| Bulk `insert()` | 39 s | ~150 s, 136 MB peak (generator) |
+| Search, one to three words (incl. typos) | 10–22 ms | 1–13 ms* |
+| Search + filter + sort + 6 facets | 50 ms | 8.6 ms* |
+| Browse page, sorted or filtered | 0.01–1.1 ms | 0.2–15 ms |
+| Listing: 2 genders + 6 facets + sort | 4.4 ms (exact counts) | 23 ms |
+| Facets of the whole index | 0.6 ms | 1.9 ms |
+| Shop page: 5 facets, excluding 9% of products | 4.5 ms | 170 ms |
+| `facetSearch()` with a filter only | 8.8 ms | 120 ms |
+| `distinct` browse | 21–44 ms | 0.3–0.7 s |
 
-Searches stay in single-digit milliseconds because each word is capped at `Config::$maxDocs`
-best matches; the page then comes from those candidates (`exhaustive: false`), while the total is
-counted in SQL up to `Config::$maxTotalHits` (1000). Facet counts over a filter
+\* The 44k column was measured on 2026-10-26; the 533k column before the search changes of that
+day (exact ranking of the page's words bucket, totals and facet counts over every match), so its
+search rows are lower than a search costs now.
+
+Each word reads its `Config::$maxDocs` best matches first. The page's words bucket is then read
+and ranked exactly while it holds at most 4 × `maxDocs` documents; a larger one is ranked from the
+candidates (`exhaustive: false`). The total and the facet counts are counted in SQL over every
+match, the total up to `Config::$maxTotalHits` (1000), so a broad search costs about 1 µs per
+match on top of the ranking. Facet counts over a filter
 that matches more than `Config::$maxFacetCountDocs` (50,000) documents are approximate
 (`approximateFacets`). Counting costs about 0.6–1 µs per counted document, whatever the number
 of facet fields: each document's facet values are stored together as one packed row. Some
