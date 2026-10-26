@@ -3527,18 +3527,22 @@ final class Index implements \Countable
         };
 
         /**
-         * Stack entries: lazy string term, materialised list<int>, NOT-marker array, or null.
-         * @var list<string|list<int>|array{__not__: list<int>}|null> $stack
+         * Stack entries: lazy string term, materialised list<int>, NOT marker (the negated
+         * operand as a BooleanEntry predicate), or null.
+         * @var list<string|list<int>|array{__not__: BooleanEntry}|null> $stack
          */
         $stack = [];
 
-        foreach ($postfix as $token) {
+        foreach ($postfix as $at => $token) {
             if ($token === '~') {
-                // Lazy NOT: fetch the excluded IDs now so AND can use array_diff directly.
-                $term    = array_pop($stack);
-                /** @infection-ignore-all Ternary: $term is always a string when '~' is evaluated — Shunting-Yard emits '~' immediately after its operand term, never after a materialised list; both branches of $ids() reach $fetchIds() for strings anyway */
-                $termIds = is_string($term) ? $fetchIds($term, $term === $lastTerm) : $ids($term);
-                $stack[] = ['__not__' => $termIds];
+                // NOT keeps its operand as a predicate (booleanRoot()), not as documents: an AND
+                // subtracts the documents of its positive side that satisfy it, exactly. Fetching
+                // the operand's first maxDocs documents left the others in the result.
+                array_pop($stack);
+                $operand = self::booleanOperand($postfix, $at);
+                $stack[] = ['__not__' => count($operand) === 1 && !in_array($operand[0], ['&', '|', '~'], true)
+                    ? $this->booleanTerm($operand[0], $operand[0] === $lastTerm, $prefixCapped)
+                    : $this->booleanRoot($operand, $lastTerm, $asYouType, $prefixCapped)];
             } elseif ($token === '&') {
                 $right    = array_pop($stack);
                 $left     = array_pop($stack);
@@ -3546,16 +3550,17 @@ final class Index implements \Countable
                 $leftNot  = is_array($left) && isset($left['__not__']);
                 if ($rightNot && $leftNot) {
                     // ~a & ~b = ~(a | b): stays a negation for an enclosing AND to subtract.
-                    /** @var array{__not__: list<int>} $left */
-                    /** @var array{__not__: list<int>} $right */
-                    $excluded = array_merge($left['__not__'], $right['__not__']);
-                    $stack[]  = ['__not__' => array_values(array_unique($excluded))];
+                    /** @var array{__not__: BooleanEntry} $left */
+                    /** @var array{__not__: BooleanEntry} $right */
+                    $stack[] = ['__not__' => self::booleanOr($left['__not__'], $right['__not__'])];
                 } elseif ($rightNot || $leftNot) {
-                    // AND-NOT, in either order ("a ~b" or "~b a"): subtract the negated IDs.
-                    /** @var array{__not__: list<int>} $negated */
+                    // AND-NOT, in either order ("a ~b" or "~b a"): subtract the positive side's
+                    // documents that satisfy the negated predicate.
+                    /** @var array{__not__: BooleanEntry} $negated */
                     [$positive, $negated] = $rightNot ? [$left, $right] : [$right, $left];
+                    $kept    = $ids($positive);
                     /** @infection-ignore-all UnwrapArrayValues: array_diff preserves keys from first arg; array_values ensures list<int> contract for downstream array_slice/assertContains; keys are integer so assertContains still passes without reindex, making this a silent correctness issue rather than a detectable test failure */
-                    $stack[] = array_values(array_diff($ids($positive), $negated['__not__']));
+                    $stack[] = array_values(array_diff($kept, $this->docsMatching($kept, $negated['__not__'])));
                 } else {
                     // AND: intersection of both sides (C-native, O(n log n)).
                     /** @infection-ignore-all UnwrapArrayValues: array_intersect preserves keys from the first arg; array_values is needed to guarantee a list<int> */
@@ -6286,6 +6291,51 @@ final class Index implements \Countable
     }
 
     /**
+     * The documents of $docIds that satisfy a BooleanEntry's predicate (searchBoolean()'s NOT),
+     * exactly: its EXISTS probes per document.
+     *
+     * @param  list<int>    $docIds
+     * @param  BooleanEntry $entry
+     * @return list<int>
+     */
+    private function docsMatching(array $docIds, array $entry): array
+    {
+        if ($docIds === [] || $entry['driver'] === null) {
+            return [];
+        }
+        $stmt = $this->prepare(
+            "SELECT bm.doc_id FROM (SELECT value AS doc_id FROM json_each(?)) bm WHERE {$entry['pred']}"
+        );
+        $stmt->execute([json_encode($docIds), ...$entry['params']]);
+        /** @var list<int> $found */
+        $found = $stmt->fetchAll(PDO::FETCH_COLUMN);
+        return $found;
+    }
+
+    /**
+     * The tokens of the operand that ends just before $at in a postfix list (a term, or a whole
+     * sub-expression such as "a b |").
+     *
+     * @param  list<string> $postfix
+     * @return list<string>
+     */
+    private static function booleanOperand(array $postfix, int $at): array
+    {
+        $need = 1;
+        for ($i = $at - 1; $i >= 0; $i--) {
+            $need += match ($postfix[$i]) {
+                '&', '|' => 1,
+                '~'      => 0,
+                default  => -1,
+            };
+            if ($need === 0) {
+                return array_slice($postfix, $i, $at - $i);
+            }
+        }
+        return [];
+    }
+
+    /**
      * Trim a result fetched with LIMIT $limit + 1 back to $limit, flagging $truncated when the
      * extra row was present — i.e. when more rows matched than the cap allows.
      *
@@ -7203,55 +7253,7 @@ final class Index implements \Countable
      */
     private function booleanMatchesSql(array $postfix, ?string $lastTerm, bool $asYouType, array $conditions): ?array
     {
-        /** @var list<string|BooleanEntry> $stack */
-        $stack = [];
-        foreach ($postfix as $token) {
-            if ($token === '~') {
-                $operand = array_pop($stack);
-                $stack[] = [
-                    ...(is_string($operand)
-                        ? $this->booleanTerm($operand, $operand === $lastTerm)
-                        : $this->booleanPositive($operand, $lastTerm, $asYouType)),
-                    'not' => true,
-                ];
-            } elseif ($token === '&') {
-                $right = array_pop($stack);
-                $left  = array_pop($stack);
-                $rightNot = is_array($right) && $right['not'];
-                $leftNot  = is_array($left) && $left['not'];
-                if ($rightNot && $leftNot) {
-                    $either  = self::booleanOr([...$left, 'not' => false], [...$right, 'not' => false]);
-                    $stack[] = [...$either, 'not' => true];
-                } elseif ($rightNot || $leftNot) {
-                    [$pos, $neg] = $rightNot
-                        ? [$this->booleanPositive($left, $lastTerm, $asYouType), $right]
-                        : [$this->booleanPositive($right, $lastTerm, $asYouType), $left];
-                    $stack[] = [
-                        ...$pos,
-                        'pred'   => "({$pos['pred']} AND NOT {$neg['pred']})",
-                        'params' => [...$pos['params'], ...$neg['params']],
-                    ];
-                } else {
-                    $a        = $this->booleanPositive($left, $lastTerm, $asYouType);
-                    $b        = $this->booleanPositive($right, $lastTerm, $asYouType);
-                    $drive    = $a['df'] <= $b['df'] ? $a : $b;
-                    $stack[] = [
-                        'not'          => false,
-                        'pred'         => "({$a['pred']} AND {$b['pred']})",
-                        'params'       => [...$a['params'], ...$b['params']],
-                        'driver'       => $a['driver'] === null || $b['driver'] === null ? null : $drive['driver'],
-                        'driverParams' => $drive['driverParams'],
-                        'df'           => min($a['df'], $b['df']),
-                    ];
-                }
-            } elseif ($token === '|') {
-                $right   = $this->booleanPositive(array_pop($stack), $lastTerm, $asYouType);
-                $stack[] = self::booleanOr($this->booleanPositive(array_pop($stack), $lastTerm, $asYouType), $right);
-            } else {
-                $stack[] = $token;
-            }
-        }
-        $root = $this->booleanPositive(array_pop($stack), $lastTerm, $asYouType);
+        $root = $this->booleanRoot($postfix, $lastTerm, $asYouType);
         if ($root['driver'] === null) {
             return null;
         }
@@ -7267,15 +7269,80 @@ final class Index implements \Countable
     }
 
     /**
+     * The BooleanEntry of a whole postfix expression (or of one operand of it), walked with
+     * booleanSearch()'s rules; see booleanMatchesSql().
+     *
+     * @param  list<string> $postfix
+     * @return BooleanEntry
+     */
+    private function booleanRoot(
+        array $postfix,
+        ?string $lastTerm,
+        bool $asYouType,
+        bool &$truncated = false,
+    ): array {
+        /** @var list<string|BooleanEntry> $stack */
+        $stack = [];
+        foreach ($postfix as $token) {
+            if ($token === '~') {
+                $operand = array_pop($stack);
+                $stack[] = [
+                    ...(is_string($operand)
+                        ? $this->booleanTerm($operand, $operand === $lastTerm, $truncated)
+                        : $this->booleanPositive($operand, $lastTerm, $asYouType, $truncated)),
+                    'not' => true,
+                ];
+            } elseif ($token === '&') {
+                $right = array_pop($stack);
+                $left  = array_pop($stack);
+                $rightNot = is_array($right) && $right['not'];
+                $leftNot  = is_array($left) && $left['not'];
+                if ($rightNot && $leftNot) {
+                    $either  = self::booleanOr([...$left, 'not' => false], [...$right, 'not' => false]);
+                    $stack[] = [...$either, 'not' => true];
+                } elseif ($rightNot || $leftNot) {
+                    [$pos, $neg] = $rightNot
+                        ? [$this->booleanPositive($left, $lastTerm, $asYouType, $truncated), $right]
+                        : [$this->booleanPositive($right, $lastTerm, $asYouType, $truncated), $left];
+                    $stack[] = [
+                        ...$pos,
+                        'pred'   => "({$pos['pred']} AND NOT {$neg['pred']})",
+                        'params' => [...$pos['params'], ...$neg['params']],
+                    ];
+                } else {
+                    $a        = $this->booleanPositive($left, $lastTerm, $asYouType, $truncated);
+                    $b        = $this->booleanPositive($right, $lastTerm, $asYouType, $truncated);
+                    $drive    = $a['df'] <= $b['df'] ? $a : $b;
+                    $stack[] = [
+                        'not'          => false,
+                        'pred'         => "({$a['pred']} AND {$b['pred']})",
+                        'params'       => [...$a['params'], ...$b['params']],
+                        'driver'       => $a['driver'] === null || $b['driver'] === null ? null : $drive['driver'],
+                        'driverParams' => $drive['driverParams'],
+                        'df'           => min($a['df'], $b['df']),
+                    ];
+                }
+            } elseif ($token === '|') {
+                $right   = $this->booleanPositive(array_pop($stack), $lastTerm, $asYouType, $truncated);
+                $left    = $this->booleanPositive(array_pop($stack), $lastTerm, $asYouType, $truncated);
+                $stack[] = self::booleanOr($left, $right);
+            } else {
+                $stack[] = $token;
+            }
+        }
+        return $this->booleanPositive(array_pop($stack), $lastTerm, $asYouType, $truncated);
+    }
+
+    /**
      * booleanMatchesSql() entry of one query term: its terms (prefix, typos, synonyms as in
      * booleanSearch()) probed by EXISTS and listed as the driver; no terms = matches nothing.
      *
      * @return BooleanEntry
      */
-    private function booleanTerm(string $keyword, bool $isLast): array
+    private function booleanTerm(string $keyword, bool $isLast, bool &$truncated = false): array
     {
         $df  = 0;
-        $ids = $this->resolveWordlistIds($keyword, $isLast, df: $df);
+        $ids = $this->resolveWordlistIds($keyword, $isLast, $truncated, $df);
         if ($ids === []) {
             return self::BOOLEAN_NONE;
         }
@@ -7298,10 +7365,14 @@ final class Index implements \Countable
      * @param  string|BooleanEntry|null $entry
      * @return BooleanEntry
      */
-    private function booleanPositive(string|array|null $entry, ?string $lastTerm, bool $asYouType): array
-    {
+    private function booleanPositive(
+        string|array|null $entry,
+        ?string $lastTerm,
+        bool $asYouType,
+        bool &$truncated = false,
+    ): array {
         if (is_string($entry)) {
-            return $this->booleanTerm($entry, $asYouType && $entry === $lastTerm);
+            return $this->booleanTerm($entry, $asYouType && $entry === $lastTerm, $truncated);
         }
         return $entry === null || $entry['not'] ? self::BOOLEAN_NONE : $entry;
     }

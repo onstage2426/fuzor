@@ -2467,6 +2467,47 @@ class IndexTest extends TestCase
         $this->assertNotContains(2, $result->getIds());
     }
 
+    /**
+     * A negated word in more than maxDocs documents still removes every document containing it,
+     * not only its first maxDocs (those with the most hits).
+     */
+    public function testSearchBooleanNotRemovesEveryDocumentWithACutWord(): void
+    {
+        $index = new Index($this->dbPath);
+        $docs  = [];
+        for ($id = 1; $id <= 10; $id++) {
+            $docs[] = ['id' => $id, 'title' => 'tee tee tee blue'];
+        }
+        $index->insert([
+            ...$docs,
+            ['id' => 11, 'title' => 'red tee'],
+            ['id' => 12, 'title' => 'red tee blue'],
+            ['id' => 13, 'title' => 'red blue'],
+            ['id' => 14, 'title' => 'red'],
+        ]);
+        $capped  = new Index($this->dbPath, config: new Config(maxDocs: 5), readonly: true);
+        $options = new SearchOptions(asYouType: false);
+
+        $result = $capped->searchBoolean('red -tee', $options);
+        $this->assertSame([13, 14], self::sorted($result->getIds()));
+        $this->assertSame(2, $result->totalHits);
+        $this->assertTrue($result->exhaustive);
+
+        $this->assertSame([13, 14], self::sorted($capped->searchBoolean('-tee red', $options)->getIds()));
+        $this->assertSame([14], $capped->searchBoolean('red -tee -blue', $options)->getIds());
+        $this->assertSame([13, 14], self::sorted($capped->searchBoolean('(red | blue) -tee', $options)->getIds()));
+    }
+
+    /**
+     * @param  list<int> $ids
+     * @return list<int>
+     */
+    private static function sorted(array $ids): array
+    {
+        sort($ids);
+        return $ids;
+    }
+
     public function testSearchBooleanNormalizesUnicodeUppercase(): void
     {
         $index = new Index($this->dbPath);
