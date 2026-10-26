@@ -21,6 +21,35 @@ schema, it throws like opening the file does.
 
 The sections below list every change that needs a change in calling code.
 
+## Facet values are listed alphabetically
+
+`$facetDistribution` and `facetSearch()` list values in alphabetical order by default (numbers
+first, by value, then strings ignoring case), as in Meilisearch. 1.x listed the values with the
+most documents first. Ask for that order to keep it, also because `Config::$maxValuesPerFacet`
+(100) cuts the list after ordering:
+
+```php
+new SearchOptions(facets: ['brand'], sortFacetValuesBy: ['*' => FacetOrder::Count]);
+new FacetSearchQuery('brand', sortFacetValuesBy: FacetOrder::Count);
+```
+
+## `Index`, `SearchResult` and the exceptions are `final`
+
+`Index`, `SearchResult`, `IOException` and `QueryException` can no longer be extended. Wrap an
+`Index` in your own class instead of subclassing it, and catch `FuzorException` (still open) or the
+specific exceptions.
+
+## `QueryToken::$matchType` is a `MatchType` enum
+
+`inspectQuery()` reports how each token matched as `Fuzor\MatchType` (`Exact`, `Prefix`, `Fuzzy`,
+`None`) instead of a string. Compare with the enum, or read `->value` for the old strings
+(`'exact'`, `'prefix'`, `'fuzzy'`, `'none'`).
+
+## `FacetSearchQuery::$query` is `$q`
+
+The facet search's full-text restriction takes Meilisearch's name: `new FacetSearchQuery('brand',
+q: 'shirt')` instead of `query: 'shirt'`. Same meaning.
+
 ## A word also matches its typos when it exists
 
 In 1.x a query word only fell back to typo matching when the index had no exact (or prefix) match
@@ -48,28 +77,34 @@ default.
   `sl`, `so`, `st`, `sw`, `tl`, `uk`, `ur`, `vi`, `yo`, `zu`. Create those indexes with
   `language: null`; indexing and search are the same apart from the stop words.
 
-## `facetFields` is split into `filterableFields` and `sortableFields`
+## `facetFields` is split into `filterableAttributes` and `sortableAttributes`; `searchableFields` is `searchableAttributes`
 
-`SchemaConfig::$facetFields` and `$index->facetFields` are gone. Declare fields used in `filter`,
-`facets`, `distinct`, and `facetSearch()` in `filterableFields`, and fields used in `sort` in
-`sortableFields`. A field may be in both. Neither kind is tokenised for full-text search unless
-it is also in `searchableFields`.
+The schema's field lists take Meilisearch's names. `SchemaConfig::$facetFields` and
+`$index->facetFields` are gone. Declare fields used in `filter`, `facets`, `distinct`, and
+`facetSearch()` in `filterableAttributes`, and fields used in `sort` in `sortableAttributes`. A
+field may be in both. Neither kind is tokenised for full-text search unless it is also in
+`searchableAttributes`, which is the former `searchableFields` (same meaning; `$index->searchableFields`
+is `$index->searchableAttributes`).
 
 ```php
 // 1.x
-new SchemaConfig(facetFields: ['brand', 'color', 'price']);
+new SchemaConfig(facetFields: ['brand', 'color', 'price'], searchableFields: ['title', 'body']);
 
 // 2.0
-new SchemaConfig(filterableFields: ['brand', 'color', 'price'], sortableFields: ['price']);
+new SchemaConfig(
+    filterableAttributes: ['brand', 'color', 'price'],
+    sortableAttributes:   ['price'],
+    searchableAttributes: ['title', 'body'],
+);
 ```
 
 ## Undeclared fields throw instead of warning
 
-A `sort` field that is not in `sortableFields`, or a `filter`, `facets`, `distinct`, or
-`FacetSearchQuery` `facetName`/`filter` field that is not in `filterableFields`, now throws a
+A `sort` field that is not in `sortableAttributes`, or a `filter`, `facets`, `distinct`, or
+`FacetSearchQuery` `facetName`/`filter` field that is not in `filterableAttributes`, now throws a
 `QueryException`. In 1.x it was ignored (or matched nothing) and reported in `$warnings`. When
-these options come from user input, check them against `$index->sortableFields` /
-`$index->filterableFields` or catch `QueryException`. `$warnings` now only reports caps.
+these options come from user input, check them against `$index->sortableAttributes` /
+`$index->filterableAttributes` or catch `QueryException`. `$warnings` now only reports caps.
 
 ## `Config::$filterMaxDocs` is removed
 

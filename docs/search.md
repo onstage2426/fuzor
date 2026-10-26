@@ -192,7 +192,7 @@ $result = $index->search('-sale');                   // every document except th
 
 ## Typo tolerance
 
-Automatic. When a query word has no exact or prefix match and is long enough, Fuzor scans the wordlist for candidates within edit distance.
+Automatic. Every query word long enough for a typo also matches the indexed words within its typo budget, as in Meilisearch; documents that match with fewer typos rank first.
 
 ```php
 $result = $index->search('economi'); // matches 'economy'
