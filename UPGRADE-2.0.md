@@ -117,9 +117,14 @@ order.
 
 ## Some results are ranked differently
 
-Four ranking fixes change the order of some results without any change on your side; tests
+Five ranking fixes change the order of some results without any change on your side; tests
 that assert an exact order may need updating:
 
+- When words match more than `Config::$maxDocs` documents, the documents that contain them are
+  now ranked by their real BM25 score while there are at most 4 × `maxDocs` (2,000) of them, not
+  only those with the most occurrences of each word: a short document that mentions the words
+  once can now rank first. On a 44k-product catalog 86% of first pages equal the ranking without
+  any cap (50% before). Raise `maxDocs` for more, at the cost of speed.
 - In a multi-word search where one word matches more than `Config::$maxDocs` documents,
   documents found through the other words are now scored for the common word too, so documents
   that contain every word rank as such.

@@ -121,12 +121,18 @@ final class Index implements \Countable
     private const int FACET_VALUE_KEY_SHIFT = 32;
 
     /**
-     * Most documents of one exact words bucket that are scored (BM25 needs each one's rows of
-     * every word; completeGroup() ~2–5 µs per document and word). A larger bucket scores the
-     * documents with the most hits of its rarest word and ranks the rest after them, still in
-     * the bucket: 45k ecom set, "men shirt" (10k full matches) 143 ms scoring all.
+     * Most documents of one words bucket that are ranked exactly, as a multiple of
+     * Config::$maxDocs (2,000 by default). A bucket up to that size is read whole and every
+     * member scored (BM25 needs each one's rows of every word; completeGroup() ~2–5 µs per
+     * document and word), and the first word is read whole when it is in at most that many
+     * documents (bucket 1, one-word queries): the page is then the uncapped one. A larger bucket
+     * scores the documents with the most hits of its rarest word and ranks the rest after them,
+     * still in the bucket ("men shirt", 10k full matches: 143 ms scoring all), and the page comes
+     * from the candidates when they cover it (exhaustive false). Measured on the 45k ecom set,
+     * 300 queries against the uncapped ranking: pages identical 50% (no exact ranking) → 79% at
+     * 2× maxDocs, 86% at 4×, 92% at 10×; plain search 7.1 → 12.3 / 13.7 / 16.4 ms.
      */
-    private const int EXACT_BUCKET_SCORED_DOCS = 500;
+    private const int EXACT_RANKED_DOCS_PER_MAX_DOCS = 4;
 
     /**
      * A primary key probe counted against reading one row in sequence: exactBucketDocs()'s
@@ -2747,15 +2753,27 @@ final class Index implements \Countable
                 $fetch = [$rarest[0]];
             }
         }
+        $scoredDocs = self::EXACT_RANKED_DOCS_PER_MAX_DOCS * $this->config->maxDocs;
         foreach ($fetch as $g) {
             if ($groups[$g]['words'] === []) {
                 continue;
+            }
+            // Bucket 1 (the first word alone, and a one-word query) ranks the first word's documents
+            // by its BM25 score, which its maxDocs rows by hit count do not give: a word in at
+            // most EXACT_RANKED_DOCS_PER_MAX_DOCS × maxDocs documents is read whole, like a words bucket.
+            $fetchRows = $this->config->maxDocs;
+            if (
+                $groups[$g]['truncated'] && $g === $order[0] && $strategy !== MatchingStrategy::All
+                && $groups[$g]['df'] <= $scoredDocs
+            ) {
+                $fetchRows                = $groups[$g]['df'];
+                $groups[$g]['truncated'] = false;
             }
             $candidatesCapped = $candidatesCapped || $groups[$g]['truncated'];
             // BM25 score computed in SQLite C; PHP receives (term_id, doc_id, score).
             $groups[$g]['rows'] = $this->fetchDocsByTermIds(
                 $groups[$g]['words'],
-                $this->config->maxDocs,
+                $fetchRows,
                 array_filter($groups[$g]['words'], fn(array $w): bool => isset($w['distance'])) !== [],
                 $groups[$g]['idfK1p1'],
                 $k1_1mb,
@@ -2795,10 +2813,14 @@ final class Index implements \Countable
         // found), so after the first pass the top buckets are read exactly where they fall short
         // (exactBucketDocs(): the documents containing the first k groups, for k = all groups
         // downwards, while the bucket's rarest word is at most EXACT_BUCKET_MAX_DRIVER documents),
-        // and the walk runs again. Without filters, negations, distinct or sort fields a bucket is
-        // only read while the buckets above it hold fewer documents than the page (phrases count
-        // the documents that pass them); with them, matches can drop out later or a document
-        // outside the candidates can sort first, so every needed bucket is read.
+        // and the walk runs again. The candidates are the best rows by hit count, not by BM25 (a
+        // short document with one hit can outrank them), so the page is only settled by buckets
+        // read exactly: without filters, negations, distinct or sort fields a bucket is read while
+        // the exact buckets above it hold fewer documents than the page (phrases count the
+        // documents that pass them); with them, matches can drop out later or a document outside
+        // the candidates can sort first, so every needed bucket is read. A bucket above
+        // $scoredDocs (EXACT_RANKED_DOCS_PER_MAX_DOCS) is too large to rank exactly: if the
+        // candidates cover the page it is taken from them, as an approximation.
         /** @var array<int, true> $candidates */
         $candidates = [];
         foreach ($groups as $group) {
@@ -2806,7 +2828,7 @@ final class Index implements \Countable
                 $candidates[$docId] = true;
             }
         }
-        /** @var array<int, int> $unscored  Bucket members beyond EXACT_BUCKET_SCORED_DOCS → their bucket. */
+        /** @var array<int, int> $unscored  Members of a bucket above $scoredDocs left unscored → their bucket. */
         $unscored     = [];
         /** @var array<int, true> $exactDocs */
         $exactDocs    = [];
@@ -2900,11 +2922,8 @@ final class Index implements \Countable
             }
             $added = false;
             for ($k = count($order); $k >= max(2, $minBucket); $k--) {
-                if ($settles) {
-                    $covered = $exactDocs + array_filter($docBucket, fn(int $bucket): bool => $bucket >= $k);
-                    if ($passing($covered) >= $offset + $limit) {
-                        break;
-                    }
+                if ($settles && $passing($exactDocs) >= $offset + $limit) {
+                    break;
                 }
                 // Every term of each word, typo derivations included: a document that contains a
                 // word only through a typo is in the bucket too (it ranks after the exact matches by
@@ -2914,21 +2933,30 @@ final class Index implements \Countable
                 $members = array_map(fn(int $g): array => $groups[$g], array_slice($order, 0, $k));
                 $hits    = in_array([], array_column($members, 'termIds'), true)
                     ? []   // an unknown word: no document contains all k groups
-                    : $this->exactBucketDocs($members);
+                    : $this->exactBucketDocs($members, $scoredDocs + 1);
                 if ($hits === null) {
                     break;
                 }
+                if (count($hits) > $scoredDocs) {
+                    if ($settles) {
+                        $covered = $exactDocs + array_filter($docBucket, fn(int $bucket): bool => $bucket >= $k);
+                        if ($passing($covered) >= $offset + $limit) {
+                            break;
+                        }
+                    }
+                    $hits = $this->exactBucketDocs($members) ?? [];
+                }
                 $exactDocs += array_fill_keys(array_keys($hits), true);
-                if (count($hits) > self::EXACT_BUCKET_SCORED_DOCS) {
+                if (count($hits) > $scoredDocs) {
                     // Most hits of the rarest word first, then newest; the rest rank after them.
                     $docIds = array_keys($hits);
                     array_multisort($hits, SORT_DESC, SORT_NUMERIC, $docIds, SORT_DESC, SORT_NUMERIC);
-                    foreach (array_slice($docIds, self::EXACT_BUCKET_SCORED_DOCS) as $docId) {
+                    foreach (array_slice($docIds, $scoredDocs) as $docId) {
                         if (!isset($candidates[$docId])) {
                             $unscored[$docId] ??= $k;
                         }
                     }
-                    $hits = array_fill_keys(array_slice($docIds, 0, self::EXACT_BUCKET_SCORED_DOCS), 0);
+                    $hits = array_fill_keys(array_slice($docIds, 0, $scoredDocs), 0);
                 }
                 foreach ($hits as $docId => $_) {
                     $added = $added || !isset($candidates[$docId]);
@@ -6813,7 +6841,7 @@ final class Index implements \Countable
      * @param  list<KeywordGroup> $members Groups with at least one term each.
      * @return array<int, int>|null Document ID → its hits of the driver (rarest) group.
      */
-    private function exactBucketDocs(array $members): ?array
+    private function exactBucketDocs(array $members, ?int $limit = null): ?array
     {
         if ($members === []) {
             return [];
@@ -6857,9 +6885,10 @@ final class Index implements \Countable
         $stmt = $this->prepare(
             'WITH ' . implode(', ', $ctes) . ' SELECT drv.doc_id, SUM(drv.hc) FROM drv'
             . ($checks === [] ? '' : ' WHERE ' . implode(' AND ', $checks)) . ' GROUP BY drv.doc_id'
+            . ($limit === null ? '' : ' LIMIT ?')
         );
         // Every CTE parameter precedes the WHERE clause's in the statement text.
-        $stmt->execute([...$cteParams, ...$termParams]);
+        $stmt->execute([...$cteParams, ...$termParams, ...($limit === null ? [] : [$limit])]);
         /** @var array<int, int> $hits */
         $hits = $stmt->fetchAll(PDO::FETCH_KEY_PAIR);
         return $hits;

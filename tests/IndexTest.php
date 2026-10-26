@@ -514,17 +514,13 @@ class IndexTest extends TestCase
 
     public function testMaxDocsLimitsResultsPerKeyword(): void
     {
+        // Above 4 × maxDocs a word is not read whole (EXACT_RANKED_DOCS_PER_MAX_DOCS).
         $index = new Index($this->dbPath, config: new \Fuzor\Config(maxDocs: 2));
-        $index->insert([
-            ['id' => 1, 'title' => 'sedan'],
-            ['id' => 2, 'title' => 'sedan'],
-            ['id' => 3, 'title' => 'sedan'],
-            ['id' => 4, 'title' => 'sedan'],
-            ['id' => 5, 'title' => 'sedan'],
-        ]);
+        $index->insert(array_map(fn(int $id): array => ['id' => $id, 'title' => 'sedan'], range(1, 9)));
 
         $result = $index->search('sedan');
         $this->assertCount(2, $result->getIds());
+        $this->assertSame(9, $result->totalHits);
     }
 
     // --- top-k / heap ---
@@ -8492,12 +8488,12 @@ class IndexTest extends TestCase
     public function testSearchKeywordAboveMaxDocsIsNotExhaustive(): void
     {
         $index = new Index($this->dbPath, config: new Config(maxDocs: 2));
-        $index->insert($this->sameWordDocs(3));
+        $index->insert($this->sameWordDocs(9));   // above 4 × maxDocs: not read whole
 
         $result = $index->search('widget');
 
         $this->assertFalse($result->exhaustive);
-        $this->assertSame(3, $result->totalHits);   // counted exactly, beyond the candidates
+        $this->assertSame(9, $result->totalHits);   // counted exactly, beyond the candidates
         $this->assertCount(1, $result->warnings);
         $this->assertStringContainsString('Config::$maxDocs (2)', $result->warnings[0]);
     }
@@ -8566,6 +8562,11 @@ class IndexTest extends TestCase
             ['id' => 5, 'title' => 'red lamp', 'color' => 'red'],
             ['id' => 6, 'title' => 'widgte red', 'color' => 'red'],   // "widget" through a typo
             ['id' => 7, 'title' => 'red widget', 'color' => 'red'],
+            // "red" in 11 documents, above 4 × maxDocs: the count reaches past the candidates.
+            ['id' => 8, 'title' => 'red', 'color' => 'blue'],
+            ['id' => 9, 'title' => 'red', 'color' => 'blue'],
+            ['id' => 10, 'title' => 'red', 'color' => 'blue'],
+            ['id' => 11, 'title' => 'red', 'color' => 'blue'],
         ]);
         $count = fn(string $q, ?string $color = null): ?int => $index->search($q, new SearchOptions(
             asYouType: false,
@@ -8573,7 +8574,8 @@ class IndexTest extends TestCase
         ))->totalHits;
 
         // Every document has the first word "red" (MatchingStrategy::Last).
-        $this->assertSame(7, $count('red widget'));
+        $this->assertFalse($index->search('red widget')->exhaustive);
+        $this->assertSame(11, $count('red widget'));
         $this->assertSame(6, $count('red widget', 'red'));
         $this->assertSame(4, $count('red widget -lamp', 'red'));
         $this->assertSame(3, $count('"red widget"', 'red'));   // 1, 4, 7: the words in order
@@ -8583,17 +8585,17 @@ class IndexTest extends TestCase
     {
         $schema = new SchemaConfig(filterableAttributes: ['color']);
         $index  = new Index($this->dbPath, config: new Config(maxDocs: 2), schema: $schema);
-        $index->insert($this->sameWordDocs(7));
+        $index->insert($this->sameWordDocs(9));
 
         $all  = $index->search('widget', new SearchOptions(facets: ['color']));
         $blue = $index->search('widget', new SearchOptions(filter: ['color' => 'blue'], facets: ['color']));
 
         $this->assertFalse($all->exhaustive);
-        $this->assertSame(['blue' => 3, 'red' => 4], $all->facetDistribution['color']);
+        $this->assertSame(['blue' => 4, 'red' => 5], $all->facetDistribution['color']);
         $this->assertSame([], $all->approximateFacets);
         // Its own filter left out (disjunctive): every value stays visible.
-        $this->assertSame(['blue' => 3, 'red' => 4], $blue->facetDistribution['color']);
-        $this->assertSame(3, $blue->totalHits);
+        $this->assertSame(['blue' => 4, 'red' => 5], $blue->facetDistribution['color']);
+        $this->assertSame(4, $blue->totalHits);
     }
 
     public function testCappedSearchFacetsOverMaxFacetCountDocsAreApproximate(): void
@@ -8601,7 +8603,7 @@ class IndexTest extends TestCase
         $schema = new SchemaConfig(filterableAttributes: ['color']);
         $config = new Config(maxDocs: 2, maxFacetCountDocs: 5);
         $index  = new Index($this->dbPath, config: $config, schema: $schema);
-        $index->insert($this->sameWordDocs(7));
+        $index->insert($this->sameWordDocs(9));
 
         $result = $index->search('widget', new SearchOptions(facets: ['color']));
 
@@ -9667,8 +9669,9 @@ class IndexTest extends TestCase
         // Words buckets: both full matches, then women + cotton, then women alone.
         $this->assertEqualsCanonicalizing([1, 2], array_slice($result->getIds(), 0, 2));
         $this->assertEqualsCanonicalizing([3, 4], array_slice($result->getIds(), 2, 2));
-        // "women" alone was cut at maxDocs, so its bucket (and the total) may miss documents.
-        $this->assertFalse($result->exhaustive);
+        // "women" (8 documents) was cut at maxDocs but is within 4 × maxDocs, so it was read
+        // whole: every bucket is exact.
+        $this->assertTrue($result->exhaustive);
     }
 
     public function testAllStrategyCountsEveryFullMatchExactly(): void
@@ -9755,17 +9758,44 @@ class IndexTest extends TestCase
         $this->assertSame([2], $result->getIds());
     }
 
+    public function testShortFullMatchOutsideTheBestRowsRanksFirst(): void
+    {
+        $docs = [
+            // Most hits of both words, so the best rows by hit count, but long.
+            ['id' => 1, 'title' => 'red red red shoe shoe shoe alpha beta gamma delta epsilon zeta eta theta'],
+            // One hit each in a short document: the best BM25 score.
+            ['id' => 2, 'title' => 'red shoe'],
+            ['id' => 3, 'title' => 'red shoe lamp desk chair table'],
+        ];
+        for ($id = 4; $id <= 6; $id++) {
+            $docs[] = ['id' => $id, 'title' => 'red red alpha'];
+            $docs[] = ['id' => $id + 3, 'title' => 'shoe shoe beta'];
+        }
+        new Index($this->dbPath)->insert($docs);
+        $options = new SearchOptions(asYouType: false, limit: 1);
+
+        // maxDocs 1: each word's best row is doc 1, which alone would fill the page.
+        $capped = new Index($this->dbPath, config: new Config(maxDocs: 1))->search('red shoe', $options);
+        $full   = new Index($this->dbPath, config: new Config(maxDocs: 100))->search('red shoe', $options);
+
+        $this->assertSame([2], $full->getIds());
+        $this->assertSame([2], $capped->getIds());
+    }
+
     public function testTruncatedRankingMatchesTheFullRankingForTheDocumentsItFinds(): void
     {
         $options = new SearchOptions(asYouType: false);
         $full    = $this->truncationIndex(100)->search('shirt casual', $options)->getIds();
-        $capped  = $this->truncationIndex(3)->search('shirt casual', $options)->getIds();
+        $capped  = $this->truncationIndex(1)->search('shirt casual', $options)->getIds();
+        $whole   = $this->truncationIndex(3)->search('shirt casual', $options)->getIds();
 
-        // "shirt" comes first, so every result contains it (MatchingStrategy::Last). Docs 4 and 5
-        // are only reachable through its truncated rows; everything else must keep the order (so
-        // the scores) of the untruncated search.
+        // "shirt" comes first, so every result contains it (MatchingStrategy::Last). With
+        // maxDocs 1 (6 documents > 4 × maxDocs) only some are reachable; those must keep the order
+        // (so the scores) of the untruncated search.
         $this->assertSame(array_values(array_intersect($full, $capped)), $capped);
-        $this->assertSame([4, 5], array_values(array_diff($full, $capped)));
+        $this->assertNotSame($full, $capped);
+        // With maxDocs 3, "shirt" is within 4 × maxDocs and read whole: the full ranking.
+        $this->assertSame($full, $whole);
     }
 
     public function testTruncatedPrefixGroupIsCompletedToo(): void
@@ -10358,11 +10388,12 @@ class IndexTest extends TestCase
         // "shirt" exceeds maxDocs; "linen" does not, and every result must contain it.
         $index = new Index($this->dbPath, config: new Config(maxDocs: 3));
         $docs  = [];
-        for ($id = 1; $id <= 8; $id++) {
+        // 13 "shirt" documents: above 4 × maxDocs, so it is not read whole.
+        for ($id = 1; $id <= 12; $id++) {
             $docs[] = ['id' => $id, 'title' => 'shirt shirt'];
         }
-        $docs[] = ['id' => 9, 'title' => 'linen shirt'];
-        $docs[] = ['id' => 10, 'title' => 'linen trousers'];
+        $docs[] = ['id' => 13, 'title' => 'linen shirt'];
+        $docs[] = ['id' => 14, 'title' => 'linen trousers'];
         $index->insert($docs);
 
         $all  = $index->search('linen shirt', new SearchOptions(
@@ -10371,10 +10402,10 @@ class IndexTest extends TestCase
         ));
         $last = $index->search('shirt linen', new SearchOptions(asYouType: false));
 
-        $this->assertSame([9], $all->getIds());
+        $this->assertSame([13], $all->getIds());
         $this->assertTrue($all->exhaustive);
         $this->assertFalse($last->exhaustive);
-        $this->assertSame(9, $last->getIds()[0]);
+        $this->assertSame(13, $last->getIds()[0]);
     }
 
     public function testExactBucketHoldsDocumentsMatchingThroughATypo(): void
