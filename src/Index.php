@@ -51,6 +51,14 @@ use PDO;
  *     truncated: bool,
  *     rows: list<array{0: int, 1: int, 2: float}>,
  * }
+ * @phpstan-type BooleanEntry array{
+ *     not: bool,
+ *     pred: string,
+ *     params: list<int>,
+ *     driver: string|null,
+ *     driverParams: list<int>,
+ *     df: int,
+ * }
  */
 final class Index implements \Countable
 {
@@ -104,6 +112,16 @@ final class Index implements \Countable
 
     /** Max rows per chunk when each row uses 5 bind variables (doclist bulk INSERT). */
     private const int CHUNK_5P = 6_553;
+
+    /** booleanMatchesSql() entry that matches no document. */
+    private const array BOOLEAN_NONE = [
+        'not'          => false,
+        'pred'         => '0',
+        'params'       => [],
+        'driver'       => null,
+        'driverParams' => [],
+        'df'           => 0,
+    ];
 
 
     /**
@@ -3234,7 +3252,11 @@ final class Index implements \Countable
                 $conditions   = [...$baseConditions, ...$this->facetFilterConditions($filter)];
                 $distinctHits = $keyId === null
                     ? $this->countSearchMatches($required, $conditions, $this->config->maxTotalHits + 1)
-                    : $this->countDistinctMatches($required, $conditions, $keyId, $distinctCount);
+                    : $this->countDistinctMatches(
+                        $this->searchMatchesSql($required, $conditions),
+                        $keyId,
+                        $distinctCount,
+                    );
             }
             $result = new SearchResult(
                 ids: $pagedIds,
@@ -3580,6 +3602,22 @@ final class Index implements \Countable
         ];
 
         $total = count($docIds);
+        // The candidates hold only part of the matches: count them all in SQL (the page and the
+        // facet counts stay candidate-based).
+        $match = $candidatesCapped
+            ? $this->booleanMatchesSql(
+                $postfix,
+                $lastTerm,
+                $asYouType,
+                [
+                    ...$this->phraseConditions($phraseGroups, $lastTerm ?? '', $asYouType),
+                    ...$this->facetFilterConditions($filter),
+                ],
+            )
+            : null;
+        if ($candidatesCapped && $distinct === null) {
+            $total = $this->countMatches($match, $this->config->maxTotalHits + 1);
+        }
 
         if ($distinct !== null) {
             $keyId     = $this->lookupFacetKeyId($distinct);
@@ -3594,6 +3632,11 @@ final class Index implements \Countable
                 $offset,
                 $limit,
             );
+            if ($candidatesCapped) {
+                $distinctHits = $keyId === null
+                    ? $this->countMatches($match, $this->config->maxTotalHits + 1)
+                    : $this->countDistinctMatches($match, $keyId, $distinctCount);
+            }
             return new SearchResult(
                 ids: $pagedIds,
                 totalHits: $distinctHits,
@@ -6155,8 +6198,13 @@ final class Index implements \Countable
      * @param  bool   $truncated     Set to true when the prefix expansion was capped.
      * @return list<int>
      */
-    private function resolveWordlistIds(string $keyword, bool $isLastKeyword, bool &$truncated = false): array
-    {
+    private function resolveWordlistIds(
+        string $keyword,
+        bool $isLastKeyword,
+        bool &$truncated = false,
+        int &$df = 0,
+    ): array {
+        $df = 0;
         $tokens = Tokenizer::tokenize($keyword, $this->language);
         if ($this->stemmer instanceof \Fuzor\Stemmer) {
             $tokens = $this->stemmer->stemTokens($tokens);
@@ -6166,10 +6214,12 @@ final class Index implements \Countable
         foreach ($tokens as $i => $token) {
             foreach ($this->getWordlistByKeyword($token, $isLastKeyword && $i === $last, true, $truncated) as $row) {
                 $ids[] = $row['id'];
+                $df   += $row['num_docs'];
             }
             foreach ($this->synonymsFor($token) as $synTerm) {
                 foreach ($this->getWordlistByKeyword($synTerm, false, false) as $row) {
                     $ids[] = $row['id'];
+                    $df   += $row['num_docs'];
                 }
             }
         }
@@ -7060,7 +7110,16 @@ final class Index implements \Countable
      */
     private function countSearchMatches(array $groups, array $conditions, int $limit): int
     {
-        $match = $this->searchMatchesSql($groups, $conditions);
+        return $this->countMatches($this->searchMatchesSql($groups, $conditions), $limit);
+    }
+
+    /**
+     * Rows of $match (a `SELECT DISTINCT … doc_id` with its parameters; null = none), counted up to $limit.
+     *
+     * @param array{0: string, 1: list<mixed>}|null $match
+     */
+    private function countMatches(?array $match, int $limit): int
+    {
         if ($match === null) {
             return 0;
         }
@@ -7070,19 +7129,18 @@ final class Index implements \Countable
     }
 
     /**
-     * The distinct total of a search whose candidates were cut: the documents of
-     * searchMatchesSql() collapsed like applyDistinctPagination(), at most $distinctCount per
+     * The distinct total of a search whose candidates were cut: the documents of $match
+     * (searchMatchesSql() or booleanMatchesSql(); null = none) collapsed like
+     * applyDistinctPagination(), at most $distinctCount per
      * value of the key, documents without it all kept. A document's value is the one
      * fetchSortValues() gives distinct: its smallest number, else its smallest string by bytes;
      * values are grouped by their PHP string form, as there. Reads every match (no early stop:
      * the values decide how many survive), grouped in SQL.
      *
-     * @param  list<KeywordGroup>   $groups
-     * @param  list<FacetCondition> $conditions
+     * @param  array{0: string, 1: list<mixed>}|null $match
      */
-    private function countDistinctMatches(array $groups, array $conditions, int $keyId, int $distinctCount): int
+    private function countDistinctMatches(?array $match, int $keyId, int $distinctCount): int
     {
-        $match = $this->searchMatchesSql($groups, $conditions);
         if ($match === null) {
             return 0;
         }
@@ -7111,6 +7169,149 @@ final class Index implements \Countable
             $total += min($n, $distinctCount);
         }
         return $total;
+    }
+
+    /**
+     * `SELECT DISTINCT bm.doc_id …` of every document searchBoolean() matches for $postfix and
+     * $conditions, with its parameters; null when none can. booleanSearch() evaluates the same
+     * expression over each term's first maxDocs documents; this one has no cap, for the total.
+     *
+     * The postfix is walked with booleanSearch()'s rules: a negation outside an AND contributes
+     * nothing, "~a & ~b" stays the negation of "a | b", and NOT subtracts from its AND partner.
+     * Each entry is a predicate on bm.doc_id (EXISTS probes on doclist via doc_id_index, joined
+     * with AND / OR / AND NOT) and a driver that lists a superset of its documents: a term's
+     * doclist rows, the rarer side of an AND (by document frequency), both sides of an OR. The
+     * result walks the driver and keeps the documents passing the predicate and $conditions.
+     *
+     * @param  list<string>         $postfix    BooleanParser::toPostfix() output.
+     * @param  list<FacetCondition> $conditions Quoted phrases and filters.
+     * @return array{0: string, 1: list<mixed>}|null
+     */
+    private function booleanMatchesSql(array $postfix, ?string $lastTerm, bool $asYouType, array $conditions): ?array
+    {
+        /** @var list<string|BooleanEntry> $stack */
+        $stack = [];
+        foreach ($postfix as $token) {
+            if ($token === '~') {
+                $operand = array_pop($stack);
+                $stack[] = [
+                    ...(is_string($operand)
+                        ? $this->booleanTerm($operand, $operand === $lastTerm)
+                        : $this->booleanPositive($operand, $lastTerm, $asYouType)),
+                    'not' => true,
+                ];
+            } elseif ($token === '&') {
+                $right = array_pop($stack);
+                $left  = array_pop($stack);
+                $rightNot = is_array($right) && $right['not'];
+                $leftNot  = is_array($left) && $left['not'];
+                if ($rightNot && $leftNot) {
+                    $either  = self::booleanOr([...$left, 'not' => false], [...$right, 'not' => false]);
+                    $stack[] = [...$either, 'not' => true];
+                } elseif ($rightNot || $leftNot) {
+                    [$pos, $neg] = $rightNot
+                        ? [$this->booleanPositive($left, $lastTerm, $asYouType), $right]
+                        : [$this->booleanPositive($right, $lastTerm, $asYouType), $left];
+                    $stack[] = [
+                        ...$pos,
+                        'pred'   => "({$pos['pred']} AND NOT {$neg['pred']})",
+                        'params' => [...$pos['params'], ...$neg['params']],
+                    ];
+                } else {
+                    $a        = $this->booleanPositive($left, $lastTerm, $asYouType);
+                    $b        = $this->booleanPositive($right, $lastTerm, $asYouType);
+                    $drive    = $a['df'] <= $b['df'] ? $a : $b;
+                    $stack[] = [
+                        'not'          => false,
+                        'pred'         => "({$a['pred']} AND {$b['pred']})",
+                        'params'       => [...$a['params'], ...$b['params']],
+                        'driver'       => $a['driver'] === null || $b['driver'] === null ? null : $drive['driver'],
+                        'driverParams' => $drive['driverParams'],
+                        'df'           => min($a['df'], $b['df']),
+                    ];
+                }
+            } elseif ($token === '|') {
+                $right   = $this->booleanPositive(array_pop($stack), $lastTerm, $asYouType);
+                $stack[] = self::booleanOr($this->booleanPositive(array_pop($stack), $lastTerm, $asYouType), $right);
+            } else {
+                $stack[] = $token;
+            }
+        }
+        $root = $this->booleanPositive(array_pop($stack), $lastTerm, $asYouType);
+        if ($root['driver'] === null) {
+            return null;
+        }
+        $probes = $this->renderFacetProbes($conditions, 'bm.doc_id');
+        if ($probes === null) {
+            return null;
+        }
+        return [
+            "SELECT DISTINCT bm.doc_id FROM ({$root['driver']}) bm WHERE {$root['pred']}"
+                . $this->liveDocsSql('bm.doc_id') . $probes[0],
+            [...$root['driverParams'], ...$root['params'], ...$probes[1]],
+        ];
+    }
+
+    /**
+     * booleanMatchesSql() entry of one query term: its terms (prefix, typos, synonyms as in
+     * booleanSearch()) probed by EXISTS and listed as the driver; no terms = matches nothing.
+     *
+     * @return BooleanEntry
+     */
+    private function booleanTerm(string $keyword, bool $isLast): array
+    {
+        $df  = 0;
+        $ids = $this->resolveWordlistIds($keyword, $isLast, df: $df);
+        if ($ids === []) {
+            return self::BOOLEAN_NONE;
+        }
+        $in = $this->placeholders(count($ids));
+        return [
+            'not'          => false,
+            'pred'         => 'EXISTS (SELECT 1 FROM doclist WHERE doclist.doc_id = bm.doc_id'
+                . " AND doclist.term_id IN ({$in}))",
+            'params'       => $ids,
+            'driver'       => "SELECT doc_id FROM doclist WHERE term_id IN ({$in})",
+            'driverParams' => $ids,
+            'df'           => $df,
+        ];
+    }
+
+    /**
+     * A booleanMatchesSql() stack entry as a positive set: a term is resolved, a lone negation
+     * (or nothing) contributes no documents, as in booleanSearch().
+     *
+     * @param  string|BooleanEntry|null $entry
+     * @return BooleanEntry
+     */
+    private function booleanPositive(string|array|null $entry, ?string $lastTerm, bool $asYouType): array
+    {
+        if (is_string($entry)) {
+            return $this->booleanTerm($entry, $asYouType && $entry === $lastTerm);
+        }
+        return $entry === null || $entry['not'] ? self::BOOLEAN_NONE : $entry;
+    }
+
+    /**
+     * @param  BooleanEntry $a
+     * @param  BooleanEntry $b
+     * @return BooleanEntry
+     */
+    private static function booleanOr(array $a, array $b): array
+    {
+        $driver = match (true) {
+            $a['driver'] === null => $b['driver'],
+            $b['driver'] === null => $a['driver'],
+            default               => "{$a['driver']} UNION ALL {$b['driver']}",
+        };
+        return [
+            'not'          => false,
+            'pred'         => "({$a['pred']} OR {$b['pred']})",
+            'params'       => [...$a['params'], ...$b['params']],
+            'driver'       => $driver,
+            'driverParams' => [...$a['driverParams'], ...$b['driverParams']],
+            'df'           => $a['df'] + $b['df'],
+        ];
     }
 
     /**

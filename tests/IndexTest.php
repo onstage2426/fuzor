@@ -8628,7 +8628,8 @@ class IndexTest extends TestCase
         $result = $index->searchBoolean('widget');
 
         $this->assertFalse($result->exhaustive);
-        $this->assertSame(2, $result->totalHits);   // boolean totals stay an estimate under maxDocs
+        $this->assertSame(2, $result->hitsCount);   // the page comes from the candidates
+        $this->assertSame(3, $result->totalHits);   // the total counts every match
         $this->assertCount(1, $result->warnings);
     }
 
@@ -10893,6 +10894,43 @@ class IndexTest extends TestCase
 
         $this->expectException(IOException::class);
         $reopened->reopenIfChanged();
+    }
+
+    public function testBooleanTotalIsExactWhenCandidatesAreCut(): void
+    {
+        $index = new Index(
+            $this->dbPath,
+            config: new Config(maxDocs: 1),
+            schema: new SchemaConfig(filterableAttributes: ['tag']),
+        );
+        $index->insert([
+            ['id' => 1, 'title' => 'red lamp', 'tag' => 'a'],
+            ['id' => 2, 'title' => 'red chair', 'tag' => 'a'],
+            ['id' => 3, 'title' => 'red lamp shade', 'tag' => 'b'],
+            ['id' => 4, 'title' => 'blue lamp', 'tag' => 'b'],
+            ['id' => 5, 'title' => 'red table'],
+            ['id' => 6, 'title' => 'green lamp shade'],
+        ]);
+        $exact = new SearchOptions(asYouType: false);
+
+        $red = $index->searchBoolean('red', $exact);
+        $this->assertFalse($red->exhaustive);
+        $this->assertSame(4, $red->totalHits);
+        $this->assertSame(2, $index->searchBoolean('red lamp', $exact)->totalHits);
+        $this->assertSame(5, $index->searchBoolean('red | lamp -shade', $exact)->totalHits);
+        $this->assertSame(2, $index->searchBoolean('red -lamp', $exact)->totalHits);
+        $this->assertSame(2, $index->searchBoolean('-lamp red', $exact)->totalHits);
+        // A negation outside an AND contributes nothing.
+        $this->assertSame(4, $index->searchBoolean('red | -lamp', $exact)->totalHits);
+        $this->assertSame(2, $index->searchBoolean('"lamp shade" | blue', $exact)->totalHits);
+        $this->assertSame(1, $index->searchBoolean('-red -blue lamp', $exact)->totalHits);
+        $this->assertSame(
+            3,
+            $index->searchBoolean('red', new SearchOptions(asYouType: false, filter: ['tag' => ['a', 'b']]))->totalHits,
+        );
+        // a (1, 2), b (3), and doc 5 without a tag.
+        $distinct = new SearchOptions(asYouType: false, distinct: 'tag');
+        $this->assertSame(3, $index->searchBoolean('red', $distinct)->totalHits);
     }
 
     public function testDistinctTotalIsExactWhenCandidatesAreCut(): void

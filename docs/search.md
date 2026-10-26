@@ -66,7 +66,7 @@ Fuzor bounds the work behind a query with a few caps (see [tuning.md](tuning.md)
 
 | Flag | Set when | Effect |
 |---|---|---|
-| `$exhaustive === false` | A keyword matched more than `Config::$maxDocs` documents, or the last keyword's prefix matched more than `Config::$fuzzyMaxExpansions` terms | Hits come from the best candidates, so the page can differ from a full ranking. `search()` still counts `$totalHits` (also with `distinct`) and facet counts exactly over every match; `searchBoolean()`'s total and a capped prefix's total are estimates |
+| `$exhaustive === false` | A keyword matched more than `Config::$maxDocs` documents, or the last keyword's prefix matched more than `Config::$fuzzyMaxExpansions` terms | Hits come from the best candidates, so the page can differ from a full ranking. `search()` and `searchBoolean()` still count `$totalHits` (also with `distinct`) exactly over every match, and `search()` its facet counts; `searchBoolean()`'s facet counts and a capped prefix's total are estimates |
 | `$totalHitsCapped === true` | More documents match than `Config::$maxTotalHits` (1000) | `$totalHits` is the cap; no hit past it can be paged to |
 | `$approximateFacets` lists a field | That field's counts covered more than `Config::$maxFacetCountDocs` matching documents | Its counts in `$facetDistribution` / `$facetStats` are approximate |
 
@@ -282,6 +282,8 @@ Spacing never changes the meaning: `a|b`, `a | b`, and `a or b` are the same que
 NOT subtracts from the terms it is combined with by AND, in any order: `shirt -jeans` and `-jeans shirt` are the same. A query that is **only** negations (`-jeans`) matches nothing — there is no positive set to subtract from — and inside an OR a negation contributes nothing (`shirt or -jeans` behaves like `shirt`).
 
 `searchBoolean()` accepts all the same `SearchOptions` as `search()`.
+
+Each term contributes its first `Config::$maxDocs` documents to the set operations, so when a term matches more, the page comes from those (`exhaustive: false`). `$totalHits` is still counted over every match, also with `distinct`; facet counts come from the page's candidates.
 
 ## Synonyms
 
@@ -644,7 +646,7 @@ $distinctGroups = $countOnly->totalHits;
 
 Documents with no value for the distinct field are never collapsed — each passes through independently. A document with several values collapses on its smallest (numbers before strings).
 
-`$totalHits` counts the hits left after collapsing. When the words match more than `Config::$maxDocs` documents (`exhaustive: false`), the page comes from the best candidates, but the total is counted over every match, so it costs time proportional to the number of matches (on the 44k catalog a distinct search takes 57 ms instead of 41). `searchBoolean()` with `distinct` counts its candidates only.
+`$totalHits` counts the hits left after collapsing. When the words match more than `Config::$maxDocs` documents (`exhaustive: false`), the page comes from the best candidates, but the total is counted over every match, so it costs time proportional to the number of matches (on the 44k catalog a distinct search takes 57 ms instead of 41). The same holds for `searchBoolean()`.
 
 ## SearchOptions reference
 

@@ -129,6 +129,41 @@ class SearchInvariantTest extends TestCase
         }
     }
 
+    /** searchBoolean()'s totalHits is the uncapped number of matches too, for every operator. */
+    #[DataProvider('seeds')]
+    public function testBooleanTotalHitsEqualsUncappedTotal(int $seed): void
+    {
+        [$capped, $reference, $queries] = $this->build($seed);
+        $cut     = 0;
+        $options = [
+            new SearchOptions(asYouType: false),
+            new SearchOptions(),
+            new SearchOptions(asYouType: false, filter: ['color' => ['red', 'blue']]),
+            new SearchOptions(asYouType: false, filter: ['color' => new FacetExclude('red')]),
+            new SearchOptions(asYouType: false, distinct: 'price'),
+        ];
+        foreach ($queries as $q) {
+            [$a, $b] = explode(' ', $q);
+            $c = explode(' ', $q)[2] ?? 'shirt';
+            $expressions = [
+                "$a $b", "$a | $b", "$a -$b", "-$a $b", "($a | $b) $c", "$a | -$b",
+                "-$a -$b $c", "\"$a $b\" | $c", "$a $b | -$c",
+            ];
+            foreach ($expressions as $e) {
+                foreach ($options as $i => $o) {
+                    $result = $capped->searchBoolean($e, $o);
+                    $cut   += $result->exhaustive ? 0 : 1;
+                    $this->assertSame(
+                        $reference->searchBoolean($e, $o)->totalHits,
+                        $result->totalHits,
+                        "options $i \"$e\"",
+                    );
+                }
+            }
+        }
+        $this->assertGreaterThan(0, $cut, 'no capped boolean search');
+    }
+
     /** Facet counts cover the whole result set, not the candidates maxDocs left. */
     #[DataProvider('seeds')]
     public function testFacetCountsEqualUncappedCounts(int $seed): void
