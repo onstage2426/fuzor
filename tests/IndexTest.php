@@ -7082,6 +7082,28 @@ class IndexTest extends TestCase
         $this->assertSame([], $index->facetSearch(new FacetSearchQuery(facetName: 'color'))->facetHits);
     }
 
+    /**
+     * A distinct total over more matches than the key's scan share counts only the matches'
+     * values: the key is read whole there, and the other documents' values must not count.
+     */
+    public function testDistinctTotalOverManyMatchesCountsOnlyTheirValues(): void
+    {
+        $index = new Index($this->dbPath, schema: new SchemaConfig(filterableAttributes: ['group']));
+        $docs  = [];
+        for ($id = 1; $id <= 2400; $id++) {
+            $docs[] = $id <= 1200
+                ? ['id' => $id, 'title' => 'alpha', 'group' => 'g' . ($id % 10)]
+                : ['id' => $id, 'title' => 'beta', 'group' => "other{$id}"];
+        }
+        $index->insert($docs);
+        $capped = new Index($this->dbPath, config: new Config(maxDocs: 50), readonly: true);
+
+        $result = $capped->search('alpha', new SearchOptions(asYouType: false, distinct: 'group'));
+
+        $this->assertFalse($result->exhaustive);
+        $this->assertSame(10, $result->totalHits);
+    }
+
     public function testSortDeclaredButUnpopulatedFieldDoesNotWarn(): void
     {
         $index = new Index($this->dbPath, schema: new SchemaConfig(
