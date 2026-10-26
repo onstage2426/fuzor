@@ -7154,11 +7154,13 @@ final class Index implements \Countable
     /**
      * The distinct total of a search whose candidates were cut: the documents of $match
      * (searchMatchesSql() or booleanMatchesSql(); null = none) collapsed like
-     * applyDistinctPagination(), at most $distinctCount per
-     * value of the key, documents without it all kept. A document's value is the one
-     * fetchSortValues() gives distinct: its smallest number, else its smallest string by bytes;
-     * values are grouped by their PHP string form, as there. Reads every match (no early stop:
-     * the values decide how many survive), grouped in SQL.
+     * applyDistinctPagination(), at most $distinctCount per value of the key, documents without
+     * it all kept. A document's value is the one fetchSortValues() gives distinct (its smallest
+     * number, else its smallest string by bytes), grouped by its PHP string form, as there.
+     * Reads every match (no early stop: the values decide how many survive); the values come
+     * from fetchSortValues(), one scan of the key when the matches are many. Joining each match
+     * to its values and grouping in SQL was slower (ecom, 300 searches with distinct articleType:
+     * 23.9 → 21.9 ms per search).
      *
      * @param  array{0: string, 1: list<mixed>}|null $match
      */
@@ -7167,25 +7169,18 @@ final class Index implements \Countable
         if ($match === null) {
             return 0;
         }
-        $stmt = $this->prepare(
-            "SELECT v, COUNT(*) FROM (
-                SELECT CASE WHEN MIN(f.num_value) IS NOT NULL THEN MIN(f.num_value) ELSE MIN(f.value) END AS v
-                  FROM ({$match[0]}) m
-                  LEFT JOIN facet_values f ON f.doc_id = m.doc_id AND f.key_id = ?
-                 GROUP BY m.doc_id
-             ) GROUP BY v"
-        );
-        $stmt->execute([...$match[1], $keyId]);
-        $total = 0;
+        $stmt = $this->prepare($match[0]);
+        $stmt->execute($match[1]);
+        /** @var list<int> $docIds */
+        $docIds = $stmt->fetchAll(PDO::FETCH_COLUMN);
+        $total  = 0;
         /** @var array<string, int> $perValue */
         $perValue = [];
-        /** @var list<array{0: float|string|null, 1: int}> $rows */
-        $rows = $stmt->fetchAll(PDO::FETCH_NUM);
-        foreach ($rows as [$value, $n]) {
+        foreach ($this->fetchSortValues($docIds, $keyId) as $value) {
             if ($value === null) {
-                $total += $n;
+                $total++;
             } else {
-                $perValue[(string) $value] = ($perValue[(string) $value] ?? 0) + $n;
+                $perValue[(string) $value] = ($perValue[(string) $value] ?? 0) + 1;
             }
         }
         foreach ($perValue as $n) {
