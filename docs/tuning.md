@@ -44,6 +44,12 @@ All properties have sensible defaults — you only need to set what differs from
 
 A typo is an inserted, deleted, or replaced character, or two neighbouring characters swapped.
 
+## Pagination
+
+| Property | Default | Effect |
+|---|---|---|
+| `maxTotalHits` | `1000` | Most documents a search can reach, as Meilisearch's `pagination.maxTotalHits`: `offset` and `limit` are clamped so no hit ranked past it is returned, and `$totalHits` stops at it (`$totalHitsCapped` is then `true`). Applies to `search()`, `searchBoolean()` and a browse; facet counts are not affected. A search with more than `maxDocs` matches per word counts them up to this number, so a larger value costs more on broad queries. Must be at least 1. |
+
 ## Facets
 
 | Property | Default | Effect |

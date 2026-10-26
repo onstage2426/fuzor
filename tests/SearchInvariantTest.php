@@ -99,6 +99,22 @@ class SearchInvariantTest extends TestCase
         $this->assertGreaterThan(0, $checked, 'no exhaustive result to compare');
     }
 
+    /** totalHits is the uncapped number of matches, whatever maxDocs cut from the candidates. */
+    #[DataProvider('seeds')]
+    public function testTotalHitsEqualsUncappedTotal(int $seed): void
+    {
+        [$capped, $reference, $queries] = $this->build($seed);
+        foreach (self::variants() as $name => $options) {
+            foreach ($queries as $q) {
+                $this->assertSame(
+                    $reference->search($q, $options)->totalHits,
+                    $capped->search($q, $options)->totalHits,
+                    "$name \"$q\"",
+                );
+            }
+        }
+    }
+
     /** A page that starts at totalHits or later is empty. */
     #[DataProvider('seeds')]
     public function testPageAtTotalHitsIsEmpty(int $seed): void
@@ -109,8 +125,9 @@ class SearchInvariantTest extends TestCase
                 $total = $capped->search($q, $options)->totalHits;
                 $this->assertNotNull($total);
                 $end   = $capped->search($q, self::page($options, $total, 10));
-                $this->knownGap(
-                    $end->hitsCount === 0,
+                $this->assertSame(
+                    0,
+                    $end->hitsCount,
                     sprintf('%s "%s": offset %d = totalHits returned %d hits', $name, $q, $total, $end->hitsCount),
                 );
             }

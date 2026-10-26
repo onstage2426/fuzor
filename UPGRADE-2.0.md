@@ -137,6 +137,22 @@ that assert an exact order may need updating:
 Like `search()`, `inspectQuery()` splits `-word` and `-"phrase"` off the query first: they are no
 longer listed in `$tokens`, `$rawTokens`, or `$filteredTokens`, but in the new `$negations`.
 
+## `totalHits` stops at `Config::$maxTotalHits` (1000) and is exact in `search()`
+
+As in Meilisearch, a search reaches at most `Config::$maxTotalHits` documents (default 1,000):
+`offset` and `limit` are clamped so no hit ranked past it is returned, and `$totalHits` stops at
+it, with the new `$totalHitsCapped` set to `true`. This also holds for a browse (empty query),
+whose total used to be the full count. Show "1000+" when the flag is set, or raise the cap:
+
+```php
+new Index($path, config: new Config(maxTotalHits: 10_000));
+```
+
+Below the cap, `search()` now counts `$totalHits` exactly also when a word matches more than
+`Config::$maxDocs` documents (`exhaustive: false`); 1.x reported the number of candidates it had
+scored, often a quarter of the real number or less. `searchBoolean()` and `distinct` totals stay
+estimates in that case.
+
 ## `SearchOptions::$limit` defaults to 20
 
 The default page size is 20 hits instead of 100. Pass `limit: 100` to keep the old size.

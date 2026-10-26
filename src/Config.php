@@ -108,9 +108,22 @@ final readonly class Config
          * @infection-ignore-all: default value; mutations only affect memory and speed, not correctness
          */
         public int $insertChunkSize = 2_000,
+        /**
+         * Most documents a search can reach: offset and limit are clamped so that no hit ranked
+         * past this number is returned, and $totalHits stops at it (SearchResult::$totalHitsCapped
+         * is then true, so a UI can show "1000+"). Applies to search(), searchBoolean() and a
+         * browse (empty query); facet counts are not affected (see $maxFacetCountDocs). A search
+         * counts its matches up to this number, so a larger value costs more on broad queries.
+         *
+         * @infection-ignore-all: default value; mutations only move the cap
+         */
+        public int $maxTotalHits = 1_000,
     ) {
         if ($insertChunkSize < 1) {
             throw new \InvalidArgumentException('insertChunkSize must be >= 1.');
+        }
+        if ($maxTotalHits < 1) {
+            throw new \InvalidArgumentException('maxTotalHits must be >= 1.');
         }
     }
 }

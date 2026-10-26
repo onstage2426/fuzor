@@ -53,11 +53,19 @@ final class SearchResult implements \Countable, \IteratorAggregate
     /**
      * False when a cap may have cut matching documents out of the result: a keyword matched more
      * than Config::$maxDocs documents, or the last keyword's prefix matched more than
-     * Config::$fuzzyMaxExpansions terms. $hits then come from the best candidates and $totalHits
-     * is an estimate. Always true for a browse (empty query). Facet counts are reported
+     * Config::$fuzzyMaxExpansions terms. $hits then come from the best candidates, so the page
+     * may differ from a full ranking; $totalHits is still counted exactly (up to
+     * Config::$maxTotalHits, see $totalHitsCapped), except over a capped prefix expansion or
+     * with distinct. Always true for a browse (empty query). Facet counts are reported
      * separately in $approximateFacets.
      */
     public readonly bool $exhaustive;
+
+    /**
+     * True when more documents match than Config::$maxTotalHits: $totalHits is then that cap
+     * (show it as "1000+"), and no hit past it can be paged to.
+     */
+    public readonly bool $totalHitsCapped;
 
     /**
      * Facet fields whose counts in $facetDistribution / $facetStats were computed over a capped
@@ -96,6 +104,7 @@ final class SearchResult implements \Countable, \IteratorAggregate
         array $warnings = [],
         bool $exhaustive = true,
         array $approximateFacets = [],
+        bool $totalHitsCapped = false,
     ) {
         $this->ids               = $ids;
         $this->totalHits         = $totalHits;
@@ -107,6 +116,7 @@ final class SearchResult implements \Countable, \IteratorAggregate
         $this->warnings          = $warnings;
         $this->exhaustive        = $exhaustive;
         $this->approximateFacets = $approximateFacets;
+        $this->totalHitsCapped   = $totalHitsCapped;
 
         $this->hits = $documents === null
             ? array_map(fn(int $id) => ['id' => $id], $ids)
@@ -206,6 +216,31 @@ final class SearchResult implements \Countable, \IteratorAggregate
         return $this->approximateFacets;
     }
 
+    public function isTotalHitsCapped(): bool
+    {
+        return $this->totalHitsCapped;
+    }
+
+    /**
+     * This result with $totalHits stopped at $maxTotalHits.
+     *
+     * @internal Index applies Config::$maxTotalHits with it.
+     */
+    public function withTotalHitsCap(int $maxTotalHits): self
+    {
+        if ($this->totalHits === null || $this->totalHits <= $maxTotalHits) {
+            return $this;
+        }
+        return clone($this, [
+            'totalHits'       => $maxTotalHits,
+            'totalHitsCapped' => true,
+            'warnings'        => [
+                ...$this->warnings,
+                "More than maxTotalHits ({$maxTotalHits}) documents match; totalHits stops there.",
+            ],
+        ]);
+    }
+
     /** @return array<string, mixed> */
     public function toArray(): array
     {
@@ -221,6 +256,7 @@ final class SearchResult implements \Countable, \IteratorAggregate
             'warnings'          => $this->warnings,
             'exhaustive'        => $this->exhaustive,
             'approximateFacets' => $this->approximateFacets,
+            'totalHitsCapped'   => $this->totalHitsCapped,
         ];
     }
 

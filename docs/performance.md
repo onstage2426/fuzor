@@ -118,7 +118,8 @@ prices, years and brands; 3.8 GB index), Fuzor 2.0, one PHP process:
 | `distinct` browse | 20–44 ms | 0.3–0.7 s |
 
 Searches stay in single-digit milliseconds because each word is capped at `Config::$maxDocs`
-best matches; their totals are then estimates (`exhaustive: false`). Facet counts over a filter
+best matches; the page then comes from those candidates (`exhaustive: false`), while the total is
+counted in SQL up to `Config::$maxTotalHits` (1000). Facet counts over a filter
 that matches more than `Config::$maxFacetCountDocs` (50,000) documents are approximate
 (`approximateFacets`). Counting costs about 0.6–1 µs per counted document, whatever the number
 of facet fields: each document's facet values are stored together as one packed row. Some

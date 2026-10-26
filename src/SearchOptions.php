@@ -70,4 +70,14 @@ final readonly class SearchOptions
         public readonly array $sortFacetValuesBy = [],
     ) {
     }
+
+    /**
+     * The same options for another page.
+     *
+     * @internal Index clamps offset and limit to Config::$maxTotalHits with it.
+     */
+    public function withPage(int $offset, int $limit): self
+    {
+        return clone($this, ['offset' => $offset, 'limit' => $limit]);
+    }
 }

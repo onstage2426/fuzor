@@ -8497,9 +8497,86 @@ class IndexTest extends TestCase
         $result = $index->search('widget');
 
         $this->assertFalse($result->exhaustive);
-        $this->assertSame(2, $result->totalHits);
+        $this->assertSame(3, $result->totalHits);   // counted exactly, beyond the candidates
         $this->assertCount(1, $result->warnings);
         $this->assertStringContainsString('Config::$maxDocs (2)', $result->warnings[0]);
+    }
+
+    public function testTotalHitsStopsAtMaxTotalHits(): void
+    {
+        $index = new Index($this->dbPath, config: new Config(maxTotalHits: 4));
+        $index->insert($this->sameWordDocs(6));
+
+        foreach ([$index->search('widget'), $index->searchBoolean('widget'), $index->search('')] as $result) {
+            $this->assertSame(4, $result->totalHits);
+            $this->assertTrue($result->totalHitsCapped);
+            $this->assertTrue($result->isTotalHitsCapped());
+            $this->assertTrue($result->toArray()['totalHitsCapped']);
+            $this->assertCount(4, $result->getIds());
+            $this->assertStringContainsString('maxTotalHits (4)', $result->warnings[0]);
+        }
+    }
+
+    public function testTotalHitsAtMaxTotalHitsIsNotCapped(): void
+    {
+        $index = new Index($this->dbPath, config: new Config(maxTotalHits: 3));
+        $index->insert($this->sameWordDocs(3));
+
+        $result = $index->search('widget');
+
+        $this->assertSame(3, $result->totalHits);
+        $this->assertFalse($result->totalHitsCapped);
+        $this->assertSame([], $result->warnings);
+    }
+
+    public function testNoHitPastMaxTotalHitsCanBePagedTo(): void
+    {
+        $index = new Index($this->dbPath, config: new Config(maxTotalHits: 4));
+        $index->insert($this->sameWordDocs(6));
+
+        foreach (['widget', ''] as $q) {
+            $all  = $index->search($q, new SearchOptions(limit: 10))->getIds();
+            $tail = $index->search($q, new SearchOptions(offset: 3, limit: 10));
+            $past = $index->search($q, new SearchOptions(offset: 4, limit: 10));
+
+            $this->assertCount(4, $all);
+            $this->assertSame(array_slice($all, 3), $tail->getIds());
+            $this->assertSame(1, $tail->limit);
+            $this->assertSame([], $past->getIds());
+            $this->assertSame(4, $past->totalHits);
+        }
+    }
+
+    public function testMaxTotalHitsMustBePositive(): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+        new Config(maxTotalHits: 0);
+    }
+
+    public function testCappedSearchCountsMatchesExactly(): void
+    {
+        $index = new Index($this->dbPath, config: new Config(maxDocs: 2), schema: new SchemaConfig(
+            filterableAttributes: ['color'],
+        ));
+        $index->insert([
+            ['id' => 1, 'title' => 'red widget box', 'color' => 'red'],
+            ['id' => 2, 'title' => 'red widget', 'color' => 'blue'],
+            ['id' => 3, 'title' => 'widget red', 'color' => 'red'],
+            ['id' => 4, 'title' => 'red widget lamp', 'color' => 'red'],
+            ['id' => 5, 'title' => 'red lamp', 'color' => 'red'],
+            ['id' => 6, 'title' => 'widgte red', 'color' => 'red'],   // "widget" through a typo
+            ['id' => 7, 'title' => 'red widget', 'color' => 'red'],
+        ]);
+        $count = fn(string $q, ?string $color = null): ?int => $index->search($q, new SearchOptions(
+            asYouType: false,
+            filter: $color === null ? [] : ['color' => $color],
+        ))->totalHits;
+
+        // Every document has the first word "red" (MatchingStrategy::Last).
+        $this->assertSame(7, $count('red widget'));
+        $this->assertSame(6, $count('red widget', 'red'));
+        $this->assertSame(4, $count('red widget -lamp', 'red'));
+        $this->assertSame(3, $count('"red widget"', 'red'));   // 1, 4, 7: the words in order
     }
 
     public function testSearchKeywordExactlyAtMaxDocsIsExhaustive(): void
@@ -8519,7 +8596,7 @@ class IndexTest extends TestCase
         $result = $index->searchBoolean('widget');
 
         $this->assertFalse($result->exhaustive);
-        $this->assertSame(2, $result->totalHits);
+        $this->assertSame(2, $result->totalHits);   // boolean totals stay an estimate under maxDocs
         $this->assertCount(1, $result->warnings);
     }
 

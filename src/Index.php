@@ -2626,6 +2626,27 @@ final class Index implements \Countable
         string $phrase,
         SearchOptions $options = new SearchOptions(),
     ): SearchResult {
+        return $this->rankedSearch($phrase, $this->clampPage($options))
+            ->withTotalHitsCap($this->config->maxTotalHits);
+    }
+
+    /**
+     * The options with offset and limit clamped to Config::$maxTotalHits: no hit ranked past it
+     * is returned (search(), searchBoolean() and browse alike).
+     */
+    private function clampPage(SearchOptions $options): SearchOptions
+    {
+        $max    = $this->config->maxTotalHits;
+        $offset = min($options->offset, $max);
+        $limit  = min($options->limit, $max - $offset);
+        return $offset === $options->offset && $limit === $options->limit
+            ? $options
+            : $options->withPage($offset, $limit);
+    }
+
+    /** search() for a page inside Config::$maxTotalHits; totalHits not capped yet. */
+    private function rankedSearch(string $phrase, SearchOptions $options): SearchResult
+    {
         $this->checkDataVersion();
         ['phrase' => $positive, 'conditions' => $negations] = $this->extractNegations($phrase);
         if (trim($positive) === '') {
@@ -3029,6 +3050,21 @@ final class Index implements \Countable
         ];
 
         $total = count($docScores);
+        if ($candidatesCapped && $distinct === null) {
+            // The candidates hold only part of the matches: count them in SQL, up to one past
+            // maxTotalHits (the result is capped there). The result set is every document with
+            // the groups up to minBucket, through any of their terms (typos, prefix, synonyms),
+            // that passes the quoted phrases, negations and filters.
+            $total = $this->countSearchMatches(
+                array_map(fn(int $g): array => $groups[$g], array_slice($order, 0, $minBucket)),
+                [
+                    ...$this->phraseConditions($phraseGroups, $lastToken, $asYouType),
+                    ...$negations,
+                    ...$this->facetFilterConditions($filter),
+                ],
+                $this->config->maxTotalHits + 1,
+            );
+        }
 
         // Proximity only reorders the documents that remain after every filter, so it runs
         // last. Without sort or distinct only the first offset + limit documents are shown, and
@@ -3196,6 +3232,13 @@ final class Index implements \Countable
         string $phrase,
         SearchOptions $options = new SearchOptions(),
     ): SearchResult {
+        return $this->booleanSearch($phrase, $this->clampPage($options))
+            ->withTotalHitsCap($this->config->maxTotalHits);
+    }
+
+    /** searchBoolean() for a page inside Config::$maxTotalHits; totalHits not capped yet. */
+    private function booleanSearch(string $phrase, SearchOptions $options): SearchResult
+    {
         $this->checkDataVersion();
         if (trim($phrase) === '') {
             return $this->browse($phrase, $options);
@@ -6811,6 +6854,91 @@ final class Index implements \Countable
         /** @var array<int, int> $hits */
         $hits = $stmt->fetchAll(PDO::FETCH_KEY_PAIR);
         return $hits;
+    }
+
+    /**
+     * Number of documents that contain every group in $groups (through any of its terms) and
+     * satisfy $conditions, counted up to $limit.
+     *
+     * Driven from the group with the fewest documents, the other groups and the conditions as
+     * correlated EXISTS probes (doclist via doc_id_index, facet rows via facet_doc_id_index);
+     * the LIMIT stops the walk once the cap is reached, so a broad query reads about $limit
+     * matches and a narrow one the driver's rows.
+     *
+     * @param  list<KeywordGroup>   $groups
+     * @param  list<FacetCondition> $conditions
+     */
+    private function countSearchMatches(array $groups, array $conditions, int $limit): int
+    {
+        if ($groups === [] || in_array([], array_column($groups, 'termIds'), true)) {
+            return 0;
+        }
+        usort($groups, fn(array $a, array $b): int => $a['df'] <=> $b['df']);
+        $driver = array_shift($groups);
+        $sql    = 'SELECT COUNT(*) FROM (SELECT DISTINCT d.doc_id FROM doclist d WHERE d.term_id IN ('
+            . $this->placeholders(count($driver['termIds'])) . ')' . $this->liveDocsSql('d.doc_id');
+        $params = $driver['termIds'];
+        foreach ($groups as $i => $group) {
+            $sql .= " AND EXISTS (SELECT 1 FROM doclist g{$i} WHERE g{$i}.doc_id = d.doc_id AND g{$i}.term_id IN ("
+                . $this->placeholders(count($group['termIds'])) . '))';
+            array_push($params, ...$group['termIds']);
+        }
+        $probes = $this->renderFacetProbes($conditions, 'd.doc_id');
+        if ($probes === null) {
+            return 0;
+        }
+        $sql     .= $probes[0] . ' LIMIT ?)';
+        $params   = [...$params, ...$probes[1], $limit];
+        $stmt     = $this->prepare($sql);
+        $stmt->execute($params);
+        return (int) $stmt->fetchColumn();
+    }
+
+    /**
+     * The quoted phrases as conditions for countSearchMatches(): a document passes when it has
+     * the phrase's words at consecutive positions (as docMatchesPhrase(); the last slot is a
+     * prefix when it is the query's as-you-type word). A phrase with a word the index lacks is
+     * skipped, as in filterDocsByPhrases().
+     *
+     * @param  list<list<string>> $phraseGroups
+     * @return list<FacetCondition>
+     */
+    private function phraseConditions(array $phraseGroups, string $lastToken, bool $asYouType): array
+    {
+        $conditions = [];
+        foreach ($phraseGroups as $group) {
+            $slots = [];
+            foreach ($group as $i => $token) {
+                $isPrefixSlot = $asYouType && $i === count($group) - 1 && $token === $lastToken;
+                $termIds      = array_column($this->getWordlistByKeyword($token, $isPrefixSlot, false), 'id');
+                if ($termIds === []) {
+                    continue 2;
+                }
+                $slots[] = $termIds;
+            }
+            if ($slots === []) {
+                continue;
+            }
+            $rows   = 'FROM ' . (count($slots) === 1 ? 'doclist' : 'positions') . ' %1$s';
+            $params = [];
+            foreach (array_slice($slots, 1) as $i => $termIds) {
+                $at    = $i + 1;
+                $rows .= " JOIN positions %1\$s_{$at} ON %1\$s_{$at}.doc_id = %1\$s.doc_id"
+                    . " AND %1\$s_{$at}.position = %1\$s.position + {$at}"
+                    . " AND %1\$s_{$at}.term_id IN (" . $this->placeholders(count($termIds)) . ')';
+                array_push($params, ...$termIds);
+            }
+            $conditions[] = [
+                'name'       => '"' . implode(' ', $group) . '"',
+                'rows'       => $rows . ' WHERE %1$s.term_id IN (' . $this->placeholders(count($slots[0])) . ')'
+                    . $this->liveDocsSql('%1$s.doc_id'),
+                'params'     => [...$params, ...$slots[0]],
+                'impossible' => false,
+                'multiRow'   => true,
+                'exclude'    => false,
+            ];
+        }
+        return $conditions;
     }
 
     /**
