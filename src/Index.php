@@ -2760,14 +2760,18 @@ final class Index implements \Countable
             }
             // Bucket 1 (the first word alone, and a one-word query) ranks the first word's documents
             // by its BM25 score, which its maxDocs rows by hit count do not give: a word in at
-            // most EXACT_RANKED_DOCS_PER_MAX_DOCS × maxDocs documents is read whole, like a words bucket.
+            // most EXACT_RANKED_DOCS_PER_MAX_DOCS × maxDocs documents is read whole, like a words bucket;
+            // a larger one's maxDocs best rows by score are read for a one-word query here, for more
+            // words after the first walk when bucket 1 reaches the page (see below).
             $fetchRows = $this->config->maxDocs;
-            if (
-                $groups[$g]['truncated'] && $g === $order[0] && $strategy !== MatchingStrategy::All
-                && $groups[$g]['df'] <= $scoredDocs
-            ) {
-                $fetchRows                = $groups[$g]['df'];
-                $groups[$g]['truncated'] = false;
+            $byScore   = false;
+            if ($groups[$g]['truncated'] && $g === $order[0] && $strategy !== MatchingStrategy::All) {
+                if ($groups[$g]['df'] <= $scoredDocs) {
+                    $fetchRows                = $groups[$g]['df'];
+                    $groups[$g]['truncated'] = false;
+                } else {
+                    $byScore = count($order) === 1 && $sortSpecs === [];
+                }
             }
             $candidatesCapped = $candidatesCapped || $groups[$g]['truncated'];
             // BM25 score computed in SQLite C; PHP receives (term_id, doc_id, score).
@@ -2778,6 +2782,7 @@ final class Index implements \Countable
                 $groups[$g]['idfK1p1'],
                 $k1_1mb,
                 $k1b_avgdl,
+                $byScore,
             );
         }
 
@@ -2966,6 +2971,42 @@ final class Index implements \Countable
                 $exactFrom = $k;
                 if ($settles && $passing($exactDocs) >= $offset + $limit) {
                     break;
+                }
+            }
+            // Bucket 1 reaches the page (or, with filters, negations or distinct, may): its best
+            // documents are the first word's best rows by BM25 score, not the maxDocs rows with
+            // the most hits fetched above. Read every row of the word in score order (one SQL
+            // sort: ecom "men", 21.8k documents, 5 ms) and keep the maxDocs best; a document of
+            // bucket 1 not among them scores below all of them. Not with sort fields, which order
+            // the bucket by value (the score rows did not change those pages, +29%).
+            $first = $order[0];
+            if (
+                $minBucket === 1 && $sortSpecs === [] && $groups[$first]['truncated']
+                && $groups[$first]['df'] > $scoredDocs
+            ) {
+                $covered = $exactDocs + array_filter($docBucket, fn(int $bucket): bool => $bucket >= 2);
+                if (!$settles || $passing($covered) < $offset + $limit) {
+                    /** @var array<string, true> $held */
+                    $held = [];
+                    foreach ($groups[$first]['rows'] as [$termId, $docId]) {
+                        $held["{$termId}:{$docId}"] = true;
+                    }
+                    $best = $this->fetchDocsByTermIds(
+                        $groups[$first]['words'],
+                        $this->config->maxDocs,
+                        array_filter($groups[$first]['words'], fn(array $w): bool => isset($w['distance'])) !== [],
+                        $groups[$first]['idfK1p1'],
+                        $k1_1mb,
+                        $k1b_avgdl,
+                        true,
+                    );
+                    foreach ($best as $row) {
+                        if (!isset($held["{$row[0]}:{$row[1]}"])) {
+                            $groups[$first]['rows'][] = $row;
+                            $added = $added || !isset($candidates[$row[1]]);
+                            $candidates[$row[1]] = true;
+                        }
+                    }
                 }
             }
             if (!$added) {
@@ -7192,6 +7233,7 @@ final class Index implements \Countable
      *         Wordlist rows from getWordlistByKeyword() (typo rows also carry distance: int).
      * @param  int  $limit   Maximum rows to return.
      * @param  bool $isFuzzy Whether some of $words carry a distance key.
+     * @param  bool $byScore Order by BM25 score (reads every row of the terms) instead of hit count.
      * @return list<array{0: int, 1: int, 2: float}> Rows as [term_id, doc_id, bm25_score].
      */
     private function fetchDocsByTermIds(
@@ -7201,6 +7243,7 @@ final class Index implements \Countable
         float $idfK1p1,
         float $k1_1mb,
         float $k1b_avgdl,
+        bool $byScore = false,
     ): array {
         if ($isFuzzy) {
             // The word's own terms first, then its typo derivations by distance, each tier with
@@ -7219,13 +7262,35 @@ final class Index implements \Countable
                 }
                 array_push(
                     $rows,
-                    ...$this->fetchDocsByTermIds($tier, $limit - count($rows), false, $idfK1p1, $k1_1mb, $k1b_avgdl),
+                    ...$this->fetchDocsByTermIds(
+                        $tier,
+                        $limit - count($rows),
+                        false,
+                        $idfK1p1,
+                        $k1_1mb,
+                        $k1b_avgdl,
+                        $byScore,
+                    ),
                 );
             }
             return $rows;
         }
         $ids  = array_column($words, 'id');
         $n    = count($ids);
+        if ($byScore) {
+            $live = $this->liveDocsSql('d.doc_id');
+            $stmt = $this->stmt(
+                "fetchTermDocsByScore:{$n}" . ($live === '' ? '' : ':live'),
+                "SELECT d.term_id, d.doc_id, ? * d.hit_count / (? + ? * dl.length + d.hit_count) AS score
+                  FROM doclist d JOIN doc_lengths dl ON dl.doc_id = d.doc_id
+                 WHERE d.term_id IN ({$this->placeholders($n)}){$live}
+                 ORDER BY score DESC, d.doc_id ASC LIMIT ?"
+            );
+            $stmt->execute([$idfK1p1, $k1_1mb, $k1b_avgdl, ...$ids, $limit]);
+            /** @var list<array{0: int, 1: int, 2: float}> $rows */
+            $rows = $stmt->fetchAll(PDO::FETCH_NUM);
+            return $rows;
+        }
         $live = $this->liveDocsSql('doc_id');
         $tag  = $live === '' ? '' : ':live';
 

@@ -148,6 +148,31 @@ class SearchInvariantTest extends TestCase
         }
     }
 
+    /**
+     * A one-word query whose word is cut at maxDocs ranks its documents by BM25 score: the
+     * maxDocs best by score are fetched, not the maxDocs with the most hits, so a page within
+     * them equals the uncapped one (short words: no typo derivations).
+     */
+    #[DataProvider('seeds')]
+    public function testOneWordPageWithinMaxDocsEqualsUncappedPage(int $seed): void
+    {
+        [$capped, $reference] = $this->build($seed);
+        $options = new SearchOptions(asYouType: false, limit: 5);
+        $checked = 0;
+        foreach (self::WORDS as $word) {
+            if (mb_strlen($word) >= 5 || $reference->search($word, $options)->totalHits <= 20) {
+                continue;
+            }
+            $checked++;
+            $this->assertSame(
+                $reference->search($word, $options)->getIds(),
+                $capped->search($word, $options)->getIds(),
+                "\"$word\"",
+            );
+        }
+        $this->assertGreaterThan(0, $checked, 'no word above 4 × maxDocs');
+    }
+
     /** A page that starts at totalHits or later is empty. */
     #[DataProvider('seeds')]
     public function testPageAtTotalHitsIsEmpty(int $seed): void
