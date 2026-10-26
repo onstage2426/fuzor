@@ -42,6 +42,7 @@ use PDO;
  *     range?: array{keyId: int, sql: string, params: list<mixed>},
  *     values?: array{keyId: int, values: list<mixed>},
  *     selection?: true,
+ *     rowCount?: int,
  * }
  * @phpstan-type KeywordGroup array{
  *     words: list<array{id: int, term: string, num_hits: int, num_docs: int, distance?: int}>,
@@ -6892,7 +6893,7 @@ final class Index implements \Countable
                     . " AND %1\$s_{$at}.doc_id = %1\$s.doc_id AND %1\$s_{$at}.position = %1\$s.position + {$at}";
                 $params[] = $termId;
             }
-            $conditions[] = [
+            $condition = [
                 'name'       => '-' . $text,
                 'rows'       => $rows . ' WHERE %1$s.term_id = ?' . $this->liveDocsSql('%1$s.doc_id'),
                 'params'     => [...$params, $termIds[0]],
@@ -6900,6 +6901,13 @@ final class Index implements \Countable
                 'multiRow'   => count($termIds) > 1,
                 'exclude'    => true,
             ];
+            if (count($termIds) === 1) {
+                // Its doclist rows (tombstoned documents' rows included, as in num_docs).
+                $stmt = $this->stmt('termNumDocs', 'SELECT num_docs FROM wordlist WHERE id = ?');
+                $stmt->execute([$termIds[0]]);
+                $condition['rowCount'] = (int) $stmt->fetchColumn();
+            }
+            $conditions[] = $condition;
         }
         return ['phrase' => $positive, 'conditions' => $conditions];
     }
@@ -9159,9 +9167,12 @@ final class Index implements \Countable
             // its values have few rows, by reading those rows in sequence (+doc_id: not probed per
             // candidate). Probing every candidate × value in the primary key cost more than either
             // (ecom, 4,593 candidates: gender Women|Men 7.7 → 4.0 ms, articleType Tshirts 5.4 → 3.4 ms).
-            // Other conditions (ranges, query negations) are probed per candidate.
-            $scan = isset($condition['values'])
-                && $this->conditionRowCount($condition) <= count($candidateDocIds) * self::KEY_SET_SCAN_ROWS;
+            // A negated word's rows are read in sequence the same way when they are few ("casual
+            // shirt -formal", 4,834 candidates, 3,472 rows: 7.6 → 2.7 ms); other conditions (ranges,
+            // negated phrases) are probed per candidate.
+            $rows = $condition['rowCount']
+                ?? (isset($condition['values']) ? $this->conditionRowCount($condition) : null);
+            $scan = $rows !== null && $rows <= count($candidateDocIds) * self::KEY_SET_SCAN_ROWS;
             if (isset($condition['values']) && !$scan) {
                 $ids = $this->candidatesHoldingValues($condition['values'], $candidateJson);
             } else {
