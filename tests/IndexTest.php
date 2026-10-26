@@ -10270,6 +10270,28 @@ class IndexTest extends TestCase
         $this->assertSame(9, $last->getIds()[0]);
     }
 
+    public function testExactBucketHoldsDocumentsMatchingThroughATypo(): void
+    {
+        $index = new Index($this->dbPath, config: new Config(maxDocs: 2));
+        $index->insert([
+            ['id' => 1, 'title' => 'classic shirt'],
+            ['id' => 2, 'title' => 'classic shirt'],
+            ['id' => 3, 'title' => 'classic shirt'],
+            ['id' => 4, 'title' => 'classic shirt'],
+            ['id' => 5, 'title' => 'clasic shirt'],
+        ]);
+
+        // Both words are over maxDocs, so the full matches are read as an exact bucket.
+        $result = $index->search('classic shirt', new SearchOptions(
+            asYouType: false,
+            matchingStrategy: MatchingStrategy::All,
+        ));
+
+        $this->assertTrue($result->exhaustive);
+        $this->assertSame(5, $result->totalHits);
+        $this->assertSame(5, $result->getIds()[4]);   // the typo match ranks last
+    }
+
     // --- negated words and phrases in search() ---
 
     private function negationIndex(): Index

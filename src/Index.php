@@ -2885,23 +2885,12 @@ final class Index implements \Countable
                         break;
                     }
                 }
-                // The bucket query reads each word's own terms: documents matching through a typo
-                // rank after them anyway (typo rule), and the derivations widen every group
-                // (amazon "black women dress": 70 → 276 ms with them). A word found only through
-                // typos keeps its derivations.
-                $members = array_map(function (int $g) use ($groups): array {
-                    $group = $groups[$g];
-                    $own   = array_values(array_filter(
-                        $group['words'],
-                        fn(array $w): bool => ($w['distance'] ?? 0) === 0,
-                    ));
-                    if ($own !== [] && count($own) < count($group['words'])) {
-                        $group['words']   = $own;
-                        $group['termIds'] = array_column($own, 'id');
-                        $group['df']      = (int) array_sum(array_column($own, 'num_docs'));
-                    }
-                    return $group;
-                }, array_slice($order, 0, $k));
+                // Every term of each word, typo derivations included: a document that contains a
+                // word only through a typo is in the bucket too (it ranks after the exact matches by
+                // the typo rule). Reading only each word's own terms left those documents out of
+                // a bucket counted as exact (MatchingStrategy::All: "classic slip grey" 33 of 39).
+                // Cost: ecom with a filter +11%; amazon "black women dress" 70 → 276 ms.
+                $members = array_map(fn(int $g): array => $groups[$g], array_slice($order, 0, $k));
                 $hits    = in_array([], array_column($members, 'termIds'), true)
                     ? []   // an unknown word: no document contains all k groups
                     : $this->exactBucketDocs($members);

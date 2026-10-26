@@ -82,7 +82,7 @@ class SearchInvariantTest extends TestCase
                 }
                 $checked++;
                 $b = $reference->search($q, $options);
-                $this->knownGap(
+                $this->assertTrue(
                     $a->getIds() === $b->getIds() && $a->totalHits === $b->totalHits,
                     sprintf(
                         'exhaustive result differs from the uncapped one (%s "%s"): total %d vs %d, page %s vs %s',
