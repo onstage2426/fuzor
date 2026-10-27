@@ -7703,33 +7703,52 @@ final class Index implements \Countable
             return [];
         }
         sort($docIds);
-        // Driven from the documents, one primary key probe per (document, term) pair through
-        // doc_id_index: amazon "women" (134k documents) completed for 87 documents 12.6 → 0.07 ms.
-        // Reading the terms' rows in sequence and testing membership is cheaper while they number
-        // fewer than COMPLETE_PROBE_ROWS per pair (ecom "black jean", 1,581 documents × 3 terms,
-        // 12.7k rows: 7.1 → 3.0 ms); it is driven from the term list, as a term_id IN (…) list
-        // left SQLite free to probe per document anyway. Sorted IDs keep consecutive probes on
-        // neighbouring pages. Never write +d.term_id: it turns the probes into a scan of every
-        // document's terms (41 ms).
+        // Three shapes, by the pairs (documents × terms) against the terms' rows (Σ df):
+        // - driven from the documents, one probe per pair through doc_id_index, while the rows
+        //   number more than COMPLETE_PROBE_ROWS per pair: amazon "women" (134k documents)
+        //   completed for 87 documents 12.6 → 0.07 ms;
+        // - driven from the term list with the documents as an IN list: SQLite probes the
+        //   primary key per (term, document), ~0.45 µs a pair (ecom "black jean", 1,581
+        //   documents × 3 terms: 7.1 → 3.0 ms against the first shape);
+        // - while the rows number at most PROBE_ROW_COST per pair, the terms' rows read in
+        //   sequence from doclist_term_hitcount (term_id, hit_count, doc_id; `hit_count > 0`
+        //   selects it, always true) and tested against the IN list, ~0.14 µs a row: the
+        //   primary key's leaf rows also carry the field columns. Ecom "casual shirt" with a
+        //   filter, 1,702 documents × 6 terms (13k rows) 4.6 → 3.0 ms; a cut typo term (df 11)
+        //   for 152 documents 0.21 → 0.05 ms. An index hint would fail while insert() has
+        //   dropped the index; this condition falls back to the primary key.
+        // Sorted IDs keep consecutive probes on neighbouring pages. Never write +d.term_id: it
+        // turns the probes into a scan of every document's terms (41 ms).
         $termIds = array_keys($terms);
         sort($termIds);
-        $probe = count($docIds) * count($terms) * self::COMPLETE_PROBE_ROWS <= array_sum($terms);
-        $stmt  = $probe
-            ? $this->stmt(
+        $pairs = count($docIds) * count($terms);
+        $probe = $pairs * self::COMPLETE_PROBE_ROWS <= array_sum($terms);
+        $read  = array_sum($terms) <= $pairs * self::PROBE_ROW_COST;
+        $stmt  = match (true) {
+            $probe => $this->stmt(
                 'completeTermGroupProbe',
                 'SELECT d.term_id, d.doc_id, ' . self::bm25Sql('d', '?1', '?2', '?3') . '
                    FROM json_each(?5) j
                    CROSS JOIN doclist d ON d.doc_id = j.value AND d.term_id IN (SELECT value FROM json_each(?4))
                    CROSS JOIN doc_lengths dl ON dl.doc_id = d.doc_id'
-            )
-            : $this->stmt(
+            ),
+            $read => $this->stmt(
+                'completeTermGroupRead',
+                'SELECT d.term_id, d.doc_id, ' . self::bm25Sql('d', '?1', '?2', '?3') . '
+                   FROM json_each(?4) t
+                   CROSS JOIN doclist d ON d.term_id = t.value AND d.hit_count > 0
+                   CROSS JOIN doc_lengths dl ON dl.doc_id = d.doc_id
+                  WHERE d.doc_id IN (SELECT value FROM json_each(?5))'
+            ),
+            default => $this->stmt(
                 'completeTermGroup',
                 'SELECT d.term_id, d.doc_id, ' . self::bm25Sql('d', '?1', '?2', '?3') . '
                    FROM json_each(?4) t
                    CROSS JOIN doclist d ON d.term_id = t.value
                    CROSS JOIN doc_lengths dl ON dl.doc_id = d.doc_id
                   WHERE d.doc_id IN (SELECT value FROM json_each(?5))'
-            );
+            ),
+        };
         $stmt->execute([
             $group['idfK1p1'],
             $k1_1mb,
