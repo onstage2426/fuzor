@@ -8686,6 +8686,16 @@ class IndexTest extends TestCase
         $this->assertSame(3, $result->totalHits);   // 1, 2, 7
         $this->assertSame(['blue' => 1, 'green' => 1, 'red' => 2], $result->facetDistribution['color']);
         $this->assertSame(['L' => 1, 'M' => 2, 'S' => 2], $result->facetDistribution['size']);
+
+        // Exclusions on two keys apply to every key's count, their own included.
+        $excluded = $index->search('widget', new SearchOptions(
+            filter: ['color' => new FacetExclude('red'), 'size' => new FacetExclude('L')],
+            facets: ['color', 'size'],
+        ));
+
+        $this->assertSame(4, $excluded->totalHits);   // 2, 3, 5, 6
+        $this->assertSame(['blue' => 2, 'green' => 1], $excluded->facetDistribution['color']);
+        $this->assertSame(['M' => 2, 'S' => 2], $excluded->facetDistribution['size']);
     }
 
     public function testCappedSearchFacetsOverMaxFacetCountDocsAreApproximate(): void
