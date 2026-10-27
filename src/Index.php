@@ -7412,14 +7412,14 @@ final class Index implements \Countable
      * @param  list<FacetCondition> $conditions
      * @return array{0: string, 1: list<mixed>}|null
      */
-    private function searchMatchesSql(array $groups, array $conditions): ?array
+    private function searchMatchesSql(array $groups, array $conditions, bool $grouped = false): ?array
     {
         if ($groups === [] || in_array([], array_column($groups, 'termIds'), true)) {
             return null;
         }
         usort($groups, fn(array $a, array $b): int => $a['df'] <=> $b['df']);
         $driver = array_shift($groups);
-        $sql    = 'SELECT DISTINCT d.doc_id FROM doclist d WHERE d.term_id IN ('
+        $sql    = 'SELECT ' . ($grouped ? '' : 'DISTINCT ') . 'd.doc_id FROM doclist d WHERE d.term_id IN ('
             . $this->placeholders(count($driver['termIds'])) . ')' . $this->liveDocsSql('d.doc_id');
         $params = $driver['termIds'];
         foreach ($groups as $i => $group) {
@@ -7431,7 +7431,7 @@ final class Index implements \Countable
         if ($probes === null) {
             return null;
         }
-        return [$sql . $probes[0], [...$params, ...$probes[1]]];
+        return [$sql . $probes[0] . ($grouped ? ' GROUP BY +d.doc_id' : ''), [...$params, ...$probes[1]]];
     }
 
     /**
@@ -7494,6 +7494,12 @@ final class Index implements \Countable
                 }
             }
         }
+        // A result set that cannot reach $maxDocs (its rarest group's df bounds it) is counted
+        // whole, so the order of its documents does not matter: grouped (sorted by document)
+        // instead of DISTINCT, and value lists checked on each document's doc_facets row, which
+        // the count reads anyway, instead of a probe per document. Otherwise the order decides
+        // which documents are counted, and it is the plan SQLite picks for the probed SQL.
+        $whole  = $groups !== [] && min(array_column($groups, 'df')) <= $maxDocs;
         $common = null;
         foreach ($byGroup as $own => $nameToId) {
             if ($own === '' && $common !== null) {
@@ -7504,7 +7510,22 @@ final class Index implements \Countable
                 $filters,
                 fn(array $c): bool => $c['exclude'] || $c['name'] !== $own,
             ));
-            $match = $this->searchMatchesSql($groups, [...$base, ...$conditions]);
+            $holding = [];
+            $probed  = [];
+            foreach ($conditions as $c) {
+                if ($whole && isset($c['values']) && !$c['impossible']) {
+                    $holding[] = [
+                        'packed'  => array_map(
+                            fn(int $vid): string => pack('P', $vid),
+                            $this->facetValueIdsOf($c['values']['keyId'], $c['values']['values']),
+                        ),
+                        'exclude' => $c['exclude'],
+                    ];
+                } else {
+                    $probed[] = $c;
+                }
+            }
+            $match = $this->searchMatchesSql($groups, [...$base, ...$probed], $whole);
             if ($match === null) {
                 continue;
             }
@@ -7514,12 +7535,13 @@ final class Index implements \Countable
             $subsetCounts = [];
             $results      = $this->facetCountsOfDocsSql(
                 $nameToId,
-                "{$match[0]} LIMIT ?",
-                [...$match[1], $maxDocs + 1],
+                $whole ? $match[0] : "{$match[0]} LIMIT ?",
+                $whole ? $match[1] : [...$match[1], $maxDocs + 1],
                 $maxDocs,
                 $truncated,
                 $own === $carrier ? $subset : null,
                 $subsetCounts,
+                $holding,
             );
             if ($truncated) {
                 array_push($approximate, ...array_keys($nameToId));
@@ -9659,8 +9681,14 @@ final class Index implements \Countable
      * @param  array<string, int> $nameToId Facet key name → key_id.
      * @param  string             $docsSql  SELECT with a doc_id column, each document once.
      * @param  list<mixed>        $params
+     * With $holding, a document is counted only when its blob holds one of each positive entry's
+     * value IDs and none of each exclusion's: value-list filters checked on the row already read
+     * instead of a probe per document in $docsSql. $maxDocs then counts the passing documents
+     * ($docsSql without a LIMIT; the cursor is closed once it is reached).
+     *
      * @param  array{vids: list<int>, nameToId: array<string, int>}|null $subset
      * @param  array<int, array<string, array{0: int, 1: int, 2: float|null}>> $subsetCounts
+     * @param  list<array{packed: list<string>, exclude: bool}> $holding
      * @return array<int, array<string, array{0: int, 1: int, 2: float|null}>>
      *         key_id → value → [documents, numeric documents, num_value]
      */
@@ -9672,6 +9700,7 @@ final class Index implements \Countable
         bool &$truncated = false,
         ?array $subset = null,
         array &$subsetCounts = [],
+        array $holding = [],
     ): array {
         // With a cap every document is a row (no facet values: NULL), so the rows count them.
         $join = $maxDocs === null ? 'CROSS JOIN' : 'LEFT JOIN';
@@ -9689,6 +9718,11 @@ final class Index implements \Countable
         $subsetBatch = [];
         $rows        = 0;
         while (($blob = $stmt->fetchColumn()) !== false) {
+            foreach ($holding as $filter) {
+                if ((is_string($blob) && self::holdsAnyPackedId($blob, $filter['packed'])) === $filter['exclude']) {
+                    continue 2;
+                }
+            }
             if ($maxDocs !== null && ++$rows > $maxDocs) {
                 $truncated = true;
                 $stmt->closeCursor();
@@ -9840,6 +9874,7 @@ final class Index implements \Countable
      * @param  array{vids: list<int>, nameToId: array<string, int>}|null $subset
      * @param  array<string, array{distribution: array<array-key, int>,
      *                              stats: array{min: float, max: float}|null}> $subsetCounts
+     * @param  list<array{packed: list<string>, exclude: bool}> $holding
      * @return array<string, array{distribution: array<array-key, int>, stats: array{min: float, max: float}|null}>
      */
     private function facetCountsOfDocsSql(
@@ -9850,6 +9885,7 @@ final class Index implements \Countable
         bool &$truncated = false,
         ?array $subset = null,
         array &$subsetCounts = [],
+        array $holding = [],
     ): array {
         $subsetByKey = [];
         $byKey       = $this->facetValueCountsOfDocs(
@@ -9860,6 +9896,7 @@ final class Index implements \Countable
             $truncated,
             $subset,
             $subsetByKey,
+            $holding,
         );
         if ($subset !== null) {
             $subsetCounts = self::summarizeKeyCounts($subset['nameToId'], $subsetByKey);

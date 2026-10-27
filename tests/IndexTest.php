@@ -8661,6 +8661,33 @@ class IndexTest extends TestCase
         $this->assertSame(4, $blue->totalHits);
     }
 
+    public function testCappedSearchCountsAKeyUnderAnotherKeysValueList(): void
+    {
+        $schema = new SchemaConfig(filterableAttributes: ['color', 'size']);
+        $index  = new Index($this->dbPath, config: new Config(maxDocs: 1), schema: $schema);
+        $index->insert([
+            ['id' => 1, 'title' => 'widget', 'color' => 'red', 'size' => 'S'],
+            ['id' => 2, 'title' => 'widget', 'color' => 'blue', 'size' => ['S', 'M']],
+            ['id' => 3, 'title' => 'widget', 'color' => 'green', 'size' => 'M'],
+            ['id' => 4, 'title' => 'widget', 'color' => 'red', 'size' => 'L'],
+            ['id' => 5, 'title' => 'widget', 'color' => 'blue'],
+            ['id' => 6, 'title' => 'widget', 'size' => 'S'],
+            ['id' => 7, 'title' => 'widget', 'color' => 'red', 'size' => 'M'],
+        ]);
+
+        // size is counted under the color list and color under the size list (each without its
+        // own filter); the candidates are cut at maxDocs, so both count the whole result set.
+        $result = $index->search('widget', new SearchOptions(
+            filter: ['color' => ['red', 'blue'], 'size' => ['S', 'M']],
+            facets: ['color', 'size'],
+        ));
+
+        $this->assertFalse($result->exhaustive);
+        $this->assertSame(3, $result->totalHits);   // 1, 2, 7
+        $this->assertSame(['blue' => 1, 'green' => 1, 'red' => 2], $result->facetDistribution['color']);
+        $this->assertSame(['L' => 1, 'M' => 2, 'S' => 2], $result->facetDistribution['size']);
+    }
+
     public function testCappedSearchFacetsOverMaxFacetCountDocsAreApproximate(): void
     {
         $schema = new SchemaConfig(filterableAttributes: ['color']);
