@@ -2928,7 +2928,10 @@ final class Index implements \Countable
                     if (!isset($alive[$docId])) {
                         continue;
                     }
-                    $matched[$docId] = min($matched[$docId] ?? PHP_INT_MAX, $termTypos[$termId] ?? 0);
+                    $typos = $termTypos[$termId] ?? 0;
+                    if (!isset($matched[$docId]) || $typos < $matched[$docId]) {
+                        $matched[$docId] = $typos;
+                    }
                     /** @infection-ignore-all OneZeroFloat: ?? 0.0 is the additive identity; the fallback only applies on first encounter of a docId which always has score 0 before accumulation */
                     $docScores[$docId]     = ($docScores[$docId] ?? 0.0) + $score;
                     $groupTermIds[$termId] = true;
