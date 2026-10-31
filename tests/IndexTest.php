@@ -7691,6 +7691,41 @@ class IndexTest extends TestCase
         $this->assertSame(3, array_sum($result->facetDistribution['brand']));
     }
 
+    public function testBrowseCountsOtherKeysExactlyWhenAFilteredKeysCountIsCapped(): void
+    {
+        $docs = [
+            ['id' => 1, 'gender' => 'Men', 'color' => 'Blue', 'brand' => 'a'],
+            ['id' => 2, 'gender' => 'Men', 'color' => 'Blue', 'brand' => 'a'],
+            ['id' => 3, 'gender' => 'Men', 'color' => 'Red', 'brand' => 'b'],
+            ['id' => 4, 'gender' => 'Men', 'color' => 'Black', 'brand' => 'c'],
+            ['id' => 5, 'gender' => 'Men', 'color' => 'Black', 'brand' => 'd'],
+            ['id' => 6, 'gender' => 'Women', 'color' => 'Black', 'brand' => 'e'],
+            // Without gender and color: both filters stay positive value lists (complementSelections()).
+            ['id' => 7, 'brand' => 'f'],
+        ];
+        $options = new SearchOptions(filter: ['gender' => 'Men', 'color' => 'Black'], facets: ['color', 'brand']);
+        $schema  = new SchemaConfig(filterableAttributes: ['gender', 'color', 'brand']);
+
+        $index = new Index($this->dbPath, schema: $schema);
+        $index->insert($docs);
+        $exact = $index->search('', $options);
+        $this->assertSame(['Black' => 2, 'Blue' => 2, 'Red' => 1], $exact->facetDistribution['color']);
+        $this->assertSame(['c' => 1, 'd' => 1], $exact->facetDistribution['brand']);
+        $this->assertSame([], $exact->approximateFacets);
+        $index->close();
+
+        // The 5 Men documents exceed the cap of 3, so color is counted over the first 3; the 2
+        // documents with both filters are under it and their brands stay exact.
+        Index::remove($this->dbPath);
+        $capped = new Index($this->dbPath, config: new Config(maxFacetCountDocs: 3), schema: $schema);
+        $capped->insert($docs);
+        $result = $capped->search('', $options);
+        $this->assertSame(['Blue' => 2, 'Red' => 1], $result->facetDistribution['color']);
+        $this->assertSame(['c' => 1, 'd' => 1], $result->facetDistribution['brand']);
+        $this->assertSame(['color'], $result->approximateFacets);
+        $this->assertSame(2, $result->totalHits);
+    }
+
     public function testBrowseFacetStatsWithFilter(): void
     {
         $index = new Index($this->dbPath, schema: new SchemaConfig(

@@ -4390,6 +4390,8 @@ final class Index implements \Countable
         $stats        = [];
         $approximate  = [];
         $common       = [];
+        /** @var array<string, array{0: int, 1: list<FacetCondition>, 2: list<FacetCondition>}> $own */
+        $own = [];
         foreach ($facetKeys as $keyName) {
             $keyId = $this->lookupFacetKeyId($keyName);
             if ($keyId === null) {
@@ -4397,19 +4399,49 @@ final class Index implements \Countable
             }
             // Only positive filters are disjunctive: an exclusion also applies to its own field,
             // unless it stands for a positive one (complementSelections()).
-            $others = array_values(array_filter(
-                $conditions,
-                fn(array $c): bool => $c['exclude'] && !isset($c['selection']) || $c['name'] !== $keyName,
-            ));
+            $kept = fn(array $c): bool => $c['exclude'] && !isset($c['selection']) || $c['name'] !== $keyName;
+            $others = array_values(array_filter($conditions, $kept));
             if (count($others) === count($conditions)) {
                 $common[$keyName] = $keyId;
                 continue;
             }
-            if ($this->countBrowseFacetGroup([$keyName => $keyId], $others, $distribution, $stats)) {
+            $removed = array_values(array_filter($conditions, fn(array $c): bool => !$kept($c)));
+            $own[$keyName] = [$keyId, $others, $removed];
+        }
+        // The common keys' documents are those of the first key whose own filter is one value list
+        // that hold one of its values: counted in the same read (as in resultSetFacetCounts()),
+        // unless that read is cut at maxFacetCountDocs.
+        $commonCounts = null;
+        foreach ($own as $keyName => [$keyId, $others, $removed]) {
+            $subset = null;
+            if (
+                $common !== [] && $commonCounts === null && count($removed) === 1 && !$removed[0]['exclude']
+                && isset($removed[0]['values']) && $others !== [] && !self::isExclusionOnly($others)
+            ) {
+                $values = $removed[0]['values'];
+                $subset = [
+                    'vids'     => $this->facetValueIdsOf($values['keyId'], $values['values']),
+                    'nameToId' => $common,
+                ];
+            }
+            $subsetCounts = [];
+            $capped = $this->countBrowseFacetGroup(
+                [$keyName => $keyId],
+                $others,
+                $distribution,
+                $stats,
+                $subset,
+                $subsetCounts,
+            );
+            if ($capped) {
                 $approximate[] = $keyName;
+            } elseif ($subset !== null) {
+                $commonCounts = $subsetCounts;
             }
         }
-        if ($common !== []) {
+        if ($commonCounts !== null) {
+            $this->mergeFacetCounts($commonCounts, $distribution, $stats);
+        } elseif ($common !== []) {
             if ($matchIds !== null) {
                 $this->collectFacetCounts($common, $matchIds['ids'], $distribution, $stats);
                 $capped = $matchIds['capped'];
@@ -4431,27 +4463,53 @@ final class Index implements \Countable
      * Count one group of browse facet keys over the documents matching $conditions.
      *
      * Exclusion-only conditions are counted as the whole index minus the excluded documents
-     * (collectFacetCountsExcluding()), exactly; anything else over browseFacetDocIds().
+     * (collectFacetCountsExcluding()), exactly; none over the whole index; anything else over
+     * the first Config::$maxFacetCountDocs documents of matchingDocsSql(), streamed into the
+     * count (the documents browseFacetDocIds() lists, without the round trip through PHP;
+     * $subset as in facetValueCountsOfDocs(), counted into $subsetCounts on that path only).
      * Returns true when the counts are approximate because the matches exceeded the cap.
      *
      * @param array<string, int>                           $nameToId
      * @param list<FacetCondition>                         $conditions
      * @param array<string, array<array-key, int>>         $distribution Mutated in place.
      * @param array<string, array{min: float, max: float}> $stats        Mutated in place.
+     * @param array{vids: list<int>, nameToId: array<string, int>}|null $subset
+     * @param array<string, array{distribution: array<array-key, int>,
+     *                             stats: array{min: float, max: float}|null}> $subsetCounts
      */
     private function countBrowseFacetGroup(
         array $nameToId,
         array $conditions,
         array &$distribution,
         array &$stats,
+        ?array $subset = null,
+        array &$subsetCounts = [],
     ): bool {
-        if ($conditions !== [] && self::isExclusionOnly($conditions)) {
+        if ($conditions === []) {
+            $this->collectFacetCounts($nameToId, null, $distribution, $stats);
+            return false;
+        }
+        if (self::isExclusionOnly($conditions)) {
             $this->collectFacetCountsExcluding($nameToId, $conditions, $distribution, $stats);
             return false;
         }
-        $capped = false;
-        $this->collectFacetCounts($nameToId, $this->browseFacetDocIds($conditions, $capped), $distribution, $stats);
-        return $capped;
+        $match = $this->matchingDocsSql($conditions);
+        if ($match === null) {
+            return false;
+        }
+        $cap       = $this->config->maxFacetCountDocs;
+        $truncated = false;
+        $results   = $this->facetCountsOfDocsSql(
+            $nameToId,
+            "{$match[0]} LIMIT ?",
+            [...$match[1], $cap + 1],
+            $cap,
+            $truncated,
+            $subset,
+            $subsetCounts,
+        );
+        $this->mergeFacetCounts($results, $distribution, $stats);
+        return $truncated;
     }
 
     /**
