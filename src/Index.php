@@ -43,6 +43,7 @@ use PDO;
  *     values?: array{keyId: int, values: list<mixed>},
  *     selection?: true,
  *     rowCount?: int,
+ *     slots?: list<array{termIds: list<int>, hits: int}>,
  * }
  * @phpstan-type KeywordGroup array{
  *     words: list<array{id: int, term: string, num_hits: int, num_docs: int, distance?: int}>,
@@ -164,6 +165,14 @@ final class Index implements \Countable
      * in sequence (ecom: ~0.9 µs per probe, ~0.05 µs per row read).
      */
     private const int COMPLETE_PROBE_ROWS = 16;
+
+    /**
+     * searchMatchesSql() with a quoted phrase, when the order is free: a positions row of the
+     * phrase's rarest word (one probe per other word) counted against a document of the rarest
+     * group (its doclist probes and the phrase probe over its positions). Ecom "blue jeans":
+     * 7,960 rows 5.3 ms against 6,802 documents 15 ms (laptop).
+     */
+    private const int PHRASE_DRIVER_ROWS = 3;
 
     /**
      * loadFacetKeySets(): a value list's rows read in sequence per candidate read from doc_facets
@@ -3266,7 +3275,7 @@ final class Index implements \Countable
                 $distinctHits = $keyId === null
                     ? $this->countSearchMatches($required, $conditions, $this->config->maxTotalHits + 1)
                     : $this->countDistinctMatches(
-                        $this->searchMatchesSql($required, $conditions),
+                        $this->searchMatchesSql($required, $conditions, orderFree: true),
                         $keyId,
                         $distinctCount,
                     );
@@ -7198,7 +7207,7 @@ final class Index implements \Countable
      */
     private function countSearchMatches(array $groups, array $conditions, int $limit): int
     {
-        return $this->countMatches($this->searchMatchesSql($groups, $conditions), $limit);
+        return $this->countMatches($this->searchMatchesSql($groups, $conditions, orderFree: true), $limit);
     }
 
     /**
@@ -7427,16 +7436,31 @@ final class Index implements \Countable
      * a LIMIT on it stops the walk once reached, so a broad query reads about that many matches
      * and a narrow one the driver's rows.
      *
+     * $orderFree (the caller counts or reads every row, or the stream cannot be cut) lets a
+     * quoted phrase drive instead (phraseMatchesSql()) when its rarest word has fewer positions
+     * rows than PHRASE_DRIVER_ROWS per document of the rarest group: the other groups are then
+     * probed only when the phrase does not imply them. The rows come in another order.
+     *
      * @param  list<KeywordGroup>   $groups
      * @param  list<FacetCondition> $conditions
      * @return array{0: string, 1: list<mixed>}|null
      */
-    private function searchMatchesSql(array $groups, array $conditions, bool $grouped = false): ?array
-    {
+    private function searchMatchesSql(
+        array $groups,
+        array $conditions,
+        bool $grouped = false,
+        bool $orderFree = false,
+    ): ?array {
         if ($groups === [] || in_array([], array_column($groups, 'termIds'), true)) {
             return null;
         }
         usort($groups, fn(array $a, array $b): int => $a['df'] <=> $b['df']);
+        if ($orderFree) {
+            $phrase = $this->phraseMatchesSql($groups, $conditions, $grouped);
+            if ($phrase !== false) {
+                return $phrase;
+            }
+        }
         $driver = array_shift($groups);
         // A one-term driver lists each document once: its DISTINCT costs nothing (SQLite drops it
         // on the unique (term_id, doc_id)), where GROUP BY would sort ("shirt" 9.4 → 10.6 ms).
@@ -7454,6 +7478,67 @@ final class Index implements \Countable
             return null;
         }
         return [$sql . $probes[0] . ($grouped ? ' GROUP BY +d.doc_id' : ''), [...$params, ...$probes[1]]];
+    }
+
+    /**
+     * searchMatchesSql() driven from a quoted phrase: the positions rows of the phrase's word with
+     * the fewest (its `slots`), each other word probed at its offset from that row
+     * (positions_doc_id), the groups the phrase does not imply (no word of it whose terms all
+     * belong to the group) probed on doclist, the other conditions as usual. false when no
+     * phrase of two or more words reads fewer rows than PHRASE_DRIVER_ROWS per document of the
+     * rarest group ($groups sorted by df), null when a condition can never match.
+     *
+     * @param  non-empty-list<KeywordGroup> $groups
+     * @param  list<FacetCondition>         $conditions
+     * @return array{0: string, 1: list<mixed>}|null|false
+     */
+    private function phraseMatchesSql(array $groups, array $conditions, bool $grouped): array|null|false
+    {
+        $best = null;
+        $cost = $groups[0]['df'] * self::PHRASE_DRIVER_ROWS;
+        foreach ($conditions as $c => $condition) {
+            if ($condition['exclude'] || count($condition['slots'] ?? []) < 2) {
+                continue;
+            }
+            foreach ($condition['slots'] as $k => $slot) {
+                if ($slot['hits'] < $cost) {
+                    [$best, $cost] = [[$c, $k], $slot['hits']];
+                }
+            }
+        }
+        if ($best === null) {
+            return false;
+        }
+        [$c, $k] = $best;
+        $slots   = $conditions[$c]['slots'] ?? [];
+        unset($conditions[$c]);
+        $sql    = 'SELECT ' . ($grouped ? '' : 'DISTINCT ') . 'p.doc_id FROM positions p WHERE p.term_id IN ('
+            . $this->placeholders(count($slots[$k]['termIds'])) . ')' . $this->liveDocsSql('p.doc_id');
+        $params = $slots[$k]['termIds'];
+        foreach ($slots as $j => $slot) {
+            if ($j === $k) {
+                continue;
+            }
+            $sql .= " AND EXISTS (SELECT 1 FROM positions s{$j} WHERE s{$j}.doc_id = p.doc_id"
+                . " AND s{$j}.position = p.position + (" . ($j - $k) . ") AND s{$j}.term_id IN ("
+                . $this->placeholders(count($slot['termIds'])) . '))';
+            array_push($params, ...$slot['termIds']);
+        }
+        foreach ($groups as $i => $group) {
+            foreach ($slots as $slot) {
+                if (array_diff($slot['termIds'], $group['termIds']) === []) {
+                    continue 2;
+                }
+            }
+            $sql .= " AND EXISTS (SELECT 1 FROM doclist g{$i} WHERE g{$i}.doc_id = p.doc_id AND g{$i}.term_id IN ("
+                . $this->placeholders(count($group['termIds'])) . '))';
+            array_push($params, ...$group['termIds']);
+        }
+        $probes = $this->renderFacetProbes(array_values($conditions), 'p.doc_id');
+        if ($probes === null) {
+            return null;
+        }
+        return [$sql . $probes[0] . ($grouped ? ' GROUP BY +p.doc_id' : ''), [...$params, ...$probes[1]]];
     }
 
     /**
@@ -7546,7 +7631,7 @@ final class Index implements \Countable
                     $probed[] = $c;
                 }
             }
-            $match = $this->searchMatchesSql($groups, [...$base, ...$probed], $whole);
+            $match = $this->searchMatchesSql($groups, [...$base, ...$probed], $whole, $whole);
             if ($match === null) {
                 continue;
             }
@@ -7610,18 +7695,19 @@ final class Index implements \Countable
             $slots = [];
             foreach ($group as $i => $token) {
                 $isPrefixSlot = $asYouType && $i === count($group) - 1 && $token === $lastToken;
-                $termIds      = array_column($this->getWordlistByKeyword($token, $isPrefixSlot, false), 'id');
+                $rows         = $this->getWordlistByKeyword($token, $isPrefixSlot, false);
+                $termIds      = array_column($rows, 'id');
                 if ($termIds === []) {
                     continue 2;
                 }
-                $slots[] = $termIds;
+                $slots[] = ['termIds' => $termIds, 'hits' => array_sum(array_column($rows, 'num_hits'))];
             }
             if ($slots === []) {
                 continue;
             }
             $rows   = 'FROM ' . (count($slots) === 1 ? 'doclist' : 'positions') . ' %1$s';
             $params = [];
-            foreach (array_slice($slots, 1) as $i => $termIds) {
+            foreach (array_column(array_slice($slots, 1), 'termIds') as $i => $termIds) {
                 $at    = $i + 1;
                 $rows .= " JOIN positions %1\$s_{$at} ON %1\$s_{$at}.doc_id = %1\$s.doc_id"
                     . " AND %1\$s_{$at}.position = %1\$s.position + {$at}"
@@ -7630,12 +7716,13 @@ final class Index implements \Countable
             }
             $conditions[] = [
                 'name'       => '"' . implode(' ', $group) . '"',
-                'rows'       => $rows . ' WHERE %1$s.term_id IN (' . $this->placeholders(count($slots[0])) . ')'
-                    . $this->liveDocsSql('%1$s.doc_id'),
-                'params'     => [...$params, ...$slots[0]],
+                'rows'       => $rows . ' WHERE %1$s.term_id IN (' . $this->placeholders(count($slots[0]['termIds']))
+                    . ')' . $this->liveDocsSql('%1$s.doc_id'),
+                'params'     => [...$params, ...$slots[0]['termIds']],
                 'impossible' => false,
                 'multiRow'   => true,
                 'exclude'    => false,
+                'slots'      => $slots,
             ];
         }
         return $conditions;

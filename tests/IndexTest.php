@@ -9812,6 +9812,40 @@ class IndexTest extends TestCase
         $this->assertEqualsCanonicalizing([1, 2], $result->getIds());
     }
 
+    public function testCappedPhraseTotalsCountOnlyTheContiguousSequence(): void
+    {
+        // maxDocs 1 cuts every word, so totals, facet counts and the distinct total come from
+        // the result-set SQL, which may drive from the phrase's positions rows.
+        $index = new Index($this->dbPath, config: new Config(maxDocs: 1), schema: new SchemaConfig(
+            filterableAttributes: ['color', 'brand'],
+        ));
+        $index->insert([
+            ['id' => 1, 'title' => 'blue jeans shirt', 'color' => 'red', 'brand' => 'a'],
+            ['id' => 2, 'title' => 'blue jeans shirt', 'color' => 'red', 'brand' => 'a'],
+            ['id' => 3, 'title' => 'jeans blue shirt', 'color' => 'red', 'brand' => 'b'],
+            ['id' => 4, 'title' => 'blue shirt jeans', 'color' => 'green', 'brand' => 'b'],
+            ['id' => 5, 'title' => 'blue jeans', 'color' => 'green', 'brand' => 'b'],
+            ['id' => 6, 'title' => 'shirt blue jeans blue jeans', 'color' => 'green', 'brand' => 'c'],
+            ['id' => 7, 'title' => 'blue jeans shirt', 'color' => 'red', 'brand' => 'c'],
+            ['id' => 8, 'title' => 'jeans shirt blue', 'color' => 'red', 'brand' => 'd'],
+        ]);
+        // Enough other documents that the deleted one stays a tombstone (below PURGE_RATIO).
+        $index->insert(array_map(fn(int $id): array => ['id' => $id, 'title' => 'socks'], range(100, 109)));
+        $index->delete(7);
+
+        $phrase = $index->search('"blue jeans"', new SearchOptions(asYouType: false, facets: ['color']));
+        $this->assertFalse($phrase->exhaustive);
+        $this->assertSame(4, $phrase->totalHits);
+        $this->assertSame(['green' => 2, 'red' => 2], $phrase->facetDistribution['color']);
+
+        $withWord = $index->search('shirt "blue jeans"', new SearchOptions(asYouType: false, facets: ['color']));
+        $this->assertSame(3, $withWord->totalHits);
+        $this->assertSame(['green' => 1, 'red' => 2], $withWord->facetDistribution['color']);
+
+        $distinct = $index->search('"blue jeans"', new SearchOptions(asYouType: false, distinct: 'brand'));
+        $this->assertSame(3, $distinct->totalHits);
+    }
+
     public function testAPageInsideTheFullBucketIsExactWithoutLowerBuckets(): void
     {
         $index = $this->commonWordsIndex();
