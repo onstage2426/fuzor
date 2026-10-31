@@ -2544,7 +2544,7 @@ final class Index implements \Countable
         /** @var list<string> $survivingRaw */
         $survivingRaw = $verbose['surviving_raw'];
 
-        $lastIndex = count($filteredTokens) - 1;
+        $lastIndex = self::endsInQuotedPhrase($positive) ? -1 : count($filteredTokens) - 1;
         $tokens    = [];
 
         foreach ($filteredTokens as $i => $processed) {
@@ -2715,6 +2715,8 @@ final class Index implements \Countable
         $sortSpecs     = $this->checkDeclaredFields($options);
         $warnings      = [];
         $parsed        = $this->filterQueryTokens($positive);
+        // A query that ends in a quoted phrase has no word being typed: phrase words are exact.
+        $asYouType     = $asYouType && !self::endsInQuotedPhrase($positive);
         /** @var list<string> $keywords */
         $keywords     = $parsed['filtered'];
         /** @var list<list<string>> $phraseGroups */
@@ -2892,15 +2894,14 @@ final class Index implements \Countable
         // pass them, so each document is checked once and the result kept for the phrase filter.
         /** @var array<int, bool> $phraseOk */
         $phraseOk = [];
-        $lastToken = end($keywords) ?: '';
-        $passing   = function (array $docIds) use (&$phraseOk, $phraseGroups, $lastToken, $asYouType): int {
+        $passing   = function (array $docIds) use (&$phraseOk, $phraseGroups): int {
             if ($phraseGroups === []) {
                 return count($docIds);
             }
             $unknown = array_keys(array_diff_key($docIds, $phraseOk));
             if ($unknown !== []) {
                 $phraseOk += array_fill_keys($unknown, false);
-                $matched   = $this->filterDocsByPhrases($unknown, $phraseGroups, $lastToken, $asYouType);
+                $matched   = $this->filterDocsByPhrases($unknown, $phraseGroups);
                 foreach ($matched as $docId) {
                     $phraseOk[$docId] = true;
                 }
@@ -3151,7 +3152,7 @@ final class Index implements \Countable
         // pass the quoted phrases, negations and filters.
         $required       = array_map(fn(int $g): array => $groups[$g], array_slice($order, 0, $minBucket));
         $baseConditions = $candidatesCapped
-            ? [...$this->phraseConditions($phraseGroups, $lastToken, $asYouType), ...$negations]
+            ? [...$this->phraseConditions($phraseGroups), ...$negations]
             : [];
         // Disjunctive facet counts over the whole filtered result set.
         [
@@ -3493,6 +3494,7 @@ final class Index implements \Countable
         $sortSpecs     = $this->checkDeclaredFields($options);
         $warnings      = [];
         $parsed       = $this->filterQueryTokens($phrase);
+        $asYouType    = $asYouType && !self::endsInQuotedPhrase($phrase);
         /** @var list<list<string>> $phraseGroups */
         $phraseGroups = $parsed['phrase_groups'];
 
@@ -3600,7 +3602,7 @@ final class Index implements \Countable
         $docIds = $ids(array_pop($stack) ?? null);
 
         if ($phraseGroups !== []) {
-            $docIds = $this->filterDocsByPhrases($docIds, $phraseGroups, $lastTerm ?? '', $asYouType);
+            $docIds = $this->filterDocsByPhrases($docIds, $phraseGroups);
         }
 
         // Apply facet filters: load per-key doc ID sets and intersect with the result.
@@ -3644,7 +3646,7 @@ final class Index implements \Countable
                 $lastTerm,
                 $asYouType,
                 [
-                    ...$this->phraseConditions($phraseGroups, $lastTerm ?? '', $asYouType),
+                    ...$this->phraseConditions($phraseGroups),
                     ...$this->facetFilterConditions($filter),
                 ],
             )
@@ -3743,7 +3745,7 @@ final class Index implements \Countable
             /** @var list<list<string>> $phraseGroups */
             $phraseGroups = $parsed['phrase_groups'];
             $maxDocs      = $this->config->maxFacetCountDocs;
-            $last         = count($keywords) - 1;
+            $last         = self::endsInQuotedPhrase($positive) ? -1 : count($keywords) - 1;
             foreach ($keywords as $i => $kw) {
                 $df            = 0;
                 $termIds       = $this->resolveWordlistIds($kw, $i === $last, $prefixCapped, $df);
@@ -3755,8 +3757,7 @@ final class Index implements \Countable
                 }
             }
             if ($phraseGroups !== [] && $ftsCandidates !== null && $ftsCandidates !== []) {
-                $lastToken = end($keywords) ?: '';
-                $matchIds  = $this->filterDocsByPhrases(array_keys($ftsCandidates), $phraseGroups, $lastToken, true);
+                $matchIds  = $this->filterDocsByPhrases(array_keys($ftsCandidates), $phraseGroups);
                 $ftsCandidates = array_fill_keys($matchIds, true);
             }
         }
@@ -4635,7 +4636,12 @@ final class Index implements \Countable
         $toText          = $escape && $this->stripHtml;
 
         $highlighter = $highlightFields !== null
-            ? $this->highlighter($options->highlightPreTag, $options->highlightPostTag, $options->asYouType, $escape)
+            ? $this->highlighter(
+                $options->highlightPreTag,
+                $options->highlightPostTag,
+                $options->asYouType && !self::endsInQuotedPhrase($phrase),
+                $escape,
+            )
             : null;
 
         $snippeter = $cropFields !== null
@@ -6805,23 +6811,16 @@ final class Index implements \Countable
     /**
      * Return the subset of $docIds in which every phrase group appears as a contiguous sequence.
      *
-     * Term IDs are resolved via the wordlist (exact match for all slots, prefix for the
-     * last slot when $asYouType and that slot's token equals $lastToken). A phrase whose
-     * first word is absent from the index is skipped entirely — an unindexed phrase should
-     * not suppress results for other keywords in the query.
+     * Term IDs are resolved via the wordlist, exact for every word (a phrase is never a prefix
+     * or a typo, as in Meilisearch). A phrase with a word absent from the index is skipped
+     * entirely — an unindexed phrase should not suppress results for other keywords in the query.
      *
      * @param list<int>          $docIds       Candidate document IDs.
      * @param list<list<string>> $phraseGroups Stemmed token lists, one per quoted phrase.
-     * @param string             $lastToken    Last token in the full flattened query (for asYouType).
-     * @param bool               $asYouType    Whether prefix expansion applies to $lastToken.
      * @return list<int>
      */
-    private function filterDocsByPhrases(
-        array $docIds,
-        array $phraseGroups,
-        string $lastToken,
-        bool $asYouType,
-    ): array {
+    private function filterDocsByPhrases(array $docIds, array $phraseGroups): array
+    {
         if ($docIds === [] || $phraseGroups === []) {
             return $docIds;
         }
@@ -6834,14 +6833,12 @@ final class Index implements \Countable
         foreach ($phraseGroups as $group) {
             $slots      = [];
             $skipPhrase = false;
-            $lastSlot   = count($group) - 1;
             $rarest     = 0;
             $rarestHits = PHP_INT_MAX;
 
-            foreach ($group as $i => $token) {
-                $isPrefixSlot = $asYouType && $i === $lastSlot && $token === $lastToken;
-                $rows         = $this->getWordlistByKeyword($token, $isPrefixSlot, false);
-                $termIds      = array_column($rows, 'id');
+            foreach ($group as $token) {
+                $rows    = $this->getWordlistByKeyword($token, false, false);
+                $termIds = array_column($rows, 'id');
 
                 if ($termIds === []) {
                     $skipPhrase = true;
@@ -7013,6 +7010,22 @@ final class Index implements \Countable
         ) ?? $query;
 
         return ['free' => $free, 'groups' => $groups];
+    }
+
+    /**
+     * Whether the query's last word is inside a closed quoted phrase. Its words are then matched
+     * exactly, as in Meilisearch, where a phrase is never a prefix: the as-you-type prefix applies
+     * only to a last word typed outside quotes.
+     */
+    private static function endsInQuotedPhrase(string $query): bool
+    {
+        $close = strrpos($query, '"');
+        if ($close === false || substr_count($query, '"') % 2 !== 0) {
+            return false;
+        }
+        $open = (int) strrpos($query, '"', $close - strlen($query) - 1);
+        return Tokenizer::split(substr($query, $close + 1)) === []
+            && Tokenizer::split(substr($query, $open + 1, $close - $open - 1)) !== [];
     }
 
     /**
@@ -7793,22 +7806,20 @@ final class Index implements \Countable
 
     /**
      * The quoted phrases as conditions for searchMatchesSql(): a document passes when it has
-     * the phrase's words at consecutive positions (as docMatchesPhrase(); the last slot is a
-     * prefix when it is the query's as-you-type word). A phrase with a word the index lacks is
-     * skipped, as in filterDocsByPhrases().
+     * the phrase's words, each exact, at consecutive positions (as docMatchesPhrase()). A phrase
+     * with a word the index lacks is skipped, as in filterDocsByPhrases().
      *
      * @param  list<list<string>> $phraseGroups
      * @return list<FacetCondition>
      */
-    private function phraseConditions(array $phraseGroups, string $lastToken, bool $asYouType): array
+    private function phraseConditions(array $phraseGroups): array
     {
         $conditions = [];
         foreach ($phraseGroups as $group) {
             $slots = [];
-            foreach ($group as $i => $token) {
-                $isPrefixSlot = $asYouType && $i === count($group) - 1 && $token === $lastToken;
-                $rows         = $this->getWordlistByKeyword($token, $isPrefixSlot, false);
-                $termIds      = array_column($rows, 'id');
+            foreach ($group as $token) {
+                $rows    = $this->getWordlistByKeyword($token, false, false);
+                $termIds = array_column($rows, 'id');
                 if ($termIds === []) {
                     continue 2;
                 }

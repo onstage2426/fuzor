@@ -3612,6 +3612,36 @@ class IndexTest extends TestCase
         $this->assertSame([1], $index->search('"fast sedan"')->getIds());
     }
 
+    public function testQuotedPhraseWordsAreExactEvenAsTheLastWord(): void
+    {
+        $index = new Index($this->dbPath, schema: new SchemaConfig(filterableAttributes: ['brand']));
+        $index->insert([
+            ['id' => 1, 'title' => 'blue jeans', 'brand' => 'a'],
+            ['id' => 2, 'title' => 'blue jeanswear', 'brand' => 'b'],
+            ['id' => 3, 'title' => 'blue jeans and jeanswear', 'brand' => 'c'],
+        ]);
+
+        // As-you-type is on by default, but a closed phrase is never a prefix.
+        $this->assertEqualsCanonicalizing([1, 3], $index->search('"blue jeans"')->getIds());
+        $this->assertEqualsCanonicalizing([1, 3], $index->searchBoolean('"blue jeans"')->getIds());
+        $brands = $index->facetSearch(new FacetSearchQuery(facetName: 'brand', q: '"blue jeans"'))->facetHits;
+        $this->assertSame(['a', 'c'], array_column($brands, 'value'));
+        $this->assertFalse($index->inspectQuery('"blue jeans"')->tokens[1]->isLast);
+        // A word typed after the phrase is still a prefix; the phrase stays exact.
+        $all = new SearchOptions(matchingStrategy: MatchingStrategy::All);
+        $this->assertEqualsCanonicalizing([2, 3], $index->search('"blue" jeanswe', $all)->getIds());
+        $this->assertSame([3], $index->search('"blue jeans" jeanswe', $all)->getIds());
+
+        $highlighted = $index->search('"blue jeans"', new SearchOptions(
+            filter: ['brand' => 'c'],
+            attributesToHighlight: ['title'],
+        ));
+        $this->assertSame(
+            '<mark>blue</mark> <mark>jeans</mark> and jeanswear',
+            $this->formattedField($highlighted, 'title'),
+        );
+    }
+
     public function testProximityRanksWordsInOneFieldAboveWordsSplitAcrossFields(): void
     {
         $index = new Index($this->dbPath);

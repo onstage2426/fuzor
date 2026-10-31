@@ -124,6 +124,14 @@ and a query of only such words returns all other documents. Hyphens inside words
 are unchanged. If your users type a leading `-` meaning something else, strip it before calling
 `search()`.
 
+## Words in quotes are never a prefix
+
+With `asYouType` on, 1.x matched the last word of a query as a prefix even inside a closed
+quoted phrase: `"blue jeans"` also found "blue jeanswear". In 2.0 every word of a quoted
+phrase matches exactly, and a query that ends in a quoted phrase has no prefix word at all
+(also in highlighting and `inspectQuery()`). A word typed after the phrase (`"blue jeans" sh`)
+is still a prefix. If you relied on the old behaviour, leave the last word outside the quotes.
+
 ## `Config::$fuzzyMinWordLength` is replaced by `TypoTolerance`
 
 ```php
