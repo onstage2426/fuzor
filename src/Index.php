@@ -175,6 +175,13 @@ final class Index implements \Countable
     private const int PHRASE_DRIVER_ROWS = 3;
 
     /**
+     * filterDocsByPhrases(): a positions row of a phrase's rarest word (phraseDocs(), one probe
+     * per other word) counted against a candidate checked in PHP (its positions of every phrase
+     * word read, docMatchesPhrase()).
+     */
+    private const int PHRASE_SCAN_ROWS_PER_DOC = 3;
+
+    /**
      * loadFacetKeySets(): a value list's rows read in sequence per candidate read from doc_facets
      * (ecom: ~0.13 µs per row, ~0.4 µs per candidate in the membership list either way, ~0.85 µs
      * per candidate row read and tested).
@@ -6764,11 +6771,14 @@ final class Index implements \Countable
         /** @var list<list<list<int>>> $resolvedPhrases  phrase → slot → termIds */
         $resolvedPhrases = [];
         $allTermIds      = [];
+        $scanRows        = count($docIds) * self::PHRASE_SCAN_ROWS_PER_DOC;
 
         foreach ($phraseGroups as $group) {
             $slots      = [];
             $skipPhrase = false;
             $lastSlot   = count($group) - 1;
+            $rarest     = 0;
+            $rarestHits = PHP_INT_MAX;
 
             foreach ($group as $i => $token) {
                 $isPrefixSlot = $asYouType && $i === $lastSlot && $token === $lastToken;
@@ -6779,16 +6789,28 @@ final class Index implements \Countable
                     $skipPhrase = true;
                     break;
                 }
-                $slots[]    = $termIds;
-                $allTermIds = array_merge($allTermIds, $termIds);
+                $hits = array_sum(array_column($rows, 'num_hits'));
+                if ($hits < $rarestHits) {
+                    [$rarest, $rarestHits] = [count($slots), $hits];
+                }
+                $slots[] = $termIds;
             }
 
-            if (!$skipPhrase) {
-                $resolvedPhrases[] = $slots;
+            if ($skipPhrase) {
+                continue;
             }
+            // Few rows for the rarest word against the candidates: the documents holding the
+            // phrase anywhere come from SQL, and the candidates keep their order.
+            if (count($slots) > 1 && $rarestHits <= $scanRows) {
+                $holding = $this->phraseDocs($slots, $rarest);
+                $docIds  = array_values(array_filter($docIds, fn(int $docId): bool => isset($holding[$docId])));
+                continue;
+            }
+            $resolvedPhrases[] = $slots;
+            $allTermIds        = array_merge($allTermIds, ...$slots);
         }
 
-        if ($resolvedPhrases === []) {
+        if ($resolvedPhrases === [] || $docIds === []) {
             return $docIds;
         }
 
@@ -6813,6 +6835,38 @@ final class Index implements \Countable
         }
 
         return $passing;
+    }
+
+    /**
+     * The documents that hold a phrase (slot → term IDs, two or more slots) at consecutive
+     * positions, as a set: driven from the positions rows of slot $from, each other slot probed
+     * at its offset (positions_doc_id). Same test as docMatchesPhrase(); deleted documents are
+     * included (callers intersect with live candidates).
+     *
+     * @param  list<list<int>> $slots
+     * @return array<int, true>
+     */
+    private function phraseDocs(array $slots, int $from): array
+    {
+        $sql    = 'SELECT DISTINCT p.doc_id FROM positions p WHERE p.term_id IN ('
+            . $this->placeholders(count($slots[$from])) . ')';
+        $params = $slots[$from];
+        $shape  = [];
+        foreach ($slots as $j => $termIds) {
+            $shape[] = count($termIds);
+            if ($j === $from) {
+                continue;
+            }
+            $sql .= " AND EXISTS (SELECT 1 FROM positions s{$j} WHERE s{$j}.doc_id = p.doc_id"
+                . " AND s{$j}.position = p.position + (" . ($j - $from) . ") AND s{$j}.term_id IN ("
+                . $this->placeholders(count($termIds)) . '))';
+            array_push($params, ...$termIds);
+        }
+        $stmt = $this->stmt('phraseDocs:' . implode(',', $shape) . ":{$from}", $sql);
+        $stmt->execute($params);
+        /** @var list<int> $ids */
+        $ids = $stmt->fetchAll(PDO::FETCH_COLUMN);
+        return array_fill_keys($ids, true);
     }
 
     /**
