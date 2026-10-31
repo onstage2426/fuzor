@@ -3642,6 +3642,39 @@ class IndexTest extends TestCase
         );
     }
 
+    public function testAPhraseWithAWordNoDocumentHoldsMatchesNothing(): void
+    {
+        $docs = [
+            ['id' => 1, 'title' => 'blue jeans shirt', 'brand' => 'a'],
+            ['id' => 2, 'title' => 'blue shirt', 'brand' => 'b'],
+            ['id' => 3, 'title' => 'blue shirt', 'brand' => 'c'],
+        ];
+        $schema = new SchemaConfig(filterableAttributes: ['brand']);
+        $index  = new Index($this->dbPath, schema: $schema);
+        $index->insert($docs);
+
+        // "jaens" is in no document (phrase words have no typos), so no document holds the phrase,
+        // and a phrase is never dropped from the query.
+        $this->assertSame([], $index->search('"blue jaens"')->getIds());
+        $this->assertSame(0, $index->search('shirt "blue jaens"')->totalHits);
+        $brands = $index->facetSearch(new FacetSearchQuery(facetName: 'brand', q: '"blue jaens"'));
+        $this->assertSame([], $brands->facetHits);
+        // searchBoolean() applies phrases to the whole result, so it leaves such a phrase out.
+        $this->assertEqualsCanonicalizing([1, 2, 3], $index->searchBoolean('"blue jaens" | shirt')->getIds());
+        $index->close();
+
+        // The same with the candidates cut at maxDocs, where the total is counted in SQL.
+        Index::remove($this->dbPath);
+        $capped = new Index($this->dbPath, config: new Config(maxDocs: 1), schema: $schema);
+        $more   = array_map(fn(int $id): array => ['id' => $id, 'title' => 'blue shirt', 'brand' => 'd'], range(4, 9));
+        $capped->insert([...$docs, ...$more]);
+        $result = $capped->search('blue "shirt jaens"', new SearchOptions(facets: ['brand']));
+        $this->assertFalse($result->exhaustive);
+        $this->assertSame([], $result->getIds());
+        $this->assertSame(0, $result->totalHits);
+        $this->assertSame([], $result->facetDistribution);
+    }
+
     public function testProximityRanksWordsInOneFieldAboveWordsSplitAcrossFields(): void
     {
         $index = new Index($this->dbPath);

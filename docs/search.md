@@ -142,7 +142,7 @@ $result = $index->search('"quick brown" sedan'); // mix phrase + free keyword
 $result = $index->search('"quick brown" "fast car"'); // multiple phrases
 ```
 
-Phrase words participate in BM25 scoring normally. Every word of a phrase matches exactly, without typos or prefix expansion, as in Meilisearch; `asYouType` applies only to a last word typed outside the quotes (`"blue jeans" sh`). A phrase matches within one field: the last word of the title followed by the first word of the description is not a phrase match.
+Phrase words participate in BM25 scoring normally. Every word of a phrase matches exactly, without typos or prefix expansion, as in Meilisearch; `asYouType` applies only to a last word typed outside the quotes (`"blue jeans" sh`). A phrase is always required: if one of its words is in no document, `search()` and `facetSearch()` find nothing (`searchBoolean()`, where a phrase applies to the whole result, leaves such a phrase out). A phrase matches within one field: the last word of the title followed by the first word of the description is not a phrase match.
 
 ## Matching strategy
 

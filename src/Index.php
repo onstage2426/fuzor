@@ -3495,8 +3495,15 @@ final class Index implements \Countable
         $warnings      = [];
         $parsed       = $this->filterQueryTokens($phrase);
         $asYouType    = $asYouType && !self::endsInQuotedPhrase($phrase);
-        /** @var list<list<string>> $phraseGroups */
-        $phraseGroups = $parsed['phrase_groups'];
+        // A phrase filters the whole boolean result, also the other side of an OR, so one with
+        // a word the index lacks is left out rather than emptying the result.
+        $phraseGroups = array_values(array_filter(
+            $parsed['phrase_groups'],
+            fn(array $group): bool => !in_array([], array_map(
+                fn(string $token): array => $this->getWordlistByKeyword($token, false, false),
+                $group,
+            ), true),
+        ));
 
         // Prepend "|" so the Shunting-Yard algorithm always has a left-hand operand.
         // OR with an empty set is the identity, so it does not affect the result.
@@ -6812,8 +6819,8 @@ final class Index implements \Countable
      * Return the subset of $docIds in which every phrase group appears as a contiguous sequence.
      *
      * Term IDs are resolved via the wordlist, exact for every word (a phrase is never a prefix
-     * or a typo, as in Meilisearch). A phrase with a word absent from the index is skipped
-     * entirely — an unindexed phrase should not suppress results for other keywords in the query.
+     * or a typo, as in Meilisearch). A phrase with a word absent from the index matches no
+     * document, so none passes (Meilisearch never drops a phrase from a query either).
      *
      * @param list<int>          $docIds       Candidate document IDs.
      * @param list<list<string>> $phraseGroups Stemmed token lists, one per quoted phrase.
@@ -6832,7 +6839,6 @@ final class Index implements \Countable
 
         foreach ($phraseGroups as $group) {
             $slots      = [];
-            $skipPhrase = false;
             $rarest     = 0;
             $rarestHits = PHP_INT_MAX;
 
@@ -6841,8 +6847,8 @@ final class Index implements \Countable
                 $termIds = array_column($rows, 'id');
 
                 if ($termIds === []) {
-                    $skipPhrase = true;
-                    break;
+                    // A word no document holds: no document holds the phrase.
+                    return [];
                 }
                 $hits = array_sum(array_column($rows, 'num_hits'));
                 if ($hits < $rarestHits) {
@@ -6851,9 +6857,6 @@ final class Index implements \Countable
                 $slots[] = $termIds;
             }
 
-            if ($skipPhrase) {
-                continue;
-            }
             // Few rows for the rarest word against the candidates: the documents holding the
             // phrase anywhere come from SQL, and the candidates keep their order.
             if (count($slots) > 1 && $rarestHits <= $scanRows) {
@@ -7807,7 +7810,8 @@ final class Index implements \Countable
     /**
      * The quoted phrases as conditions for searchMatchesSql(): a document passes when it has
      * the phrase's words, each exact, at consecutive positions (as docMatchesPhrase()). A phrase
-     * with a word the index lacks is skipped, as in filterDocsByPhrases().
+     * with a word the index lacks gives one impossible condition (no document passes, as in
+     * filterDocsByPhrases()).
      *
      * @param  list<list<string>> $phraseGroups
      * @return list<FacetCondition>
@@ -7821,7 +7825,15 @@ final class Index implements \Countable
                 $rows    = $this->getWordlistByKeyword($token, false, false);
                 $termIds = array_column($rows, 'id');
                 if ($termIds === []) {
-                    continue 2;
+                    // No document holds the word, so none holds the phrase.
+                    return [[
+                        'name'       => '"' . implode(' ', $group) . '"',
+                        'rows'       => '',
+                        'params'     => [],
+                        'impossible' => true,
+                        'multiRow'   => false,
+                        'exclude'    => false,
+                    ]];
                 }
                 $slots[] = ['termIds' => $termIds, 'hits' => array_sum(array_column($rows, 'num_hits'))];
             }

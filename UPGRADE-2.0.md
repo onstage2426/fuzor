@@ -132,6 +132,14 @@ phrase matches exactly, and a query that ends in a quoted phrase has no prefix w
 (also in highlighting and `inspectQuery()`). A word typed after the phrase (`"blue jeans" sh`)
 is still a prefix. If you relied on the old behaviour, leave the last word outside the quotes.
 
+## A phrase with a word no document holds finds nothing
+
+In 1.x a quoted phrase whose word was not in the index was ignored, so `search('"blue jaens"')`
+returned every document with "blue". In 2.0 such a phrase matches no document, and since a
+phrase is never dropped from a query, `search()` and `facetSearch()` return nothing (phrase words
+have no typo tolerance). `searchBoolean()` still leaves such a phrase out. If you want results
+for a misspelled phrase, retry the query without the quotes when it comes back empty.
+
 ## `Config::$fuzzyMinWordLength` is replaced by `TypoTolerance`
 
 ```php
