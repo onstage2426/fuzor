@@ -2355,6 +2355,10 @@ class IndexTest extends TestCase
         $result = $index->searchBoolean('sedan -merc');
         $this->assertContains(2, $result->getIds());
         $this->assertNotContains(1, $result->getIds());
+
+        // Without asYouType the negated last word is exact: no document holds 'merc'.
+        $exact = $index->searchBoolean('sedan -merc', new SearchOptions(asYouType: false));
+        $this->assertEqualsCanonicalizing([1, 2], $exact->getIds());
     }
 
     public function testSearchBooleanAndLastTermPrefixMatches(): void

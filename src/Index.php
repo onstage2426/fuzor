@@ -3569,7 +3569,7 @@ final class Index implements \Countable
                 array_pop($stack);
                 $operand = self::booleanOperand($postfix, $at);
                 $stack[] = ['__not__' => count($operand) === 1 && !in_array($operand[0], ['&', '|', '~'], true)
-                    ? $this->booleanTerm($operand[0], $operand[0] === $lastTerm, $prefixCapped)
+                    ? $this->booleanTerm($operand[0], $asYouType && $operand[0] === $lastTerm, $prefixCapped)
                     : $this->booleanRoot($operand, $lastTerm, $asYouType, $prefixCapped)];
             } elseif ($token === '&') {
                 $right    = array_pop($stack);
