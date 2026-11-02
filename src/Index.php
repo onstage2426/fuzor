@@ -494,7 +494,12 @@ final class Index implements \Countable
             return false;
         }
         try {
-            $pdo    = new \PDO('sqlite:' . $resolved);
+            // Read-only: a read-write open creates an empty database when the file (or a symlink's
+            // target) disappears between the check above and this open.
+            $pdo    = new \PDO(
+                'sqlite:' . $resolved,
+                options: [\Pdo\Sqlite::ATTR_OPEN_FLAGS => \Pdo\Sqlite::OPEN_READONLY],
+            );
             $result = $pdo->query("SELECT 1 FROM wordlist LIMIT 1");
             return $result !== false;
         } catch (\Exception) {
