@@ -518,9 +518,11 @@ class IndexTest extends TestCase
         $index = new Index($this->dbPath, config: new \Fuzor\Config(maxDocs: 2));
         $index->insert(array_map(fn(int $id): array => ['id' => $id, 'title' => 'sedan'], range(1, 9)));
 
+        // The page holds the 2 ranked candidates, then the rest of the result set.
         $result = $index->search('sedan');
-        $this->assertCount(2, $result->getIds());
+        $this->assertCount(9, $result->getIds());
         $this->assertSame(9, $result->totalHits);
+        $this->assertFalse($result->exhaustive);
     }
 
     // --- top-k / heap ---
@@ -2500,6 +2502,63 @@ class IndexTest extends TestCase
         $this->assertSame([13, 14], self::sorted($capped->searchBoolean('-tee red', $options)->getIds()));
         $this->assertSame([14], $capped->searchBoolean('red -tee -blue', $options)->getIds());
         $this->assertSame([13, 14], self::sorted($capped->searchBoolean('(red | blue) -tee', $options)->getIds()));
+    }
+
+    /**
+     * A word in more documents than maxDocs (and than the bucket read whole): every page up to
+     * totalHits is full, no document is on two pages, and with a sort the pages follow one order.
+     */
+    public function testSearchPagesPastCutCandidatesComeFromTheResultSet(): void
+    {
+        $schema = new SchemaConfig(filterableAttributes: ['price', 'colour'], sortableAttributes: ['price']);
+        $index  = new Index($this->dbPath, schema: $schema);
+        $docs   = [];
+        for ($id = 1; $id <= 60; $id++) {
+            $docs[] = [
+                'id'     => $id,
+                'title'  => str_repeat('jurk ', 1 + $id % 4) . "model {$id}",
+                'price'  => $id % 17,
+                'colour' => $id % 3 === 0 ? 'red' : 'blue',
+            ];
+        }
+        $index->insert($docs);
+        $capped = new Index($this->dbPath, config: new Config(maxDocs: 5), readonly: true);
+
+        foreach (
+            [
+                [[], [], 60],
+                [['price:desc'], [], 60],
+                [[], ['colour' => 'blue'], 40],
+                [['price:asc'], ['colour' => 'blue'], 40],
+            ] as [$sort, $filter, $expected]
+        ) {
+            $seen   = [];
+            $prices = [];
+            for ($offset = 0; $offset < $expected; $offset += 7) {
+                $result = $capped->search('jurk', new SearchOptions(
+                    asYouType: false,
+                    limit: 7,
+                    offset: $offset,
+                    sort: $sort,
+                    filter: $filter,
+                ));
+                $this->assertSame($expected, $result->totalHits);
+                $this->assertFalse($result->exhaustive);
+                $this->assertCount(min(7, $expected - $offset), $result->hits, "offset {$offset}");
+                foreach ($result->hits as $hit) {
+                    /** @var array{id: int, price: int} $hit */
+                    $seen[]   = $hit['id'];
+                    $prices[] = $hit['price'];
+                }
+            }
+            $this->assertSame($seen, array_values(array_unique($seen)));
+            $this->assertCount($expected, $seen);
+            if ($sort !== []) {
+                $ordered = $prices;
+                $sort === ['price:desc'] ? rsort($ordered) : sort($ordered);
+                $this->assertSame($ordered, $prices);
+            }
+        }
     }
 
     /**
@@ -10023,14 +10082,30 @@ class IndexTest extends TestCase
     {
         $options = new SearchOptions(asYouType: false);
         $full    = $this->truncationIndex(100)->search('shirt casual', $options)->getIds();
-        $capped  = $this->truncationIndex(1)->search('shirt casual', $options)->getIds();
+        $hits    = $this->truncationIndex(1)->search(
+            'shirt casual',
+            new SearchOptions(asYouType: false, showRankingScoreDetails: true),
+        )->hits;
         $whole   = $this->truncationIndex(3)->search('shirt casual', $options)->getIds();
 
         // "shirt" comes first, so every result contains it (MatchingStrategy::Last). With
-        // maxDocs 1 (6 documents > 4 × maxDocs) only some are reachable; those must keep the order
-        // (so the scores) of the untruncated search.
-        $this->assertSame(array_values(array_intersect($full, $capped)), $capped);
-        $this->assertNotSame($full, $capped);
+        // maxDocs 1 (6 documents > 4 × maxDocs) only some are ranked (the rest of the result set
+        // follows them unscored); the ranked ones must keep the order (so the scores) of the
+        // untruncated search.
+        /** @var list<int> $ranked */
+        $ranked = [];
+        /** @var list<int> $capped */
+        $capped = [];
+        foreach ($hits as $hit) {
+            /** @var array{id: int, _rankingScoreDetails: array{bm25: array{score: float}}} $hit */
+            $capped[] = $hit['id'];
+            if ($hit['_rankingScoreDetails']['bm25']['score'] > 0) {
+                $ranked[] = $hit['id'];
+            }
+        }
+        $this->assertSame(self::sorted($full), self::sorted($capped));
+        $this->assertSame(array_values(array_intersect($full, $ranked)), $ranked);
+        $this->assertLessThan(count($full), count($ranked));
         // With maxDocs 3, "shirt" is within 4 × maxDocs and read whole: the full ranking.
         $this->assertSame($full, $whole);
     }

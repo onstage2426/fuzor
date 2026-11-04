@@ -255,3 +255,12 @@ A multi-document `insert()`, `update()` or `upsert()` no longer reads its whole 
 size. A generator is read while the write runs, so it should not depend on the index it feeds.
 When an `update()` names IDs that do not exist, nothing is written as before, but the exception
 lists the missing IDs of the first chunk that has any, not all of them.
+
+## Pages past `maxDocs` candidates are no longer empty
+
+When the words of a `search()` match more than `Config::$maxDocs` documents (`exhaustive: false`),
+pages past the ranked candidates used to be empty while `$totalHits` counted every match. They are
+now filled with the other matches, after the ranked ones, so every page up to `$totalHits` is full.
+With `sort` the candidates and the other matches are sorted together, so even the first page of a
+sorted search can show different documents. Callers that stopped paging at the first empty page
+get more pages; nothing else changes.

@@ -3335,9 +3335,35 @@ final class Index implements \Countable
             );
         }
 
+        // When maxDocs cut the candidates, the matches the total counts beyond them follow the
+        // ranked candidates (unscored, in result-set order), so no page up to the total is
+        // empty. With sort fields they are sorted together with the candidates on every page,
+        // so all pages come from one order.
+        $ranked = count($docScores);
+        $rest   = [];
+        if ($candidatesCapped && $total > $ranked && ($sortSpecs !== [] || $offset + $limit > $ranked)) {
+            $rest = $this->restOfResultSet(
+                $required,
+                [...$baseConditions, ...$this->facetFilterConditions($filter)],
+                $docScores,
+                min($total, $sortSpecs !== [] ? $this->config->maxTotalHits : $offset + $limit) - $ranked,
+            );
+            // Each holds the groups up to minBucket; its bucket and typos are not known, so it
+            // ranks as the last of that bucket: the bucket's typo budget, score 0.
+            $restTypos = $maxTypos()[$minBucket] ?? 0;
+            foreach ($rest as $docId) {
+                $docBucket[$docId] = $minBucket;
+                $docTypos[$docId]  = $restTypos;
+                if ($docRank !== null) {
+                    $docRank[$docId] = $minBucket * 1000 - $restTypos;
+                }
+            }
+        }
+
         /** @var array<int, float>|null $reranked  Page ties reranked by proximity (sorted search). */
         $reranked = null;
         if ($sortSpecs !== []) {
+            $docScores += array_fill_keys($rest, 0.0);
             // Words bucket first (MatchingStrategy), then the sort fields, then BM25 score, then
             // doc ID as the final deterministic key.
             $tieKeys   = [];
@@ -3362,11 +3388,15 @@ final class Index implements \Countable
                 )
                 : array_slice($sortedIds, $offset, $limit);
         } elseif ($docRank !== null) {
-            $pagedIds = array_slice(self::rankByBucketThenScore($docScores, $docRank), $offset, $limit);
+            $pagedIds = array_slice(
+                [...self::rankByBucketThenScore($docScores, $docRank), ...$rest],
+                $offset,
+                $limit,
+            );
         } else {
             // Single-keyword: all docs tie on match count; C-native arsort on scores alone.
             arsort($docScores);
-            $pagedIds = array_slice(array_keys($docScores), $offset, $limit);
+            $pagedIds = array_slice([...array_keys($docScores), ...$rest], $offset, $limit);
         }
         $result = new SearchResult(
             ids: $pagedIds,
@@ -7341,6 +7371,39 @@ final class Index implements \Countable
     private function countSearchMatches(array $groups, array $conditions, int $limit): int
     {
         return $this->countMatches($this->searchMatchesSql($groups, $conditions, orderFree: true), $limit);
+    }
+
+    /**
+     * Up to $count documents of the result set (searchMatchesSql() of $groups and $conditions)
+     * that are not keys of $candidates, in the SQL's order (stable for the same data, so the
+     * same documents fill every page). rankedSearch() appends them after its ranked candidates
+     * when maxDocs cut those.
+     *
+     * @param  list<KeywordGroup>   $groups
+     * @param  list<FacetCondition> $conditions
+     * @param  array<int, mixed>    $candidates
+     * @return list<int>
+     */
+    private function restOfResultSet(array $groups, array $conditions, array $candidates, int $count): array
+    {
+        $match = $count > 0 ? $this->searchMatchesSql($groups, $conditions) : null;
+        if ($match === null) {
+            return [];
+        }
+        $stmt = $this->prepare("SELECT doc_id FROM ({$match[0]}) LIMIT ?");
+        $stmt->execute([...$match[1], $count + count($candidates)]);
+        $rest = [];
+        /** @var list<int|string> $ids */
+        $ids  = $stmt->fetchAll(PDO::FETCH_COLUMN);
+        foreach ($ids as $docId) {
+            if (!isset($candidates[(int) $docId])) {
+                $rest[] = (int) $docId;
+                if (count($rest) === $count) {
+                    break;
+                }
+            }
+        }
+        return $rest;
     }
 
     /**
