@@ -4711,6 +4711,7 @@ final class Index implements \Countable
         $snippeter = $cropFields !== null
             ? $this->snippeter($options->cropLength, 1, $options->cropMarker)
             : null;
+        $terms     = $this->derivedTerms($phrase, $options->asYouType && !self::endsInQuotedPhrase($phrase));
 
         foreach ($documents as $id => $doc) {
             $stringFields = [];
@@ -4732,7 +4733,7 @@ final class Index implements \Countable
                 $fields    = $cropFields === ['*']
                     ? $stringFields
                     : array_intersect_key($stringFields, array_flip($cropFields));
-                $formatted = $snippeter->snippetMany($phrase, $fields);
+                $formatted = $snippeter->snippetMany($phrase, $fields, $terms);
             }
 
             // Highlight — applied to the cropped version when both target the same field.
@@ -4744,7 +4745,7 @@ final class Index implements \Countable
                 foreach ($fields as $key => $value) {
                     $inputs[$key] = $formatted[$key] ?? $value;
                 }
-                foreach ($highlighter->highlightMany($phrase, $inputs) as $key => $value) {
+                foreach ($highlighter->highlightMany($phrase, $inputs, $terms) as $key => $value) {
                     $formatted[$key] = $value;
                 }
                 if ($escape) {
@@ -4763,6 +4764,40 @@ final class Index implements \Countable
         }
 
         return $documents;
+    }
+
+    /**
+     * The index terms a query matches besides its own words: typo derivations and synonyms, so
+     * formatting marks what made a document match. Quoted words are exact, so they have no
+     * derivations. The wordlist rows are the ones the search just read (getWordlistByKeyword()).
+     *
+     * @return list<string>
+     */
+    private function derivedTerms(string $phrase, bool $asYouType): array
+    {
+        $parsed = $this->filterQueryTokens($phrase);
+        /** @var list<string> $keywords */
+        $keywords = $parsed['filtered'];
+        /** @var list<list<string>> $phraseGroups */
+        $phraseGroups = $parsed['phrase_groups'];
+        $quoted       = array_merge(...$phraseGroups);
+        $last         = array_key_last($keywords);
+        $terms        = [];
+        foreach ($keywords as $i => $keyword) {
+            if (!in_array($keyword, $quoted, true)) {
+                foreach ($this->getWordlistByKeyword($keyword, $asYouType && $i === $last) as $row) {
+                    if (($row['distance'] ?? 0) > 0) {
+                        $terms[] = $row['term'];
+                    }
+                }
+            }
+            foreach ($this->synonymsFor($keyword) as $synonym) {
+                if ($this->getWordlistByKeyword($synonym, false, false) !== []) {
+                    $terms[] = $synonym;
+                }
+            }
+        }
+        return array_values(array_unique($terms));
     }
 
     // --- Private write helpers ----------------------------------------------

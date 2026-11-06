@@ -66,16 +66,18 @@ final readonly class Snippeter
      *
      * @param string                $query  Raw search phrase.
      * @param array<string, string> $fields Field name → text pairs.
+     * @param list<string>          $terms  @internal Index terms that also matched the query (typo
+     *                                      derivations, synonyms).
      * @return array<string, string>        Same keys, snippeted values.
      */
-    public function snippetMany(string $query, array $fields): array
+    public function snippetMany(string $query, array $fields, array $terms = []): array
     {
         if ($fields === []) {
             /** @infection-ignore-all fall-through gives identical result: foreach over [] returns empty $out */
             return [];
         }
 
-        $querySet = $this->buildQuerySet($query);
+        $querySet = $this->buildQuerySet($query) + array_fill_keys($terms, true);
         $out      = [];
 
         foreach ($fields as $key => $text) {

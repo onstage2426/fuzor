@@ -122,10 +122,7 @@ class ShopWorkloadTest extends TestCase
                 );
             }
         }
-        // A word found through a typo gets no mark yet: only its escaping is checked.
-        if ($name !== 'shop_search_typo') {
-            $this->assertGreaterThan(0, $marked);
-        }
+        $this->assertGreaterThan(0, $marked);
     }
 
     /** The page a new connection gives is the page a used one gives, in every detail. */

@@ -156,7 +156,7 @@ echo $hl->highlight('fast', 'Fast & <Furious>');
 // '<mark>Fast</mark> &amp; &lt;Furious&gt;'
 ```
 
-Stemming is intentionally not applied — raw query terms are highlighted, not their stems.
+Stemming is intentionally not applied — raw query terms are highlighted, not their stems. In the `_formatted` of a search, words that matched through a typo or a synonym are marked too, and a crop centres on them.
 
 ### Snippeter
 

@@ -10,7 +10,8 @@ namespace Fuzor;
  * Matching is Unicode-aware and case-insensitive, following the same tokenisation
  * as the index. When $asYouType is true (the default) the last token is matched as
  * a word prefix — "merc" highlights the full word "Mercedes". Stemming is
- * intentionally not applied: raw query terms are highlighted, not their stems.
+ * intentionally not applied: raw query terms are highlighted, not their stems. Index terms
+ * that matched in another way (a typo, a synonym) are passed to highlightMany() by the search.
  *
  * By default the text is returned as given with tags inserted, so the output is only safe
  * to render as HTML when the input text is trusted. With $escape the output is safe HTML:
@@ -18,6 +19,9 @@ namespace Fuzor;
  */
 final readonly class Highlighter
 {
+    /** A word as the patterns bound it. */
+    private const string WORD_CHARS = '[\p{L}\p{N}\p{Pc}]';
+
     /** N-gram window size for the configured language. */
     private int $ngramSize;
 
@@ -64,15 +68,43 @@ final readonly class Highlighter
      *
      * @param  string                $phrase Raw search phrase (will be tokenised).
      * @param  array<string, string> $fields Field name → text pairs.
+     * @param  list<string>          $terms  @internal Index terms that also matched the query (typo
+     *                                       derivations, synonyms): marked like the query's words, on
+     *                                       a stemmed index by their stem. Not for n-gram languages,
+     *                                       whose words have no boundaries to test.
      * @return array<string, string>         Same keys, with highlights applied.
      */
-    public function highlightMany(string $phrase, array $fields): array
+    public function highlightMany(string $phrase, array $fields, array $terms = []): array
     {
-        $pattern = $this->buildPattern(Tokenizer::tokenize($phrase, $this->language, false));
+        $tokens = Tokenizer::tokenize($phrase, $this->language, false);
+        $isTerm = null;
+        if ($terms !== [] && $this->ngramSize === 0) {
+            if ($this->language !== null && Stemmer::supports($this->language)) {
+                $isTerm = self::stemTest($terms, new Stemmer($this->language));
+            } else {
+                // Unstemmed terms are the words themselves. The query's own stay last: the
+                // last one is the word being typed.
+                $tokens = [...$terms, ...$tokens];
+            }
+        }
+        $pattern = $this->buildPattern($tokens, $isTerm !== null);
         if ($pattern === null) {
             return $this->escape ? array_map(HtmlText::escape(...), $fields) : $fields;
         }
-        return array_map(fn(string $text): string => $this->apply($pattern, $text), $fields);
+        return array_map(fn(string $text): string => $this->apply($pattern, $text, $isTerm), $fields);
+    }
+
+    /**
+     * Whether a word of the text has one of $terms as its stem. Index terms are stems there, so
+     * they cannot be matched as text.
+     *
+     * @param  list<string> $terms
+     * @return \Closure(string): bool
+     */
+    private static function stemTest(array $terms, Stemmer $stemmer): \Closure
+    {
+        $set = array_fill_keys($terms, true);
+        return fn(string $word): bool => isset($set[$stemmer->stemTokens([mb_strtolower($word, 'UTF-8')])[0]]);
     }
 
     /**
@@ -82,11 +114,12 @@ final readonly class Highlighter
      * when $asYouType is true. Prefix alternative is placed first in the alternation so it
      * takes precedence over any shorter exact token that shares the same word start.
      *
-     * Returns null when the token list is empty.
+     * Returns null when the token list is empty. With $everyWord the query's matches are the
+     * group `q` and any other word matches too, for apply() to test against the terms.
      *
      * @param  list<string> $tokens
      */
-    private function buildPattern(array $tokens): ?string
+    private function buildPattern(array $tokens, bool $everyWord = false): ?string
     {
         if ($tokens === []) {
             return null;
@@ -109,7 +142,7 @@ final readonly class Highlighter
         // For non-ngram queries, apply asYouType prefix extension to the last token.
         if ($this->ngramSize === 0 && $this->asYouType && $asciiAlts !== []) {
             $lastIdx = count($asciiAlts) - 1;
-            $asciiAlts[$lastIdx] .= '[\p{L}\p{N}\p{Pc}]*';
+            $asciiAlts[$lastIdx] .= self::WORD_CHARS . '*';
             /** @infection-ignore-all word-boundary lookahead makes alternation order irrelevant; moving prefix first is style only */
             array_unshift($asciiAlts, array_splice($asciiAlts, $lastIdx, 1)[0]);
         }
@@ -125,10 +158,11 @@ final readonly class Highlighter
 
         // ASCII/Latin tokens: Unicode-aware word boundaries prevent partial-word highlights.
         if ($asciiAlts !== []) {
-            $parts[] = '(?<![\p{L}\p{N}\p{Pc}])(?:' . implode('|', $asciiAlts) . ')(?![\p{L}\p{N}\p{Pc}])';
+            $parts[] = '(?<!' . self::WORD_CHARS . ')(?:' . implode('|', $asciiAlts) . ')(?!' . self::WORD_CHARS . ')';
         }
 
-        return '/' . implode('|', $parts) . '/iu';
+        $query = implode('|', $parts);
+        return $everyWord ? '/(?<q>' . $query . ')|' . self::WORD_CHARS . '+/iu' : '/' . $query . '/iu';
     }
 
     /**
@@ -138,13 +172,18 @@ final readonly class Highlighter
      * piece is escaped on its own. Escaping first and matching afterwards would be wrong:
      * the tokenizer drops punctuation, so a query token such as "amp" would match inside
      * the "&amp;" produced for a literal "&".
+     *
+     * @param (\Closure(string): bool)|null $isTerm Set when the pattern matches every word (see
+     *                                              buildPattern()): keeps the group `q` and its terms.
      */
-    private function apply(string $pattern, string $text): string
+    private function apply(string $pattern, string $text, ?\Closure $isTerm = null): string
     {
         if (!$this->escape) {
             return preg_replace_callback(
                 $pattern,
-                fn(array $m): string => $this->open . $m[0] . $this->close,
+                fn(array $m): string => $isTerm === null || ($m['q'] ?? '') !== '' || $isTerm($m[0])
+                    ? $this->open . $m[0] . $this->close
+                    : $m[0],
                 $text
             ) ?? $text;
         }
@@ -153,7 +192,10 @@ final readonly class Highlighter
         }
         $html   = '';
         $cursor = 0;
-        foreach ($matches[0] as [$match, $offset]) {
+        foreach ($matches[0] as $i => [$match, $offset]) {
+            if ($isTerm !== null && $matches['q'][$i][0] === '' && !$isTerm($match)) {
+                continue;
+            }
             $html  .= HtmlText::escape(substr($text, $cursor, $offset - $cursor))
                 . $this->open . HtmlText::escape($match) . $this->close;
             $cursor = $offset + strlen($match);

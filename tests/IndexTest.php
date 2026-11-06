@@ -11566,4 +11566,68 @@ class IndexTest extends TestCase
 
         $this->assertSame(range(300, 1), $page->getIds());
     }
+
+    public function testFormattingMarksAWordFoundThroughATypo(): void
+    {
+        $index = new Index($this->dbPath, force: true);
+        $index->insert([['id' => 1, 'text' => 'A red Terracotta pot, and a blue one']]);
+
+        $hit = $index->search('terrakotta', new SearchOptions(attributesToHighlight: ['text']))->hits[0];
+
+        $this->assertSame(['text' => 'A red <mark>Terracotta</mark> pot, and a blue one'], $hit['_formatted']);
+    }
+
+    public function testFormattingMarksATypoMatchOnAStemmedIndex(): void
+    {
+        $index = new Index($this->dbPath, force: true, schema: new SchemaConfig(language: 'en'));
+        $index->insert([['id' => 1, 'text' => 'Fresh strawberries here']]);
+
+        $hit = $index->search('strawbery', new SearchOptions(
+            asYouType: false,
+            attributesToHighlight: ['text'],
+            escapeFormatted: true,
+        ))->hits[0];
+
+        $this->assertSame(['text' => 'Fresh <mark>strawberries</mark> here'], $hit['_formatted']);
+    }
+
+    public function testFormattingMarksASynonym(): void
+    {
+        $index = new Index($this->dbPath, force: true);
+        $index->insert([['id' => 1, 'text' => 'A warm sofa'], ['id' => 2, 'text' => 'A warm couch']]);
+        $index->setSynonyms([['sofa', 'couch']]);
+
+        $result = $index->search('couch', new SearchOptions(asYouType: false, attributesToHighlight: ['text']));
+
+        $marked = array_column(array_column($result->hits, '_formatted'), 'text');
+        sort($marked);
+        $this->assertSame(['A warm <mark>couch</mark>', 'A warm <mark>sofa</mark>'], $marked);
+    }
+
+    public function testCropCentresOnAWordFoundThroughATypo(): void
+    {
+        $index = new Index($this->dbPath, force: true);
+        $index->insert([['id' => 1, 'text' => str_repeat('filler ', 80) . 'terracotta ' . str_repeat('filler ', 80)]]);
+
+        $hit = $index->search('terrakotta', new SearchOptions(attributesToCrop: ['text'], cropLength: 60))->hits[0];
+
+        $formatted = $hit['_formatted'];
+        $this->assertIsArray($formatted);
+        $this->assertIsString($formatted['text']);
+        $this->assertStringContainsString('terracotta', $formatted['text']);
+    }
+
+    /** A quoted word is exact, so a derivation of it is no match to mark. */
+    public function testFormattingLeavesDerivationsOfAQuotedWordUnmarked(): void
+    {
+        $index = new Index($this->dbPath, force: true);
+        $index->insert([['id' => 1, 'text' => 'blue jeans and blue jeens']]);
+
+        $hit = $index->search('"blue jeans"', new SearchOptions(attributesToHighlight: ['text']))->hits[0];
+
+        $this->assertSame(
+            ['text' => '<mark>blue</mark> <mark>jeans</mark> and <mark>blue</mark> jeens'],
+            $hit['_formatted'],
+        );
+    }
 }
