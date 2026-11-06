@@ -9027,6 +9027,39 @@ class IndexTest extends TestCase
         $this->assertSame([1, 2], $result->getIds());
     }
 
+    public function testFieldBoostScoreIsTheSameWhateverTheFilterLeaves(): void
+    {
+        // Unfiltered, the pairs cover the term's rows (read in sequence); filtered to one document
+        // of many, each pair is sought. Doc 1 holds the word in two fields (field_split), doc 2 in
+        // one (field_id). Neither read, nor filtering before re-scoring, may change a score.
+        $index = new Index(
+            $this->dbPath,
+            config: new Config(fieldBoosts: ['title' => 3.0, 'body' => 0.5]),
+            schema: new SchemaConfig(searchableAttributes: ['title', 'body'], filterableAttributes: ['kind']),
+        );
+        $docs = [
+            ['id' => 1, 'title' => 'turbo engine', 'body' => 'a turbo turbo story', 'kind' => 'one'],
+            ['id' => 2, 'title' => 'turbo pump', 'body' => 'nothing else', 'kind' => 'two'],
+        ];
+        for ($id = 3; $id <= 12; $id++) {
+            $docs[] = ['id' => $id, 'title' => 'plain', 'body' => 'turbo filler text', 'kind' => 'rest'];
+        }
+        $index->insert($docs);
+        $details = function (?string $kind) use ($index): array {
+            $hits = $index->search('turbo', new SearchOptions(
+                limit: 20,
+                filter: $kind === null ? [] : ['kind' => $kind],
+                showRankingScoreDetails: true,
+            ))->getHits();
+            return array_column($hits, '_rankingScoreDetails', 'id');
+        };
+        $all = $details(null);
+        $this->assertCount(12, $all);
+        $this->assertNotEquals($all[1], $all[2]);
+        $this->assertSame([1 => $all[1]], $details('one'));
+        $this->assertSame([2 => $all[2]], $details('two'));
+    }
+
     /** @return array<string, array{0: int}> */
     public static function boostIdOffsetProvider(): array
     {

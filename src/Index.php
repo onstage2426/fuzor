@@ -3100,9 +3100,29 @@ final class Index implements \Countable
             }
         }
 
+        // Phrase filter: remove documents that do not contain every quoted phrase as a
+        // contiguous token sequence. Positions are only fetched for the candidate set, not the
+        // entire doclist.
+        if ($phraseGroups !== []) {
+            $passing($docScores);
+            $docScores = array_intersect_key($docScores, array_filter($phraseOk));
+        }
+
+        // Apply facet filters: load per-key doc ID sets and intersect with the score map.
+        // Exclusions are removed first, so they also hold for disjunctive facet counts.
+        [$filterSets, $excluded] = $this->loadFacetKeySets($filter, array_keys($docScores), $negations);
+        $docScores    = array_diff_key($docScores, $excluded);
+        $rawDocScores = $docScores;
+        if ($filterSets !== []) {
+            $globalFilter = $this->intersectFilterSets($filterSets);
+            $docScores = array_intersect_key($docScores, $globalFilter);
+        }
+
         // Field boost re-scoring: replace uniform BM25 scores with field-weighted BM25.
         // Only executes when fieldBoosts is non-empty; the normal path is completely untouched.
-        // Runs before proximity boost so proximity applies on top of the re-scored values.
+        // Runs after the filters, which never read a score, so a document they drop costs no
+        // field read ($rawDocScores keeps the old scores: facet counts only use its keys), and
+        // before the proximity boost, so proximity applies on top of the re-scored values.
         if ($useFieldBoosts && $docScores !== []) {
             $fieldIdBoostMap = [];
             foreach ($fieldBoosts as $name => $boost) {
@@ -3132,24 +3152,6 @@ final class Index implements \Countable
                 }
                 $docScores = $newScores;
             }
-        }
-
-        // Phrase filter: remove documents that do not contain every quoted phrase as a
-        // contiguous token sequence. Positions are only fetched for the candidate set, not the
-        // entire doclist.
-        if ($phraseGroups !== []) {
-            $passing($docScores);
-            $docScores = array_intersect_key($docScores, array_filter($phraseOk));
-        }
-
-        // Apply facet filters: load per-key doc ID sets and intersect with the score map.
-        // Exclusions are removed first, so they also hold for disjunctive facet counts.
-        [$filterSets, $excluded] = $this->loadFacetKeySets($filter, array_keys($docScores), $negations);
-        $docScores    = array_diff_key($docScores, $excluded);
-        $rawDocScores = $docScores;
-        if ($filterSets !== []) {
-            $globalFilter = $this->intersectFilterSets($filterSets);
-            $docScores = array_intersect_key($docScores, $globalFilter);
         }
 
         // The result set beyond the candidates, when maxDocs cut them: the documents with the
