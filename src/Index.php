@@ -10249,7 +10249,13 @@ final class Index implements \Countable
         }
         /** @var array<int, int> $unpacked */
         $unpacked = unpack('P*', implode('', $blobs));
-        foreach (array_count_values($unpacked) as $vid => $n) {
+        $counts = array_count_values($unpacked);
+        // One batch is the usual case: nothing to merge into.
+        if ($vidCounts === []) {
+            $vidCounts = $counts;
+            return;
+        }
+        foreach ($counts as $vid => $n) {
             $vidCounts[$vid] = ($vidCounts[$vid] ?? 0) + $n;
         }
     }
