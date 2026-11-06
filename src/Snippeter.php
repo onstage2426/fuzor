@@ -105,11 +105,15 @@ final readonly class Snippeter
             return '';
         }
 
+        // No query (a browse page): there is no window to look for, so nothing to tokenise.
+        if ($querySet === []) {
+            return $this->fallback($text);
+        }
+
         $bodyTokens = Tokenizer::tokenizeWithOffsets($text, $this->language);
 
-        /** @infection-ignore-all || vs &&: both paths reach fallback (empty scores → wins=[] → fallback) */
-        if ($bodyTokens === [] || $querySet === []) {
-            /** @infection-ignore-all fall-through: scores=[] or all-zero → wins=[] → fallback called anyway */
+        if ($bodyTokens === []) {
+            /** @infection-ignore-all fall-through: scores=[] → wins=[] → fallback called anyway */
             return $this->fallback($text);
         }
 
@@ -275,7 +279,7 @@ final readonly class Snippeter
             return 10;
         }
         /** @infection-ignore-all mb_strlen/strlen differ only for CJK tokens; ±1 rounding variants change winTokens by at most 1, which falls below the max(3) floor or produces same window selection */
-        $totalLen = array_sum(array_map(fn(array $t): int => mb_strlen($t[0], 'UTF-8'), $bodyTokens));
+        $totalLen = mb_strlen(implode('', array_column($bodyTokens, 0)), 'UTF-8');
         $avgLen   = $totalLen / $count;
         // +1 accounts for average inter-token spacing.
         /** @infection-ignore-all rounding, cast, and ±1 mutations shift winTokens by at most 1 token; window selection is robust to this perturbation */
