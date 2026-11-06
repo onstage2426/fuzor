@@ -417,7 +417,7 @@ class SnippeterTest extends TestCase
         // Without snap, slice starts at 'hello', adding a leading '…' prefix.
         $snip = new Snippeter(windowSize: 20);
         $text = 'foo-bar.baz-hello world fox more padding words here';
-        $result = $snip->snippet('fox', $text);
+        $result = $snip->snippet('world', $text);
         $this->assertStringStartsWith('foo-bar', $result);
     }
 
@@ -436,7 +436,7 @@ class SnippeterTest extends TestCase
         // Suffix is ' ' . ellipsis (not just ellipsis). Triggered when endByte < textLen.
         // truncated=false here so || vs && matters: truncated(false) || endByte<textLen(true).
         $snip   = new Snippeter(windowSize: 50);
-        $result = $snip->snippet('fox', str_repeat('a ', 30) . 'fox here');
+        $result = $snip->snippet('fox', str_repeat('a ', 30) . 'fox here ' . str_repeat('a ', 30));
         $this->assertStringEndsWith(' …', $result);
     }
 
@@ -509,5 +509,24 @@ class SnippeterTest extends TestCase
             ['a' => '1 &lt; 2', 'b' => '&quot;q&quot;'],
             $snip->snippetMany('zzz', ['a' => '1 < 2', 'b' => '"q"']),
         );
+    }
+
+    public function testMatchAtTheEndOfTheWindowSurvivesTheCut(): void
+    {
+        $text = str_repeat('filler ', 80) . 'terracotta ' . str_repeat('filler ', 80);
+
+        $excerpt = (new Snippeter(windowSize: 60))->snippet('terracotta', $text);
+
+        $this->assertStringContainsString('terracotta', $excerpt);
+        // In the middle: the words on both sides of it take about the same room.
+        $this->assertLessThan(16, abs(strpos($excerpt, 'terracotta') - (strlen($excerpt) - strlen('terracotta')) / 2));
+    }
+
+    public function testCentringStopsAtTheStartAndEndOfTheText(): void
+    {
+        $snippeter = new Snippeter(windowSize: 40);
+
+        $this->assertStringStartsWith('match', $snippeter->snippet('match', 'match ' . str_repeat('word ', 60)));
+        $this->assertStringEndsWith('match', $snippeter->snippet('match', str_repeat('word ', 60) . 'match'));
     }
 }

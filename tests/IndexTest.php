@@ -5399,7 +5399,7 @@ class IndexTest extends TestCase
         $result = $index->search('needle', new SearchOptions(
             attributesToHighlight: ['body'],
             attributesToCrop:      ['body', 'note'],
-            cropLength:            40,
+            cropLength:            60,
             escapeFormatted:       true,
         ));
         $body = $this->formattedField($result, 'body');

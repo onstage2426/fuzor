@@ -244,6 +244,10 @@ final readonly class Snippeter
                 break;
             }
 
+            // N-grams overlap and a window of them is not a run of text, so they stay as found.
+            if ($this->ngramSize === 0) {
+                $bestStart = $this->centredStart($s, $bestStart, $winTokens, $n);
+            }
             /** @infection-ignore-all DecrementInteger/Minus on $n-1: first arg ($bestStart+$winTokens-1) is always ≤$n-1 since winTokens is clamped to $n; changing $n-1 to $n or $n+1 never affects the min result */
             $bestEnd   = min($bestStart + $winTokens - 1, $n - 1);
             $results[] = [$bestStart, $bestEnd];
@@ -265,6 +269,20 @@ final readonly class Snippeter
         usort($results, fn(array $a, array $b): int => $a[0] <=> $b[0]);
 
         return $results;
+    }
+
+    /**
+     * Where a window of the same score starts with its matches in the middle. The slide stops at
+     * the first best window, which ends on a match, and the window is an estimate: the cut to
+     * $windowSize characters could take that match off.
+     *
+     * @param array<int, float> $scores
+     */
+    private function centredStart(array $scores, int $start, int $winTokens, int $n): int
+    {
+        $matches = array_keys(array_filter(array_slice($scores, $start, $winTokens, true)));
+        $free    = $winTokens - (end($matches) - $matches[0] + 1);
+        return max(0, min($matches[0] - intdiv($free, 2), $n - $winTokens));
     }
 
     /**
