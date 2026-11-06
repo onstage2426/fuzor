@@ -9880,24 +9880,7 @@ final class Index implements \Countable
         );
         $results = [];
         foreach ($nameToId as $keyName => $keyId) {
-            $rows = $this->wholeKeyFacetCountRows($keyId);
-            if (isset($removed[$keyId])) {
-                $kept   = [];
-                $counts = [];
-                $values = [];
-                foreach ($rows as $row) {
-                    [$n, $numCount] = $removed[$keyId][$row['value']] ?? [0, 0];
-                    if ($row['n'] > $n) {
-                        $kept[]   = ['n' => $row['n'] - $n, 'num_count' => $row['num_count'] - $numCount] + $row;
-                        $counts[] = $row['n'] - $n;
-                        $values[] = (string) $row['value'];
-                    }
-                }
-                // Count desc, then value: the order facet_counts is read in.
-                array_multisort($counts, SORT_DESC, SORT_NUMERIC, $values, SORT_ASC, SORT_STRING, $kept);
-                $rows = $kept;
-            }
-            $results[$keyName] = self::summarizeFacetCounts($rows);
+            $results[$keyName] = $this->keyCountsWithout($keyId, $removed[$keyId] ?? []);
         }
         $this->mergeFacetCounts($results, $distribution, $stats);
     }
@@ -9926,6 +9909,55 @@ final class Index implements \Countable
                 $stats[$keyName] = $counts['stats'];
             }
         }
+    }
+
+    /**
+     * A whole key's counts from facet_counts minus the excluded documents' counts: what
+     * summarizeFacetCounts() gives for the remaining rows, in one pass and with one sort. Runs
+     * on every page of a shop that hides documents with an exclusion, and a key with a value
+     * per product (a price) has thousands of rows, so no array per row and no sort in SQL.
+     *
+     * @param  array<int|string, array{0: int, 1: int, 2: float|null}> $removed value → [n, numeric n, number]
+     * @return array{distribution: array<string, int>, stats: array{min: float, max: float}|null}
+     */
+    private function keyCountsWithout(int $keyId, array $removed): array
+    {
+        $stmt = $this->stmt(
+            'facetCountsForKeyUnordered',
+            'SELECT value, count, num_count, num_value FROM facet_counts WHERE key_id = ?'
+        );
+        $stmt->execute([$keyId]);
+        /** @var list<array{0: string, 1: int, 2: int, 3: float|null}> $rows */
+        $rows     = $stmt->fetchAll(PDO::FETCH_NUM);
+        $values   = [];
+        $counts   = [];
+        $total    = 0;
+        $numCount = 0;
+        $min      = null;
+        $max      = null;
+        foreach ($rows as [$value, $n, $numeric, $num]) {
+            $gone = $removed[$value] ?? [0, 0];
+            $n   -= $gone[0];
+            if ($n <= 0) {
+                continue;
+            }
+            $values[]  = $value;
+            $counts[]  = $n;
+            $total    += $n;
+            $numCount += $numeric - $gone[1];
+            // A value's number stays a bound while its row does, as in the unreduced row.
+            if ($numeric > 0 && $num !== null) {
+                $min = $min === null || $num < $min ? $num : $min;
+                $max = $max === null || $num > $max ? $num : $max;
+            }
+        }
+        // Count desc, then value: the order facet_counts is read in elsewhere.
+        array_multisort($counts, SORT_DESC, SORT_NUMERIC, $values, SORT_ASC, SORT_STRING);
+        $distribution = array_combine($values, $counts);
+        $stats        = $numCount === $total && $numCount > 0
+            ? ['min' => $min ?? 0.0, 'max' => $max ?? 0.0]
+            : null;
+        return ['distribution' => $distribution, 'stats' => $stats];
     }
 
     /**

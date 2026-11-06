@@ -9027,6 +9027,40 @@ class IndexTest extends TestCase
         $this->assertSame([1, 2], $result->getIds());
     }
 
+    public function testExclusionFacetCountsSubtractValuesStatsAndOrder(): void
+    {
+        $index = new Index($this->dbPath, schema: new SchemaConfig(
+            searchableAttributes: ['title'],
+            filterableAttributes: ['hidden', 'price', 'label', 'mixedOut', 'mixedIn'],
+        ));
+        $index->insert([
+            ['id' => 1, 'title' => 'a', 'price' => 10, 'label' => 'x', 'mixedOut' => 1, 'mixedIn' => 'small'],
+            ['id' => 2, 'title' => 'b', 'price' => 5, 'label' => 'y', 'mixedOut' => 2, 'mixedIn' => 'small'],
+            ['id' => 3, 'title' => 'c', 'label' => 'y'],
+            ['id' => 4, 'title' => 'd', 'hidden' => 'yes', 'price' => 10, 'label' => 'x', 'mixedOut' => 'big'],
+            ['id' => 5, 'title' => 'e', 'hidden' => 'yes', 'price' => 99, 'label' => 'x', 'mixedIn' => 3],
+            ['id' => 6, 'title' => 'f', 'hidden' => 'yes', 'label' => 'x'],
+        ]);
+        $result = $index->search('', new SearchOptions(
+            filter: ['hidden' => new FacetExclude('yes')],
+            facets: ['price', 'label', 'mixedOut', 'mixedIn', 'hidden'],
+            sortFacetValuesBy: ['*' => FacetOrder::Count],
+        ));
+        $this->assertSame([
+            // A value left with no document goes, also as a bound; ties by value bytes ('10' < '5').
+            'price'    => [10 => 1, 5 => 1],
+            // x held 4 documents and y 2: three of x's are excluded, so y comes first now.
+            'label'    => ['y' => 2, 'x' => 1],
+            'mixedOut' => [1 => 1, 2 => 1],
+            'mixedIn'  => ['small' => 2],
+        ], $result->getFacetDistribution());
+        $this->assertSame([
+            'price'    => ['min' => 5.0, 'max' => 10.0],
+            // The only string value was excluded: what remains is numeric, so it has stats.
+            'mixedOut' => ['min' => 1.0, 'max' => 2.0],
+        ], $result->getFacetStats());
+    }
+
     public function testFieldBoostScoreIsTheSameWhateverTheFilterLeaves(): void
     {
         // Unfiltered, the pairs cover the term's rows (read in sequence); filtered to one document
