@@ -3018,14 +3018,13 @@ final class Index implements \Countable
                 $exactDocs += array_fill_keys(array_keys($hits), true);
                 if (count($hits) > $scoredDocs) {
                     // Most hits of the rarest word first, then newest; the rest rank after them.
-                    $docIds = array_keys($hits);
-                    array_multisort($hits, SORT_DESC, SORT_NUMERIC, $docIds, SORT_DESC, SORT_NUMERIC);
-                    foreach (array_slice($docIds, $scoredDocs) as $docId) {
+                    $top = self::mostHits($hits, $scoredDocs);
+                    foreach (array_diff_key($hits, $top) as $docId => $_) {
                         if (!isset($candidates[$docId])) {
                             $unscored[$docId] ??= $k;
                         }
                     }
-                    $hits = array_fill_keys(array_slice($docIds, 0, $scoredDocs), 0);
+                    $hits = $top;
                 }
                 foreach ($hits as $docId => $_) {
                     $added = $added || !isset($candidates[$docId]);
@@ -4771,6 +4770,35 @@ final class Index implements \Countable
         }
 
         return $documents;
+    }
+
+    /**
+     * The $count documents with the most hits, newest first among equals, as a set. Hit counts are
+     * small, so counting them finds the cut: no sort of a whole bucket for its first part.
+     *
+     * @param  array<int, int> $hits doc → hits, by ascending doc ID.
+     * @return array<int, int>
+     */
+    private static function mostHits(array $hits, int $count): array
+    {
+        $perCount = array_count_values($hits);
+        krsort($perCount);
+        $above = 0;
+        $cut   = 0;
+        foreach ($perCount as $cut => $docs) {
+            if ($above + $docs >= $count) {
+                break;
+            }
+            $above += $docs;
+        }
+        $top  = [];
+        $left = $count - $above;
+        foreach (array_reverse($hits, true) as $docId => $n) {
+            if ($n > $cut || ($n === $cut && $left-- > 0)) {
+                $top[$docId] = 0;
+            }
+        }
+        return $top;
     }
 
     /**
