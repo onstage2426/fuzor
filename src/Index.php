@@ -161,6 +161,12 @@ final class Index implements \Countable
     private const int PROBE_ROW_COST = 3;
 
     /**
+     * fetchWeightedHits(): the terms' rows are read in sequence while they are at most this many
+     * per (term, document) pair asked for (a row ~0.5 µs, a primary-key seek ~1.1 µs).
+     */
+    private const int FIELD_HITS_SCAN_ROWS_PER_PAIR = 2;
+
+    /**
      * groupRowsOfDocs(): a (document, term) probe counted against reading one of the terms' rows
      * in sequence (ecom: ~0.9 µs per probe, ~0.05 µs per row read).
      */
@@ -3132,19 +3138,24 @@ final class Index implements \Countable
                 }
             }
             if ($fieldIdBoostMap !== []) {
-                $fieldHitRows = $this->fetchFieldHitsForPairs(array_intersect_key($docContribTermIds, $docScores));
+                $termDocs = [];
+                foreach ($groups as $group) {
+                    $termDocs += array_column($group['words'], 'num_docs', 'id');
+                }
+                $weightedHits = $this->fetchWeightedHits(
+                    array_intersect_key($docContribTermIds, $docScores),
+                    $fieldIdBoostMap,
+                    $termDocs,
+                );
                 $docLengths   = $this->fetchDocLengthsForDocs(array_keys($docScores));
                 $newScores    = [];
                 foreach ($docScores as $docId => $_) {
                     $docLen   = (float) max(1, $docLengths[$docId] ?? 1);
                     $newScore = 0.0;
                     foreach ($docContribTermIds[$docId] ?? [] as $termId => $_) {
-                        $idfK1p1val = $termIdfMap[$termId] ?? 0.0;
-                        $weighted   = 0.0;
-                        foreach ($fieldHitRows[$termId][$docId] ?? [] as $fieldId => $hits) {
-                            $weighted += ($fieldIdBoostMap[$fieldId] ?? 1.0) * $hits;
-                        }
+                        $weighted = $weightedHits[$termId][$docId] ?? 0.0;
                         if ($weighted > 0.0) {
+                            $idfK1p1val = $termIdfMap[$termId] ?? 0.0;
                             $newScore += $idfK1p1val * $weighted / ($k1_1mb + $k1b_avgdl * $docLen + $weighted);
                         }
                     }
@@ -5781,7 +5792,7 @@ final class Index implements \Countable
     /**
      * The doclist columns recording which fields a term was found in: the field ID when it is
      * one field, else the split "fieldId:hits fieldId:hits" (field IDs ascending). Field boosts
-     * read them (fetchFieldHitsForPairs()); a separate field_hits table cost a row per field, 2.2M
+     * read them (fetchWeightedHits()); a separate field_hits table cost a row per field, 2.2M
      * rows on the 45k ecom set where 88% of the pairs have one field, and a second seek per pair.
      *
      * @param  array<int, int> $fields field ID → hits; [] for a document without field hits
@@ -6157,21 +6168,68 @@ final class Index implements \Countable
     }
 
     /**
-     * Fetch per-field hit counts for the (term, document) pairs the field boost re-scoring in
-     * search() reads: one primary-key seek per pair in doclist, whose fieldColumns() hold the
-     * fields. Passing every term ID and every candidate as two IN lists cost 6.2 ms for "blue
-     * jeans" on the 45k ecom set (954 candidates) against 1.8 ms for the pairs; 1,800 pairs
-     * read 0.9 ms from doclist against 1.3 ms from the former field_hits table (one row per
-     * field).
+     * The boost-weighted hit count (Σ boost(field) × hits, fields without a boost at 1.0) of the
+     * (term, document) pairs the field boost re-scoring in search() reads, from the fieldColumns()
+     * of doclist.
      *
-     * The pairs travel as one json_each list. Each is packed into one integer (term × 2^32 +
-     * document) when every ID fits, which is the case for all but exotic document IDs; otherwise
-     * as [term, document] arrays read with ->>.
+     * A broad query's pairs are most of its terms' rows: then those rows are read in sequence,
+     * ~0.5 µs a row against ~1.1 µs for a primary-key seek ("tegels 60x60" on 7.7k products,
+     * 8,779 pairs of 8,810 rows: 9.8 → 4.3 ms), and rows of other documents are simply not asked
+     * for by the caller. Otherwise one seek per pair; the pairs travel as one json_each list, each
+     * packed into one integer (term × 2^32 + document) when every ID fits, which is the case for
+     * all but exotic document IDs, else as [term, document] arrays read with ->>. Passing every
+     * term ID and every candidate as two IN lists cost 6.2 ms for "blue jeans" on the 45k ecom
+     * set (954 candidates) against 1.8 ms for the pairs.
      *
      * @param  array<int, array<int, true>> $docTerms docId → termId → true
-     * @return array<int, array<int, array<int, int>>> termId → docId → fieldId → hitCount
+     * @param  array<int, float>            $boosts   fieldId → boost
+     * @param  array<int, int>              $termDocs termId → rows in doclist (wordlist num_docs)
+     * @return array<int, array<int, float>> termId → docId → weighted hits
      */
-    private function fetchFieldHitsForPairs(array $docTerms): array
+    private function fetchWeightedHits(array $docTerms, array $boosts, array $termDocs): array
+    {
+        $select = 'SELECT d.term_id, d.doc_id, d.hit_count, d.field_id, d.field_split FROM json_each(?) p';
+        /** @var array<int, true> $terms */
+        $terms     = [];
+        $pairCount = 0;
+        foreach ($docTerms as $docTermIds) {
+            $terms     += $docTermIds;
+            $pairCount += count($docTermIds);
+        }
+        if ($pairCount === 0) {
+            return [];
+        }
+        if (array_sum(array_intersect_key($termDocs, $terms)) <= $pairCount * self::FIELD_HITS_SCAN_ROWS_PER_PAIR) {
+            $termIds = array_keys($terms);
+            sort($termIds);
+            $stmt = $this->stmt('fieldHitsOfTerms', $select . ' CROSS JOIN doclist d ON d.term_id = p.value');
+            $stmt->execute([json_encode($termIds)]);
+        } else {
+            $stmt = $this->fieldHitPairsStmt($select, $docTerms);
+        }
+        /** @var list<array{0: int, 1: int, 2: int, 3: int|null, 4: string|null}> $rows */
+        $rows   = $stmt->fetchAll(PDO::FETCH_NUM);
+        $result = [];
+        foreach ($rows as [$termId, $docId, $hits, $fieldId, $split]) {
+            if ($fieldId !== null) {
+                $result[$termId][$docId] = ($boosts[$fieldId] ?? 1.0) * $hits;
+                continue;
+            }
+            $weighted = 0.0;
+            foreach (self::fieldsFromColumns($fieldId, $split, $hits) as $field => $fieldHits) {
+                $weighted += ($boosts[$field] ?? 1.0) * $fieldHits;
+            }
+            $result[$termId][$docId] = $weighted;
+        }
+        return $result;
+    }
+
+    /**
+     * The executed statement of fetchWeightedHits() that seeks each (term, document) pair.
+     *
+     * @param array<int, array<int, true>> $docTerms docId → termId → true
+     */
+    private function fieldHitPairsStmt(string $select, array $docTerms): \PDOStatement
     {
         $pairs  = [];
         $packed = [];
@@ -6185,10 +6243,6 @@ final class Index implements \Countable
                 }
             }
         }
-        if ($pairs === []) {
-            return [];
-        }
-        $select = 'SELECT d.term_id, d.doc_id, d.hit_count, d.field_id, d.field_split FROM json_each(?) p';
         if ($packed !== null) {
             // Sorted, so consecutive seeks land on neighbouring primary-key pages.
             sort($packed);
@@ -6197,21 +6251,15 @@ final class Index implements \Countable
                 $select . ' CROSS JOIN doclist d ON d.term_id = p.value >> 32 AND d.doc_id = p.value & 4294967295'
             );
             $stmt->execute([json_encode($packed)]);
-        } else {
-            sort($pairs);
-            $stmt = $this->stmt(
-                'fieldHitsForPairs',
-                $select . ' CROSS JOIN doclist d ON d.term_id = p.value ->> 0 AND d.doc_id = p.value ->> 1'
-            );
-            $stmt->execute([json_encode($pairs)]);
+            return $stmt;
         }
-        /** @var list<array{0: int, 1: int, 2: int, 3: int|null, 4: string|null}> $rows */
-        $rows   = $stmt->fetchAll(PDO::FETCH_NUM);
-        $result = [];
-        foreach ($rows as [$termId, $docId, $hits, $fieldId, $split]) {
-            $result[$termId][$docId] = self::fieldsFromColumns($fieldId, $split, $hits);
-        }
-        return $result;
+        sort($pairs);
+        $stmt = $this->stmt(
+            'fieldHitsForPairs',
+            $select . ' CROSS JOIN doclist d ON d.term_id = p.value ->> 0 AND d.doc_id = p.value ->> 1'
+        );
+        $stmt->execute([json_encode($pairs)]);
+        return $stmt;
     }
 
     /**
