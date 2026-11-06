@@ -2898,6 +2898,8 @@ final class Index implements \Countable
         }
         /** @var array<int, int> $unscored  Members of a bucket above $scoredDocs left unscored → their bucket. */
         $unscored     = [];
+        /** @var array<int, true> $lateDocs  Candidates only pages reaching bucket 1 have. */
+        $lateDocs     = [];
         /** @var array<int, true> $exactDocs */
         $exactDocs    = [];
         $exactFrom    = count($order) + 1;   // buckets >= this hold every document they should
@@ -3066,6 +3068,9 @@ final class Index implements \Countable
                         if (!isset($held["{$row[0]}:{$row[1]}"]) && !($settles && isset($unscored[$row[1]]))) {
                             $groups[$first]['rows'][] = $row;
                             $added = $added || !isset($candidates[$row[1]]);
+                            if ($settles && !isset($candidates[$row[1]])) {
+                                $lateDocs[$row[1]] = true;
+                            }
                             $candidates[$row[1]] = true;
                         }
                     }
@@ -3096,7 +3101,9 @@ final class Index implements \Countable
             }
         }
         foreach ($docBucket as $docId => $bucket) {
-            if ($bucket < $minBucket) {
+            // A late document of a higher bucket (one too large to read) would push aside what
+            // the pages before showed: it follows with the rest of the result set instead.
+            if ($bucket < $minBucket || ($bucket >= 2 && isset($lateDocs[$docId]))) {
                 unset($docBucket[$docId], $docScores[$docId], $docContribTermIds[$docId]);
             }
         }

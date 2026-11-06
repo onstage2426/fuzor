@@ -11630,4 +11630,38 @@ class IndexTest extends TestCase
             $hit['_formatted'],
         );
     }
+
+    /**
+     * Both words are above the size up to which a words bucket is read (EXACT_BUCKET_MAX_DRIVER), so
+     * the pages come from the candidates. A page that reaches the documents with only the first
+     * word adds that word's best rows, and those holding both words must not move into the
+     * pages before it.
+     */
+    public function testPagesStayTheSameWhenABucketIsTooLargeToRead(): void
+    {
+        $docs = [];
+        for ($id = 1; $id <= 52_000; $id++) {
+            $docs[] = ['id' => $id, 'text' => match (true) {
+                $id % 13 === 0 => 'alpha',
+                $id % 2 === 0  => 'alpha beta',
+                default        => 'alpha alpha alpha beta beta beta filler filler filler filler filler',
+            } . ($id > 200 ? ' beta' : '')];
+        }
+        $index = new Index($this->dbPath, force: true, config: new Config(maxDocs: 20, maxTotalHits: 600));
+        $index->insert($docs);
+
+        $seen = [];
+        for ($offset = 0; $offset < 600; $offset += 30) {
+            $page = $index->search('alpha beta', new SearchOptions(
+                asYouType: false,
+                limit: 30,
+                offset: $offset,
+                attributesToRetrieve: [],
+            ));
+            array_push($seen, ...$page->getIds());
+        }
+
+        $this->assertCount(600, $seen);
+        $this->assertCount(600, array_unique($seen));
+    }
 }
