@@ -10198,13 +10198,14 @@ final class Index implements \Countable
         // groups count mostly the same IDs.
         // An ID carries its key: the other keys' values (a doc holds all its filterable values)
         // are dropped here, before any lookup.
-        $wanted = array_flip($nameToId);
-        foreach ($vidCounts as $vid => $_) {
-            if (!isset($wanted[$vid >> self::FACET_VALUE_KEY_SHIFT])) {
-                unset($vidCounts[$vid]);
+        $wanted  = array_flip($nameToId);
+        $counted = [];
+        foreach ($vidCounts as $vid => $n) {
+            if (isset($wanted[$vid >> self::FACET_VALUE_KEY_SHIFT])) {
+                $counted[$vid] = $n;
             }
         }
-        $missing = array_keys(array_diff_key($vidCounts, $this->facetValueCache));
+        $missing = array_keys(array_diff_key($counted, $this->facetValueCache));
         if ($missing !== []) {
             $stmt = $this->stmt(
                 'facetValueIdsCounted',
@@ -10218,18 +10219,12 @@ final class Index implements \Countable
                 $this->facetValueCache[$entry[0]] = $entry;
             }
         }
-        $ids = [];
-        foreach ($vidCounts as $vid => $_) {
-            if (isset($this->facetValueCache[$vid])) {
-                $ids[] = $this->facetValueCache[$vid];
-            }
-        }
         $counts = [];
-        foreach ($ids as [$vid, $keyId, $value, $isNum, $num]) {
-            if (!isset($vidCounts[$vid])) {
+        foreach ($counted as $vid => $n) {
+            if (!isset($this->facetValueCache[$vid])) {
                 continue;
             }
-            $n     = $vidCounts[$vid];
+            [, $keyId, $value, $isNum, $num] = $this->facetValueCache[$vid];
             $entry = $counts[$keyId][$value] ?? [0, 0, null];
             $entry[0] += $n;
             if ($isNum === 1) {
