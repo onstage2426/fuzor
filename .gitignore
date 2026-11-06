@@ -4,3 +4,4 @@ vendor/
 infection.log
 infection-summary.log
 *.db
+*.db.v-*
