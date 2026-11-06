@@ -11502,4 +11502,68 @@ class IndexTest extends TestCase
             $this->assertSame(['words', 'typo', 'bm25'], array_keys($rules));
         }
     }
+
+    /** @return array<string, array{string}> */
+    public static function multiWordQueries(): array
+    {
+        return [
+            'two words'      => ['jurk model'],
+            'three words'    => ['jurk model rood'],
+            'a typo'         => ['jurk modle'],
+            'a rare word'    => ['jurk rood katoen'],
+            'a quoted word'  => ['"jurk model" rood'],
+        ];
+    }
+
+    /**
+     * The buckets are far above 4 x maxDocs, so a page deep enough reads them while the first
+     * pages do not need to: paging through must still show each document exactly once.
+     */
+    #[DataProvider('multiWordQueries')]
+    public function testPagesOfAMultiWordSearchShowEachDocumentOnce(string $query): void
+    {
+        $words = ['jurk' => 90, 'model' => 60, 'rood' => 45, 'modle' => 15, 'katoen' => 15];
+        $docs  = [];
+        mt_srand(3);
+        for ($id = 1; $id <= 900; $id++) {
+            $text = '';
+            foreach ($words as $word => $percent) {
+                if (mt_rand(0, 99) < $percent) {
+                    $text .= str_repeat("{$word} ", mt_rand(1, 4));
+                }
+            }
+            $docs[] = ['id' => $id, 'text' => $text . str_repeat('vul ', mt_rand(0, 25))];
+        }
+        $index = new Index($this->dbPath, force: true, config: new Config(maxDocs: 25, maxTotalHits: 2000));
+        $index->insert($docs);
+
+        $seen  = [];
+        $total = 0;
+        for ($offset = 0; $offset < 1000; $offset += 24) {
+            $page  = $index->search($query, new SearchOptions(asYouType: false, limit: 24, offset: $offset));
+            $total = $page->totalHits ?? 0;
+            array_push($seen, ...$page->getIds());
+        }
+
+        $this->assertGreaterThan(100, $total);
+        $this->assertCount($total, $seen);
+        $this->assertSame([], array_keys(array_filter(array_count_values($seen), fn(int $n): bool => $n > 1)));
+    }
+
+    /** A sort field orders a bucket's unscored members with the scored ones. */
+    public function testSortOrdersABucketAboveTheScoredDocuments(): void
+    {
+        $docs = [];
+        for ($id = 1; $id <= 300; $id++) {
+            $docs[] = ['id' => $id, 'text' => 'jurk model ' . str_repeat('vul ', $id % 7), 'rank' => 301 - $id];
+        }
+        $index = new Index($this->dbPath, force: true, config: new Config(maxDocs: 10), schema: new SchemaConfig(
+            sortableAttributes: ['rank'],
+        ));
+        $index->insert($docs);
+
+        $page = $index->search('jurk model', new SearchOptions(asYouType: false, limit: 300, sort: ['rank:asc']));
+
+        $this->assertSame(range(300, 1), $page->getIds());
+    }
 }

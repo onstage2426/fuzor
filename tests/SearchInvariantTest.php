@@ -14,9 +14,6 @@ use PHPUnit\Framework\TestCase;
 /**
  * Properties search() must keep whatever its caps are, checked on small random indexes: the
  * same file is searched with a tiny maxDocs (every word is cut) and with no cap (the reference).
- *
- * Invariants that do not hold yet are reported as incomplete with the first counterexample,
- * so the suite stays green; the step that fixes one removes its knownGap() call.
  */
 class SearchInvariantTest extends TestCase
 {
@@ -238,8 +235,9 @@ class SearchInvariantTest extends TestCase
                 $first  = $capped->search($q, self::page($options, 0, 10))->getIds();
                 $second = $capped->search($q, self::page($options, 10, 10))->getIds();
                 $both   = $capped->search($q, self::page($options, 0, 20))->getIds();
-                $this->knownGap(
-                    [...$first, ...$second] === $both,
+                $this->assertSame(
+                    $both,
+                    [...$first, ...$second],
                     sprintf(
                         '%s "%s": pages %s + %s, one page %s',
                         $name,
@@ -393,17 +391,6 @@ class SearchInvariantTest extends TestCase
             config: new Config(maxDocs: $maxDocs, maxFacetCountDocs: 100_000_000, proximityBoost: 0.0),
             readonly: true,
         );
-    }
-
-    /**
-     * A property that does not hold yet: report the first counterexample as incomplete instead
-     * of failing. Remove the call (use an assertion) once the property holds.
-     */
-    private function knownGap(bool $holds, string $counterexample): void
-    {
-        if (!$holds) {
-            $this->markTestIncomplete('Known gap: ' . $counterexample);
-        }
     }
 
     private static function page(SearchOptions $o, int $offset, int $limit, bool $details = false): SearchOptions

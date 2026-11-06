@@ -2884,8 +2884,11 @@ final class Index implements \Countable
         // the exact buckets above it hold fewer documents than the page (phrases count the
         // documents that pass them); with them, matches can drop out later or a document outside
         // the candidates can sort first, so every needed bucket is read. A bucket above
-        // $scoredDocs (EXACT_RANKED_DOCS_PER_MAX_DOCS) is too large to rank exactly: if the
-        // candidates cover the page it is taken from them, as an approximation.
+        // $scoredDocs (EXACT_RANKED_DOCS_PER_MAX_DOCS) is too large to rank exactly: the candidates
+        // and its $scoredDocs documents with the most driver hits are scored, the rest follow
+        // unscored. Which documents those are must not depend on the page, or pages repeat
+        // documents and lose others: a bucket read for a deep page ranks the buckets above it,
+        // and every page before it, exactly as they were.
         /** @var array<int, true> $candidates */
         $candidates = [];
         foreach ($groups as $group) {
@@ -3004,11 +3007,11 @@ final class Index implements \Countable
                 if ($hits === null) {
                     break;
                 }
-                if (count($hits) > $scoredDocs && $settles) {
-                    $covered = $exactDocs + array_filter($docBucket, fn(int $bucket): bool => $bucket >= $k);
-                    if ($passing($covered) >= $offset + $limit) {
-                        break;
-                    }
+                // A document of a bucket above stays as that bucket ranked it: a page that reaches
+                // this bucket must not reorder what the pages before it showed. (Without $settles
+                // every page reads every bucket.)
+                if ($settles) {
+                    $hits = array_diff_key($hits, $exactDocs);
                 }
                 $exactDocs += array_fill_keys(array_keys($hits), true);
                 if (count($hits) > $scoredDocs) {
@@ -3060,7 +3063,7 @@ final class Index implements \Countable
                         true,
                     );
                     foreach ($best as $row) {
-                        if (!isset($held["{$row[0]}:{$row[1]}"])) {
+                        if (!isset($held["{$row[0]}:{$row[1]}"]) && !($settles && isset($unscored[$row[1]]))) {
                             $groups[$first]['rows'][] = $row;
                             $added = $added || !isset($candidates[$row[1]]);
                             $candidates[$row[1]] = true;
@@ -3072,11 +3075,24 @@ final class Index implements \Countable
                 break;
             }
         }
+        $maxTypos  = function () use ($order, $keywords): array {
+            $max = [0];
+            foreach ($order as $g) {
+                $max[] = end($max) + $this->typoBudget($keywords[$g]);
+            }
+            return $max;
+        };
         // Unscored members of a large exact bucket: in their bucket, after its scored documents.
+        // Their typos are not known, so on a page that may stop above them they rank as the last
+        // of it: the bucket's typo budget, score 0.
+        $budget = $unscored !== [] && $settles ? $maxTypos() : [];
         foreach ($unscored as $docId => $bucket) {
             if (!isset($docScores[$docId])) {
                 $docBucket[$docId] = $bucket;
                 $docScores[$docId] = 0.0;
+                if ($budget !== []) {
+                    $docTypos[$docId] = $budget[$bucket];
+                }
             }
         }
         foreach ($docBucket as $docId => $bucket) {
@@ -3216,13 +3232,6 @@ final class Index implements \Countable
         $proximity = count($termGroups) >= 2 && $this->config->proximityBoost > 0.0;
         $details   = $options->showRankingScoreDetails;
         // Typos each words bucket allows: the budgets of its groups, in strategy order.
-        $maxTypos  = function () use ($order, $keywords): array {
-            $max = [0];
-            foreach ($order as $g) {
-                $max[] = end($max) + $this->typoBudget($keywords[$g]);
-            }
-            return $max;
-        };
         /** @var array<int, float> $bm25  Scores before the proximity factor (ranking details). */
         $bm25      = $details ? $docScores : [];
         // With sort fields the proximity factor only breaks ties between documents with equal
