@@ -3,6 +3,35 @@
 Records of options that were evaluated and rejected, with the evidence, so they
 are not re-attempted without new information.
 
+## Rejected: other layouts for an exclusion's facet counts (2026-11-06)
+
+**Proposal:** a shop hides products with a constant `FacetExclude`, so every unfiltered page reads
+the hidden documents' `doc_facets` rows and subtracts them from `facet_counts`. Change the format
+before 2.0 so that this costs less.
+
+**Why rejected:** measured on a production catalogue (homelab; 7,712 products, 42 keys, 1,325
+hidden holding 39,996 value IDs, 6,142 distinct; 28 facets; new connection per request). Without
+that step (wrong counts, as an upper bound) the page takes 4.0 instead of 6.8 ms. Of its 2.8 ms,
+reading the rows is 0.6, counting the IDs 1.3 and turning them into values 0.9. Nothing tried
+reaches that time:
+
+- `vid` with the key in the low bits, so PHP's integer hash spreads the keys: counting 0.76 →
+  0.78 ms (`n << 8 | key`), and 23.5 ms with `n << 16 | key`, whose low bits are mostly zero.
+- `vid` and a second ID for numbers as columns of `facet_counts`, subtracting by ID without any
+  value lookup: same results, 6.5 ms, no faster than without the columns (the lookup moves to two
+  hash probes and two more columns per `facet_counts` row).
+- A dictionary of repeated value combinations: still 648 distinct among the 1,325 documents with
+  the 13 widest keys left out, so at best half the rows, for a second write-path structure.
+- Leaving sort-only keys out of the blobs: they are not in them.
+
+Storing the kept counts per excluded value would reach it, but which exclusions a site sends is
+not known at write time: for every value of the small keys it is a copy of `facet_counts` per
+value, and otherwise a schema option for one request shape, kept exact on every write.
+
+**When to revisit:** if a deployment's hidden share is much larger, or an exclusion needs to be
+declared for another reason. A caller can already cache the counts of an unfiltered page per index
+version, which saves more than any of these.
+
 ## Rejected: other shapes for the exact `searchBoolean()` total (2026-10-26)
 
 **Proposal:** count the matches of a boolean query whose terms were cut at `maxDocs` with a
