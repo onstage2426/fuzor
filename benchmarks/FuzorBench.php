@@ -8,6 +8,7 @@ use Fuzor\FacetSearchQuery;
 use Fuzor\Index;
 use Fuzor\SchemaConfig;
 use Fuzor\SearchOptions;
+use Fuzor\Tests\ShopCatalog;
 use PhpBench\Attributes\AfterMethods;
 use PhpBench\Attributes\BeforeMethods;
 use PhpBench\Attributes\Groups;
@@ -29,6 +30,9 @@ use PhpBench\Attributes\Warmup;
  *   ./vendor/bin/phpbench run benchmarks/FuzorBench.php --store --tag=baseline --report=default
  *   ./vendor/bin/phpbench run benchmarks/FuzorBench.php --report=default --ref=baseline
  *
+ * Run the pages of a web shop (a new read-only Index per request, as on a site):
+ *   ./vendor/bin/phpbench run benchmarks/FuzorBench.php --group=shop --report=default
+ *
  * Notes:
  * - PHPBench's remote executor spawns a new PHP process per iteration, so there is no
  *   shared memory between iterations. The search DB is stored at a fixed path on disk
@@ -49,6 +53,14 @@ class FuzorBench
      * Persists between phpbench invocations; delete manually to force a rebuild.
      */
     private const FACET_DB = '/tmp/fuzor_phpbench_facet.db';
+
+    /**
+     * Generated shop catalogue (tests/ShopCatalog.php).
+     * Persists between phpbench invocations; delete manually to force a rebuild.
+     */
+    private const SHOP_DB = '/tmp/fuzor_phpbench_shop.db';
+
+    private const SHOP_DOCS = 8000;
 
     /** @var list<array{id: int, text: string}> */
     private static array $docs = [];
@@ -119,6 +131,16 @@ class FuzorBench
         $idx->close();
     }
 
+    private static function ensureShopDb(): void
+    {
+        if (file_exists(self::SHOP_DB)) {
+            return;
+        }
+        $idx = new Index(self::SHOP_DB, force: true, schema: ShopCatalog::schema());
+        $idx->insert(ShopCatalog::documents(self::SHOP_DOCS));
+        $idx->close();
+    }
+
     public function setUpIndex(): void
     {
         self::loadDocs();
@@ -181,6 +203,38 @@ class FuzorBench
         }
         $idx->close();
         @unlink($path);
+    }
+
+    // -----------------------------------------------------------------------
+    // Shop pages — a new read-only connection per request
+    // -----------------------------------------------------------------------
+
+    public function setUpShop(): void
+    {
+        self::ensureShopDb();
+    }
+
+    /** @param array{search: string} $params */
+    #[Groups(['shop'])]
+    #[BeforeMethods('setUpShop')]
+    #[Iterations(5)]
+    #[Revs(20)]
+    #[Warmup(1)]
+    #[ParamProviders('provideShopSearches')]
+    public function benchShopPage(array $params): void
+    {
+        $search = ShopCatalog::searches()[$params['search']];
+        $index  = new Index(self::SHOP_DB, config: $search['config'], readonly: true);
+        $index->search($search['query'], $search['options']);
+        $index->close();
+    }
+
+    /** @return iterable<string, array{search: string}> */
+    public function provideShopSearches(): iterable
+    {
+        foreach (array_keys(ShopCatalog::searches()) as $name) {
+            yield $name => ['search' => $name];
+        }
     }
 
     // -----------------------------------------------------------------------
