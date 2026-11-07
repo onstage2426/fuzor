@@ -94,10 +94,12 @@ class FacetClassesTest extends TestCase
             if ($filter === []) {
                 continue;
             }
+            // Some pages count only some keys: the filters on the others then bound the reads.
+            $facets = $i % 3 === 2 ? ['size', 'price'] : self::FACETS;
             $result = $index->search('', new SearchOptions(
                 limit: 500,
                 filter: $filter,
-                facets: self::FACETS,
+                facets: $facets,
                 sort: $i % 2 === 0 ? ['price:asc'] : [],
             ));
             $matches = $this->scan($filter);
@@ -111,7 +113,7 @@ class FacetClassesTest extends TestCase
                 continue;
             }
             $counted++;
-            foreach (self::FACETS as $key) {
+            foreach ($facets as $key) {
                 $expected = $this->countValues($this->scan(self::withoutOwnFilter($filter, $key)), $key);
                 $this->assertEqualsCanonicalizing(
                     $expected,

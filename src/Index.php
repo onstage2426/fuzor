@@ -3206,12 +3206,20 @@ final class Index implements \Countable
         $baseConditions = $candidatesCapped
             ? [...$this->phraseConditions($phraseGroups), ...$negations]
             : [];
+        // The whole result set in PHP, when its conditions fit: one read for facets and total.
+        $classified = $candidatesCapped && $facets !== [] && $baseConditions === []
+            ? $this->overClasses(
+                $facets,
+                [...$this->groupConditions($required), ...$this->facetFilterConditions($filter)],
+                (int) ($this->getInfoValues(['total_documents'])['total_documents'] ?? 0),
+            )
+            : null;
         // Disjunctive facet counts over the whole filtered result set.
         [
             'distribution' => $facetDistribution,
             'stats'        => $facetStats,
             'approximate'  => $approximateFacets,
-        ] = $candidatesCapped && $facets !== []
+        ] = $classified ?? ($candidatesCapped && $facets !== []
             ? $this->resultSetFacetCounts(
                 $facets,
                 $required,
@@ -3225,7 +3233,7 @@ final class Index implements \Countable
                 $rawDocScores,
                 $docScores,
                 $this->config->maxFacetCountDocs,
-            );
+            ));
         $facetDistribution = $this->orderFacetValues($facetDistribution, $options->sortFacetValuesBy);
         $exhaustive = !$candidatesCapped && !$prefixCapped;
         $warnings   = [
@@ -3237,11 +3245,13 @@ final class Index implements \Countable
         if ($candidatesCapped && $distinct === null) {
             // The candidates hold only part of the matches: count them in SQL, up to one past
             // maxTotalHits (the result is capped there).
-            $total = $this->countSearchMatches(
-                $required,
-                [...$baseConditions, ...$this->facetFilterConditions($filter)],
-                $this->config->maxTotalHits + 1,
-            );
+            $total = $classified !== null
+                ? min($classified['total'], $this->config->maxTotalHits + 1)
+                : $this->countSearchMatches(
+                    $required,
+                    [...$baseConditions, ...$this->facetFilterConditions($filter)],
+                    $this->config->maxTotalHits + 1,
+                );
         }
 
         // Proximity only reorders the documents that remain after every filter, so it runs
@@ -4468,16 +4478,16 @@ final class Index implements \Countable
     }
 
     /**
-     * Total, facet counts and matching documents of a filtered browse from one read of each
-     * condition's documents; null when a condition holds more rows than
-     * Config::$maxFacetCountDocs (or cannot match) and the SQL paths apply.
+     * Total, facet counts and matching documents of a filtered browse, or of a search's whole
+     * result set, from one read of each condition's documents; null when a condition holds more
+     * rows than Config::$maxFacetCountDocs (or cannot match) and the SQL paths apply.
      *
      * Reading a condition's documents in order costs a fraction of a probe per document, and
      * every facet group, the total and an unsorted page follow from the same sets. No group can
      * exceed the cap here, so the counts are exact, as the SQL paths' are below it.
      *
      * @param  list<string>         $facetKeys
-     * @param  list<FacetCondition> $conditions Ordered by orderBySelectivity().
+     * @param  list<FacetCondition> $conditions Filters, a search's groupConditions() first.
      * @return array{
      *     total: int,
      *     ids: list<int>|null,
@@ -4539,6 +4549,24 @@ final class Index implements \Countable
             default              => null,
         };
         if ($budget !== null && array_sum($rows) > $budget * min($positiveRows ?: [0])) {
+            return null;
+        }
+        // Positive conditions every group requires bound what any group can count: a condition
+        // with many more rows than the smallest of them is read mostly for nothing, where the SQL
+        // paths probe it from that one, at half the budget below (ecom "casual shirt" with gender
+        // Women or Men: 9.2k documents against 40.8k rows, 37.7 ms probed, 41.6 ms read).
+        $removed = 0;
+        foreach ($groups as $id => $group) {
+            if ($group['keys'] !== [] || $id === 'common') {
+                $removed |= $positive & ~$group['require'];
+            }
+        }
+        $required = array_filter(
+            $rows,
+            fn(int $i): bool => ((($positive & ~$removed) >> $i) & 1) === 1,
+            ARRAY_FILTER_USE_KEY,
+        );
+        if ($required !== [] && max($rows) > intdiv(self::CLASS_ROWS_PER_DRIVER_ROW, 2) * min($required)) {
             return null;
         }
         $classes = $this->classifyDocs($conditions);
@@ -7864,6 +7892,31 @@ final class Index implements \Countable
     }
 
     /**
+     * Keyword groups as positive conditions for overClasses(): a document qualifies through any
+     * of a group's terms.
+     *
+     * @param  list<KeywordGroup> $groups
+     * @return list<FacetCondition>
+     */
+    private function groupConditions(array $groups): array
+    {
+        $conditions = [];
+        foreach ($groups as $group) {
+            $conditions[] = [
+                'name'       => '',
+                'rows'       => 'FROM doclist %1$s WHERE %1$s.term_id IN ('
+                    . $this->placeholders(count($group['termIds'])) . ')' . $this->liveDocsSql('%1$s.doc_id'),
+                'params'     => $group['termIds'],
+                'impossible' => $group['termIds'] === [],
+                'multiRow'   => true,
+                'exclude'    => false,
+                'rowCount'   => (int) array_sum(array_column($group['words'], 'num_docs')),
+            ];
+        }
+        return $conditions;
+    }
+
+    /**
      * Number of documents that contain every group in $groups (through any of its terms) and
      * satisfy $conditions, counted up to $limit.
      *
@@ -9927,6 +9980,9 @@ final class Index implements \Countable
     {
         if ($condition['impossible']) {
             return 0;
+        }
+        if (isset($condition['rowCount'])) {
+            return $condition['rowCount'];
         }
         if (isset($condition['values'])) {
             $stmt = $this->stmt(
