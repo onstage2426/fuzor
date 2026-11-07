@@ -3,6 +3,23 @@
 Records of options that were evaluated and rejected, with the evidence, so they
 are not re-attempted without new information.
 
+## Rejected: reading a key's whole value range to name counted values (2026-11-07)
+
+**Proposal:** facet counts name each counted value ID with one rowid seek into `facet_value_ids`
+(about 0.6 µs). A key with a value per few documents (a price) has thousands of counted IDs on a
+broad page, so read the key's whole ID range in order instead (about 0.15 µs a row) when the IDs
+asked for are at least a quarter of its values (IDs are numbered from 1 within a key, so one
+`MAX(vid)` gives the count).
+
+**Why rejected:** same results, but no page got faster (homelab, 106 shop pages, 7.7k products,
+alternating runs): unfiltered and broad filtered pages +3–5%, search bar pages +4–12%, 1.43M
+amazon flat to +14% on one prefix search. Grouping every counted ID by its key in PHP before the
+lookup costs more than the seeks it saves at these sizes; the seeks were about 1 ms on the
+broadest page.
+
+**When to revisit:** with a catalogue whose counted keys have tens of thousands of values per
+page, or if the IDs arrive grouped by key already.
+
 ## Rejected: other layouts for an exclusion's facet counts (2026-11-06)
 
 **Proposal:** a shop hides products with a constant `FacetExclude`, so every unfiltered page reads
