@@ -7,6 +7,7 @@ namespace Fuzor\Tests;
 use Fuzor\FacetExclude;
 use Fuzor\FacetRange;
 use Fuzor\Index;
+use Fuzor\SearchOptions;
 use Fuzor\SearchResult;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
@@ -17,11 +18,17 @@ use PHPUnit\Framework\TestCase;
  * complement, the filtered counts and the field boosts; the scan shares none of that code.
  *
  * @phpstan-import-type ShopDoc from ShopCatalog
+ * @phpstan-import-type ShopSearch from ShopCatalog
  */
 class ShopWorkloadTest extends TestCase
 {
     private const int DOCS = 700;
-    private const array KEYWORD_SEARCHES = ['shop_search', 'shop_search_typo', 'category_search'];
+    private const array KEYWORD_SEARCHES = [
+        'shop_search', 'shop_search_typo', 'category_search', 'bar_t', 'bar_ti', 'bar_til', 'bar_tile', 'bar_tile_6',
+        'bar_tile_60', 'bar_tile_60x', 'bar_tile_60x60', 'bar_typo_two', 'bar_filter', 'bar_range', 'bar_sort',
+        'search_filter', 'search_range', 'search_sort', 'search_common', 'search_typo_two',
+    ];
+    private const string NO_HITS = 'search_no_hits';
 
     private static string $dbPath;
 
@@ -48,7 +55,7 @@ class ShopWorkloadTest extends TestCase
     /** @return array<string, array{string}> */
     public static function browsePages(): array
     {
-        $names = array_diff(array_keys(ShopCatalog::searches()), self::KEYWORD_SEARCHES);
+        $names = array_diff(array_keys(ShopCatalog::searches()), self::KEYWORD_SEARCHES, [self::NO_HITS]);
         return array_combine($names, array_map(fn(string $name): array => [$name], $names));
     }
 
@@ -94,13 +101,24 @@ class ShopWorkloadTest extends TestCase
         $this->assertNotSame([], $found);
         $this->assertSame(count($found), $all->totalHits);
         $this->assertSame([], array_diff_key($found, self::scan($options->filter)), 'a hidden or filtered document');
+        $words = $this->matchesOfWords(ShopCatalog::searches(0)[$name]);
         foreach ($options->facets as $key) {
+            $counted = array_intersect_key($words, self::scan(self::withoutSelection($options->filter, $key)));
             $this->assertEqualsCanonicalizing(
-                self::countValues($found, $key),
+                self::countValues($counted, $key),
                 $all->facetDistribution[$key] ?? [],
                 "facet {$key}",
             );
         }
+    }
+
+    public function testAQueryWithoutHitsCountsNothing(): void
+    {
+        $result = $this->searchPage(self::NO_HITS);
+
+        $this->assertSame([], $result->hits);
+        $this->assertSame(0, $result->totalHits);
+        $this->assertSame([], array_filter($result->facetDistribution));
     }
 
     #[DataProvider('keywordSearches')]
@@ -135,6 +153,21 @@ class ShopWorkloadTest extends TestCase
             $index->close();
             $this->assertSame($cold, $warm, $name);
         }
+    }
+
+    /**
+     * Every document the query's words find, whatever the filters.
+     *
+     * @param  ShopSearch $search
+     * @return array<int, ShopDoc>
+     */
+    private function matchesOfWords(array $search): array
+    {
+        $index   = new Index(self::$dbPath, config: $search['config'], readonly: true);
+        $options = new SearchOptions(limit: self::DOCS, attributesToRetrieve: []);
+        $ids     = $index->search($search['query'], $options)->getIds();
+        $index->close();
+        return array_intersect_key(self::$docs, array_flip($ids));
     }
 
     private function searchPage(string $name, ?int $keywordLimit = null): SearchResult

@@ -134,6 +134,12 @@ final class ShopCatalog
         $sale     = ['on_sale' => 'yes'];
         $bounds   = ['price', 'unit_price'];
         $limit    = $keywordLimit ?? 24;
+        $size     = ['size' => '60x60'];
+        $dark     = ['color' => 'Anthracite'];
+        $brands   = ['brand' => ['Lumina', 'Terrano', 'Stonewell']];
+        $slider2  = ['price' => new FacetRange(gte: 10.0, lte: 100.0)];
+        $bar      = self::config(500, min($maxValuesPerFacet, 101));
+        $barSize  = $keywordLimit ?? 10;
         return [
             'shop'              => self::search('', $archive, self::page([], $menu)),
             'shop_page_3'       => self::search('', $archive, self::page([], $menu, offset: 48)),
@@ -155,6 +161,50 @@ final class ShopCatalog
             'shop_search'       => self::search('tile 60x60', $archive, self::page([], [], $limit)),
             'shop_search_typo'  => self::search('terrakotta', $archive, self::page([], [], $limit)),
             'category_search'   => self::search('anthracite', $archive, self::page($category, [], $limit)),
+            // The sidebar, each click its own request.
+            'cat_size'          => self::search('', $archive, self::page($category + $size, $menu)),
+            'cat_size_color'    => self::search('', $archive, self::page($category + $size + $dark, $menu)),
+            'cat_three'         => self::search(
+                '',
+                $archive,
+                self::page($category + $dark + ['brand' => 'Lumina', 'on_sale' => 'no'], $menu),
+            ),
+            'cat_color'         => self::search('', $archive, self::page($category + $dark, $menu)),
+            'cat_brand_multi'   => self::search('', $archive, self::page($category + $brands, $menu)),
+            'cat_range'         => self::search('', $archive, self::page($category + $range, $menu)),
+            'cat_size_range'    => self::search('', $archive, self::page($category + $size + $range, $menu)),
+            'cat_sort_price'    => self::search('', $archive, self::page($category + $size, ['price:asc'])),
+            'cat_deep'          => self::search('', $archive, self::page($category + $dark, $menu, offset: 96)),
+            'brand_size'        => self::search('', $archive, self::page(['brand' => 'Lumina'] + $size, $menu)),
+            'sale_category'     => self::search('', $archive, self::page($sale + $category, $menu)),
+            'shop_color'        => self::search('', $archive, self::page($dark, $menu)),
+            'shop_two'          => self::search('', $archive, self::page($dark + ['finish' => 'smooth'], $menu)),
+            'shop_multi'        => self::search('', $archive, self::page($brands, $menu)),
+            'shop_stock'        => self::search('', $archive, self::page(['stock_status' => 'instock'], $menu)),
+            'shop_slider'       => self::search('', $archive, self::page($slider2, $menu)),
+            'shop_slider_sort'  => self::search('', $archive, self::page($slider2, ['price:asc'])),
+            'shop_range_filter' => self::search('', $archive, self::page($slider2 + $dark, $menu)),
+            // The count next to a filter control.
+            'counter'           => self::search('', $archive, self::page($category + $size, [], 1, counted: [])),
+            // The search bar, a request per keystroke, and the results page.
+            'bar_t'             => self::search('t', $bar, self::bar($barSize)),
+            'bar_ti'            => self::search('ti', $bar, self::bar($barSize)),
+            'bar_til'           => self::search('til', $bar, self::bar($barSize)),
+            'bar_tile'          => self::search('tile', $bar, self::bar($barSize)),
+            'bar_tile_6'        => self::search('tile 6', $bar, self::bar($barSize)),
+            'bar_tile_60'       => self::search('tile 60', $bar, self::bar($barSize)),
+            'bar_tile_60x'      => self::search('tile 60x', $bar, self::bar($barSize)),
+            'bar_tile_60x60'    => self::search('tile 60x60', $bar, self::bar($barSize)),
+            'bar_typo_two'      => self::search('terrakotta tlie', $bar, self::bar($barSize)),
+            'bar_filter'        => self::search('tile 60', $bar, self::bar($barSize, ['brand' => 'Lumina'])),
+            'bar_range'         => self::search('tile 60', $bar, self::bar($barSize, $slider2)),
+            'bar_sort'          => self::search('tile 60', $bar, self::bar($barSize, [], ['price:asc'])),
+            'search_filter'     => self::search('tile 60x60', $archive, self::page($dark, [], $limit)),
+            'search_range'      => self::search('tile 60x60', $archive, self::page($slider2, [], $limit)),
+            'search_sort'       => self::search('tile 60x60', $archive, self::page([], ['price:asc'], $limit)),
+            'search_common'     => self::search('garden', $archive, self::page([], [], $limit)),
+            'search_typo_two'   => self::search('anthrazite tlie', $archive, self::page([], [], $limit)),
+            'search_no_hits'    => self::search('zzzqqq', $archive, self::page([], [], $limit)),
         ];
     }
 
@@ -173,9 +223,10 @@ final class ShopCatalog
     /**
      * What every page sends, around its own filter, sort and paging.
      *
-     * @param array<string, FacetRange|string> $filter
-     * @param list<string>                     $sort
-     * @param list<string>|null                $counted Facets, when not the page's usual ones.
+     * @param array<string, FacetRange|list<string>|string> $filter
+     * @param list<string>                                  $sort
+     * @param list<string>|null                             $counted  Facets, when not the page's usual ones.
+     * @param list<string>                                  $retrieve
      */
     private static function page(
         array $filter,
@@ -183,12 +234,14 @@ final class ShopCatalog
         int $limit = 24,
         int $offset = 0,
         ?array $counted = null,
+        string $hidden = 'exclude-from-catalog',
+        array $retrieve = ['id', 'card'],
     ): SearchOptions {
         return new SearchOptions(
             asYouType: true,
             limit: $limit,
             offset: $offset,
-            filter: $filter + ['visibility' => new FacetExclude(['exclude-from-catalog'])],
+            filter: $filter + ['visibility' => new FacetExclude([$hidden])],
             facets: $counted ?? self::FACETS,
             sortFacetValuesBy: ['*' => FacetOrder::Count],
             sort: $sort,
@@ -199,8 +252,26 @@ final class ShopCatalog
             attributesToCrop: ['description'],
             cropLength: 200,
             cropMarker: '…',
-            attributesToRetrieve: ['id', 'card'],
+            attributesToRetrieve: $retrieve,
             escapeFormatted: true,
+        );
+    }
+
+    /**
+     * What the search bar sends: a short page and two facets, without what search hides.
+     *
+     * @param array<string, FacetRange|list<string>|string> $filter
+     * @param list<string>                                  $sort
+     */
+    private static function bar(int $limit, array $filter = [], array $sort = []): SearchOptions
+    {
+        return self::page(
+            $filter,
+            $sort,
+            $limit,
+            counted: ['price', 'brand'],
+            hidden: 'exclude-from-search',
+            retrieve: ['id', 'title', 'price'],
         );
     }
 
