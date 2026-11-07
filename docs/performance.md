@@ -122,7 +122,8 @@ day (exact ranking of the page's words bucket, totals and facet counts over ever
 search rows are lower than a search costs now.
 
 Each word reads its `Config::$maxDocs` best matches first. The page's words bucket is then read
-and ranked exactly while it holds at most 4 × `maxDocs` documents; of a larger one those candidates
+and ranked exactly while it holds at most 4 × `maxDocs` documents (with a quoted phrase, counting only
+the documents that contain the phrase); of a larger one those candidates
 and the 4 × `maxDocs` documents with the most hits are ranked and the rest follows unscored
 (`exhaustive: false`), the same way on every page. The total and the facet counts are counted in SQL over every
 match, the total up to `Config::$maxTotalHits` (1000), so a broad search costs about 1 µs per

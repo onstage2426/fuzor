@@ -10056,6 +10056,11 @@ class IndexTest extends TestCase
             ['id' => 6, 'title' => 'shirt blue jeans blue jeans', 'color' => 'green', 'brand' => 'c'],
             ['id' => 7, 'title' => 'blue jeans shirt', 'color' => 'red', 'brand' => 'c'],
             ['id' => 8, 'title' => 'jeans shirt blue', 'color' => 'red', 'brand' => 'd'],
+            // More phrase matches than the 4 x maxDocs a words bucket scores, so the phrase
+            // search stays capped after its bucket is filtered by the phrase.
+            ['id' => 9, 'title' => 'blue jeans', 'color' => 'blue', 'brand' => 'e'],
+            ['id' => 10, 'title' => 'blue jeans', 'color' => 'blue', 'brand' => 'e'],
+            ['id' => 11, 'title' => 'blue jeans', 'color' => 'blue', 'brand' => 'e'],
         ]);
         // Enough other documents that the deleted one stays a tombstone (below PURGE_RATIO).
         $index->insert(array_map(fn(int $id): array => ['id' => $id, 'title' => 'socks'], range(100, 109)));
@@ -10063,15 +10068,15 @@ class IndexTest extends TestCase
 
         $phrase = $index->search('"blue jeans"', new SearchOptions(asYouType: false, facets: ['color']));
         $this->assertFalse($phrase->exhaustive);
-        $this->assertSame(4, $phrase->totalHits);
-        $this->assertSame(['green' => 2, 'red' => 2], $phrase->facetDistribution['color']);
+        $this->assertSame(7, $phrase->totalHits);
+        $this->assertSame(['blue' => 3, 'green' => 2, 'red' => 2], $phrase->facetDistribution['color']);
 
         $withWord = $index->search('shirt "blue jeans"', new SearchOptions(asYouType: false, facets: ['color']));
         $this->assertSame(3, $withWord->totalHits);
         $this->assertSame(['green' => 1, 'red' => 2], $withWord->facetDistribution['color']);
 
         $distinct = $index->search('"blue jeans"', new SearchOptions(asYouType: false, distinct: 'brand'));
-        $this->assertSame(3, $distinct->totalHits);
+        $this->assertSame(4, $distinct->totalHits);
     }
 
     public function testAPageInsideTheFullBucketIsExactWithoutLowerBuckets(): void
@@ -11663,5 +11668,30 @@ class IndexTest extends TestCase
 
         $this->assertCount(600, $seen);
         $this->assertCount(600, array_unique($seen));
+    }
+
+    /**
+     * A bucket above 4 x maxDocs whose members with the most hits fail a quoted phrase: the
+     * phrase matches must all be scored, so the page ranks them as the uncapped search does.
+     */
+    public function testPhraseMatchesOfALargeBucketAreAllScored(): void
+    {
+        $docs = [];
+        for ($id = 1; $id <= 60; $id++) {
+            $docs[] = ['id' => $id, 'text' => 'red red red red filler cotton cotton cotton cotton'];
+        }
+        for ($id = 61; $id <= 70; $id++) {
+            $docs[] = ['id' => $id, 'text' => 'red cotton ' . str_repeat('filler ', 80 - $id)];
+        }
+        $capped = new Index($this->dbPath, force: true, config: new Config(maxDocs: 5));
+        $capped->insert($docs);
+        $uncapped = new Index($this->dbPath, readonly: true, config: new Config(maxDocs: 100_000));
+
+        $options = new SearchOptions(asYouType: false, limit: 10);
+        $page    = $capped->search('"red cotton"', $options);
+
+        $this->assertSame(range(70, 61), $uncapped->search('"red cotton"', $options)->getIds());
+        $this->assertSame(range(70, 61), $page->getIds());
+        $this->assertTrue($page->exhaustive);
     }
 }

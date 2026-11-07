@@ -3027,6 +3027,14 @@ final class Index implements \Countable
                 if ($settles) {
                     $hits = array_diff_key($hits, $exactDocs);
                 }
+                // A member that fails a quoted phrase is filtered out later anyway: leave it out
+                // before the $scoredDocs cut, or it takes the place of a phrase match that would
+                // then rank unscored ("blue jeans" on the 45k ecom set: 2,245 members, 486 pass;
+                // all of them scored, 20.6 → 13.7 ms). The phrase results are kept in $phraseOk.
+                if ($phraseGroups !== [] && $hits !== []) {
+                    $passing($hits);
+                    $hits = array_intersect_key($hits, array_filter($phraseOk));
+                }
                 $exactDocs += array_fill_keys(array_keys($hits), true);
                 if (count($hits) > $scoredDocs) {
                     // Most hits of the rarest word first, then newest; the rest rank after them.

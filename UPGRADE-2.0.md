@@ -172,9 +172,9 @@ Five ranking fixes change the order of some results without any change on your s
 that assert an exact order may need updating:
 
 - When words match more than `Config::$maxDocs` documents, the documents that contain them are
-  now ranked by their real BM25 score while there are at most 4 × `maxDocs` (2,000) of them, not
-  only those with the most occurrences of each word: a short document that mentions the words
-  once can now rank first. When a page reaches documents that contain only the first word (a
+  now ranked by their real BM25 score while there are at most 4 × `maxDocs` (2,000) of them (with a
+  quoted phrase, only those that contain the phrase count), not only those with the most
+  occurrences of each word: a short document that mentions the words once can now rank first. When a page reaches documents that contain only the first word (a
   one-word query, or a query whose other words match nothing), those are the first word's
   `maxDocs` documents with the best BM25 score, not with the most occurrences. On a 44k-product
   catalog 93% of first pages equal the ranking without any cap (50% before). Raise `maxDocs` for
