@@ -4095,7 +4095,15 @@ final class Index implements \Countable
         if ($total === 0 || $limit === 0) {
             $pagedIds = [];
         } elseif ($sortSpecs !== []) {
-            $pagedIds = $this->browseSortedPage($sortSpecs, $conditions, $offset, $limit, $total, $totalDocuments);
+            $pagedIds = $this->browseSortedPage(
+                $sortSpecs,
+                $conditions,
+                $offset,
+                $limit,
+                $total,
+                $totalDocuments,
+                matchIds: $classified['ids'] ?? null,
+            );
         } elseif (isset($classified['ids'])) {
             $pagedIds = array_slice(self::newestFirst($classified['ids']) ?? [], $offset, $limit);
         } else {
@@ -4322,6 +4330,7 @@ final class Index implements \Countable
      * @param  int                                   $total          Documents matching $conditions (> 0).
      * @param  int                                   $totalDocuments Documents in the index.
      * @param  bool                                  $materialise    Skip the walk (the fallback).
+     * @param  list<int>|null                        $matchIds       The documents matching $conditions, if known.
      * @return list<int>
      */
     private function browseSortedPage(
@@ -4332,6 +4341,7 @@ final class Index implements \Countable
         int $total,
         int $totalDocuments,
         bool $materialise = false,
+        ?array $matchIds = null,
     ): array {
         $allConditions = $conditions;
         ['field' => $field, 'asc' => $asc] = $specs[0];
@@ -4377,7 +4387,11 @@ final class Index implements \Countable
                 $budget = null;
             }
         }
-        [$walkSql, $walkParams] = $this->facetFilterSql($conditions, 's.doc_id', $probe) ?? ['', []];
+        // The matching documents, when the caller already has them, instead of evaluating the
+        // filter again for the materialised shape.
+        [$walkSql, $walkParams] = !$probe && $matchIds !== null
+            ? [' AND s.doc_id IN (SELECT value FROM json_each(?))', [json_encode($matchIds)]]
+            : $this->facetFilterSql($conditions, 's.doc_id', $probe) ?? ['', []];
 
         // Each phase walks one table aliased s in sort order: [select list, FROM … WHERE …, order, params].
         // A declared field that no document has populated has no key: every document is "missing".
@@ -4453,6 +4467,7 @@ final class Index implements \Countable
                         $total,
                         $totalDocuments,
                         materialise: true,
+                        matchIds: $matchIds,
                     );
                 }
             }
