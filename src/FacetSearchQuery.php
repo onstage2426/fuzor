@@ -19,7 +19,7 @@ final readonly class FacetSearchQuery
      *                           (Meilisearch's `q`).
      *                           Keywords are AND-combined (all must match), consistent with searchBoolean() default.
      *                           Quoted phrases (e.g. '"science fiction"') are applied as contiguous-word constraints.
-     *                           Candidates are capped at Config::$maxFacetCountDocs, so counts may be approximate
+     *                           Candidates are capped at Limits::$facetCountDocs, so counts may be approximate
      *                           for queries that match a very large portion of the corpus.
      * @param array<string, string|list<string>|FacetRange|FacetExclude> $filter Facet filters applied before counting;
      *                           same type as SearchOptions::$filter.

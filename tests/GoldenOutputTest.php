@@ -9,6 +9,7 @@ use Fuzor\FacetRange;
 use Fuzor\FacetSearchQuery;
 use Fuzor\FacetSearchResult;
 use Fuzor\Index;
+use Fuzor\Limits;
 use Fuzor\MatchingStrategy;
 use Fuzor\SchemaConfig;
 use Fuzor\SearchOptions;
@@ -135,8 +136,11 @@ class GoldenOutputTest extends TestCase
     {
         $configs = [
             'open'   => new Config(),
-            'cut'    => new Config(maxDocs: 5),
-            'capped' => new Config(maxDocs: 5, maxFacetCountDocs: 40, maxTotalHits: 30, fuzzyMaxExpansions: 3),
+            'cut'    => new Config(limits: new Limits(candidatesPerWord: 5)),
+            'capped' => new Config(
+                limits: new Limits(candidatesPerWord: 5, facetCountDocs: 40, totalHits: 30),
+                fuzzyMaxExpansions: 3,
+            ),
         ];
         foreach ($configs as $name => $config) {
             $index  = new Index($this->dbPath, config: $config, readonly: true);

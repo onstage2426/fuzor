@@ -21,6 +21,30 @@ schema, it throws like opening the file does.
 
 The sections below list every change that needs a change in calling code.
 
+## `maxDocs` and `maxFacetCountDocs` moved to `Config::$limits`
+
+The settings that decide how much of a large result set a search reads are now one value object,
+`Fuzor\Limits`, passed as `Config::$limits`. The old `Config` properties are gone:
+
+| 1.x | 2.0 |
+|---|---|
+| `new Config(maxDocs: 200)` | `new Config(limits: new Limits(candidatesPerWord: 200))` |
+| `new Config(maxFacetCountDocs: 10_000)` | `new Config(limits: new Limits(facetCountDocs: 10_000))` |
+| `$config->maxDocs` / `$config->maxFacetCountDocs` | `$config->limits->candidatesPerWord` / `$config->limits->facetCountDocs` |
+
+`Limits` also holds the new `totalHits` (below). `Limits::fast()` is the default (500 candidates
+per word, facet counts over 50,000 documents, 1,000 reachable hits); `Limits::exact()` lifts the
+first two caps, so rankings, totals and facet counts cover every matching document:
+
+```php
+use Fuzor\Limits;
+
+new Index($path, config: new Config(limits: Limits::exact()));
+```
+
+A value below 1 throws `\InvalidArgumentException`. Warnings name the new settings
+(`Limits::$candidatesPerWord`, `Limits::$facetCountDocs`, `Limits::$totalHits`).
+
 ## Facet values are listed alphabetically
 
 `$facetDistribution` and `facetSearch()` list values in alphabetical order by default (numbers
@@ -171,17 +195,17 @@ order.
 Five ranking fixes change the order of some results without any change on your side; tests
 that assert an exact order may need updating:
 
-- When words match more than `Config::$maxDocs` documents, the documents that contain them are
-  now ranked by their real BM25 score while there are at most 4 × `maxDocs` (2,000) of them (with a
+- When words match more than `Limits::$candidatesPerWord` documents, the documents that contain them are
+  now ranked by their real BM25 score while there are at most 4 × `candidatesPerWord` (2,000) of them (with a
   quoted phrase, only those that contain the phrase count), not only those with the most
   occurrences of each word: a short document that mentions the words once can now rank first. When a page reaches documents that contain only the first word (a
   one-word query, or a query whose other words match nothing), those are the first word's
-  `maxDocs` documents with the best BM25 score, not with the most occurrences. On a 44k-product
+  `candidatesPerWord` documents with the best BM25 score, not with the most occurrences. On a 44k-product
   catalog 97% of first pages equal the ranking without any cap (50% before). Of a larger set, the
-  4 × `maxDocs` in which the rarest word weighs most (its BM25 term frequency, so a short document
+  4 × `candidatesPerWord` in which the rarest word weighs most (its BM25 term frequency, so a short document
   counts more than a long one with the same hits) are ranked and the rest follow them. Raise
-  `maxDocs` for more, at the cost of speed.
-- In a multi-word search where one word matches more than `Config::$maxDocs` documents,
+  `candidatesPerWord` for more, at the cost of speed.
+- In a multi-word search where one word matches more than `Limits::$candidatesPerWord` documents,
   documents found through the other words are now scored for the common word too, so documents
   that contain every word rank as such.
 - A prefix that expands to words counting more documents together than the index holds no longer
@@ -198,21 +222,21 @@ that assert an exact order may need updating:
 Like `search()`, `inspectQuery()` splits `-word` and `-"phrase"` off the query first: they are no
 longer listed in `$tokens`, `$rawTokens`, or `$filteredTokens`, but in the new `$negations`.
 
-## `totalHits` stops at `Config::$maxTotalHits` (1000) and is exact in `search()`
+## `totalHits` stops at `Limits::$totalHits` (1000) and is exact in `search()`
 
-As in Meilisearch, a search reaches at most `Config::$maxTotalHits` documents (default 1,000):
+As in Meilisearch, a search reaches at most `Limits::$totalHits` documents (default 1,000):
 `offset` and `limit` are clamped so no hit ranked past it is returned, and `$totalHits` stops at
 it, with the new `$totalHitsCapped` set to `true`. This also holds for a browse (empty query),
 whose total used to be the full count. Show "1000+" when the flag is set, or raise the cap:
 
 ```php
-new Index($path, config: new Config(maxTotalHits: 10_000));
+new Index($path, config: new Config(limits: new Limits(totalHits: 10_000)));
 ```
 
 Below the cap, `search()` now counts `$totalHits` exactly also when a word matches more than
-`Config::$maxDocs` documents (`exhaustive: false`); 1.x reported the number of candidates it had
+`Limits::$candidatesPerWord` documents (`exhaustive: false`); 1.x reported the number of candidates it had
 scored, often a quarter of the real number or less. Facet counts of such a search are taken over
-every match too (up to `Config::$maxFacetCountDocs`), not over the scored candidates; on the 44k
+every match too (up to `Limits::$facetCountDocs`), not over the scored candidates; on the 44k
 catalog they were off by 76% at the median. `searchBoolean()` and `distinct` totals stay estimates
 in that case.
 
@@ -220,14 +244,14 @@ in that case.
 
 The default page size is 20 hits instead of 100. Pass `limit: 100` to keep the old size.
 
-## `Config::$maxFacetCountDocs` defaults to 50,000
+## `Limits::$facetCountDocs` defaults to 50,000
 
-Facet counts over a filter or query are taken over at most `maxFacetCountDocs` matching
+Facet counts over a filter or query are taken over at most `facetCountDocs` matching
 documents. The default is 50,000 instead of 10,000, so pages with 10,001 to 50,000 matches now
 get exact counts (and no longer list their fields in `$approximateFacets`). Counting is cheaper
 in 2.0 (one row per document for all facet fields), so such a page is still faster than a
 capped one in 1.x. `facetSearch()` with a `query` also considers up to 50,000 candidates. Pass
-`maxFacetCountDocs: 10000` to keep the old cap.
+`limits: new Limits(facetCountDocs: 10_000)` to keep the old cap.
 
 ## `facetSearch()` matches any word, ignoring accents
 
@@ -258,9 +282,9 @@ size. A generator is read while the write runs, so it should not depend on the i
 When an `update()` names IDs that do not exist, nothing is written as before, but the exception
 lists the missing IDs of the first chunk that has any, not all of them.
 
-## Pages past `maxDocs` candidates are no longer empty
+## Pages past `candidatesPerWord` candidates are no longer empty
 
-When the words of a `search()` match more than `Config::$maxDocs` documents (`exhaustive: false`),
+When the words of a `search()` match more than `Limits::$candidatesPerWord` documents (`exhaustive: false`),
 pages past the ranked candidates used to be empty while `$totalHits` counted every match. They are
 now filled with the other matches, after the ranked ones, so every page up to `$totalHits` is full.
 With `sort` the candidates and the other matches are sorted together, so even the first page of a

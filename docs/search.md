@@ -29,7 +29,7 @@ When the document store is disabled, `$hits` contains id-only stubs: `[['id' => 
 |---|---|---|
 | `$hits` | `list<array>` | Documents in relevance order; gains `_formatted` when formatting options are set, `_rankingScoreDetails` with `showRankingScoreDetails` |
 | `$hitsCount` | `int` | Documents in this page (≤ limit) |
-| `$totalHits` | `int\|null` | Total matches across all pages, up to `Config::$maxTotalHits` (1000) — see [Pagination](#pagination) |
+| `$totalHits` | `int\|null` | Total matches across all pages, up to `Limits::$totalHits` (1000) — see [Pagination](#pagination) |
 | `$query` | `string` | Original query string |
 | `$limit` | `int\|null` | Page limit |
 | `$offset` | `int\|null` | Page offset |
@@ -38,7 +38,7 @@ When the document store is disabled, `$hits` contains id-only stubs: `[['id' => 
 | `$warnings` | `list<string>` | Notices about limits that made the result approximate — see [Warnings](#warnings) |
 | `$exhaustive` | `bool` | `false` when a cap may have cut matches out of the result — see [Approximate results](#approximate-results) |
 | `$approximateFacets` | `list<string>` | Facet fields whose counts were computed over a capped document set |
-| `$totalHitsCapped` | `bool` | `true` when more documents match than `Config::$maxTotalHits`; `$totalHits` is then that cap |
+| `$totalHitsCapped` | `bool` | `true` when more documents match than `Limits::$totalHits`; `$totalHits` is then that cap |
 | `getHit(int $index, array $default = [])` | `array` | Document at position (0-based); `$default` when out of bounds |
 | `getIds()` | `list<int>` | Document IDs in relevance order |
 | `toArray()` | `array` | Full result as a plain array |
@@ -66,9 +66,9 @@ Fuzor bounds the work behind a query with a few caps (see [tuning.md](tuning.md)
 
 | Flag | Set when | Effect |
 |---|---|---|
-| `$exhaustive === false` | A keyword matched more than `Config::$maxDocs` documents, or the last keyword's prefix matched more than `Config::$fuzzyMaxExpansions` terms | Hits come from the best candidates, so the page can differ from a full ranking. Pages past the ranked candidates are filled with the other matches (unscored, after the ranked ones), so every page up to `$totalHits` is full; with `sort` the candidates and those matches are sorted together. `search()` and `searchBoolean()` still count `$totalHits` (also with `distinct`) exactly over every match, and `search()` its facet counts; `searchBoolean()`'s facet counts and a capped prefix's total are estimates |
-| `$totalHitsCapped === true` | More documents match than `Config::$maxTotalHits` (1000) | `$totalHits` is the cap; no hit past it can be paged to |
-| `$approximateFacets` lists a field | That field's counts covered more than `Config::$maxFacetCountDocs` matching documents | Its counts in `$facetDistribution` / `$facetStats` are approximate |
+| `$exhaustive === false` | A keyword matched more than `Limits::$candidatesPerWord` documents, or the last keyword's prefix matched more than `Config::$fuzzyMaxExpansions` terms | Hits come from the best candidates, so the page can differ from a full ranking. Pages past the ranked candidates are filled with the other matches (unscored, after the ranked ones), so every page up to `$totalHits` is full; with `sort` the candidates and those matches are sorted together. `search()` and `searchBoolean()` still count `$totalHits` (also with `distinct`) exactly over every match, and `search()` its facet counts; `searchBoolean()`'s facet counts and a capped prefix's total are estimates |
+| `$totalHitsCapped === true` | More documents match than `Limits::$totalHits` (1000) | `$totalHits` is the cap; no hit past it can be paged to |
+| `$approximateFacets` lists a field | That field's counts covered more than `Limits::$facetCountDocs` matching documents | Its counts in `$facetDistribution` / `$facetStats` are approximate |
 
 ```php
 $result = $index->search('shoe', new SearchOptions(facets: ['brand']));
@@ -80,11 +80,11 @@ if ($result->totalHitsCapped) {
 
 Each cap that was hit also adds a line to `$warnings`. A browse (empty query) is always exhaustive; only its filtered facet counts can be approximate. `FacetSearchResult::$exhaustive` is `false` when the `q` restricting a facet search was capped.
 
-Compared with Meilisearch: `maxTotalHits` caps the total and the reachable hits the same way (`pagination.maxTotalHits`, default 1000, also for an empty query). Meilisearch reports `estimatedTotalHits` for offset/limit queries; `search()` counts its total exactly up to the cap instead, and says when the cap was reached.
+Compared with Meilisearch: `Limits::$totalHits` caps the total and the reachable hits the same way (`pagination.maxTotalHits`, default 1000, also for an empty query). Meilisearch reports `estimatedTotalHits` for offset/limit queries; `search()` counts its total exactly up to the cap instead, and says when the cap was reached.
 
 ## Pagination
 
-Use `offset` to page through results. `$totalHits` is the number of matches, counted up to `Config::$maxTotalHits` (default 1000, as in Meilisearch). Hits ranked past that number cannot be reached: `offset` and `limit` are clamped to it, so a page at or past the cap is empty, and `$totalHitsCapped` tells a UI to show "1000+". Raise `maxTotalHits` to page deeper; a search counts its matches up to the cap, so a larger value costs more on broad queries. Facet counts are not affected by it.
+Use `offset` to page through results. `$totalHits` is the number of matches, counted up to `Limits::$totalHits` (default 1000, as in Meilisearch). Hits ranked past that number cannot be reached: `offset` and `limit` are clamped to it, so a page at or past the cap is empty, and `$totalHitsCapped` tells a UI to show "1000+". Raise `Limits::$totalHits` to page deeper; a search counts its matches up to the cap, so a larger value costs more on broad queries. Facet counts are not affected by it.
 
 ```php
 $page1 = $index->search('city car', new SearchOptions(limit: 20, offset: 0));
@@ -115,13 +115,13 @@ $result = $index->search('', new SearchOptions(limit: 20, offset: 0));
 $totalPages = (int) ceil($result->totalHits / 20);
 ```
 
-When no `sort` is specified, results are returned in insertion order, newest first (`doc_id DESC`). `$totalHits` reflects the document count (or filtered count when a filter is active), up to `Config::$maxTotalHits` like any search.
+When no `sort` is specified, results are returned in insertion order, newest first (`doc_id DESC`). `$totalHits` reflects the document count (or filtered count when a filter is active), up to `Limits::$totalHits` like any search.
 
 `searchBoolean('')` follows the same path.
 
-A browse is answered by SQL over the whole index, so `$totalHits` (below `maxTotalHits`), the page, and the sort order are exact at any index size. As in Meilisearch, a sorted browse walks the sort field's index in order and stops once the page is full, so its cost follows the page position, not the index size. On a 45k-document index a sorted or filtered page takes well under 5 ms.
+A browse is answered by SQL over the whole index, so `$totalHits` (below `Limits::$totalHits`), the page, and the sort order are exact at any index size. As in Meilisearch, a sorted browse walks the sort field's index in order and stops once the page is full, so its cost follows the page position, not the index size. On a 45k-document index a sorted or filtered page takes well under 5 ms.
 
-Facet counts are exact when no filter applies to them, and when the only filters that apply are [exclusions](#excluding-values). With a positive filter they are counted over at most `Config::$maxFacetCountDocs` matching documents, the same cap as in `search()` — see [tuning.md](tuning.md#facets). A value filter on a field that every document has exactly once counts as an exclusion when the values it leaves out hold at most `maxFacetCountDocs` documents (for example `gender: ['Women', 'Men']` when few products are for children), so its counts are exact too. `distinct` has to look at every matching document to count the surviving groups, so a browse with `distinct` costs time proportional to the number of matches.
+Facet counts are exact when no filter applies to them, and when the only filters that apply are [exclusions](#excluding-values). With a positive filter they are counted over at most `Limits::$facetCountDocs` matching documents, the same cap as in `search()` — see [tuning.md](tuning.md#facets). A value filter on a field that every document has exactly once counts as an exclusion when the values it leaves out hold at most `facetCountDocs` documents (for example `gender: ['Women', 'Men']` when few products are for children), so its counts are exact too. `distinct` has to look at every matching document to count the surviving groups, so a browse with `distinct` costs time proportional to the number of matches.
 
 ## As-you-type prefix
 
@@ -164,7 +164,7 @@ $index->search('big fat cat', new SearchOptions(matchingStrategy: MatchingStrate
 
 With `Last`, a document with "big" and "cat" but not "fat" is in the "big" bucket: only the leading words count. Within a bucket, documents are ranked by `sort` fields when given, otherwise by relevance (BM25 over the words of their bucket, with proximity for documents matching every word). A word that is not in the index still counts as a word, so `big zzz cat` returns the "big" bucket with `Last` and nothing with `All`.
 
-`All` is also exact: when the rarest word matches at most `Config::$maxDocs` documents, every document containing all words is found and `exhaustive` is `true`, even if the other words are very common.
+`All` is also exact: when the rarest word matches at most `Limits::$candidatesPerWord` documents, every document containing all words is found and `exhaustive` is `true`, even if the other words are very common.
 
 `searchBoolean()` keeps its own operators and ignores `matchingStrategy`; `facetSearch()` with a `q` requires every word.
 
@@ -283,7 +283,7 @@ NOT subtracts from the terms it is combined with by AND, in any order: `shirt -j
 
 `searchBoolean()` accepts all the same `SearchOptions` as `search()`.
 
-Each term contributes its first `Config::$maxDocs` documents to the set operations, so when a term matches more, the page comes from those (`exhaustive: false`). `$totalHits` is still counted over every match, also with `distinct`; facet counts come from the page's candidates.
+Each term contributes its first `Limits::$candidatesPerWord` documents to the set operations, so when a term matches more, the page comes from those (`exhaustive: false`). `$totalHits` is still counted over every match, also with `distinct`; facet counts come from the page's candidates.
 
 ## Synonyms
 
@@ -530,7 +530,7 @@ Only values that appear on documents satisfying both the FTS query and all filte
 $result->facetHits;        // list<array{value: string, count: int}>
 $result->facetQuery;       // the facetQuery that was searched
 $result->warnings;         // list<string> — limits that made the result approximate
-$result->exhaustive;       // false when the `q` candidates were capped (maxFacetCountDocs)
+$result->exhaustive;       // false when the `q` candidates were capped (Limits::$facetCountDocs)
 count($result);            // number of values returned
 foreach ($result as $hit) { ... }
 $result->toArray();        // serialisable snapshot
@@ -646,7 +646,7 @@ $distinctGroups = $countOnly->totalHits;
 
 Documents with no value for the distinct field are never collapsed — each passes through independently. A document with several values collapses on its smallest (numbers before strings).
 
-`$totalHits` counts the hits left after collapsing. When the words match more than `Config::$maxDocs` documents (`exhaustive: false`), the page comes from the best candidates, but the total is counted over every match, so it costs time proportional to the number of matches (on the 44k catalog a distinct search takes 57 ms instead of 41). The same holds for `searchBoolean()`.
+`$totalHits` counts the hits left after collapsing. When the words match more than `Limits::$candidatesPerWord` documents (`exhaustive: false`), the page comes from the best candidates, but the total is counted over every match, so it costs time proportional to the number of matches (on the 44k catalog a distinct search takes 57 ms instead of 41). The same holds for `searchBoolean()`.
 
 ## SearchOptions reference
 

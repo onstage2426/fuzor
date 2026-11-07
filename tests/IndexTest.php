@@ -8,6 +8,7 @@ use Fuzor\FacetOrder;
 use Fuzor\FacetRange;
 use Fuzor\FacetSearchQuery;
 use Fuzor\Index;
+use Fuzor\Limits;
 use Fuzor\MatchType;
 use Fuzor\MatchingStrategy;
 use Fuzor\QueryToken;
@@ -510,12 +511,12 @@ class IndexTest extends TestCase
         $this->assertSame([1, 2], $index->search('car')->getIds());
     }
 
-    // --- maxDocs ---
+    // --- candidatesPerWord ---
 
     public function testMaxDocsLimitsResultsPerKeyword(): void
     {
-        // Above 4 × maxDocs a word is not read whole (EXACT_RANKED_DOCS_PER_MAX_DOCS).
-        $index = new Index($this->dbPath, config: new \Fuzor\Config(maxDocs: 2));
+        // Above 4 × candidatesPerWord a word is not read whole (EXACT_RANKED_DOCS_PER_MAX_DOCS).
+        $index = new Index($this->dbPath, config: new \Fuzor\Config(limits: new \Fuzor\Limits(candidatesPerWord: 2)));
         $index->insert(array_map(fn(int $id): array => ['id' => $id, 'title' => 'sedan'], range(1, 9)));
 
         // The page holds the 2 ranked candidates, then the rest of the result set.
@@ -1516,8 +1517,8 @@ class IndexTest extends TestCase
 
     public function testDeletedDocumentsDoNotTakeCandidateSlots(): void
     {
-        // maxDocs 3 fetches the three best "car" rows: exactly the deleted documents 1 and 2 plus 3.
-        $index = $this->tombstoneIndex(new Config(maxDocs: 3));
+        // candidatesPerWord 3 fetches the three best "car" rows: exactly the deleted documents 1 and 2 plus 3.
+        $index = $this->tombstoneIndex(new Config(limits: new Limits(candidatesPerWord: 3)));
         $index->delete(1, 2);
 
         $ids = $index->search('car', new SearchOptions(limit: 3))->getIds();
@@ -1528,7 +1529,7 @@ class IndexTest extends TestCase
 
     public function testSearchBooleanSkipsDeletedDocuments(): void
     {
-        $index = $this->tombstoneIndex(new Config(maxDocs: 3));
+        $index = $this->tombstoneIndex(new Config(limits: new Limits(candidatesPerWord: 3)));
         $index->delete(1, 2);
 
         $ids = $this->booleanIds($index, 'car');
@@ -2474,8 +2475,8 @@ class IndexTest extends TestCase
     }
 
     /**
-     * A negated word in more than maxDocs documents still removes every document containing it,
-     * not only its first maxDocs (those with the most hits).
+     * A negated word in more than candidatesPerWord documents still removes every document containing it,
+     * not only its first candidatesPerWord (those with the most hits).
      */
     public function testSearchBooleanNotRemovesEveryDocumentWithACutWord(): void
     {
@@ -2491,7 +2492,9 @@ class IndexTest extends TestCase
             ['id' => 13, 'title' => 'red blue'],
             ['id' => 14, 'title' => 'red'],
         ]);
-        $capped  = new Index($this->dbPath, config: new Config(maxDocs: 5), readonly: true);
+        $capped  = new Index($this->dbPath, config: new Config(
+            limits: new Limits(candidatesPerWord: 5),
+        ), readonly: true);
         $options = new SearchOptions(asYouType: false);
 
         $result = $capped->searchBoolean('red -tee', $options);
@@ -2505,7 +2508,7 @@ class IndexTest extends TestCase
     }
 
     /**
-     * A word in more documents than maxDocs (and than the bucket read whole): every page up to
+     * A word in more documents than candidatesPerWord (and than the bucket read whole): every page up to
      * totalHits is full, no document is on two pages, and with a sort the pages follow one order.
      */
     public function testSearchPagesPastCutCandidatesComeFromTheResultSet(): void
@@ -2522,7 +2525,9 @@ class IndexTest extends TestCase
             ];
         }
         $index->insert($docs);
-        $capped = new Index($this->dbPath, config: new Config(maxDocs: 5), readonly: true);
+        $capped = new Index($this->dbPath, config: new Config(
+            limits: new Limits(candidatesPerWord: 5),
+        ), readonly: true);
 
         foreach (
             [
@@ -3726,9 +3731,11 @@ class IndexTest extends TestCase
         $this->assertEqualsCanonicalizing([1, 2, 3], $index->searchBoolean('"blue jaens" | shirt')->getIds());
         $index->close();
 
-        // The same with the candidates cut at maxDocs, where the total is counted in SQL.
+        // The same with the candidates cut at candidatesPerWord, where the total is counted in SQL.
         Index::remove($this->dbPath);
-        $capped = new Index($this->dbPath, config: new Config(maxDocs: 1), schema: $schema);
+        $capped = new Index($this->dbPath, config: new Config(
+            limits: new Limits(candidatesPerWord: 1),
+        ), schema: $schema);
         $more   = array_map(fn(int $id): array => ['id' => $id, 'title' => 'blue shirt', 'brand' => 'd'], range(4, 9));
         $capped->insert([...$docs, ...$more]);
         $result = $capped->search('blue "shirt jaens"', new SearchOptions(facets: ['brand']));
@@ -5911,7 +5918,7 @@ class IndexTest extends TestCase
         $reference = null;
         foreach ([100, 2, 1] as $cap) {
             $this->tearDown();
-            $index   = $this->exclusionIndex(new Config(maxFacetCountDocs: $cap));
+            $index   = $this->exclusionIndex(new Config(limits: new Limits(facetCountDocs: $cap)));
             $options = new SearchOptions(
                 filter: ['brand' => new FacetExclude('Nike')],
                 facets: ['brand', 'visibility', 'price'],
@@ -6050,7 +6057,7 @@ class IndexTest extends TestCase
                     filterableAttributes: ['size', 'group'],
                     sortableAttributes: ['size', 'group'],
                 ),
-                config: new Config(maxFacetCountDocs: $cap),
+                config: new Config(limits: new Limits(facetCountDocs: $cap)),
             );
             $index->insert([
                 ['id' => 1, 'title' => 'shoe', 'size' => 'L', 'group' => 'a'],
@@ -7263,7 +7270,9 @@ class IndexTest extends TestCase
                 : ['id' => $id, 'title' => 'beta', 'group' => "other{$id}"];
         }
         $index->insert($docs);
-        $capped = new Index($this->dbPath, config: new Config(maxDocs: 50), readonly: true);
+        $capped = new Index($this->dbPath, config: new Config(
+            limits: new Limits(candidatesPerWord: 50),
+        ), readonly: true);
 
         $result = $capped->search('alpha', new SearchOptions(asYouType: false, distinct: 'group'));
 
@@ -7766,7 +7775,7 @@ class IndexTest extends TestCase
                 filterableAttributes: ['price', 'color', 'brand'],
                 sortableAttributes: ['price', 'color', 'brand'],
             ),
-            config: new Config(maxFacetCountDocs: 2),
+            config: new Config(limits: new Limits(facetCountDocs: 2)),
         );
         $index->insert($this->browseCatalog());
 
@@ -7806,7 +7815,7 @@ class IndexTest extends TestCase
                 filterableAttributes: ['price', 'color', 'brand'],
                 sortableAttributes: ['price', 'color', 'brand'],
             ),
-            config: new Config(maxFacetCountDocs: 3),
+            config: new Config(limits: new Limits(facetCountDocs: 3)),
         );
         // A product without a color keeps the color filter a capped positive one (complementSelections()).
         $index->insert([...$this->browseCatalog(), ['id' => 13, 'title' => 'product', 'brand' => 'Acme']]);
@@ -7843,7 +7852,7 @@ class IndexTest extends TestCase
         // The 5 Men documents exceed the cap of 3, so color is counted over the first 3; the 2
         // documents with both filters are under it and their brands stay exact.
         Index::remove($this->dbPath);
-        $capped = new Index($this->dbPath, config: new Config(maxFacetCountDocs: 3), schema: $schema);
+        $capped = new Index($this->dbPath, config: new Config(limits: new Limits(facetCountDocs: 3)), schema: $schema);
         $capped->insert($docs);
         $result = $capped->search('', $options);
         $this->assertSame(['Blue' => 2, 'Red' => 1], $result->facetDistribution['color']);
@@ -8058,7 +8067,9 @@ class IndexTest extends TestCase
 
     public function testFilteredBrowseWithFacetsKeepsAnExactTotalAboveTheFacetCap(): void
     {
-        $index = new Index($this->dbPath, config: new Config(maxFacetCountDocs: 3), schema: new SchemaConfig(
+        $index = new Index($this->dbPath, config: new Config(
+            limits: new Limits(facetCountDocs: 3),
+        ), schema: new SchemaConfig(
             filterableAttributes: ['color', 'brand'],
         ));
         $docs = [];
@@ -8143,7 +8154,7 @@ class IndexTest extends TestCase
                 filterableAttributes: ['price', 'color', 'brand'],
                 sortableAttributes: ['price', 'color', 'brand'],
             ),
-            config: new Config(maxFacetCountDocs: 2),
+            config: new Config(limits: new Limits(facetCountDocs: 2)),
         );
         $index->insert($this->browseCatalog());
 
@@ -8161,7 +8172,7 @@ class IndexTest extends TestCase
                 filterableAttributes: ['price', 'color', 'brand'],
                 sortableAttributes: ['price', 'color', 'brand'],
             ),
-            config: new Config(maxFacetCountDocs: 2),
+            config: new Config(limits: new Limits(facetCountDocs: 2)),
         );
         $index->insert($this->browseCatalog());
 
@@ -8277,7 +8288,7 @@ class IndexTest extends TestCase
                 ['color' => ['red' => 3, 'blue' => 1, 'green' => 1], 'brand' => ['B' => 4]],
                 [],
             ],
-            // 4 other documents, above maxFacetCountDocs (2): left as a capped positive filter.
+            // 4 other documents, above facetCountDocs (2): left as a capped positive filter.
             'others above the cap'  => [
                 ['color' => 'red'],
                 [],
@@ -8285,7 +8296,7 @@ class IndexTest extends TestCase
                 ['color' => ['red' => 6, 'blue' => 2, 'green' => 2], 'brand' => ['A' => 1, 'B' => 1]],
                 ['brand'],
             ],
-            // A multi-valued key is left as it is: counted over at most maxFacetCountDocs.
+            // A multi-valued key is left as it is: counted over at most facetCountDocs.
             'multi-valued key'      => [
                 ['tags' => ['new', 'old']],
                 [],
@@ -8318,7 +8329,7 @@ class IndexTest extends TestCase
         $index = new Index(
             $this->dbPath,
             schema: new SchemaConfig(filterableAttributes: ['color', 'brand', 'tags'], sortableAttributes: ['price']),
-            config: new Config(maxFacetCountDocs: 2),
+            config: new Config(limits: new Limits(facetCountDocs: 2)),
         );
         $docs = [];
         for ($i = 1; $i <= 10; $i++) {
@@ -8711,20 +8722,20 @@ class IndexTest extends TestCase
 
     public function testSearchKeywordAboveMaxDocsIsNotExhaustive(): void
     {
-        $index = new Index($this->dbPath, config: new Config(maxDocs: 2));
-        $index->insert($this->sameWordDocs(9));   // above 4 × maxDocs: not read whole
+        $index = new Index($this->dbPath, config: new Config(limits: new Limits(candidatesPerWord: 2)));
+        $index->insert($this->sameWordDocs(9));   // above 4 × candidatesPerWord: not read whole
 
         $result = $index->search('widget');
 
         $this->assertFalse($result->exhaustive);
         $this->assertSame(9, $result->totalHits);   // counted exactly, beyond the candidates
         $this->assertCount(1, $result->warnings);
-        $this->assertStringContainsString('Config::$maxDocs (2)', $result->warnings[0]);
+        $this->assertStringContainsString('Limits::$candidatesPerWord (2)', $result->warnings[0]);
     }
 
     public function testTotalHitsStopsAtMaxTotalHits(): void
     {
-        $index = new Index($this->dbPath, config: new Config(maxTotalHits: 4));
+        $index = new Index($this->dbPath, config: new Config(limits: new Limits(totalHits: 4)));
         $index->insert($this->sameWordDocs(6));
 
         foreach ([$index->search('widget'), $index->searchBoolean('widget'), $index->search('')] as $result) {
@@ -8733,13 +8744,13 @@ class IndexTest extends TestCase
             $this->assertTrue($result->isTotalHitsCapped());
             $this->assertTrue($result->toArray()['totalHitsCapped']);
             $this->assertCount(4, $result->getIds());
-            $this->assertStringContainsString('maxTotalHits (4)', $result->warnings[0]);
+            $this->assertStringContainsString('Limits::$totalHits (4)', $result->warnings[0]);
         }
     }
 
     public function testTotalHitsAtMaxTotalHitsIsNotCapped(): void
     {
-        $index = new Index($this->dbPath, config: new Config(maxTotalHits: 3));
+        $index = new Index($this->dbPath, config: new Config(limits: new Limits(totalHits: 3)));
         $index->insert($this->sameWordDocs(3));
 
         $result = $index->search('widget');
@@ -8751,7 +8762,7 @@ class IndexTest extends TestCase
 
     public function testNoHitPastMaxTotalHitsCanBePagedTo(): void
     {
-        $index = new Index($this->dbPath, config: new Config(maxTotalHits: 4));
+        $index = new Index($this->dbPath, config: new Config(limits: new Limits(totalHits: 4)));
         $index->insert($this->sameWordDocs(6));
 
         foreach (['widget', ''] as $q) {
@@ -8767,15 +8778,38 @@ class IndexTest extends TestCase
         }
     }
 
-    public function testMaxTotalHitsMustBePositive(): void
+    public function testExactLimitsRankAndCountEveryMatch(): void
     {
-        $this->expectException(\InvalidArgumentException::class);
-        new Config(maxTotalHits: 0);
+        $docs = [];
+        for ($id = 1; $id <= 40; $id++) {
+            $color  = $id % 3 === 0 ? 'a' : 'b';
+            $docs[] = ['id' => $id, 'text' => 'red cotton ' . str_repeat('filler ', $id), 'color' => $color];
+        }
+        $schema = new SchemaConfig(filterableAttributes: ['color']);
+        $fast   = new Index($this->dbPath, force: true, schema: $schema, config: new Config(
+            limits: new Limits(candidatesPerWord: 2, facetCountDocs: 5),
+        ));
+        $fast->insert($docs);
+        $exact = new Index($this->dbPath, readonly: true, config: new Config(limits: Limits::exact()));
+
+        $options = new SearchOptions(asYouType: false, limit: 40, facets: ['color'], filter: ['color' => ['a', 'b']]);
+        $capped  = $fast->search('red cotton', $options);
+        $full    = $exact->search('red cotton', $options);
+
+        $this->assertFalse($capped->exhaustive);
+        $this->assertSame(['color'], $capped->approximateFacets);
+        $this->assertTrue($full->exhaustive);
+        $this->assertSame([], $full->approximateFacets);
+        $this->assertSame([], $full->warnings);
+        $this->assertSame(range(1, 40), $full->getIds());
+        $this->assertSame(['a' => 13, 'b' => 27], $full->facetDistribution['color']);
     }
 
     public function testCappedSearchCountsMatchesExactly(): void
     {
-        $index = new Index($this->dbPath, config: new Config(maxDocs: 2), schema: new SchemaConfig(
+        $index = new Index($this->dbPath, config: new Config(
+            limits: new Limits(candidatesPerWord: 2),
+        ), schema: new SchemaConfig(
             filterableAttributes: ['color'],
         ));
         $index->insert([
@@ -8786,7 +8820,7 @@ class IndexTest extends TestCase
             ['id' => 5, 'title' => 'red lamp', 'color' => 'red'],
             ['id' => 6, 'title' => 'widgte red', 'color' => 'red'],   // "widget" through a typo
             ['id' => 7, 'title' => 'red widget', 'color' => 'red'],
-            // "red" in 11 documents, above 4 × maxDocs: the count reaches past the candidates.
+            // "red" in 11 documents, above 4 × candidatesPerWord: the count reaches past the candidates.
             ['id' => 8, 'title' => 'red', 'color' => 'blue'],
             ['id' => 9, 'title' => 'red', 'color' => 'blue'],
             ['id' => 10, 'title' => 'red', 'color' => 'blue'],
@@ -8808,7 +8842,9 @@ class IndexTest extends TestCase
     public function testCappedSearchCountsFacetsOverEveryMatch(): void
     {
         $schema = new SchemaConfig(filterableAttributes: ['color']);
-        $index  = new Index($this->dbPath, config: new Config(maxDocs: 2), schema: $schema);
+        $index  = new Index($this->dbPath, config: new Config(
+            limits: new Limits(candidatesPerWord: 2),
+        ), schema: $schema);
         $index->insert($this->sameWordDocs(9));
 
         $all  = $index->search('widget', new SearchOptions(facets: ['color']));
@@ -8825,7 +8861,9 @@ class IndexTest extends TestCase
     public function testCappedSearchCountsAKeyUnderAnotherKeysValueList(): void
     {
         $schema = new SchemaConfig(filterableAttributes: ['color', 'size']);
-        $index  = new Index($this->dbPath, config: new Config(maxDocs: 1), schema: $schema);
+        $index  = new Index($this->dbPath, config: new Config(
+            limits: new Limits(candidatesPerWord: 1),
+        ), schema: $schema);
         $index->insert([
             ['id' => 1, 'title' => 'widget', 'color' => 'red', 'size' => 'S'],
             ['id' => 2, 'title' => 'widget', 'color' => 'blue', 'size' => ['S', 'M']],
@@ -8837,7 +8875,7 @@ class IndexTest extends TestCase
         ]);
 
         // size is counted under the color list and color under the size list (each without its
-        // own filter); the candidates are cut at maxDocs, so both count the whole result set.
+        // own filter); the candidates are cut at candidatesPerWord, so both count the whole result set.
         $result = $index->search('widget', new SearchOptions(
             filter: ['color' => ['red', 'blue'], 'size' => ['S', 'M']],
             facets: ['color', 'size'],
@@ -8862,7 +8900,7 @@ class IndexTest extends TestCase
     public function testCappedSearchFacetsOverMaxFacetCountDocsAreApproximate(): void
     {
         $schema = new SchemaConfig(filterableAttributes: ['color']);
-        $config = new Config(maxDocs: 2, maxFacetCountDocs: 5);
+        $config = new Config(limits: new Limits(candidatesPerWord: 2, facetCountDocs: 5));
         $index  = new Index($this->dbPath, config: $config, schema: $schema);
         $index->insert($this->sameWordDocs(9));
 
@@ -8874,7 +8912,7 @@ class IndexTest extends TestCase
 
     public function testSearchKeywordExactlyAtMaxDocsIsExhaustive(): void
     {
-        $index = new Index($this->dbPath, config: new Config(maxDocs: 3));
+        $index = new Index($this->dbPath, config: new Config(limits: new Limits(candidatesPerWord: 3)));
         $index->insert($this->sameWordDocs(3));
 
         $this->assertTrue($index->search('widget')->exhaustive);
@@ -8883,7 +8921,7 @@ class IndexTest extends TestCase
 
     public function testBooleanKeywordAboveMaxDocsIsNotExhaustive(): void
     {
-        $index = new Index($this->dbPath, config: new Config(maxDocs: 2));
+        $index = new Index($this->dbPath, config: new Config(limits: new Limits(candidatesPerWord: 2)));
         $index->insert($this->sameWordDocs(3));
 
         $result = $index->searchBoolean('widget');
@@ -8934,7 +8972,7 @@ class IndexTest extends TestCase
         $index = new Index(
             $this->dbPath,
             schema: new SchemaConfig(filterableAttributes: ['color'], sortableAttributes: ['color']),
-            config: new Config(maxFacetCountDocs: 2),
+            config: new Config(limits: new Limits(facetCountDocs: 2)),
         );
         $index->insert($this->sameWordDocs(3));
 
@@ -8956,7 +8994,7 @@ class IndexTest extends TestCase
         $index = new Index(
             $this->dbPath,
             schema: new SchemaConfig(filterableAttributes: ['color'], sortableAttributes: ['color']),
-            config: new Config(maxFacetCountDocs: 3),
+            config: new Config(limits: new Limits(facetCountDocs: 3)),
         );
         $index->insert($this->sameWordDocs(3));
 
@@ -8974,7 +9012,7 @@ class IndexTest extends TestCase
                 filterableAttributes: ['price', 'color', 'brand'],
                 sortableAttributes: ['price', 'color', 'brand'],
             ),
-            config: new Config(maxDocs: 1, maxFacetCountDocs: 3),
+            config: new Config(limits: new Limits(candidatesPerWord: 1, facetCountDocs: 3)),
         );
         // A product without a color keeps the color filter a capped positive one (complementSelections()).
         $index->insert([...$this->browseCatalog(), ['id' => 13, 'title' => 'product', 'brand' => 'Acme']]);
@@ -8995,7 +9033,7 @@ class IndexTest extends TestCase
         $index = new Index(
             $this->dbPath,
             schema: new SchemaConfig(filterableAttributes: ['color'], sortableAttributes: ['color']),
-            config: new Config(maxFacetCountDocs: 2),
+            config: new Config(limits: new Limits(facetCountDocs: 2)),
         );
         $index->insert($this->sameWordDocs(3));
 
@@ -9005,7 +9043,7 @@ class IndexTest extends TestCase
         $this->assertFalse($capped->exhaustive);
         $this->assertFalse($capped->isExhaustive());
         $this->assertSame(2, array_sum(array_column($capped->facetHits, 'count')));
-        $this->assertStringContainsString('Config::$maxFacetCountDocs (2)', $capped->warnings[0]);
+        $this->assertStringContainsString('Limits::$facetCountDocs (2)', $capped->warnings[0]);
         $this->assertTrue($noQuery->exhaustive);
         $this->assertSame(3, array_sum(array_column($noQuery->facetHits, 'count')));
         $this->assertFalse($capped->toArray()['exhaustive']);
@@ -9935,12 +9973,14 @@ class IndexTest extends TestCase
         }
     }
 
-    // --- completing keyword groups truncated at maxDocs ---
+    // --- completing keyword groups truncated at candidatesPerWord ---
 
     /** Five docs where "shirt" is frequent, one with both words, two with "casual" only (doc 7 twice). */
     private function truncationIndex(int $maxDocs): Index
     {
-        $index = new Index($this->dbPath, force: true, config: new Config(maxDocs: $maxDocs));
+        $index = new Index($this->dbPath, force: true, config: new Config(
+            limits: new Limits(candidatesPerWord: $maxDocs),
+        ));
         $index->insert([
             ['id' => 1, 'title' => 'shirt shirt shirt'],
             ['id' => 2, 'title' => 'shirt shirt shirt'],
@@ -9967,12 +10007,14 @@ class IndexTest extends TestCase
     }
 
     /**
-     * Every word's maxDocs (2) best rows are documents with that word only (repeated, so they rank
+     * Every word's candidatesPerWord (2) best rows are documents with that word only (repeated, so they rank
      * first); the full matches 1 and 2 mention each word once, docs 3 and 4 have women + cotton.
      */
     private function commonWordsIndex(): Index
     {
-        $index = new Index($this->dbPath, force: true, config: new Config(maxDocs: 2), schema: new SchemaConfig(
+        $index = new Index($this->dbPath, force: true, config: new Config(
+            limits: new Limits(candidatesPerWord: 2),
+        ), schema: new SchemaConfig(
             filterableAttributes: ['color'],
         ));
         $docs = [
@@ -9998,7 +10040,7 @@ class IndexTest extends TestCase
         // Words buckets: both full matches, then women + cotton, then women alone.
         $this->assertEqualsCanonicalizing([1, 2], array_slice($result->getIds(), 0, 2));
         $this->assertEqualsCanonicalizing([3, 4], array_slice($result->getIds(), 2, 2));
-        // "women" (8 documents) was cut at maxDocs but is within 4 × maxDocs, so it was read
+        // "women" (8 documents) was cut at candidatesPerWord but is within 4 × candidatesPerWord, so it was read
         // whole: every bucket is exact.
         $this->assertTrue($result->exhaustive);
     }
@@ -10042,9 +10084,11 @@ class IndexTest extends TestCase
 
     public function testCappedPhraseTotalsCountOnlyTheContiguousSequence(): void
     {
-        // maxDocs 1 cuts every word, so totals, facet counts and the distinct total come from
+        // candidatesPerWord 1 cuts every word, so totals, facet counts and the distinct total come from
         // the result-set SQL, which may drive from the phrase's positions rows.
-        $index = new Index($this->dbPath, config: new Config(maxDocs: 1), schema: new SchemaConfig(
+        $index = new Index($this->dbPath, config: new Config(
+            limits: new Limits(candidatesPerWord: 1),
+        ), schema: new SchemaConfig(
             filterableAttributes: ['color', 'brand'],
         ));
         $index->insert([
@@ -10056,7 +10100,7 @@ class IndexTest extends TestCase
             ['id' => 6, 'title' => 'shirt blue jeans blue jeans', 'color' => 'green', 'brand' => 'c'],
             ['id' => 7, 'title' => 'blue jeans shirt', 'color' => 'red', 'brand' => 'c'],
             ['id' => 8, 'title' => 'jeans shirt blue', 'color' => 'red', 'brand' => 'd'],
-            // More phrase matches than the 4 x maxDocs a words bucket scores, so the phrase
+            // More phrase matches than the 4 x candidatesPerWord a words bucket scores, so the phrase
             // search stays capped after its bucket is filtered by the phrase.
             ['id' => 9, 'title' => 'blue jeans', 'color' => 'blue', 'brand' => 'e'],
             ['id' => 10, 'title' => 'blue jeans', 'color' => 'blue', 'brand' => 'e'],
@@ -10089,9 +10133,11 @@ class IndexTest extends TestCase
 
     public function testASortedPageComesFromEveryFullMatch(): void
     {
-        // Each word's maxDocs (2) best rows are docs 1 and 2: full matches that already fill the
+        // Each word's candidatesPerWord (2) best rows are docs 1 and 2: full matches that already fill the
         // page. The cheapest full match, doc 3, mentions each word once and is not among them.
-        $index = new Index($this->dbPath, config: new Config(maxDocs: 2), schema: new SchemaConfig(
+        $index = new Index($this->dbPath, config: new Config(
+            limits: new Limits(candidatesPerWord: 2),
+        ), schema: new SchemaConfig(
             sortableAttributes: ['price'],
         ));
         $index->insert([
@@ -10142,9 +10188,13 @@ class IndexTest extends TestCase
         new Index($this->dbPath)->insert($docs);
         $options = new SearchOptions(asYouType: false, limit: 1);
 
-        // maxDocs 1: each word's best row is doc 1, which alone would fill the page.
-        $capped = new Index($this->dbPath, config: new Config(maxDocs: 1))->search('red shoe', $options);
-        $full   = new Index($this->dbPath, config: new Config(maxDocs: 100))->search('red shoe', $options);
+        // candidatesPerWord 1: each word's best row is doc 1, which alone would fill the page.
+        $capped = new Index($this->dbPath, config: new Config(
+            limits: new Limits(candidatesPerWord: 1),
+        ))->search('red shoe', $options);
+        $full   = new Index($this->dbPath, config: new Config(
+            limits: new Limits(candidatesPerWord: 100),
+        ))->search('red shoe', $options);
 
         $this->assertSame([2], $full->getIds());
         $this->assertSame([2], $capped->getIds());
@@ -10161,7 +10211,7 @@ class IndexTest extends TestCase
         $whole   = $this->truncationIndex(3)->search('shirt casual', $options)->getIds();
 
         // "shirt" comes first, so every result contains it (MatchingStrategy::Last). With
-        // maxDocs 1 (6 documents > 4 × maxDocs) only some are ranked (the rest of the result set
+        // candidatesPerWord 1 (6 documents > 4 × candidatesPerWord) only some are ranked (the rest of the result set
         // follows them unscored); the ranked ones must keep the order (so the scores) of the
         // untruncated search.
         /** @var list<int> $ranked */
@@ -10178,13 +10228,13 @@ class IndexTest extends TestCase
         $this->assertSame(self::sorted($full), self::sorted($capped));
         $this->assertSame(array_values(array_intersect($full, $ranked)), $ranked);
         $this->assertLessThan(count($full), count($ranked));
-        // With maxDocs 3, "shirt" is within 4 × maxDocs and read whole: the full ranking.
+        // With candidatesPerWord 3, "shirt" is within 4 × candidatesPerWord and read whole: the full ranking.
         $this->assertSame($full, $whole);
     }
 
     public function testTruncatedPrefixGroupIsCompletedToo(): void
     {
-        $index = new Index($this->dbPath, config: new Config(maxDocs: 2));
+        $index = new Index($this->dbPath, config: new Config(limits: new Limits(candidatesPerWord: 2)));
         $index->insert([
             ['id' => 1, 'title' => 'shiny shiny shiny'],
             ['id' => 2, 'title' => 'shiny shiny shiny'],
@@ -10193,7 +10243,7 @@ class IndexTest extends TestCase
             ['id' => 5, 'title' => 'casual casual'],
         ]);
 
-        // The last word "shi" expands to shiny, shin, shirts (several term IDs, over maxDocs).
+        // The last word "shi" expands to shiny, shin, shirts (several term IDs, over candidatesPerWord).
         $result = $index->search('casual shi');
 
         $this->assertSame(4, $result->getIds()[0]);
@@ -10202,7 +10252,7 @@ class IndexTest extends TestCase
     public function testCompletedGroupAddsTermsPastTheCutForADocumentItHolds(): void
     {
         $docs = [
-            // Doc 2 has "shoe" once: its row ranks below the fillers' and is cut at maxDocs.
+            // Doc 2 has "shoe" once: its row ranks below the fillers' and is cut at candidatesPerWord.
             ['id' => 1, 'title' => 'red shoes shoes shoes shoes shoes blue', 'color' => 'red'],
             ['id' => 2, 'title' => 'red shoes shoes shoes shoes shoes shoe', 'color' => 'red'],
         ];
@@ -10214,8 +10264,12 @@ class IndexTest extends TestCase
         // A filter reads the full-match bucket exactly, so the capped result claims to be exhaustive.
         $options = new SearchOptions(filter: ['color' => 'red']);
 
-        $capped = new Index($this->dbPath, config: new Config(maxDocs: 3))->search('red sho', $options);
-        $full   = new Index($this->dbPath, config: new Config(maxDocs: 1000))->search('red sho', $options);
+        $capped = new Index($this->dbPath, config: new Config(
+            limits: new Limits(candidatesPerWord: 3),
+        ))->search('red sho', $options);
+        $full   = new Index($this->dbPath, config: new Config(
+            limits: new Limits(candidatesPerWord: 1000),
+        ))->search('red sho', $options);
 
         // Doc 2 also contains "shoe", so it scores above doc 1 (same length) in both.
         $this->assertSame([2, 1], $full->getIds());
@@ -10769,10 +10823,10 @@ class IndexTest extends TestCase
 
     public function testAllStrategyIsExactWhenTheRarestWordIsComplete(): void
     {
-        // "shirt" exceeds maxDocs; "linen" does not, and every result must contain it.
-        $index = new Index($this->dbPath, config: new Config(maxDocs: 3));
+        // "shirt" exceeds candidatesPerWord; "linen" does not, and every result must contain it.
+        $index = new Index($this->dbPath, config: new Config(limits: new Limits(candidatesPerWord: 3)));
         $docs  = [];
-        // 13 "shirt" documents: above 4 × maxDocs, so it is not read whole.
+        // 13 "shirt" documents: above 4 × candidatesPerWord, so it is not read whole.
         for ($id = 1; $id <= 12; $id++) {
             $docs[] = ['id' => $id, 'title' => 'shirt shirt'];
         }
@@ -10794,7 +10848,7 @@ class IndexTest extends TestCase
 
     public function testExactBucketHoldsDocumentsMatchingThroughATypo(): void
     {
-        $index = new Index($this->dbPath, config: new Config(maxDocs: 2));
+        $index = new Index($this->dbPath, config: new Config(limits: new Limits(candidatesPerWord: 2)));
         $index->insert([
             ['id' => 1, 'title' => 'classic shirt'],
             ['id' => 2, 'title' => 'classic shirt'],
@@ -10803,7 +10857,7 @@ class IndexTest extends TestCase
             ['id' => 5, 'title' => 'clasic shirt'],
         ]);
 
-        // Both words are over maxDocs, so the full matches are read as an exact bucket.
+        // Both words are over candidatesPerWord, so the full matches are read as an exact bucket.
         $result = $index->search('classic shirt', new SearchOptions(
             asYouType: false,
             matchingStrategy: MatchingStrategy::All,
@@ -11283,7 +11337,7 @@ class IndexTest extends TestCase
     {
         $index = new Index(
             $this->dbPath,
-            config: new Config(maxDocs: 1),
+            config: new Config(limits: new Limits(candidatesPerWord: 1)),
             schema: new SchemaConfig(filterableAttributes: ['tag']),
         );
         $index->insert([
@@ -11320,7 +11374,7 @@ class IndexTest extends TestCase
     {
         $index = new Index(
             $this->dbPath,
-            config: new Config(maxDocs: 1),
+            config: new Config(limits: new Limits(candidatesPerWord: 1)),
             schema: new SchemaConfig(filterableAttributes: ['tag']),
         );
         // Bucket 1 ("red" without "lamp") is ranked from the candidates, so most matches are
@@ -11521,7 +11575,7 @@ class IndexTest extends TestCase
     }
 
     /**
-     * The buckets are far above 4 x maxDocs, so a page deep enough reads them while the first
+     * The buckets are far above 4 x candidatesPerWord, so a page deep enough reads them while the first
      * pages do not need to: paging through must still show each document exactly once.
      */
     #[DataProvider('multiWordQueries')]
@@ -11539,7 +11593,9 @@ class IndexTest extends TestCase
             }
             $docs[] = ['id' => $id, 'text' => $text . str_repeat('vul ', mt_rand(0, 25))];
         }
-        $index = new Index($this->dbPath, force: true, config: new Config(maxDocs: 25, maxTotalHits: 2000));
+        $index = new Index($this->dbPath, force: true, config: new Config(
+            limits: new Limits(candidatesPerWord: 25, totalHits: 2000),
+        ));
         $index->insert($docs);
 
         $seen  = [];
@@ -11562,7 +11618,9 @@ class IndexTest extends TestCase
         for ($id = 1; $id <= 300; $id++) {
             $docs[] = ['id' => $id, 'text' => 'jurk model ' . str_repeat('vul ', $id % 7), 'rank' => 301 - $id];
         }
-        $index = new Index($this->dbPath, force: true, config: new Config(maxDocs: 10), schema: new SchemaConfig(
+        $index = new Index($this->dbPath, force: true, config: new Config(
+            limits: new Limits(candidatesPerWord: 10),
+        ), schema: new SchemaConfig(
             sortableAttributes: ['rank'],
         ));
         $index->insert($docs);
@@ -11652,7 +11710,9 @@ class IndexTest extends TestCase
                 default        => 'alpha alpha alpha beta beta beta filler filler filler filler filler',
             } . ($id > 200 ? ' beta' : '')];
         }
-        $index = new Index($this->dbPath, force: true, config: new Config(maxDocs: 20, maxTotalHits: 600));
+        $index = new Index($this->dbPath, force: true, config: new Config(
+            limits: new Limits(candidatesPerWord: 20, totalHits: 600),
+        ));
         $index->insert($docs);
 
         $seen = [];
@@ -11671,7 +11731,7 @@ class IndexTest extends TestCase
     }
 
     /**
-     * A bucket above 4 x maxDocs whose members with the most hits fail a quoted phrase: the
+     * A bucket above 4 x candidatesPerWord whose members with the most hits fail a quoted phrase: the
      * phrase matches must all be scored, so the page ranks them as the uncapped search does.
      */
     public function testPhraseMatchesOfALargeBucketAreAllScored(): void
@@ -11683,9 +11743,11 @@ class IndexTest extends TestCase
         for ($id = 61; $id <= 70; $id++) {
             $docs[] = ['id' => $id, 'text' => 'red cotton ' . str_repeat('filler ', 80 - $id)];
         }
-        $capped = new Index($this->dbPath, force: true, config: new Config(maxDocs: 5));
+        $capped = new Index($this->dbPath, force: true, config: new Config(limits: new Limits(candidatesPerWord: 5)));
         $capped->insert($docs);
-        $uncapped = new Index($this->dbPath, readonly: true, config: new Config(maxDocs: 100_000));
+        $uncapped = new Index($this->dbPath, readonly: true, config: new Config(
+            limits: new Limits(candidatesPerWord: 100_000),
+        ));
 
         $options = new SearchOptions(asYouType: false, limit: 10);
         $page    = $capped->search('"red cotton"', $options);
@@ -11696,7 +11758,7 @@ class IndexTest extends TestCase
     }
 
     /**
-     * A bucket above 4 x maxDocs scores the members with the best term frequency of its rarest
+     * A bucket above 4 x candidatesPerWord scores the members with the best term frequency of its rarest
      * word, not the most hits: long documents that repeat the words rank below short ones that
      * mention them once, so the short ones must be among those scored.
      */
@@ -11709,9 +11771,11 @@ class IndexTest extends TestCase
         for ($id = 41; $id <= 50; $id++) {
             $docs[] = ['id' => $id, 'text' => 'red cotton ' . str_repeat('filler ', $id - 40)];
         }
-        $capped = new Index($this->dbPath, force: true, config: new Config(maxDocs: 5));
+        $capped = new Index($this->dbPath, force: true, config: new Config(limits: new Limits(candidatesPerWord: 5)));
         $capped->insert($docs);
-        $uncapped = new Index($this->dbPath, readonly: true, config: new Config(maxDocs: 100_000));
+        $uncapped = new Index($this->dbPath, readonly: true, config: new Config(
+            limits: new Limits(candidatesPerWord: 100_000),
+        ));
 
         $options = new SearchOptions(asYouType: false, limit: 10);
         $page    = $capped->search('red cotton', $options);

@@ -121,15 +121,15 @@ prices, years and brands; 3.8 GB index), Fuzor 2.0, one PHP process:
 day (exact ranking of the page's words bucket, totals and facet counts over every match), so its
 search rows are lower than a search costs now.
 
-Each word reads its `Config::$maxDocs` best matches first. The page's words bucket is then read
-and ranked exactly while it holds at most 4 × `maxDocs` documents (with a quoted phrase, counting only
+Each word reads its `Limits::$candidatesPerWord` best matches first. The page's words bucket is then read
+and ranked exactly while it holds at most 4 × `candidatesPerWord` documents (with a quoted phrase, counting only
 the documents that contain the phrase); of a larger one those candidates
-and the 4 × `maxDocs` documents in which its rarest word weighs most (its BM25 term frequency)
+and the 4 × `candidatesPerWord` documents in which its rarest word weighs most (its BM25 term frequency)
 are ranked and the rest follows unscored
 (`exhaustive: false`), the same way on every page. The total and the facet counts are counted in SQL over every
-match, the total up to `Config::$maxTotalHits` (1000), so a broad search costs about 1 µs per
+match, the total up to `Limits::$totalHits` (1000), so a broad search costs about 1 µs per
 match on top of the ranking. Facet counts over a filter
-that matches more than `Config::$maxFacetCountDocs` (50,000) documents are approximate
+that matches more than `Limits::$facetCountDocs` (50,000) documents are approximate
 (`approximateFacets`). Counting costs about 0.6–1 µs per counted document, whatever the number
 of facet fields: each document's facet values are stored together as one packed row. Some
 shapes grow with the index rather than the page: facet counts on a page whose only filter
@@ -139,7 +139,7 @@ indexes, or cache their results.
 
 A value filter that selects most documents of a field every document has exactly once (such as
 `gender: [Women, Men]`) is counted through the remaining values when those hold at most
-`maxFacetCountDocs` documents: its page then gets exact facet counts at the cost of the excluded
+`facetCountDocs` documents: its page then gets exact facet counts at the cost of the excluded
 documents. On the 533k catalog the remaining 43k documents are above the cap, so the listing's
 counts stay approximate there.
 

@@ -78,8 +78,9 @@ Pass a `Config` object to tune BM25, typo tolerance, and other search behaviour.
 
 ```php
 use Fuzor\Config;
+use Fuzor\Limits;
 
-$index = new Index('/path/to/articles.db', config: new Config(maxDocs: 200));
+$index = new Index('/path/to/articles.db', config: new Config(limits: new Limits(candidatesPerWord: 200)));
 ```
 
 ### Schema

@@ -52,24 +52,24 @@ final class SearchResult implements \Countable, \IteratorAggregate
 
     /**
      * False when a cap may have cut matching documents out of the result: a keyword matched more
-     * than Config::$maxDocs documents, or the last keyword's prefix matched more than
+     * than Limits::$candidatesPerWord documents, or the last keyword's prefix matched more than
      * Config::$fuzzyMaxExpansions terms. $hits then come from the best candidates, so the page
      * may differ from a full ranking; $totalHits is still counted exactly (up to
-     * Config::$maxTotalHits, see $totalHitsCapped), also with distinct and in searchBoolean(),
+     * Limits::$totalHits, see $totalHitsCapped), also with distinct and in searchBoolean(),
      * except over a capped prefix expansion. Always true for a browse (empty query). Facet counts are reported
      * separately in $approximateFacets.
      */
     public readonly bool $exhaustive;
 
     /**
-     * True when more documents match than Config::$maxTotalHits: $totalHits is then that cap
+     * True when more documents match than Limits::$totalHits: $totalHits is then that cap
      * (show it as "1000+"), and no hit past it can be paged to.
      */
     public readonly bool $totalHitsCapped;
 
     /**
      * Facet fields whose counts in $facetDistribution / $facetStats were computed over a capped
-     * set of matching documents (Config::$maxFacetCountDocs) and are therefore approximate.
+     * set of matching documents (Limits::$facetCountDocs) and are therefore approximate.
      *
      * @var list<string>
      */
@@ -224,7 +224,7 @@ final class SearchResult implements \Countable, \IteratorAggregate
     /**
      * This result with $totalHits stopped at $maxTotalHits.
      *
-     * @internal Index applies Config::$maxTotalHits with it.
+     * @internal Index applies Limits::$totalHits with it.
      */
     public function withTotalHitsCap(int $maxTotalHits): self
     {
@@ -236,7 +236,7 @@ final class SearchResult implements \Countable, \IteratorAggregate
             'totalHitsCapped' => true,
             'warnings'        => [
                 ...$this->warnings,
-                "More than maxTotalHits ({$maxTotalHits}) documents match; totalHits stops there.",
+                "More than Limits::\$totalHits ({$maxTotalHits}) documents match; totalHits stops there.",
             ],
         ]);
     }

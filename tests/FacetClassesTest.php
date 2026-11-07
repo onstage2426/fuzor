@@ -8,6 +8,7 @@ use Fuzor\Config;
 use Fuzor\FacetExclude;
 use Fuzor\FacetRange;
 use Fuzor\Index;
+use Fuzor\Limits;
 use Fuzor\SchemaConfig;
 use Fuzor\SearchOptions;
 use PHPUnit\Framework\Attributes\DataProvider;
@@ -86,7 +87,7 @@ class FacetClassesTest extends TestCase
     #[DataProvider('caps')]
     public function testBrowseMatchesAScanOfTheDocuments(int $cap): void
     {
-        $index  = new Index($this->path, config: new Config(maxFacetCountDocs: $cap), readonly: true);
+        $index  = new Index($this->path, config: new Config(limits: new Limits(facetCountDocs: $cap)), readonly: true);
         $random = new Randomizer(new Mt19937($cap));
         $counted = 0;
         for ($i = 0; $i < 150; $i++) {

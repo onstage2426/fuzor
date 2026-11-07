@@ -130,7 +130,7 @@ final class Index implements \Countable
      * Largest posting list a words bucket is computed exactly from (search(), exactBucketDocs()).
      * The bucket's rarest word is read and the other words are looked up per document: ~0.4–1 µs
      * per row of that word on 1.43M amazon products ("women cotton dress", rarest 25k: 28 ms,
-     * all 88 full matches). Above it the bucket comes from each word's maxDocs best rows.
+     * all 88 full matches). Above it the bucket comes from each word's candidatesPerWord best rows.
      */
     private const int EXACT_BUCKET_MAX_DRIVER = 50_000;
 
@@ -142,7 +142,7 @@ final class Index implements \Countable
 
     /**
      * Most documents of one words bucket that are ranked exactly, as a multiple of
-     * Config::$maxDocs (2,000 by default). A bucket up to that size is read whole and every
+     * Limits::$candidatesPerWord (2,000 by default). A bucket up to that size is read whole and every
      * member scored (BM25 needs each one's rows of every word; completeGroup() ~2–5 µs per
      * document and word), and the first word is read whole when it is in at most that many
      * documents (bucket 1, one-word queries): the page is then the uncapped one. A larger bucket
@@ -151,7 +151,7 @@ final class Index implements \Countable
      * still in the bucket ("men shirt", 10k full matches: 143 ms scoring all), and the page comes
      * from the candidates when they cover it (exhaustive false). Measured on the 45k ecom set,
      * 300 queries against the uncapped ranking: pages identical 50% (no exact ranking) → 79% at
-     * 2× maxDocs, 86% at 4×, 92% at 10×; plain search 7.1 → 12.3 / 13.7 / 16.4 ms.
+     * 2× candidatesPerWord, 86% at 4×, 92% at 10×; plain search 7.1 → 12.3 / 13.7 / 16.4 ms.
      */
     private const int EXACT_RANKED_DOCS_PER_MAX_DOCS = 4;
 
@@ -2704,16 +2704,16 @@ final class Index implements \Countable
         SearchOptions $options = new SearchOptions(),
     ): SearchResult {
         return $this->rankedSearch($phrase, $this->clampPage($options))
-            ->withTotalHitsCap($this->config->maxTotalHits);
+            ->withTotalHitsCap($this->config->limits->totalHits);
     }
 
     /**
-     * The options with offset and limit clamped to Config::$maxTotalHits: no hit ranked past it
+     * The options with offset and limit clamped to Limits::$totalHits: no hit ranked past it
      * is returned (search(), searchBoolean() and browse alike).
      */
     private function clampPage(SearchOptions $options): SearchOptions
     {
-        $max    = $this->config->maxTotalHits;
+        $max    = $this->config->limits->totalHits;
         $offset = min($options->offset, $max);
         $limit  = min($options->limit, $max - $offset);
         return $offset === $options->offset && $limit === $options->limit
@@ -2721,7 +2721,7 @@ final class Index implements \Countable
             : $options->withPage($offset, $limit);
     }
 
-    /** search() for a page inside Config::$maxTotalHits; totalHits not capped yet. */
+    /** search() for a page inside Limits::$totalHits; totalHits not capped yet. */
     private function rankedSearch(string $phrase, SearchOptions $options): SearchResult
     {
         $this->checkDataVersion();
@@ -2778,7 +2778,7 @@ final class Index implements \Countable
         $termGroups = [];
         /** @var list<KeywordGroup> $groups  One per keyword, in query order. */
         $groups = [];
-        // Set when a cap cut matches out: a keyword above maxDocs, or a capped prefix expansion.
+        // Set when a cap cut matches out: a keyword above candidatesPerWord, or a capped prefix expansion.
         $candidatesCapped = false;
         $prefixCapped     = false;
 
@@ -2806,7 +2806,7 @@ final class Index implements \Countable
                 /** @infection-ignore-all DecrementInteger|IncrementInteger|Plus|Multiplication: idfK1p1 is a per-term scalar; mutating k1+1 uniformly rescales every doc's contribution for that term, preserving relative ranking */
                 'idfK1p1'   => $idf * ($k1 + 1),
                 'df'        => $df,
-                'truncated' => $df > $this->config->maxDocs,
+                'truncated' => $df > $this->config->limits->candidatesPerWord,
                 'rows'      => [],
             ];
         }
@@ -2826,17 +2826,17 @@ final class Index implements \Countable
                 $fetch = [$rarest[0]];
             }
         }
-        $scoredDocs = self::EXACT_RANKED_DOCS_PER_MAX_DOCS * $this->config->maxDocs;
+        $scoredDocs = self::EXACT_RANKED_DOCS_PER_MAX_DOCS * $this->config->limits->candidatesPerWord;
         foreach ($fetch as $g) {
             if ($groups[$g]['words'] === []) {
                 continue;
             }
             // Bucket 1 (the first word alone, and a one-word query) ranks the first word's documents
-            // by its BM25 score, which its maxDocs rows by hit count do not give: a word in at
-            // most EXACT_RANKED_DOCS_PER_MAX_DOCS × maxDocs documents is read whole, like a words bucket;
-            // a larger one's maxDocs best rows by score are read for a one-word query here, for more
+            // by its BM25 score, which its candidatesPerWord rows by hit count do not give: a word in at
+            // most EXACT_RANKED_DOCS_PER_MAX_DOCS × candidatesPerWord documents is read whole, like a words bucket;
+            // a larger one's candidatesPerWord best rows by score are read for a one-word query here, for more
             // words after the first walk when bucket 1 reaches the page (see below).
-            $fetchRows = $this->config->maxDocs;
+            $fetchRows = $this->config->limits->candidatesPerWord;
             $byScore   = false;
             if ($groups[$g]['truncated'] && $g === $order[0] && $strategy !== MatchingStrategy::All) {
                 if ($groups[$g]['df'] <= $scoredDocs) {
@@ -2882,11 +2882,11 @@ final class Index implements \Countable
         // Phase 3: walk the groups in order. A document's bucket is the number of leading groups
         // it contains; it is fixed at the first group it lacks, so later groups are never looked
         // up for it, and only the groups in its bucket add to its score (so how a word was cut at
-        // maxDocs cannot reorder documents within a bucket). A group cut at maxDocs is completed
+        // candidatesPerWord cannot reorder documents within a bucket). A group cut at candidatesPerWord is completed
         // for the documents still alive that it has not seen (completeGroup()); the rows it adds
         // are kept, so a second pass only looks up the documents added since.
         //
-        // The candidates are each fetched group's maxDocs best rows. When every word is common
+        // The candidates are each fetched group's candidatesPerWord best rows. When every word is common
         // those can hold too few full matches ("women cotton dress" on 1.43M products: 1 of 88
         // found), so after the first pass the top buckets are read exactly where they fall short
         // (exactBucketDocs(): the documents containing the first k groups, for k = all groups
@@ -3059,9 +3059,9 @@ final class Index implements \Countable
                 }
             }
             // Bucket 1 reaches the page (or, with filters, negations or distinct, may): its best
-            // documents are the first word's best rows by BM25 score, not the maxDocs rows with
+            // documents are the first word's best rows by BM25 score, not the candidatesPerWord rows with
             // the most hits fetched above. Read every row of the word in score order (one SQL
-            // sort: ecom "men", 21.8k documents, 5 ms) and keep the maxDocs best; a document of
+            // sort: ecom "men", 21.8k documents, 5 ms) and keep the candidatesPerWord best; a document of
             // bucket 1 not among them scores below all of them. Not with sort fields, which order
             // the bucket by value (the score rows did not change those pages, +29%).
             $first = $order[0];
@@ -3078,7 +3078,7 @@ final class Index implements \Countable
                     }
                     $best = $this->fetchDocsByTermIds(
                         $groups[$first]['words'],
-                        $this->config->maxDocs,
+                        $this->config->limits->candidatesPerWord,
                         array_filter($groups[$first]['words'], fn(array $w): bool => isset($w['distance'])) !== [],
                         $groups[$first]['idfK1p1'],
                         $k1_1mb,
@@ -3209,7 +3209,7 @@ final class Index implements \Countable
             }
         }
 
-        // The result set beyond the candidates, when maxDocs cut them: the documents with the
+        // The result set beyond the candidates, when candidatesPerWord cut them: the documents with the
         // groups up to minBucket, through any of their terms (typos, prefix, synonyms), that
         // pass the quoted phrases, negations and filters.
         $required       = array_map(fn(int $g): array => $groups[$g], array_slice($order, 0, $minBucket));
@@ -3235,32 +3235,32 @@ final class Index implements \Countable
                 $required,
                 $baseConditions,
                 $this->facetFilterConditions($filter),
-                $this->config->maxFacetCountDocs,
+                $this->config->limits->facetCountDocs,
             )
             : $this->computeFacetCounts(
                 $facets,
                 $filterSets,
                 $rawDocScores,
                 $docScores,
-                $this->config->maxFacetCountDocs,
+                $this->config->limits->facetCountDocs,
             ));
         $facetDistribution = $this->orderFacetValues($facetDistribution, $options->sortFacetValuesBy);
         $exhaustive = !$candidatesCapped && !$prefixCapped;
         $warnings   = [
             ...$warnings,
-            ...$this->capWarnings($candidatesCapped ? 'maxDocs' : null, $prefixCapped, $approximateFacets),
+            ...$this->capWarnings($candidatesCapped ? 'candidatesPerWord' : null, $prefixCapped, $approximateFacets),
         ];
 
         $total = count($docScores);
         if ($candidatesCapped && $distinct === null) {
             // The candidates hold only part of the matches: count them in SQL, up to one past
-            // maxTotalHits (the result is capped there).
+            // Limits::$totalHits (the result is capped there).
             $total = $classified !== null
-                ? min($classified['total'], $this->config->maxTotalHits + 1)
+                ? min($classified['total'], $this->config->limits->totalHits + 1)
                 : $this->countSearchMatches(
                     $required,
                     [...$baseConditions, ...$this->facetFilterConditions($filter)],
-                    $this->config->maxTotalHits + 1,
+                    $this->config->limits->totalHits + 1,
                 );
         }
 
@@ -3346,7 +3346,7 @@ final class Index implements \Countable
                 // The candidates hold only part of the matches: collapse all of them in SQL.
                 $conditions   = [...$baseConditions, ...$this->facetFilterConditions($filter)];
                 $distinctHits = $keyId === null
-                    ? $this->countSearchMatches($required, $conditions, $this->config->maxTotalHits + 1)
+                    ? $this->countSearchMatches($required, $conditions, $this->config->limits->totalHits + 1)
                     : $this->countDistinctMatches(
                         $this->searchMatchesSql($required, $conditions, orderFree: true),
                         $keyId,
@@ -3395,7 +3395,7 @@ final class Index implements \Countable
             );
         }
 
-        // When maxDocs cut the candidates, the matches the total counts beyond them follow the
+        // When candidatesPerWord cut the candidates, the matches the total counts beyond them follow the
         // ranked candidates (unscored, in result-set order), so no page up to the total is
         // empty. With sort fields they are sorted together with the candidates on every page,
         // so all pages come from one order.
@@ -3406,7 +3406,7 @@ final class Index implements \Countable
                 $required,
                 [...$baseConditions, ...$this->facetFilterConditions($filter)],
                 $docScores,
-                min($total, $sortSpecs !== [] ? $this->config->maxTotalHits : $offset + $limit) - $ranked,
+                min($total, $sortSpecs !== [] ? $this->config->limits->totalHits : $offset + $limit) - $ranked,
             );
             // Each holds the groups up to minBucket; its bucket and typos are not known, so it
             // ranks as the last of that bucket: the bucket's typo budget, score 0.
@@ -3569,10 +3569,10 @@ final class Index implements \Countable
     ): SearchResult {
         $options = $this->clampPage($options);
         return $this->withSortDetails($this->booleanSearch($phrase, $options), $options)
-            ->withTotalHitsCap($this->config->maxTotalHits);
+            ->withTotalHitsCap($this->config->limits->totalHits);
     }
 
-    /** searchBoolean() for a page inside Config::$maxTotalHits; totalHits not capped yet. */
+    /** searchBoolean() for a page inside Limits::$totalHits; totalHits not capped yet. */
     private function booleanSearch(string $phrase, SearchOptions $options): SearchResult
     {
         $this->checkDataVersion();
@@ -3607,16 +3607,16 @@ final class Index implements \Countable
         /** @infection-ignore-all ConcatOperandRemoval: '|' prefix is the OR identity; removing it or appending instead yields identical postfix because '|' is always the lowest-priority operator */
         [$postfix, $lastTerm] = BooleanParser::toPostfix('|' . $parsed['free_phrase']);
 
-        // PHP-side set evaluation: fetch per-term doc IDs (capped at maxDocs) from SQLite,
+        // PHP-side set evaluation: fetch per-term doc IDs (capped at candidatesPerWord) from SQLite,
         // then apply set operations in PHP via C-native array_intersect / array_diff /
         // array_unique. This avoids SQLite compound-query materialisation (UNION/INTERSECT/
         // EXCEPT over unbounded doclists) which was the main boolean performance bottleneck.
         // Each term lookup is a single indexed SELECT with LIMIT; the wordlistCache ensures
         // repeated keyword lookups within one query incur no extra DB round-trips.
 
-        $maxDocs = $this->config->maxDocs;
+        $maxDocs = $this->config->limits->candidatesPerWord;
 
-        // Set when a cap cut matches out: a keyword above maxDocs, or a capped prefix expansion.
+        // Set when a cap cut matches out: a keyword above candidatesPerWord, or a capped prefix expansion.
         $candidatesCapped = false;
         $prefixCapped     = false;
 
@@ -3660,7 +3660,7 @@ final class Index implements \Countable
             if ($token === '~') {
                 // NOT keeps its operand as a predicate (booleanRoot()), not as documents: an AND
                 // subtracts the documents of its positive side that satisfy it, exactly. Fetching
-                // the operand's first maxDocs documents left the others in the result.
+                // the operand's first candidatesPerWord documents left the others in the result.
                 array_pop($stack);
                 $operand = self::booleanOperand($postfix, $at);
                 $stack[] = ['__not__' => count($operand) === 1 && !in_array($operand[0], ['&', '|', '~'], true)
@@ -3730,13 +3730,13 @@ final class Index implements \Countable
             $filterSets,
             $rawDocSet,
             $filteredDocSet,
-            $this->config->maxFacetCountDocs,
+            $this->config->limits->facetCountDocs,
         );
         $facetDistribution = $this->orderFacetValues($facetDistribution, $options->sortFacetValuesBy);
         $exhaustive = !$candidatesCapped && !$prefixCapped;
         $warnings   = [
             ...$warnings,
-            ...$this->capWarnings($candidatesCapped ? 'maxDocs' : null, $prefixCapped, $approximateFacets),
+            ...$this->capWarnings($candidatesCapped ? 'candidatesPerWord' : null, $prefixCapped, $approximateFacets),
         ];
 
         $total = count($docIds);
@@ -3754,7 +3754,7 @@ final class Index implements \Countable
             )
             : null;
         if ($candidatesCapped && $distinct === null) {
-            $total = $this->countMatches($match, $this->config->maxTotalHits + 1);
+            $total = $this->countMatches($match, $this->config->limits->totalHits + 1);
         }
 
         if ($distinct !== null) {
@@ -3772,7 +3772,7 @@ final class Index implements \Countable
             );
             if ($candidatesCapped) {
                 $distinctHits = $keyId === null
-                    ? $this->countMatches($match, $this->config->maxTotalHits + 1)
+                    ? $this->countMatches($match, $this->config->limits->totalHits + 1)
                     : $this->countDistinctMatches($match, $keyId, $distinctCount);
             }
             return new SearchResult(
@@ -3846,7 +3846,7 @@ final class Index implements \Countable
             $keywords     = $parsed['filtered'];
             /** @var list<list<string>> $phraseGroups */
             $phraseGroups = $parsed['phrase_groups'];
-            $maxDocs      = $this->config->maxFacetCountDocs;
+            $maxDocs      = $this->config->limits->facetCountDocs;
             $last         = self::endsInQuotedPhrase($positive) ? -1 : count($keywords) - 1;
             foreach ($keywords as $i => $kw) {
                 $df            = 0;
@@ -3867,7 +3867,7 @@ final class Index implements \Countable
         $exhaustive = !$candidatesCapped && !$prefixCapped;
         $warnings   = [
             ...$warnings,
-            ...$this->capWarnings($candidatesCapped ? 'maxFacetCountDocs' : null, $prefixCapped, []),
+            ...$this->capWarnings($candidatesCapped ? 'facetCountDocs' : null, $prefixCapped, []),
         ];
 
         // --- Step 2: Facet filters ---
@@ -3984,7 +3984,7 @@ final class Index implements \Countable
      * are driven from the most selective one (see orderBySelectivity()).
      *
      * Facet counts are exact without a filter; with one they cover at most
-     * Config::$maxFacetCountDocs matching documents, as in search() (see browseFacetCounts()).
+     * Limits::$facetCountDocs matching documents, as in search() (see browseFacetCounts()).
      * distinct still needs every matching document in PHP to count the surviving groups, so
      * that combination costs O(matches); it is exact too.
      *
@@ -4142,12 +4142,12 @@ final class Index implements \Countable
      * of documents as "none of the other values". When the listed values hold more than half
      * of the key's rows, the other values select fewer rows, and an all-exclusion filter takes
      * the complement paths: exact totals and facet counts from facet_counts minus the excluded
-     * documents, instead of counting up to maxFacetCountDocs matching documents. The condition
+     * documents, instead of counting up to facetCountDocs matching documents. The condition
      * keeps its positive meaning for disjunctive facet counts ('selection'). Listed values
      * that cover every document match everything, so the condition is dropped.
      *
      * Counting through the excluded documents costs per excluded document (as counting the
-     * listed ones would), so the other values may hold at most maxFacetCountDocs rows: the work
+     * listed ones would), so the other values may hold at most facetCountDocs rows: the work
      * stays within what the capped count of the listed values costs. Measured on the 45k ecom
      * set, gender Women or Men (40.8k docs, 3.6k others), six facets: 9.9 ms exact.
      *
@@ -4184,7 +4184,7 @@ final class Index implements \Countable
             if (
                 $rows[0] !== $totalDocuments
                 || $otherRows >= $rows[1]
-                || $otherRows > $this->config->maxFacetCountDocs
+                || $otherRows > $this->config->limits->facetCountDocs
             ) {
                 $result[] = $condition;
                 continue;
@@ -4505,7 +4505,7 @@ final class Index implements \Countable
     /**
      * Total, facet counts and matching documents of a filtered browse, or of a search's whole
      * result set, from one read of each condition's documents; null when a condition holds more
-     * rows than Config::$maxFacetCountDocs (or cannot match) and the SQL paths apply.
+     * rows than Limits::$facetCountDocs (or cannot match) and the SQL paths apply.
      *
      * Reading a condition's documents in order costs a fraction of a probe per document, and
      * every facet group, the total and an unsorted page follow from the same sets. No group can
@@ -4530,7 +4530,7 @@ final class Index implements \Countable
         $rows = [];
         foreach ($conditions as $condition) {
             $rows[] = $count = $condition['impossible'] ? 0 : $this->conditionRowCount($condition);
-            if ($condition['impossible'] || $count > $this->config->maxFacetCountDocs) {
+            if ($condition['impossible'] || $count > $this->config->limits->facetCountDocs) {
                 return null;
             }
         }
@@ -4684,7 +4684,7 @@ final class Index implements \Countable
      * A group is counted from its own classes, or as the whole index (facet_counts) minus the
      * classes outside it, whichever needs fewer rows read in total: a broad filter's group is
      * mostly the documents outside it. Class 0 (in no condition's rows, $rest documents) is
-     * listed from doc_lengths only when the index is within Config::$maxFacetCountDocs.
+     * listed from doc_lengths only when the index is within Limits::$facetCountDocs.
      *
      * @param  array<int, list<int>> $classes From classifyDocs().
      * @param  array<array-key, array{require: int, forbid: int, keys: array<string, int>}> $groups
@@ -4777,7 +4777,7 @@ final class Index implements \Countable
     private function chooseInvertedGroups(array $sizes, array $groups, int $rest): array
     {
         $inverse = [];
-        if ($rest > 0 && array_sum($sizes) > $this->config->maxFacetCountDocs) {
+        if ($rest > 0 && array_sum($sizes) > $this->config->limits->facetCountDocs) {
             foreach ($groups as $id => $group) {
                 if (self::isClassInGroup(0, $group)) {
                     $inverse[$id] = true;
@@ -4865,7 +4865,7 @@ final class Index implements \Countable
      * With no filter to apply, a key is counted exactly over the whole index by one sequential
      * scan of its primary-key range, and with only exclusions to apply, exactly as that minus the
      * excluded documents. Otherwise counting costs one lookup per matching document and key, so
-     * — as in search() — it runs over at most Config::$maxFacetCountDocs matching documents and
+     * — as in search() — it runs over at most Limits::$facetCountDocs matching documents and
      * is approximate beyond that.
      *
      * @param  list<string>         $facetKeys
@@ -4907,7 +4907,7 @@ final class Index implements \Countable
         }
         // The common keys' documents are those of the first key whose own filter is one value list
         // that hold one of its values: counted in the same read (as in resultSetFacetCounts()),
-        // unless that read is cut at maxFacetCountDocs.
+        // unless that read is cut at facetCountDocs.
         $commonCounts = null;
         foreach ($own as $keyName => [$keyId, $others, $removed]) {
             $subset = null;
@@ -4961,7 +4961,7 @@ final class Index implements \Countable
      *
      * Exclusion-only conditions are counted as the whole index minus the excluded documents
      * (collectFacetCountsExcluding()), exactly; none over the whole index; anything else over
-     * the first Config::$maxFacetCountDocs documents of matchingDocsSql(), streamed into the
+     * the first Limits::$facetCountDocs documents of matchingDocsSql(), streamed into the
      * count (the documents browseFacetDocIds() lists, without the round trip through PHP;
      * $subset as in facetValueCountsOfDocs(), counted into $subsetCounts on that path only).
      * Returns true when the counts are approximate because the matches exceeded the cap.
@@ -4994,7 +4994,7 @@ final class Index implements \Countable
         if ($match === null) {
             return false;
         }
-        $cap       = $this->config->maxFacetCountDocs;
+        $cap       = $this->config->limits->facetCountDocs;
         $truncated = false;
         $results   = $this->facetCountsOfDocsSql(
             $nameToId,
@@ -5011,7 +5011,7 @@ final class Index implements \Countable
 
     /**
      * Documents to count browse facets over: null (the whole index) without conditions,
-     * otherwise up to Config::$maxFacetCountDocs matching documents.
+     * otherwise up to Limits::$facetCountDocs matching documents.
      *
      * @param  list<FacetCondition> $conditions
      * @param  bool                 $capped Set to true when more documents matched than the cap.
@@ -5027,7 +5027,7 @@ final class Index implements \Countable
         if ($match === null) {
             return [];
         }
-        $cap  = $this->config->maxFacetCountDocs;
+        $cap  = $this->config->limits->facetCountDocs;
         $stmt = $this->prepare($match[0] . ' LIMIT ?');
         $stmt->execute([...$match[1], $cap + 1]);
         /** @var list<int> $ids */
@@ -7961,7 +7961,7 @@ final class Index implements \Countable
      * Up to $count documents of the result set (searchMatchesSql() of $groups and $conditions)
      * that are not keys of $candidates, in the SQL's order (stable for the same data, so the
      * same documents fill every page). rankedSearch() appends them after its ranked candidates
-     * when maxDocs cut those.
+     * when candidatesPerWord cut those.
      *
      * @param  list<KeywordGroup>   $groups
      * @param  list<FacetCondition> $conditions
@@ -8046,7 +8046,7 @@ final class Index implements \Countable
     /**
      * `SELECT DISTINCT bm.doc_id …` of every document searchBoolean() matches for $postfix and
      * $conditions, with its parameters; null when none can. booleanSearch() evaluates the same
-     * expression over each term's first maxDocs documents; this one has no cap, for the total.
+     * expression over each term's first candidatesPerWord documents; this one has no cap, for the total.
      *
      * The postfix is walked with booleanSearch()'s rules: a negation outside an AND contributes
      * nothing, "~a & ~b" stays the negation of "a | b", and NOT subtracts from its AND partner.
@@ -8323,7 +8323,7 @@ final class Index implements \Countable
 
     /**
      * Disjunctive facet counts over the whole result set of a search whose candidates were cut
-     * at maxDocs (computeFacetCounts() counts the candidates, which are then only part of it):
+     * at candidatesPerWord (computeFacetCounts() counts the candidates, which are then only part of it):
      * each group's documents come from searchMatchesSql(), up to $maxDocs; a key with a positive
      * filter of its own is counted without that filter (exclusions always apply).
      *
@@ -8518,7 +8518,7 @@ final class Index implements \Countable
     /**
      * The rows of a keyword group for the documents in $docIds that the group has not read yet.
      *
-     * A group whose document frequency exceeds maxDocs (or that was not fetched at all, see
+     * A group whose document frequency exceeds candidatesPerWord (or that was not fetched at all, see
      * search()) holds only some of its rows. A document found through another group may still
      * contain it; this looks those rows up, scored with the group's IDF exactly as
      * fetchDocsByTermIds() scores them. Only the terms whose rows were cut are looked up (a term
@@ -10257,16 +10257,17 @@ final class Index implements \Countable
     /**
      * Warnings naming the caps that made a result approximate.
      *
-     * @param  'maxDocs'|'maxFacetCountDocs'|null $candidateCap Setting that capped the keyword candidates, if any.
-     * @param  list<string>                       $approximateFacets
+     * @param  'candidatesPerWord'|'facetCountDocs'|null $candidateCap Limit that capped the keyword candidates.
+     * @param  list<string>                                $approximateFacets
      * @return list<string>
      */
     private function capWarnings(?string $candidateCap, bool $prefixCapped, array $approximateFacets): array
     {
         $warnings = [];
         if ($candidateCap !== null) {
-            $cap        = $candidateCap === 'maxDocs' ? $this->config->maxDocs : $this->config->maxFacetCountDocs;
-            $warnings[] = "A keyword matched more than Config::\${$candidateCap} ({$cap}) documents; only the first "
+            $limits     = $this->config->limits;
+            $cap        = $candidateCap === 'candidatesPerWord' ? $limits->candidatesPerWord : $limits->facetCountDocs;
+            $warnings[] = "A keyword matched more than Limits::\${$candidateCap} ({$cap}) documents; only the first "
                 . "{$cap} were considered, so results and counts are estimates.";
         }
         if ($prefixCapped) {
@@ -10275,10 +10276,10 @@ final class Index implements \Countable
                 . "prefix; only the {$cap} shortest were searched.";
         }
         if ($approximateFacets !== []) {
-            $cap        = $this->config->maxFacetCountDocs;
+            $cap        = $this->config->limits->facetCountDocs;
             $fields     = implode(', ', array_map(fn(string $f): string => "'{$f}'", $approximateFacets));
             $warnings[] = "Facet counts for {$fields} cover only {$cap} of the matching documents "
-                . '(Config::$maxFacetCountDocs).';
+                . '(Limits::$facetCountDocs).';
         }
         return $warnings;
     }

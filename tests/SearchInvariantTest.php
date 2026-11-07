@@ -5,6 +5,7 @@ namespace Fuzor\Tests;
 use Fuzor\Config;
 use Fuzor\FacetExclude;
 use Fuzor\Index;
+use Fuzor\Limits;
 use Fuzor\MatchingStrategy;
 use Fuzor\SchemaConfig;
 use Fuzor\SearchOptions;
@@ -13,7 +14,7 @@ use PHPUnit\Framework\TestCase;
 
 /**
  * Properties search() must keep whatever its caps are, checked on small random indexes: the
- * same file is searched with a tiny maxDocs (every word is cut) and with no cap (the reference).
+ * same file is searched with a tiny candidatesPerWord (every word is cut) and with no cap (the reference).
  */
 class SearchInvariantTest extends TestCase
 {
@@ -110,7 +111,7 @@ class SearchInvariantTest extends TestCase
         $this->assertGreaterThan(0, $checked, 'no exhaustive result to compare');
     }
 
-    /** totalHits is the uncapped number of matches, whatever maxDocs cut from the candidates. */
+    /** totalHits is the uncapped number of matches, whatever candidatesPerWord cut from the candidates. */
     #[DataProvider('seeds')]
     public function testTotalHitsEqualsUncappedTotal(int $seed): void
     {
@@ -161,7 +162,7 @@ class SearchInvariantTest extends TestCase
         $this->assertGreaterThan(0, $cut, 'no capped boolean search');
     }
 
-    /** Facet counts cover the whole result set, not the candidates maxDocs left. */
+    /** Facet counts cover the whole result set, not the candidates candidatesPerWord left. */
     #[DataProvider('seeds')]
     public function testFacetCountsEqualUncappedCounts(int $seed): void
     {
@@ -182,8 +183,8 @@ class SearchInvariantTest extends TestCase
     }
 
     /**
-     * A one-word query whose word is cut at maxDocs ranks its documents by BM25 score: the
-     * maxDocs best by score are fetched, not the maxDocs with the most hits, so a page within
+     * A one-word query whose word is cut at candidatesPerWord ranks its documents by BM25 score: the
+     * candidatesPerWord best by score are fetched, not the candidatesPerWord with the most hits, so a page within
      * them equals the uncapped one (short words: no typo derivations).
      */
     #[DataProvider('seeds')]
@@ -203,7 +204,7 @@ class SearchInvariantTest extends TestCase
                 "\"$word\"",
             );
         }
-        $this->assertGreaterThan(0, $checked, 'no word above 4 × maxDocs');
+        $this->assertGreaterThan(0, $checked, 'no word above 4 × candidatesPerWord');
     }
 
     /** A page that starts at totalHits or later is empty. */
@@ -388,7 +389,10 @@ class SearchInvariantTest extends TestCase
     {
         return new Index(
             $this->dbPath,
-            config: new Config(maxDocs: $maxDocs, maxFacetCountDocs: 100_000_000, proximityBoost: 0.0),
+            config: new Config(
+                limits: new Limits(candidatesPerWord: $maxDocs, facetCountDocs: 100_000_000),
+                proximityBoost: 0.0,
+            ),
             readonly: true,
         );
     }
@@ -485,7 +489,7 @@ class SearchInvariantTest extends TestCase
 
     /**
      * A random index (Zipf-like word frequencies, so a few words are in most documents) opened
-     * twice: with maxDocs 5 and uncapped.
+     * twice: with candidatesPerWord 5 and uncapped.
      *
      * @return array{Index, Index, list<string>, list<array<string, mixed>>}
      */
@@ -521,11 +525,13 @@ class SearchInvariantTest extends TestCase
         }
         $reference = new Index(
             $this->dbPath,
-            config: new Config(maxDocs: 100_000_000, maxFacetCountDocs: 100_000_000),
+            config: new Config(limits: new Limits(candidatesPerWord: 100_000_000, facetCountDocs: 100_000_000)),
             schema: new SchemaConfig(filterableAttributes: ['color', 'price'], sortableAttributes: ['price']),
         );
         $reference->insert($docs);
-        $capped = new Index($this->dbPath, config: new Config(maxDocs: 5), readonly: true);
+        $capped = new Index($this->dbPath, config: new Config(
+            limits: new Limits(candidatesPerWord: 5),
+        ), readonly: true);
 
         $queries = [];
         while (count($queries) < self::QUERIES) {

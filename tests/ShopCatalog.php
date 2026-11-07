@@ -8,6 +8,7 @@ use Fuzor\Config;
 use Fuzor\FacetExclude;
 use Fuzor\FacetOrder;
 use Fuzor\FacetRange;
+use Fuzor\Limits;
 use Fuzor\MatchingStrategy;
 use Fuzor\SchemaConfig;
 use Fuzor\SearchOptions;
@@ -211,12 +212,10 @@ final class ShopCatalog
     private static function config(int $maxDocs, int $maxValuesPerFacet): Config
     {
         return new Config(
-            maxDocs: $maxDocs,
+            limits: new Limits(candidatesPerWord: $maxDocs, facetCountDocs: 50000, totalHits: 10100),
             maxValuesPerFacet: $maxValuesPerFacet,
             fieldBoosts: ['title' => 3.0],
             typoTolerance: new TypoTolerance(disableOnNumbers: true),
-            maxTotalHits: 10100,
-            maxFacetCountDocs: 50000,
         );
     }
 

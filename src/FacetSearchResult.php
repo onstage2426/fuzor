@@ -33,7 +33,7 @@ final class FacetSearchResult implements \Countable, \IteratorAggregate
     public readonly array $warnings;
 
     /**
-     * False when the FTS query's candidate documents were capped (Config::$maxFacetCountDocs per
+     * False when the FTS query's candidate documents were capped (Limits::$facetCountDocs per
      * keyword, or Config::$fuzzyMaxExpansions prefix terms), so the counts are approximate.
      * Always true without a query.
      */

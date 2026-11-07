@@ -8,8 +8,8 @@ namespace Fuzor;
 final readonly class Config
 {
     public function __construct(
-        /** @infection-ignore-all DecrementInteger,IncrementInteger: default value; exact number only affects result cap, not correctness */
-        public int $maxDocs = 500,
+        /** How much of a large result set a search reads: Limits::fast() (default) or Limits::exact(). */
+        public Limits $limits = new Limits(),
         /** BM25 term frequency saturation parameter. */
         public float $k1 = 1.2,
         /** BM25 document length normalisation weight (0 = none, 1 = full). */
@@ -29,11 +29,6 @@ final readonly class Config
          * @infection-ignore-all: default value; mutations only affect ranking magnitude, not correctness
          */
         public float $proximityBoost = 1.0,
-        /** Maximum matching doc IDs included in facet counting — for search() / searchBoolean(),
-         *  a filtered browse, and facetSearch() with a query. Counts are approximate when more
-         *  documents match. Counts with no filter and no query are always exact. Counting costs
-         *  about 0.6–1 µs per document, so the default bounds it near 50 ms per facet group. */
-        public int $maxFacetCountDocs = 50_000,
         /**
          * Maximum number of values returned per facet field in $facetDistribution.
          * Values are ordered by count descending; the tail is truncated.
@@ -108,22 +103,9 @@ final readonly class Config
          * @infection-ignore-all: default value; mutations only affect memory and speed, not correctness
          */
         public int $insertChunkSize = 2_000,
-        /**
-         * Most documents a search can reach: offset and limit are clamped so that no hit ranked
-         * past this number is returned, and $totalHits stops at it (SearchResult::$totalHitsCapped
-         * is then true, so a UI can show "1000+"). Applies to search(), searchBoolean() and a
-         * browse (empty query); facet counts are not affected (see $maxFacetCountDocs). A search
-         * counts its matches up to this number, so a larger value costs more on broad queries.
-         *
-         * @infection-ignore-all: default value; mutations only move the cap
-         */
-        public int $maxTotalHits = 1_000,
     ) {
         if ($insertChunkSize < 1) {
             throw new \InvalidArgumentException('insertChunkSize must be >= 1.');
-        }
-        if ($maxTotalHits < 1) {
-            throw new \InvalidArgumentException('maxTotalHits must be >= 1.');
         }
     }
 }

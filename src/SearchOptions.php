@@ -82,7 +82,7 @@ final readonly class SearchOptions
     /**
      * The same options for another page.
      *
-     * @internal Index clamps offset and limit to Config::$maxTotalHits with it.
+     * @internal Index clamps offset and limit to Limits::$totalHits with it.
      */
     public function withPage(int $offset, int $limit): self
     {
