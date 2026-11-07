@@ -215,6 +215,18 @@ final class Index implements \Countable
     private const float SORT_VALUE_SCAN_SHARE = 0.4;
 
     /**
+     * facet_counts rows read in the time one document's doc_facets row is read and counted:
+     * what counting a facet group as the whole index minus other documents costs up front.
+     */
+    private const int FACET_COUNT_ROWS_PER_DOC = 3;
+
+    /** See overClasses(): rows read per row of the most selective condition, without facets. */
+    private const int CLASS_ROWS_PER_DRIVER_ROW = 8;
+
+    /** Most conditions facetCountsOfClasses() tells apart: one bit each in an integer. */
+    private const int MAX_CLASS_CONDITIONS = 16;
+
+    /**
      * A sorted filtered browse walks the sort field's index while it expects to read at most this
      * many index rows per matching document, and materialises the matches otherwise; the walk
      * also stops after that many rows and falls back, so a page costs at most about twice the
@@ -4007,11 +4019,16 @@ final class Index implements \Countable
             ...$negations,
         ]);
         $match      = $conditions === [] ? null : $this->matchingDocsSql($conditions);
+        // Conditions small enough to hold in PHP are read once, for the total, the facet groups
+        // and an unsorted page; a single condition without facets needs none of that.
+        $classified = $negations === [] && $match !== null && ($facets !== [] || count($conditions) > 1)
+            ? $this->overClasses($facets, $conditions, $totalDocuments)
+            : null;
         // With facets to count over the matching documents, fetch their IDs once (up to the facet
         // cap + 1): under the cap the list length is the exact total and the same IDs feed the
         // facet counts, instead of evaluating the filter twice (COUNT, then the IDs).
         $matchIds = null;
-        if ($facets !== [] && $match !== null && !self::isExclusionOnly($conditions)) {
+        if ($classified === null && $facets !== [] && $match !== null && !self::isExclusionOnly($conditions)) {
             $capped   = false;
             $ids      = $this->browseFacetDocIds($conditions, $capped) ?? [];
             $matchIds = ['ids' => $ids, 'capped' => $capped];
@@ -4019,6 +4036,7 @@ final class Index implements \Countable
         $total      = match (true) {
             $conditions === []                         => $totalDocuments,
             $match === null                            => 0,
+            $classified !== null                       => $classified['total'],
             self::isExclusionOnly($conditions)         => $totalDocuments - $this->countExcludedDocs($conditions),
             $matchIds !== null && !$matchIds['capped'] => count($matchIds['ids']),
             default                                    => $this->countBrowseDocs($conditions, $match),
@@ -4034,12 +4052,13 @@ final class Index implements \Countable
             'distribution' => $facetDistribution,
             'stats'        => $facetStats,
             'approximate'  => $approximateFacets,
-        ] = $this->browseFacetCounts($facets, $conditions, $matchIds);
+        ] = $classified ?? $this->browseFacetCounts($facets, $conditions, $matchIds);
         $facetDistribution = $this->orderFacetValues($facetDistribution, $options->sortFacetValuesBy);
         $warnings = [...$warnings, ...$this->capWarnings(null, false, $approximateFacets)];
 
         if ($distinct !== null) {
-            $docIds = $total === 0 ? [] : $this->fetchBrowseDocIds($conditions);
+            $docIds = $total === 0 ? [] : self::newestFirst($classified['ids'] ?? null)
+                ?? $this->fetchBrowseDocIds($conditions);
             $sortedDocIds = $sortSpecs !== [] ? $this->sortDocIdsBySpecs($docIds, $sortSpecs, []) : $docIds;
             [$pagedIds, $distinctHits] = $this->applyDistinctPagination(
                 $sortedDocIds,
@@ -4067,6 +4086,8 @@ final class Index implements \Countable
             $pagedIds = [];
         } elseif ($sortSpecs !== []) {
             $pagedIds = $this->browseSortedPage($sortSpecs, $conditions, $offset, $limit, $total, $totalDocuments);
+        } elseif (isset($classified['ids'])) {
+            $pagedIds = array_slice(self::newestFirst($classified['ids']) ?? [], $offset, $limit);
         } else {
             $pagedIds = $this->browseUnsortedPage($conditions, $probe, $offset, $limit);
         }
@@ -4435,6 +4456,355 @@ final class Index implements \Countable
     }
 
     /**
+     * Whether a condition is left out when counting $keyName: only positive filters are
+     * disjunctive. An exclusion also applies to its own field, unless it stands for a positive
+     * one (complementSelections()).
+     *
+     * @param FacetCondition $condition
+     */
+    private static function isDisjunctiveFor(array $condition, string $keyName): bool
+    {
+        return $condition['name'] === $keyName && (!$condition['exclude'] || isset($condition['selection']));
+    }
+
+    /**
+     * Total, facet counts and matching documents of a filtered browse from one read of each
+     * condition's documents; null when a condition holds more rows than
+     * Config::$maxFacetCountDocs (or cannot match) and the SQL paths apply.
+     *
+     * Reading a condition's documents in order costs a fraction of a probe per document, and
+     * every facet group, the total and an unsorted page follow from the same sets. No group can
+     * exceed the cap here, so the counts are exact, as the SQL paths' are below it.
+     *
+     * @param  list<string>         $facetKeys
+     * @param  list<FacetCondition> $conditions Ordered by orderBySelectivity().
+     * @return array{
+     *     total: int,
+     *     ids: list<int>|null,
+     *     distribution: array<string, array<array-key, int>>,
+     *     stats: array<string, array{min: float, max: float}>,
+     *     approximate: list<string>
+     * }|null ids: the matching documents, in no order; null when they are "all except" some.
+     */
+    private function overClasses(array $facetKeys, array $conditions, int $totalDocuments): ?array
+    {
+        // One condition shares nothing between reads; more than the bits of a mask are not told apart.
+        if (count($conditions) < 2 || count($conditions) > self::MAX_CLASS_CONDITIONS) {
+            return null;
+        }
+        $rows = [];
+        foreach ($conditions as $condition) {
+            $rows[] = $count = $condition['impossible'] ? 0 : $this->conditionRowCount($condition);
+            if ($condition['impossible'] || $count > $this->config->maxFacetCountDocs) {
+                return null;
+            }
+        }
+        $positive = 0;
+        $negative = 0;
+        foreach ($conditions as $i => $condition) {
+            $condition['exclude'] ? $negative |= 1 << $i : $positive |= 1 << $i;
+        }
+        $all    = ['require' => $positive, 'forbid' => $negative, 'keys' => []];
+        $groups = ['common' => $all];
+        $names  = [];
+        foreach ($facetKeys as $keyName) {
+            $keyId = $this->lookupFacetKeyId($keyName);
+            if ($keyId === null) {
+                continue;
+            }
+            $removed = 0;
+            foreach ($conditions as $i => $condition) {
+                $removed |= self::isDisjunctiveFor($condition, $keyName) ? 1 << $i : 0;
+            }
+            $id = $removed === 0 ? 'common' : (string) $removed;
+            $groups[$id] ??= ['require' => $positive & ~$removed, 'forbid' => $negative & ~$removed, 'keys' => []];
+            $groups[$id]['keys'][$keyName] = $keyId;
+            $names[$removed === 0 ? 1 : 0][] = $keyName;
+        }
+        // The SQL paths probe from the most selective condition. The reads pay when facet groups
+        // share them; without facets (total and page only) while the rows read stay within
+        // CLASS_ROWS_PER_DRIVER_ROW of that condition's (amazon category 28.6k + best sellers:
+        // 0.2 ms probed, 4.2 ms read), and with one group needing a positive condition within
+        // half that (a 7.7k-product shop, a small category + hidden products: 2.6 ms probed, 2.9 ms
+        // read).
+        $positiveRows = array_filter($rows, fn(int $i): bool => !$conditions[$i]['exclude'], ARRAY_FILTER_USE_KEY);
+        $drivers      = 0;
+        foreach ($groups as $id => $group) {
+            $drivers += $group['require'] !== 0 && ($group['keys'] !== [] || $id === 'common') ? 1 : 0;
+        }
+        $budget = match (true) {
+            $positiveRows === [] => null,
+            $facetKeys === []    => self::CLASS_ROWS_PER_DRIVER_ROW,
+            $drivers <= 1        => intdiv(self::CLASS_ROWS_PER_DRIVER_ROW, 2),
+            default              => null,
+        };
+        if ($budget !== null && array_sum($rows) > $budget * min($positiveRows ?: [0])) {
+            return null;
+        }
+        $classes = $this->classifyDocs($conditions);
+        $rest    = $totalDocuments - array_sum(array_map(count(...), $classes));
+
+        $counts       = $this->facetCountsOfClasses($classes, $rest, $groups);
+        $distribution = [];
+        $stats        = [];
+        // Keys with an own filter first: the order the SQL paths give.
+        foreach ([...$names[0] ?? [], ...$names[1] ?? []] as $keyName) {
+            if (isset($counts[$keyName])) {
+                $this->mergeFacetCounts([$keyName => $counts[$keyName]], $distribution, $stats);
+            }
+        }
+
+        $ids   = [];
+        $total = self::isClassInGroup(0, $all) ? $rest : 0;
+        foreach ($classes as $mask => $docs) {
+            if (self::isClassInGroup($mask, $all)) {
+                $total += count($docs);
+                array_push($ids, ...$docs);
+            }
+        }
+        return [
+            'total'        => $total,
+            'ids'          => $positive === 0 ? null : $ids,
+            'distribution' => $distribution,
+            'stats'        => $stats,
+            'approximate'  => [],
+        ];
+    }
+
+    /**
+     * @param  list<int>|null $ids
+     * @return list<int>|null
+     */
+    private static function newestFirst(?array $ids): ?array
+    {
+        if ($ids !== null) {
+            rsort($ids);
+        }
+        return $ids;
+    }
+
+    /**
+     * The documents of each condition's rows, grouped by which conditions hold them: bit i of a
+     * mask = in the rows of $conditions[$i]. A document in no rows is in no class.
+     *
+     * @param  list<FacetCondition> $conditions
+     * @return array<int, list<int>> mask → documents
+     */
+    private function classifyDocs(array $conditions): array
+    {
+        $masks = [];
+        foreach ($conditions as $i => $condition) {
+            $stmt = $this->prepare('SELECT cd.doc_id ' . sprintf($condition['rows'], 'cd'));
+            $stmt->execute($condition['params']);
+            /** @var list<int> $docs */
+            $docs = $stmt->fetchAll(PDO::FETCH_COLUMN);
+            $bit  = 1 << $i;
+            if ($masks === []) {
+                $masks = array_fill_keys($docs, $bit);
+                continue;
+            }
+            foreach ($docs as $doc) {
+                $masks[$doc] = ($masks[$doc] ?? 0) | $bit;
+            }
+        }
+        $classes = [];
+        foreach ($masks as $doc => $mask) {
+            $classes[$mask][] = $doc;
+        }
+        return $classes;
+    }
+
+    /**
+     * Whether a class's documents belong to a facet group.
+     *
+     * @param array{require: int, forbid: int, keys: array<string, int>} $group
+     */
+    private static function isClassInGroup(int $mask, array $group): bool
+    {
+        return ($mask & $group['require']) === $group['require'] && ($mask & $group['forbid']) === 0;
+    }
+
+    /**
+     * Facet counts of several groups of keys over one set of classes, each doc_facets row read
+     * and counted once however many groups hold it.
+     *
+     * A group is counted from its own classes, or as the whole index (facet_counts) minus the
+     * classes outside it, whichever needs fewer rows read in total: a broad filter's group is
+     * mostly the documents outside it. Class 0 (in no condition's rows, $rest documents) is
+     * listed from doc_lengths only when the index is within Config::$maxFacetCountDocs.
+     *
+     * @param  array<int, list<int>> $classes From classifyDocs().
+     * @param  array<array-key, array{require: int, forbid: int, keys: array<string, int>}> $groups
+     * @return array<string, array{distribution: array<array-key, int>, stats: array{min: float, max: float}|null}>
+     */
+    private function facetCountsOfClasses(array $classes, int $rest, array $groups): array
+    {
+        $sizes = array_map(count(...), $classes);
+        if ($rest > 0) {
+            $sizes[0] = $rest;
+        }
+        $groups  = array_filter($groups, fn(array $group): bool => $group['keys'] !== []);
+        $inverse = $this->chooseInvertedGroups($sizes, $groups, $rest);
+
+        // The classes to read, and the keys their counts are kept for.
+        $wanted = [];
+        $read   = [];
+        foreach ($groups as $id => $group) {
+            $wanted += array_flip($group['keys']);
+            foreach ($sizes as $mask => $_) {
+                if (self::isClassInGroup($mask, $group) !== isset($inverse[$id])) {
+                    $read[$mask] = true;
+                }
+            }
+        }
+        if (isset($read[0])) {
+            $classes[0] = $this->docsOutsideClasses($classes);
+        }
+        $stmt = $this->stmt(
+            'classFacetBlobs',
+            'SELECT df.vids FROM json_each(?) j CROSS JOIN doc_facets df ON df.doc_id = j.value'
+        );
+        $counted = [];
+        foreach ($read as $mask => $_) {
+            $docs = $classes[$mask] ?? [];
+            sort($docs);
+            $vidCounts = [];
+            foreach (array_chunk($docs, 20_000) as $chunk) {
+                $stmt->execute([json_encode($chunk)]);
+                /** @var list<string> $blobs */
+                $blobs = $stmt->fetchAll(PDO::FETCH_COLUMN);
+                self::countPackedIds($blobs, $vidCounts);
+            }
+            $kept = [];
+            foreach ($vidCounts as $vid => $n) {
+                if (isset($wanted[$vid >> self::FACET_VALUE_KEY_SHIFT])) {
+                    $kept[$vid] = $n;
+                }
+            }
+            $counted[$mask] = $kept;
+        }
+
+        $results = [];
+        foreach ($groups as $id => $group) {
+            $vidCounts = [];
+            foreach ($counted as $mask => $classCounts) {
+                if (self::isClassInGroup($mask, $group) === isset($inverse[$id])) {
+                    continue;
+                }
+                if ($vidCounts === []) {
+                    $vidCounts = $classCounts;
+                    continue;
+                }
+                foreach ($classCounts as $vid => $n) {
+                    $vidCounts[$vid] = ($vidCounts[$vid] ?? 0) + $n;
+                }
+            }
+            $byKey = $this->valueCountsOfIds($group['keys'], $vidCounts);
+            if (!isset($inverse[$id])) {
+                $results += self::summarizeKeyCounts($group['keys'], $byKey);
+                continue;
+            }
+            foreach ($group['keys'] as $keyName => $keyId) {
+                $results[$keyName] = $this->keyCountsWithout($keyId, $byKey[$keyId] ?? []);
+            }
+        }
+        return $results;
+    }
+
+    /**
+     * Which groups facetCountsOfClasses() counts as the whole index minus the classes outside
+     * them: the combination with the fewest rows to read, a group's facet_counts rows included
+     * (groups share classes, so they are weighed together). Class 0 cannot be listed in a large
+     * index: there a group holding it has to be inverted and one without it cannot be.
+     *
+     * @param  array<int, int> $sizes mask → documents
+     * @param  array<array-key, array{require: int, forbid: int, keys: array<string, int>}> $groups
+     * @return array<array-key, true>
+     */
+    private function chooseInvertedGroups(array $sizes, array $groups, int $rest): array
+    {
+        $inverse = [];
+        if ($rest > 0 && array_sum($sizes) > $this->config->maxFacetCountDocs) {
+            foreach ($groups as $id => $group) {
+                if (self::isClassInGroup(0, $group)) {
+                    $inverse[$id] = true;
+                }
+            }
+            return $inverse;
+        }
+        // Per group, the classes either way as bit sets over the classes.
+        $classBit = array_flip(array_keys($sizes));
+        $weights  = [];
+        foreach ($groups as $id => $group) {
+            $own = 0;
+            foreach ($classBit as $mask => $bit) {
+                $own |= self::isClassInGroup($mask, $group) ? 1 << $bit : 0;
+            }
+            $weights[] = [$id, $own, ((1 << count($sizes)) - 1) & ~$own, $this->facetCountRows($group['keys'])];
+        }
+        $sizeOf = array_values($sizes);
+        $best   = PHP_INT_MAX;
+        for ($choice = 0; $choice < 1 << count($weights); $choice++) {
+            $read = 0;
+            $cost = 0;
+            foreach ($weights as $i => [, $own, $others, $rows]) {
+                $inverted = ($choice >> $i & 1) === 1;
+                $read    |= $inverted ? $others : $own;
+                $cost    += $inverted ? intdiv($rows, self::FACET_COUNT_ROWS_PER_DOC) : 0;
+            }
+            foreach ($sizeOf as $bit => $size) {
+                $cost += ($read >> $bit & 1) * $size;
+            }
+            if ($cost < $best) {
+                $best    = $cost;
+                $inverse = [];
+                foreach ($weights as $i => [$id]) {
+                    if (($choice >> $i & 1) === 1) {
+                        $inverse[$id] = true;
+                    }
+                }
+            }
+        }
+        return $inverse;
+    }
+
+    /**
+     * Rows of the keys in facet_counts.
+     *
+     * @param array<string, int> $nameToId
+     */
+    private function facetCountRows(array $nameToId): int
+    {
+        $stmt = $this->stmt(
+            'facetCountRows',
+            'SELECT COUNT(*) FROM json_each(?) j CROSS JOIN facet_counts fc ON fc.key_id = j.value'
+        );
+        $stmt->execute([json_encode(array_values($nameToId))]);
+        $rows = (int) $stmt->fetchColumn();
+        $stmt->closeCursor();
+        return $rows;
+    }
+
+    /**
+     * Documents in no class.
+     *
+     * @param  array<int, list<int>> $classes
+     * @return list<int>
+     */
+    private function docsOutsideClasses(array $classes): array
+    {
+        $stmt = $this->stmt('allDocIds', 'SELECT doc_id FROM doc_lengths');
+        $stmt->execute();
+        /** @var list<int> $docs */
+        $docs = $stmt->fetchAll(PDO::FETCH_COLUMN);
+        $all  = array_flip($docs);
+        foreach ($classes as $members) {
+            $all = array_diff_key($all, array_flip($members));
+        }
+        return array_keys($all);
+    }
+
+    /**
      * Facet value counts for a browse.
      *
      * Same semantics as computeFacetCounts(): a requested key that is also an active filter is
@@ -4468,15 +4838,18 @@ final class Index implements \Countable
             if ($keyId === null) {
                 continue;
             }
-            // Only positive filters are disjunctive: an exclusion also applies to its own field,
-            // unless it stands for a positive one (complementSelections()).
-            $kept = fn(array $c): bool => $c['exclude'] && !isset($c['selection']) || $c['name'] !== $keyName;
-            $others = array_values(array_filter($conditions, $kept));
+            $others = array_values(array_filter(
+                $conditions,
+                fn(array $c): bool => !self::isDisjunctiveFor($c, $keyName),
+            ));
             if (count($others) === count($conditions)) {
                 $common[$keyName] = $keyId;
                 continue;
             }
-            $removed = array_values(array_filter($conditions, fn(array $c): bool => !$kept($c)));
+            $removed = array_values(array_filter(
+                $conditions,
+                fn(array $c): bool => self::isDisjunctiveFor($c, $keyName),
+            ));
             $own[$keyName] = [$keyId, $others, $removed];
         }
         // The common keys' documents are those of the first key whose own filter is one value list
