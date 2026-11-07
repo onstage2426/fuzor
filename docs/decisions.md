@@ -26,7 +26,7 @@ page, or if the IDs arrive grouped by key already.
 the hidden documents' `doc_facets` rows and subtracts them from `facet_counts`. Change the format
 before 2.0 so that this costs less.
 
-**Why rejected:** measured on a production catalogue (homelab; 7,712 products, 42 keys, 1,325
+**Why rejected:** measured on a 7.7k-product shop catalogue (homelab; 7,712 products, 42 keys, 1,325
 hidden holding 39,996 value IDs, 6,142 distinct; 28 facets; new connection per request). Without
 that step (wrong counts, as an upper bound) the page takes 4.0 instead of 6.8 ms. Of its 2.8 ms,
 reading the rows is 0.6, counting the IDs 1.3 and turning them into values 0.9. Nothing tried
@@ -129,7 +129,7 @@ and counting them, or if `k1`/`b` move into the schema for another reason. Numbe
 ## Rejected: one document per variation with per-product facet counts (2026-10-07)
 
 **Proposal:** index each product variation (size, colour) as its own document and have facet
-counts count distinct products instead of documents (raised by the `fuzor-wp` review).
+counts count distinct products instead of documents (raised in an integration review).
 
 **Why rejected:** it multiplies the index size by the number of variations, and counting
 distinct groups per facet value is O(matches) for every value without bitmaps, so every
@@ -143,8 +143,8 @@ consumer shows that the combined-facet pattern cannot express its filters.
 ## Rejected: a facet value to label map (2026-10-07)
 
 **Proposal:** store a display label per facet value (slug `rosa-clara` → `Rosa Clará`) so
-`facetDistribution` and `facetSearch()` can return and match labels (raised by the
-`fuzor-wp` review).
+`facetDistribution` and `facetSearch()` can return and match labels (raised in an
+integration review).
 
 **Why rejected:** labels are presentation data that the consumer already has. The real need
 was matching typed text against slug values; case and accent folding plus matching at the
@@ -156,7 +156,7 @@ unanswerable.
 ## Rejected: facet bitmaps (2026-10-07)
 
 **Proposal:** keep a bitmap of document IDs per facet value and intersect bitmaps for
-filtered facet counts (raised by the `fuzor-wp` review).
+filtered facet counts (raised in an integration review).
 
 **Why rejected:** SQLite has no native bitmap type. Bitmaps kept as PHP blobs would rewrite
 large values on every write and have to be loaded and decoded on every read. The measured
@@ -198,8 +198,8 @@ rather than counting speed.
 
 ## Rejected: field weights in `SchemaConfig` (2026-10-07)
 
-**Proposal:** declare per-field ranking weights in the schema at creation time (raised by the
-`fuzor-wp` review).
+**Proposal:** declare per-field ranking weights in the schema at creation time (raised in an
+integration review).
 
 **Why rejected:** `Config::$fieldBoosts` already does this, per open instead of per file,
 which is more flexible: weights can change without a rebuild. The consumer that raised it
@@ -222,10 +222,10 @@ outgrow a file are better served by a search server than by Fuzor on a network d
 ## Rejected: a per-index result cache keyed by revision (2026-10-07)
 
 **Proposal:** cache search results inside the library, invalidated when the index changes
-(raised by the `fuzor-wp` review).
+(raised in an integration review).
 
 **Why rejected:** under PHP-FPM a process keeps nothing between requests, so an in-process
-cache rarely hits. Caching belongs in front of the library: `fuzor-wp` already caches
+cache rarely hits. Caching belongs in front of the library: an integration can cache
 responses by ETag keyed on the file state, which also serves CDNs.
 
 **When to revisit:** for long-running servers (Swoole, FrankenPHP worker mode) if repeat
@@ -233,7 +233,7 @@ queries show up as a measurable share of the load.
 
 ## Rejected: `SchemaConfig::$htmlFields` — store converted text (2026-09-27)
 
-**Proposal:** a per-field `htmlFields: list<string>` schema option (raised by the `fuzor-wp`
+**Proposal:** a per-field `htmlFields: list<string>` schema option (raised in an integration
 review after 1.6.0). Declared fields are converted with `HtmlText::toText()` on insert,
 update, and upsert, and the **text** is both indexed and stored, so hits, `getMany()`, and
 `stream()` return text and `escapeFormatted` only has to escape. Persisted in `info`,
@@ -267,7 +267,7 @@ evidence that pre-converting in the caller is a real burden.
 ## Rejected: the document ID as a built-in sort key (2026-09-27)
 
 **Proposal:** treat `id:asc` / `id:desc` as declared by default, sorting on `doc_id` directly
-with no `facet_values` lookup (raised by the `fuzor-wp` review after 1.6.0 started ignoring
+with no `facet_values` lookup (raised in an integration review after 1.6.0 started ignoring
 undeclared sort fields, which silently changed the order for callers passing `id:asc`).
 
 **Why rejected:** it is already possible. Declaring `id` in `facetFields` stores the ID as a
@@ -286,8 +286,8 @@ sorting by ID turns out to be common enough that declaring it is a recurring stu
 
 ## Rejected: escaping `_formatted` by default (2026-09-26)
 
-**Proposal:** make `SearchOptions::$escapeFormatted` default to `true` in 2.0 (raised by the
-`fuzor-wp` review), so `_formatted` is safe HTML unless a caller opts out.
+**Proposal:** make `SearchOptions::$escapeFormatted` default to `true` in 2.0 (raised in an
+integration review), so `_formatted` is safe HTML unless a caller opts out.
 
 **Why rejected:** it breaks callers silently in both directions. Anyone who stores sanitized
 HTML and renders `_formatted` would start showing literal `&lt;p&gt;` text, and anyone who

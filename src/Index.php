@@ -6668,7 +6668,7 @@ final class Index implements \Countable
      * of doclist.
      *
      * A broad query's pairs are most of its terms' rows: then those rows are read in sequence,
-     * ~0.5 µs a row against ~1.1 µs for a primary-key seek ("tegels 60x60" on 7.7k products,
+     * ~0.5 µs a row against ~1.1 µs for a primary-key seek (a two-word query on 7.7k products,
      * 8,779 pairs of 8,810 rows: 9.8 → 4.3 ms), and rows of other documents are simply not asked
      * for by the caller. Otherwise one seek per pair; the pairs travel as one json_each list, each
      * packed into one integer (term × 2^32 + document) when every ID fits, which is the case for

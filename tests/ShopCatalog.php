@@ -17,7 +17,7 @@ use Random\Randomizer;
 
 /**
  * A generated web shop and the searches its pages send, for ShopWorkloadTest and the shop group
- * of FuzorBench. Modelled on a production catalogue: every request hides products with a constant
+ * of FuzorBench. Modelled on a typical web shop: every request hides products with a constant
  * exclusion, pages count many sparse facets, multi-valued categories, a near-unique price per
  * product, a sort on two fields, highlighting and cropping on every card, and a new read-only
  * Index per request.
