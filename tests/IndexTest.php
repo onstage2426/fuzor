@@ -11694,4 +11694,30 @@ class IndexTest extends TestCase
         $this->assertSame(range(70, 61), $page->getIds());
         $this->assertTrue($page->exhaustive);
     }
+
+    /**
+     * A bucket above 4 x maxDocs scores the members with the best term frequency of its rarest
+     * word, not the most hits: long documents that repeat the words rank below short ones that
+     * mention them once, so the short ones must be among those scored.
+     */
+    public function testALargeBucketScoresItsShortMatches(): void
+    {
+        $docs = [];
+        for ($id = 1; $id <= 40; $id++) {
+            $docs[] = ['id' => $id, 'text' => 'red red red cotton cotton cotton ' . str_repeat('filler ', 200)];
+        }
+        for ($id = 41; $id <= 50; $id++) {
+            $docs[] = ['id' => $id, 'text' => 'red cotton ' . str_repeat('filler ', $id - 40)];
+        }
+        $capped = new Index($this->dbPath, force: true, config: new Config(maxDocs: 5));
+        $capped->insert($docs);
+        $uncapped = new Index($this->dbPath, readonly: true, config: new Config(maxDocs: 100_000));
+
+        $options = new SearchOptions(asYouType: false, limit: 10);
+        $page    = $capped->search('red cotton', $options);
+
+        $this->assertSame(range(41, 50), $uncapped->search('red cotton', $options)->getIds());
+        $this->assertSame(range(41, 50), $page->getIds());
+        $this->assertFalse($page->exhaustive);
+    }
 }

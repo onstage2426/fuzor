@@ -146,7 +146,8 @@ final class Index implements \Countable
      * member scored (BM25 needs each one's rows of every word; completeGroup() ~2–5 µs per
      * document and word), and the first word is read whole when it is in at most that many
      * documents (bucket 1, one-word queries): the page is then the uncapped one. A larger bucket
-     * scores the documents with the most hits of its rarest word and ranks the rest after them,
+     * scores the documents with the best term frequency of its rarest word (bestDriverDocs()) and
+     * ranks the rest after them,
      * still in the bucket ("men shirt", 10k full matches: 143 ms scoring all), and the page comes
      * from the candidates when they cover it (exhaustive false). Measured on the 45k ecom set,
      * 300 queries against the uncapped ranking: pages identical 50% (no exact ranking) → 79% at
@@ -2897,7 +2898,8 @@ final class Index implements \Countable
         // documents that pass them); with them, matches can drop out later or a document outside
         // the candidates can sort first, so every needed bucket is read. A bucket above
         // $scoredDocs (EXACT_RANKED_DOCS_PER_MAX_DOCS) is too large to rank exactly: the candidates
-        // and its $scoredDocs documents with the most driver hits are scored, the rest follow
+        // and its $scoredDocs documents with the best term frequency of the rarest word
+        // (bestDriverDocs()) are scored, the rest follow
         // unscored. Which documents those are must not depend on the page, or pages repeat
         // documents and lose others: a bucket read for a deep page ranks the buckets above it,
         // and every page before it, exactly as they were.
@@ -3037,8 +3039,8 @@ final class Index implements \Countable
                 }
                 $exactDocs += array_fill_keys(array_keys($hits), true);
                 if (count($hits) > $scoredDocs) {
-                    // Most hits of the rarest word first, then newest; the rest rank after them.
-                    $top = self::mostHits($hits, $scoredDocs);
+                    // The rarest word's best term frequency first; the rest rank after them.
+                    $top = $this->bestDriverDocs($hits, $scoredDocs, $k1_1mb, $k1b_avgdl);
                     foreach (array_diff_key($hits, $top) as $docId => $_) {
                         if (!isset($candidates[$docId])) {
                             $unscored[$docId] ??= $k;
@@ -5197,32 +5199,36 @@ final class Index implements \Countable
     }
 
     /**
-     * The $count documents with the most hits, newest first among equals, as a set. Hit counts are
-     * small, so counting them finds the cut: no sort of a whole bucket for its first part.
+     * The $count members of a words bucket above $scoredDocs that are scored, as a set: those with
+     * the best BM25 term frequency of the bucket's rarest word, hits / (k1 · (1 − b + b · dl /
+     * avgdl) + hits) (its BM25 without the IDF, the same for every member), newest first among
+     * equals. The raw hit count it replaced favoured long documents, which BM25 ranks low: on
+     * the 45k ecom set (300 searches) pages equal to the uncapped ranking 93 → 97%, page 10
+     * 85 → 89%, distinct 79 → 84%, at the same average time (one doc_lengths read of the bucket,
+     * ~0.4 µs a member).
      *
-     * @param  array<int, int> $hits doc → hits, by ascending doc ID.
+     * @param  array<int, int> $hits doc → hits of the rarest word, by ascending doc ID.
      * @return array<int, int>
      */
-    private static function mostHits(array $hits, int $count): array
+    private function bestDriverDocs(array $hits, int $count, float $k1_1mb, float $k1b_avgdl): array
     {
-        $perCount = array_count_values($hits);
-        krsort($perCount);
-        $above = 0;
-        $cut   = 0;
-        foreach ($perCount as $cut => $docs) {
-            if ($above + $docs >= $count) {
-                break;
-            }
-            $above += $docs;
+        $stmt = $this->stmt(
+            'bucketDocLengths',
+            'SELECT dl.length FROM json_each(?) j CROSS JOIN doc_lengths dl ON dl.doc_id = j.value'
+        );
+        // Newest first: the stable sort below keeps that order among equal values.
+        $hits = array_reverse($hits, true);
+        $stmt->execute([json_encode(array_keys($hits))]);
+        /** @var list<int> $lengths  In the order of $hits: every live document has a length. */
+        $lengths = $stmt->fetchAll(PDO::FETCH_COLUMN);
+        /** @var array<int, float> $tf */
+        $tf = [];
+        $i  = 0;
+        foreach ($hits as $docId => $n) {
+            $tf[$docId] = $n / ($k1_1mb + $k1b_avgdl * $lengths[$i++] + $n);
         }
-        $top  = [];
-        $left = $count - $above;
-        foreach (array_reverse($hits, true) as $docId => $n) {
-            if ($n > $cut || ($n === $cut && $left-- > 0)) {
-                $top[$docId] = 0;
-            }
-        }
-        return $top;
+        arsort($tf, SORT_NUMERIC);
+        return array_fill_keys(array_slice(array_keys($tf), 0, $count), 0);
     }
 
     /**

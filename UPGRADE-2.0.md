@@ -177,8 +177,10 @@ that assert an exact order may need updating:
   occurrences of each word: a short document that mentions the words once can now rank first. When a page reaches documents that contain only the first word (a
   one-word query, or a query whose other words match nothing), those are the first word's
   `maxDocs` documents with the best BM25 score, not with the most occurrences. On a 44k-product
-  catalog 93% of first pages equal the ranking without any cap (50% before). Raise `maxDocs` for
-  more, at the cost of speed.
+  catalog 97% of first pages equal the ranking without any cap (50% before). Of a larger set, the
+  4 × `maxDocs` in which the rarest word weighs most (its BM25 term frequency, so a short document
+  counts more than a long one with the same hits) are ranked and the rest follow them. Raise
+  `maxDocs` for more, at the cost of speed.
 - In a multi-word search where one word matches more than `Config::$maxDocs` documents,
   documents found through the other words are now scored for the common word too, so documents
   that contain every word rank as such.
