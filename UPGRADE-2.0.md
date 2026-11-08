@@ -156,6 +156,11 @@ phrase matches exactly, and a query that ends in a quoted phrase has no prefix w
 (also in highlighting and `inspectQuery()`). A word typed after the phrase (`"blue jeans" sh`)
 is still a prefix. If you relied on the old behaviour, leave the last word outside the quotes.
 
+A quote left open now makes a phrase of the rest of the query (`blue "denim jacket` is
+`blue "denim jacket"`); 1.x ignored it. A query with an inch mark (`24" monitor`) therefore
+searches `monitor` exactly. Remove such quotes before searching if they are not meant
+as phrases.
+
 ## A phrase with a word no document holds finds nothing
 
 In 1.x a quoted phrase whose word was not in the index was ignored, so `search('"blue jaens"')`

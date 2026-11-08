@@ -144,6 +144,8 @@ $result = $index->search('"quick brown" "fast car"'); // multiple phrases
 
 Phrase words participate in BM25 scoring normally. Every word of a phrase matches exactly, without typos or prefix expansion, as in Meilisearch; `asYouType` applies only to a last word typed outside the quotes (`"blue jeans" sh`). A phrase is always required: if one of its words is in no document, `search()` and `facetSearch()` find nothing (`searchBoolean()`, where a phrase applies to the whole result, leaves such a phrase out). A phrase matches within one field: the last word of the title followed by the first word of the description is not a phrase match.
 
+Quotes pair from the left. A quote left open makes a phrase of the rest of the query, as if it were closed at the end: `blue "denim jacket` is `blue "denim jacket"`, and the words after the quote are exact (no prefix while typing). This also holds for `-"…`, `facetSearch()` and `searchBoolean()`.
+
 ## Matching strategy
 
 For a query of several words, `matchingStrategy` decides which documents are returned and ranks them in "words" buckets: a document matching more of the words in order always comes first, before `sort` fields and relevance.

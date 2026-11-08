@@ -7692,6 +7692,7 @@ final class Index implements \Countable
      */
     private function filterQueryTokens(string $phrase, bool $verbose = false): array
     {
+        $phrase = self::closeOpenQuote($phrase);
         ['free' => $freePhrase, 'groups' => $rawPhraseGroups] = $this->extractQuotedPhrases($phrase);
 
         $survivingRaw = Tokenizer::tokenize($phrase, $this->language);
@@ -7730,12 +7731,21 @@ final class Index implements \Countable
     }
 
     /**
+     * The query with a quote left open closed at its end: quotes pair from the left, and an
+     * unpaired last one makes the rest of the query a phrase (`blue "denim jacket` is
+     * `blue "denim jacket"`). Balanced queries are returned unchanged.
+     */
+    private static function closeOpenQuote(string $query): string
+    {
+        return substr_count($query, '"') % 2 === 1 ? $query . '"' : $query;
+    }
+
+    /**
      * Strip enclosing double-quotes from a query, leaving phrase words in place.
      *
      * The phrase words remain in the returned free string so they still participate in
-     * BM25/boolean scoring. Only matched (closed) quote pairs are extracted; unclosed
-     * quotes are passed through unchanged and will be stripped as punctuation during
-     * tokenisation.
+     * BM25/boolean scoring. Only matched quote pairs are extracted; callers pass the query
+     * through closeOpenQuote() first, so a quote left open makes a phrase of the rest.
      *
      * @param  string $query Raw query string.
      * @return array{free: string, groups: list<string>}
@@ -7767,6 +7777,7 @@ final class Index implements \Countable
      */
     private static function endsInQuotedPhrase(string $query): bool
     {
+        $query = self::closeOpenQuote($query);
         $close = strrpos($query, '"');
         if ($close === false || substr_count($query, '"') % 2 !== 0) {
             return false;
@@ -7784,6 +7795,7 @@ final class Index implements \Countable
      */
     private static function splitNegations(string $phrase): array
     {
+        $phrase = self::closeOpenQuote($phrase);
         if (!str_contains($phrase, '-')) {
             return ['phrase' => $phrase, 'negations' => []];
         }
@@ -7804,8 +7816,9 @@ final class Index implements \Countable
     /**
      * Split '-word' and '-"phrase"' negations off a search() / facetSearch() query.
      *
-     * A '-' counts at the start of the query or after whitespace, followed by a word or a closed
-     * quoted phrase, so "t-shirt" and an unclosed '-"red' are left alone. Each negation is
+     * A '-' counts at the start of the query or after whitespace, followed by a word or a quoted
+     * phrase (one left open runs to the end of the query, closeOpenQuote()), so "t-shirt" is
+     * left alone. Each negation is
      * normalised like a quoted phrase (tokenised, stopwords removed, stemmed) and matched
      * exactly: no prefix, typo, or synonym expansion, also for a trailing word still being
      * typed. One token becomes an exclusion on doclist; several must appear at consecutive
@@ -7882,6 +7895,7 @@ final class Index implements \Countable
      */
     private static function splitNegatedPhrases(string $phrase): array
     {
+        $phrase = self::closeOpenQuote($phrase);
         if (!str_contains($phrase, '"')) {
             return ['phrase' => $phrase, 'negations' => []];
         }

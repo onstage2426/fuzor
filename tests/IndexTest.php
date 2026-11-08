@@ -2978,6 +2978,56 @@ class IndexTest extends TestCase
         $this->assertSame([1], $index->search('"bank -" "england"')->getIds());
     }
 
+    /** @return iterable<string, array{string, list<int>}> */
+    public static function unclosedQuoteQueries(): iterable
+    {
+        yield 'whole query'   => ['"river bank', [3]];
+        yield 'after a word'  => ['blue "bank of', [2]];
+        yield 'one word'      => ['"rive', []];
+        yield 'negated'       => ['bank -"river bank', [1, 2, 4]];
+        yield 'after a pair'  => ['"blue bank" "of england', [2]];
+        yield 'quote at end'  => ['blue "', [2, 5]];
+    }
+
+    /**
+     * A quote left open makes a phrase of the rest of the query, the same as closing it at the
+     * end: its words match exactly and in order, and none of them is the as-you-type prefix.
+     *
+     * @param list<int> $expected
+     */
+    #[DataProvider('unclosedQuoteQueries')]
+    public function testUnclosedQuoteMakesAPhraseOfTheRest(string $query, array $expected): void
+    {
+        $index = new Index($this->dbPath, schema: new SchemaConfig(filterableAttributes: ['color']));
+        $index->insert([
+            ['id' => 1, 'title' => 'bank of england', 'color' => 'red'],
+            ['id' => 2, 'title' => 'blue bank of england', 'color' => 'blue'],
+            ['id' => 3, 'title' => 'river bank house', 'color' => 'green'],
+            ['id' => 4, 'title' => 'bank river', 'color' => 'red'],
+            ['id' => 5, 'title' => 'blue riverside', 'color' => 'blue'],
+        ]);
+        $ids = $index->search($query)->getIds();
+        sort($ids);
+        $this->assertSame($expected, $ids);
+        $closed = $query . '"';
+        $this->assertSame($index->search($closed)->getIds(), $index->search($query)->getIds());
+        $this->assertSame($index->searchBoolean($closed)->getIds(), $index->searchBoolean($query)->getIds());
+        $this->assertSame($index->inspectQuery($closed)->phraseGroups, $index->inspectQuery($query)->phraseGroups);
+        $facets = fn(string $q): array => $index->facetSearch(new FacetSearchQuery('color', q: $q))->facetHits;
+        $this->assertSame($facets($closed), $facets($query));
+    }
+
+    public function testUnclosedQuoteWordIsNotHighlightedAsAPrefix(): void
+    {
+        $index = new Index($this->dbPath);
+        $index->insert([['id' => 1, 'title' => 'blue river riverside']]);
+        $hit = $index->search('blue "river', new SearchOptions(attributesToHighlight: ['title']))->getHit(0);
+        $this->assertSame(
+            ['title' => '<mark>blue</mark> <mark>river</mark> riverside'],
+            $hit['_formatted'] ?? null,
+        );
+    }
+
     /** @return iterable<string, array{string, list<int>, list<string>}> */
     public static function booleanStopWordQueries(): iterable
     {
