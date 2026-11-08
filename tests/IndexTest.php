@@ -2914,6 +2914,43 @@ class IndexTest extends TestCase
         $this->assertSame($result->rawTokens, $result->filteredTokens);
     }
 
+    /** @return iterable<string, array{string, list<int>, list<string>}> */
+    public static function booleanStopWordQueries(): iterable
+    {
+        yield 'and'             => ['bank of england', [1, 2, 3], ['bank', 'england', '&']];
+        yield 'leading'         => ['of england', [1, 2, 3, 4], ['england']];
+        yield 'trailing'        => ['bank the', [1, 2, 3, 5], ['bank']];
+        yield 'or'              => ['bank | of', [1, 2, 3, 5], ['bank']];
+        yield 'negated'         => ['bank -of', [1, 2, 3, 5], ['bank']];
+        yield 'group'           => ['(of | the) england', [1, 2, 3, 4], ['england']];
+        yield 'typed prefix'    => ['ban of', [1, 2, 3, 5], ['ban']];
+        yield 'only stop words' => ['of the', [], ['of', 'the', '&', '|']];
+    }
+
+    /**
+     * A stop word is never indexed, so as a boolean operand it is left out like in search():
+     * an AND with it takes its other side instead of matching nothing.
+     *
+     * @param list<int>    $expected
+     * @param list<string> $postfix
+     */
+    #[DataProvider('booleanStopWordQueries')]
+    public function testBooleanSearchLeavesStopWordsOut(string $query, array $expected, array $postfix): void
+    {
+        $index = new Index($this->dbPath, schema: new SchemaConfig(stopWords: ['of', 'the']));
+        $index->insert([
+            ['id' => 1, 'title' => 'bank of england'],
+            ['id' => 2, 'title' => 'england bank'],
+            ['id' => 3, 'title' => 'the bank england'],
+            ['id' => 4, 'title' => 'england rose'],
+            ['id' => 5, 'title' => 'river bank'],
+        ]);
+        $ids = $index->searchBoolean($query, new SearchOptions(asYouType: $query === 'ban of'))->getIds();
+        sort($ids);
+        $this->assertSame($expected, $ids);
+        $this->assertSame($postfix, $index->inspectQuery($query)->booleanPostfix);
+    }
+
     public function testInspectQueryAllStrippedFalseWithoutStopWords(): void
     {
         $index = new Index($this->dbPath);

@@ -2657,9 +2657,9 @@ final class Index implements \Countable
             tokens:          $tokens,
             /** @infection-ignore-all Concat|ConcatOperandRemoval: '|' prepend is the OR identity; '|' . $phrase and $phrase . '|' both yield identical postfix because '|' is always the last operator popped */
             // searchBoolean() reads '-' as its own NOT, so its postfix covers the whole query.
-            booleanPostfix:  BooleanParser::toPostfix(
+            booleanPostfix:  $this->withoutStopWords(BooleanParser::toPostfix(
                 '|' . $this->filterQueryTokens($phrase, verbose: true)['free_phrase']
-            )[0],
+            )[0]),
             phraseGroups:    $verbose['phrase_groups'],
             negations:       $negations,
         );
@@ -3659,6 +3659,12 @@ final class Index implements \Countable
         // space→& replacement does not break quoted phrases.
         /** @infection-ignore-all ConcatOperandRemoval: '|' prefix is the OR identity; removing it or appending instead yields identical postfix because '|' is always the lowest-priority operator */
         [$postfix, $lastTerm] = BooleanParser::toPostfix('|' . $parsed['free_phrase']);
+        $postfix = $this->withoutStopWords($postfix);
+        if (!in_array($lastTerm, $postfix, true)) {
+            // A trailing stop word left out: the word before it is the one being typed, as in search().
+            $operands = array_values(array_diff($postfix, ['&', '|', '~']));
+            $lastTerm = $operands === [] ? $lastTerm : $operands[count($operands) - 1];
+        }
 
         // PHP-side set evaluation: fetch per-term doc IDs (capped at candidatesPerWord) from SQLite,
         // then apply set operations in PHP via C-native array_intersect / array_diff /
@@ -7112,6 +7118,44 @@ final class Index implements \Countable
         /** @var list<int> $found */
         $found = $stmt->fetchAll(PDO::FETCH_COLUMN);
         return $found;
+    }
+
+    /**
+     * A boolean postfix without its stop word operands, which no document holds: an operator
+     * with one left out takes its other side (`a & of` is `a`, `a | of` is `a`), and a negated
+     * one negates nothing. Like the words of search(), a query of only stop words keeps them.
+     *
+     * @param  list<string> $postfix BooleanParser::toPostfix() output.
+     * @return list<string>
+     */
+    private function withoutStopWords(array $postfix): array
+    {
+        if (!$this->stopwords instanceof Stopwords) {
+            return $postfix;
+        }
+        /** @var list<list<string>|null> $stack  sub-expressions; null = left out */
+        $stack = [];
+        $kept  = false;
+        foreach ($postfix as $token) {
+            if ($token === '~') {
+                $operand = array_pop($stack);
+                $stack[] = $operand === null ? null : [...$operand, '~'];
+            } elseif ($token === '&' || $token === '|') {
+                $right   = array_pop($stack);
+                $left    = array_pop($stack);
+                $stack[] = match (true) {
+                    $left === null  => $right,
+                    $right === null => $left,
+                    default         => [...$left, ...$right, $token],
+                };
+            } elseif ($this->stopwords->filter([$token]) === []) {
+                $stack[] = null;
+            } else {
+                $stack[] = [$token];
+                $kept    = true;
+            }
+        }
+        return $kept ? array_pop($stack) ?? [] : $postfix;
     }
 
     /**

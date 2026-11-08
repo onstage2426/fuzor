@@ -22,7 +22,8 @@ product words such as "c" in "usb c cable" or "men" keep counting.
 ## Stop words
 
 To leave words out, list them in the schema. They are left out of the index and of every query
-(also quoted phrases and `-word` exclusions), matched case-insensitively before stemming:
+(also quoted phrases, `-word` exclusions and the operands of `searchBoolean()`), matched
+case-insensitively before stemming:
 
 ```php
 $index = new Index('/path/to/articles.db', schema: new SchemaConfig(
