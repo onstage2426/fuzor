@@ -3271,7 +3271,7 @@ final class Index implements \Countable
             'distribution' => $facetDistribution,
             'stats'        => $facetStats,
             'approximate'  => $approximateFacets,
-        ] = $classified ?? ($candidatesCapped && $facetKeys !== []
+        ] = $facetCounts = $classified ?? ($candidatesCapped && $facetKeys !== []
             ? $this->resultSetFacetCounts(
                 $facetKeys,
                 $required,
@@ -3306,8 +3306,10 @@ final class Index implements \Countable
         if ($candidatesCapped && $distinct === null) {
             // The candidates hold only part of the matches: count them in SQL, up to one past
             // Limits::$totalHits (the result is capped there).
-            $total = $classified !== null
-                ? min($classified['total'], $this->config->limits->totalHits + 1)
+            // The facet count read the result set whole when its common group was not cut.
+            $counted = $classified['total'] ?? $facetCounts['total'] ?? null;
+            $total   = $counted !== null
+                ? min($counted, $this->config->limits->totalHits + 1)
                 : $this->countSearchMatches(
                     $required,
                     [...$baseConditions, ...$this->facetFilterConditions($filter)],
@@ -8435,7 +8437,10 @@ final class Index implements \Countable
      *     distribution: array<string, array<array-key, int>>,
      *     stats: array<string, array{min: float, max: float}>,
      *     approximate: list<string>,
+     *     total: int|null,
      * }
+     *         total: the result set's size when the common group (every filter applies) was
+     *         read whole, so countSearchMatches() need not walk it again; else null.
      */
     private function resultSetFacetCounts(
         array $facetKeys,
@@ -8490,6 +8495,7 @@ final class Index implements \Countable
         // the plan SQLite picks for the probed SQL.
         $whole  = $groups !== [] && min(array_column($groups, 'df')) <= $maxDocs;
         $common = null;
+        $total  = null;
         foreach ($byGroup as $own => $nameToId) {
             if ($own === '' && $common !== null) {
                 $this->mergeFacetCounts($common, $distribution, $stats);
@@ -8519,6 +8525,8 @@ final class Index implements \Countable
             // a round trip through PHP.
             $truncated    = false;
             $subsetCounts = [];
+            $docCount     = 0;
+            $subsetDocs   = 0;
             $results      = $this->facetCountsOfDocsSql(
                 $nameToId,
                 $whole ? $match[0] : "{$match[0]} LIMIT ?",
@@ -8528,15 +8536,25 @@ final class Index implements \Countable
                 $own === $carrier ? $subset : null,
                 $subsetCounts,
                 $excluded,
+                $docCount,
+                $subsetDocs,
             );
             if ($truncated) {
                 array_push($approximate, ...array_keys($nameToId));
+            } elseif ($own === '') {
+                $total = $docCount;
             } elseif ($own === $carrier) {
                 $common = $subsetCounts;
+                $total  = $subsetDocs;
             }
             $this->mergeFacetCounts($results, $distribution, $stats);
         }
-        return ['distribution' => $distribution, 'stats' => $stats, 'approximate' => $approximate];
+        return [
+            'distribution' => $distribution,
+            'stats'        => $stats,
+            'approximate'  => $approximate,
+            'total'        => $total,
+        ];
     }
 
     /**
@@ -11004,6 +11022,9 @@ final class Index implements \Countable
      * $maxDocs then counts the documents kept ($docsSql without a LIMIT; the cursor is closed
      * once it is reached).
      *
+     * $docCount gets the documents counted (with $maxDocs, those without facet values too) and
+     * $subsetDocs those of $subset.
+     *
      * @param  array<string, int> $nameToId Facet key name → key_id.
      * @param  string             $docsSql  SELECT with a doc_id column, each document once.
      * @param  list<mixed>        $params
@@ -11022,6 +11043,8 @@ final class Index implements \Countable
         ?array $subset = null,
         array &$subsetCounts = [],
         array $excluded = [],
+        int &$docCount = 0,
+        int &$subsetDocs = 0,
     ): array {
         // With a cap every document is a row (no facet values: NULL), so the rows count them.
         $join = $maxDocs === null ? 'CROSS JOIN' : 'LEFT JOIN';
@@ -11047,12 +11070,14 @@ final class Index implements \Countable
                 $stmt->closeCursor();
                 break;
             }
+            $docCount++;
             if (!is_string($blob)) {
                 continue;
             }
             $batch[] = $blob;
             if ($packed !== [] && self::holdsAnyPackedId($blob, $packed)) {
                 $subsetBatch[] = $blob;
+                $subsetDocs++;
             }
             if (count($batch) === 20_000) {
                 self::countPackedIds($batch, $vidCounts);
@@ -11187,7 +11212,8 @@ final class Index implements \Countable
 
     /**
      * fetchFacetCountsOfDocs() over the documents a SELECT returns (see facetValueCountsOfDocs()
-     * for $maxDocs, $truncated and $subset; $subsetCounts gets the subset's summary).
+     * for $maxDocs, $truncated, $subset, $docCount and $subsetDocs; $subsetCounts gets the
+     * subset's summary).
      *
      * @param  array<string, int> $nameToId
      * @param  list<mixed>        $params
@@ -11206,6 +11232,8 @@ final class Index implements \Countable
         ?array $subset = null,
         array &$subsetCounts = [],
         array $excluded = [],
+        int &$docCount = 0,
+        int &$subsetDocs = 0,
     ): array {
         $subsetByKey = [];
         $byKey       = $this->facetValueCountsOfDocs(
@@ -11217,6 +11245,8 @@ final class Index implements \Countable
             $subset,
             $subsetByKey,
             $excluded,
+            $docCount,
+            $subsetDocs,
         );
         if ($subset !== null) {
             $subsetCounts = self::summarizeKeyCounts($subset['nameToId'], $subsetByKey);

@@ -11397,6 +11397,67 @@ class IndexTest extends TestCase
         $this->assertSame(5, $two->totalHits);
     }
 
+    /**
+     * With facets the total of a capped search comes from the facet count's read of the result
+     * set when that read was not cut: documents without any filterable value, exclusions checked
+     * on the blobs and a filter's own key (counted without it) must give the same total.
+     *
+     * @return iterable<string, array{
+     *     0: array<string, string|list<string>|FacetRange|FacetExclude>, 1: list<string>, 2: int, 3: int, 4: int,
+     * }>
+     */
+    public static function cappedFacetTotals(): iterable
+    {
+        // "red": 1, 2, 3, 5, 6, 7, 8 (6 and 7 without any filterable value); "red -sofa" without 8.
+        // filter, facets, facetCountDocs, total of "red", total of "red -sofa".
+        yield 'common group' => [[], ['tag'], 50_000, 7, 6];
+        yield 'own key only' => [['tag' => 'a'], ['tag'], 50_000, 3, 2];
+        yield 'own key and common keys' => [['tag' => ['a', 'b']], ['tag', 'size'], 50_000, 4, 3];
+        yield 'filter on another key' => [['size' => 'l'], ['tag'], 50_000, 3, 2];
+        yield 'exclusion' => [['tag' => new FacetExclude('a')], ['size'], 50_000, 4, 4];
+        yield 'exclusion and own key' => [['tag' => new FacetExclude('b'), 'size' => 'l'], ['size'], 50_000, 1, 1];
+        yield 'range' => [['n' => FacetRange::min(2.0)], ['tag'], 50_000, 4, 3];
+        yield 'facet count cut' => [[], ['tag'], 1, 7, 6];
+        yield 'facet count cut with a filter' => [['tag' => ['a', 'b']], ['tag', 'size'], 1, 4, 3];
+    }
+
+    /**
+     * @param array<string, string|list<string>|FacetRange|FacetExclude> $filter
+     * @param list<string>                                               $facets
+     */
+    #[DataProvider('cappedFacetTotals')]
+    public function testCappedSearchTotalIsTheSameWithFacets(
+        array $filter,
+        array $facets,
+        int $maxDocs,
+        int $red,
+        int $redWithoutSofa,
+    ): void {
+        $index = new Index(
+            $this->dbPath,
+            config: new Config(limits: new Limits(candidatesPerWord: 1, facetCountDocs: $maxDocs)),
+            schema: new SchemaConfig(filterableAttributes: ['tag', 'size', 'n']),
+        );
+        $index->insert([
+            ['id' => 1, 'title' => 'red lamp', 'tag' => 'a', 'size' => 'l', 'n' => 1],
+            ['id' => 2, 'title' => 'red chair', 'tag' => ['a', 'b'], 'n' => 2],
+            ['id' => 3, 'title' => 'red red table', 'tag' => 'b', 'size' => 'l', 'n' => 3],
+            ['id' => 4, 'title' => 'blue lamp', 'tag' => 'b'],
+            ['id' => 5, 'title' => 'red shelf', 'tag' => 'c', 'size' => 's', 'n' => 4],
+            ['id' => 6, 'title' => 'red stool'],
+            ['id' => 7, 'title' => 'red mat'],
+            ['id' => 8, 'title' => 'red sofa', 'tag' => ['a', 'b'], 'size' => 'l', 'n' => 5],
+        ]);
+        // The negation keeps the facet count off the in-PHP classes path (overClasses()).
+        foreach (['red' => $red, 'red -sofa' => $redWithoutSofa] as $query => $expected) {
+            $plain   = $index->search($query, new SearchOptions(asYouType: false, filter: $filter));
+            $faceted = $index->search($query, new SearchOptions(asYouType: false, filter: $filter, facets: $facets));
+            $this->assertFalse($faceted->exhaustive, $query);
+            $this->assertSame($expected, $plain->totalHits, $query);
+            $this->assertSame($expected, $faceted->totalHits, $query);
+        }
+    }
+
     // --- Ranking score details ---
 
     /** @param list<string> $sort */
