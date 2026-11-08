@@ -345,14 +345,17 @@ final class Index implements \Countable
      */
     private array $multiValuedKeys = [];
 
-    /** @var array<int, bool> facet key ID → facet_keys.multi_valued, read lazily; cleared with the caches. */
+    /**
+     * @var array<int, bool> facet key ID → facet_keys.multi_valued, read with the key's ID
+     * (rememberKeyFlags()); cleared with the caches.
+     */
     private array $keyMultiValued = [];
 
     /**
-     * @var array<int, bool> facet key ID → hasOnlyNumbers(), read lazily from facet_counts;
-     * cleared with the caches and by every facet_counts change.
+     * @var array<int, bool> facet key ID → facet_keys.has_strings, read with the key's ID
+     * (rememberKeyFlags()), set by markHasStrings(); cleared with the caches.
      */
-    private array $keyOnlyNumbers = [];
+    private array $keyHasStrings = [];
 
     /**
      * @var array<int, array<int, array<string, int>>> key_id → is_num (0/1) → value → facet_value_ids.vid.
@@ -1253,7 +1256,8 @@ final class Index implements \Countable
             "CREATE TABLE IF NOT EXISTS facet_keys (
                 id           INTEGER PRIMARY KEY,
                 name         TEXT NOT NULL UNIQUE,
-                multi_valued INTEGER NOT NULL DEFAULT 0
+                multi_valued INTEGER NOT NULL DEFAULT 0,
+                has_strings  INTEGER NOT NULL DEFAULT 0
             ) STRICT"
         );
         // facet_values: inverted index clustered on (key_id, value, doc_id).
@@ -1567,7 +1571,7 @@ final class Index implements \Countable
         $this->facetKeyCache   = [];
         $this->multiValuedKeys = [];
         $this->keyMultiValued  = [];
-        $this->keyOnlyNumbers  = [];
+        $this->keyHasStrings   = [];
         $this->facetValueIdCache = [];
         $this->facetValueCache   = [];
         $this->fieldNameCache  = [];
@@ -1621,7 +1625,7 @@ final class Index implements \Countable
         $this->facetKeyCache   = [];
         $this->multiValuedKeys = [];
         $this->keyMultiValued  = [];
-        $this->keyOnlyNumbers  = [];
+        $this->keyHasStrings   = [];
         $this->fieldNameCache  = [];
         $this->synonymCache    = null;
         $this->hasDeleted      = null;
@@ -2258,7 +2262,9 @@ final class Index implements \Countable
             $pdo->exec('DELETE FROM facet_counts');
             $pdo->exec('DELETE FROM doc_facets');
             $pdo->exec('DELETE FROM sort_keys');
-            $pdo->exec('UPDATE facet_keys SET multi_valued = 0 WHERE multi_valued = 1');
+            $pdo->exec(
+                'UPDATE facet_keys SET multi_valued = 0, has_strings = 0 WHERE multi_valued = 1 OR has_strings = 1'
+            );
             $pdo->exec('DELETE FROM deleted_docs');
 
             $this->stmt(
@@ -2276,7 +2282,7 @@ final class Index implements \Countable
         $this->facetKeyCache   = [];
         $this->multiValuedKeys = [];
         $this->keyMultiValued  = [];
-        $this->keyOnlyNumbers  = [];
+        $this->keyHasStrings   = [];
         $this->fieldNameCache  = [];
         $this->hasDeleted      = false;
     }
@@ -9173,16 +9179,15 @@ final class Index implements \Countable
             'facetKeyUpsert',
             'INSERT INTO facet_keys (name) VALUES (?)
              ON CONFLICT(name) DO UPDATE SET name = excluded.name
-             RETURNING id'
+             RETURNING id, multi_valued, has_strings'
         );
         $stmt->execute([$name]);
-        $row = $stmt->fetch(PDO::FETCH_ASSOC);
+        $row = $stmt->fetch(PDO::FETCH_NUM);
         $stmt->closeCursor();
         assert($row !== false);
-        /** @var array{id: int} $row */
-        $id = (int) $row['id'];
-        $this->facetKeyCache[$name] = $id;
-        return $id;
+        /** @var array{0: int, 1: int, 2: int} $row */
+        $this->rememberKeyFlags($name, ...$row);
+        return $row[0];
     }
 
     /**
@@ -9196,16 +9201,28 @@ final class Index implements \Countable
         }
         $stmt = $this->stmt(
             'facetKeyLookup',
-            'SELECT id FROM facet_keys WHERE name = ? LIMIT 1'
+            'SELECT id, multi_valued, has_strings FROM facet_keys WHERE name = ? LIMIT 1'
         );
         $stmt->execute([$name]);
-        $id = $stmt->fetchColumn();
+        $row = $stmt->fetch(PDO::FETCH_NUM);
         $stmt->closeCursor();
-        if ($id === false) {
+        if ($row === false) {
             return null;
         }
-        $this->facetKeyCache[$name] = (int) $id;
-        return (int) $id;
+        /** @var array{0: int, 1: int, 2: int} $row */
+        $this->rememberKeyFlags($name, ...$row);
+        return $row[0];
+    }
+
+    /**
+     * Cache a facet key's row: its ID and both flags (facet_keys.multi_valued, has_strings), read
+     * in the same statement as the ID, so the flag checks cost no query of their own.
+     */
+    private function rememberKeyFlags(string $name, int $id, int $multiValued, int $hasStrings): void
+    {
+        $this->facetKeyCache[$name] = $id;
+        $this->keyMultiValued[$id]  = $multiValued === 1;
+        $this->keyHasStrings[$id]   = $hasStrings === 1;
     }
 
     /**
@@ -9230,8 +9247,13 @@ final class Index implements \Countable
         $inserted = [];
         /** @var list<array{0: int, 1: string, 2: float|null}> $filterable  the filterable part of $inserted */
         $filterable = [];
+        /** @var array<int, true> $withStrings  keys given a string value */
+        $withStrings = [];
         foreach ($rows as $row) {
             $keyId = $this->resolveFacetKeyId($row['name']);
+            if ($row['numValue'] === null) {
+                $withStrings[$keyId] = true;
+            }
             $stmt->execute([$keyId, $row['value'], $documentId, $row['numValue']]);
             // The primary key is (key_id, value, doc_id): a repeated value is ignored, and
             // counted once.
@@ -9251,6 +9273,7 @@ final class Index implements \Countable
             }
         }
         $this->adjustFacetCounts(self::facetCountDeltas($inserted, 1));
+        $this->markHasStrings(array_keys($withStrings));
         if ($filterable !== []) {
             $this->resolveFacetValueIds($filterable);
             $this->stmt('docFacetsSave', 'INSERT INTO doc_facets (doc_id, vids) VALUES (?, CAST(? AS BLOB))')
@@ -9374,7 +9397,6 @@ final class Index implements \Countable
         if ($deltas === []) {
             return;
         }
-        $this->keyOnlyNumbers = [];
         $json = json_encode($deltas, JSON_THROW_ON_ERROR | JSON_PRESERVE_ZERO_FRACTION);
         // "WHERE true" lets SQLite parse an upsert whose source is a SELECT.
         $this->stmt(
@@ -9431,12 +9453,59 @@ final class Index implements \Countable
     private function isMultiValuedKey(int $keyId): bool
     {
         if (!isset($this->keyMultiValued[$keyId])) {
-            $stmt = $this->stmt('facetKeyMultiValued', 'SELECT multi_valued FROM facet_keys WHERE id = ?');
-            $stmt->execute([$keyId]);
-            $this->keyMultiValued[$keyId] = (int) $stmt->fetchColumn() === 1;
-            $stmt->closeCursor();
+            $this->readKeyFlags($keyId);
         }
         return $this->keyMultiValued[$keyId];
+    }
+
+    /**
+     * Flag facet keys as holding string values (facet_keys.has_strings), set on every write of a
+     * string value. Like multi_valued it only goes from 0 to 1: a delete or update that removes
+     * a key's last string leaves it set, which only costs speed (walkStatsOnly() then counts the
+     * field with the facets, which give the same stats). clear() and rebuild() reset it. A key
+     * known to be flagged is skipped, so each key costs at most one UPDATE per connection.
+     *
+     * @param list<int> $keyIds
+     */
+    private function markHasStrings(array $keyIds): void
+    {
+        foreach ($keyIds as $keyId) {
+            if ($this->keyHasStrings[$keyId] ?? false) {
+                continue;
+            }
+            $this->stmt(
+                'facetKeyMarkStrings',
+                'UPDATE facet_keys SET has_strings = 1 WHERE id = ? AND has_strings = 0'
+            )->execute([$keyId]);
+            $this->keyHasStrings[$keyId] = true;
+        }
+    }
+
+    /**
+     * Whether some document stored a string value for this facet key (facet_keys.has_strings;
+     * see markHasStrings()). A key without strings has facetStats whenever it has numbers.
+     */
+    private function hasStrings(int $keyId): bool
+    {
+        if (!isset($this->keyHasStrings[$keyId])) {
+            $this->readKeyFlags($keyId);
+        }
+        return $this->keyHasStrings[$keyId];
+    }
+
+    /**
+     * Read both flags of a key known by ID only (its name lookup fills them otherwise, see
+     * rememberKeyFlags()).
+     */
+    private function readKeyFlags(int $keyId): void
+    {
+        $stmt = $this->stmt('facetKeyFlags', 'SELECT multi_valued, has_strings FROM facet_keys WHERE id = ?');
+        $stmt->execute([$keyId]);
+        /** @var array{0: int, 1: int}|false $row */
+        $row = $stmt->fetch(PDO::FETCH_NUM);
+        $stmt->closeCursor();
+        $this->keyMultiValued[$keyId] = $row !== false && $row[0] === 1;
+        $this->keyHasStrings[$keyId]  = $row !== false && $row[1] === 1;
     }
 
     /**
@@ -9466,13 +9535,14 @@ final class Index implements \Countable
                 $stmt = ($this->bulkStmtCache["facetKeyUpsert:{$n}"] ??= $pdo->prepare(
                     'INSERT INTO facet_keys (name) VALUES '
                     . implode(',', array_fill(0, $n, '(?)'))
-                    . ' ON CONFLICT(name) DO UPDATE SET name = excluded.name RETURNING id, name'
+                    . ' ON CONFLICT(name) DO UPDATE SET name = excluded.name'
+                    . ' RETURNING name, id, multi_valued, has_strings'
                 ));
                 $stmt->execute($chunk);
-                /** @var list<array{id: int, name: string}> $fetched */
-                $fetched = $stmt->fetchAll(PDO::FETCH_ASSOC);
+                /** @var list<array{0: string, 1: int, 2: int, 3: int}> $fetched */
+                $fetched = $stmt->fetchAll(PDO::FETCH_NUM);
                 foreach ($fetched as $returned) {
-                    $this->facetKeyCache[$returned['name']] = (int) $returned['id'];
+                    $this->rememberKeyFlags(...$returned);
                 }
             }
         }
@@ -9519,10 +9589,14 @@ final class Index implements \Countable
             )->execute($params);
         }
 
-        $deltas = [];
+        $deltas      = [];
+        $withStrings = [];
         foreach ($kvdMap as $keyId => $values) {
             foreach ($values as $value => $docs) {
                 $numeric = array_filter($docs, static fn(?float $num): bool => $num !== null);
+                if (count($numeric) < count($docs)) {
+                    $withStrings[$keyId] = true;
+                }
                 $deltas[] = [
                     $keyId,
                     (string) $value,
@@ -9533,6 +9607,7 @@ final class Index implements \Countable
             }
         }
         $this->adjustFacetCounts($deltas);
+        $this->markHasStrings(array_keys($withStrings));
 
         $this->bulkFlushDocFacets($kvdMap, array_intersect_key($facetBuffer, $this->filterableFieldSet));
         $this->bulkFlushSortKeys($kvdMap, array_intersect_key($facetBuffer, $this->sortableFieldSet));
@@ -10611,10 +10686,11 @@ final class Index implements \Countable
      *
      * $bounds walks the key's numeric rows (the matches' lowest and highest value, see
      * boundsOfDocSet() / boundsOfConditions()); its result holds unless the walk ran out (null)
-     * or the key also has string rows (a key with both kinds has stats only when every counted
-     * row is numeric, summarizeFacetCounts()). No numeric value among the matches means no
-     * stats either way. The other fields are returned in `count`: the caller counts them with
-     * its facets, in the same read, and mergeStatsOnly() keeps only their stats.
+     * or the key may have string rows (facet_keys.has_strings, see markHasStrings(): a key with
+     * both kinds has stats only when every counted row is numeric, summarizeFacetCounts()).
+     * No numeric value among the matches means no stats either way. The other fields are
+     * returned in `count`: the caller counts them with its facets, in the same read, and
+     * mergeStatsOnly() keeps only their stats.
      *
      * @param  list<string> $fields
      * @param  callable(string, int): (array{stats: array{min: float, max: float}|null, approximate: bool}|null) $bounds
@@ -10632,10 +10708,10 @@ final class Index implements \Countable
             if ($keyId === null) {
                 continue;
             }
-            // Stats found by a walk hold only when the key has no string rows (checked after the
-            // walk: a walk that runs out goes to the facet path, which needs no check).
+            // Stats found by a walk hold only when the key never stored a string (checked after
+            // the walk: a walk that runs out goes to the facet path, which needs no check).
             $walk = $bounds($name, $keyId);
-            if ($walk !== null && ($walk['stats'] === null || $this->hasOnlyNumbers($keyId))) {
+            if ($walk !== null && ($walk['stats'] === null || !$this->hasStrings($keyId))) {
                 $found[$name] = $walk;
             } else {
                 $count[] = $name;
@@ -10680,26 +10756,6 @@ final class Index implements \Countable
                 $approximate[] = $name;
             }
         }
-    }
-
-    /**
-     * Whether every row of a key is numeric, from facet_counts (O(values): 0.2 ms for 2.2k
-     * values, 1 ms for 12k); cached per connection.
-     */
-    private function hasOnlyNumbers(int $keyId): bool
-    {
-        if (!isset($this->keyOnlyNumbers[$keyId])) {
-            $stmt = $this->stmt(
-                'keyOnlyNumbers',
-                'SELECT COALESCE(SUM(count), 0), COALESCE(SUM(num_count), 0) FROM facet_counts WHERE key_id = ?'
-            );
-            $stmt->execute([$keyId]);
-            /** @var array{0: int, 1: int} $row */
-            $row = $stmt->fetch(PDO::FETCH_NUM);
-            $stmt->closeCursor();
-            $this->keyOnlyNumbers[$keyId] = $row[0] === $row[1];
-        }
-        return $this->keyOnlyNumbers[$keyId];
     }
 
     /**

@@ -180,6 +180,113 @@ class FacetStatsOnlyTest extends TestCase
         }
     }
 
+    /**
+     * facet_keys.has_strings is set by every path that writes a string value (one document,
+     * several, update, upsert), stays set when the strings are deleted or replaced by numbers,
+     * and is reset by clear() and recomputed by rebuild().
+     */
+    public function testEveryWritePathFlagsAKeyWithStrings(): void
+    {
+        $this->path = sys_get_temp_dir() . '/fuzor_stats_flag_' . uniqid() . '.db';
+        $index      = new Index($this->path, force: true, schema: new SchemaConfig(
+            filterableAttributes: ['one', 'many', 'updated', 'upserted', 'numbers'],
+        ));
+        $index->insert([self::flagDoc(1, ['one' => 'n/a', 'numbers' => 1, 'updated' => 2, 'upserted' => 3])]);
+        $index->insert([
+            self::flagDoc(2, ['many' => 4, 'numbers' => 5]),
+            self::flagDoc(3, ['many' => ['x', 6], 'numbers' => 7.5]),
+        ]);
+        $this->assertSame(
+            ['many' => 1, 'numbers' => 0, 'one' => 1, 'updated' => 0, 'upserted' => 0],
+            $this->stringFlags($this->path),
+        );
+
+        $index->update([self::flagDoc(1, ['one' => 1, 'updated' => 'n/a', 'upserted' => 3])]);
+        $index->upsert([self::flagDoc(2, ['many' => 4, 'upserted' => 'n/a']), self::flagDoc(4, ['numbers' => 8])]);
+        $flagged = ['many' => 1, 'numbers' => 0, 'one' => 1, 'updated' => 1, 'upserted' => 1];
+        $this->assertSame($flagged, $this->stringFlags($this->path));
+
+        $index->delete(1, 2, 3);
+        $this->assertSame($flagged, $this->stringFlags($this->path));
+
+        $index->insert([self::flagDoc(5, ['one' => 'n/a', 'numbers' => 9])]);
+        Index::rebuild($this->path);
+        $this->assertSame(['numbers' => 0, 'one' => 1], $this->stringFlags($this->path));
+
+        $index = new Index($this->path);
+        $index->clear();
+        $this->assertSame(['numbers' => 0, 'one' => 0], $this->stringFlags($this->path));
+        $index->insert([self::flagDoc(6, ['numbers' => 'n/a']), self::flagDoc(7, ['one' => 1])]);
+        $this->assertSame(['numbers' => 1, 'one' => 0], $this->stringFlags($this->path));
+        $index->close();
+    }
+
+    /**
+     * A key whose strings were all deleted keeps its flag, so its stats come from the facet
+     * count instead of the walk: still the facet's stats. A reader opened before another
+     * connection writes the first string sees the flag at its next search.
+     */
+    public function testAStaleOrNewStringFlagKeepsTheFacetsStats(): void
+    {
+        $this->path = sys_get_temp_dir() . '/fuzor_stats_stale_' . uniqid() . '.db';
+        $index      = new Index($this->path, force: true, schema: new SchemaConfig(
+            filterableAttributes: ['color', 'mixed'],
+            searchableAttributes: ['title'],
+        ));
+        $docs = [];
+        for ($id = 1; $id <= 200; $id++) {
+            $docs[] = ['id' => $id, 'title' => 'item ' . ($id % 2 ? 'odd' : 'even'),
+                'color' => $id % 2 ? 'red' : 'blue', 'mixed' => $id === 7 ? 'n/a' : $id * 1.5];
+        }
+        $index->insert($docs);
+        $reader = new Index($this->path, readonly: true);
+        $only   = new SearchOptions(limit: 3, filter: ['color' => 'red'], facetStatsOnly: ['mixed']);
+        $before = $reader->search('', $only);
+        $this->assertSame([], $before->facetStats);
+
+        $index->delete(7);
+        $exact  = new Config(limits: Limits::exact());
+        $red    = new SearchOptions(limit: 3, filter: ['color' => 'red']);
+        $search = ['query' => '', 'config' => $exact, 'options' => $red];
+        foreach (['', 'item', 'odd'] as $query) {
+            foreach (['search', 'searchBoolean'] as $method) {
+                $search['query'] = $query;
+                $this->assertStatsOnlyMatchesFacet($this->path, $exact, $exact, $method, $search, 'mixed');
+            }
+        }
+        $after = $reader->search('', $only);
+        $this->assertSame(['mixed' => ['min' => 1.5, 'max' => 298.5]], $after->facetStats);
+
+        // A numbers-only key flagged by another connection while this reader has it cached.
+        $numbers = new SearchOptions(limit: 3, facetStatsOnly: ['mixed'], filter: ['color' => 'blue']);
+        $statsOf = static fn(): array => $reader->search('', $numbers)->facetStats;
+        $this->assertSame(['mixed' => ['min' => 3.0, 'max' => 300.0]], $statsOf());
+        $index->clear();
+        $index->insert([['id' => 1, 'title' => 'item', 'color' => 'blue', 'mixed' => 2]]);
+        $this->assertSame(['mixed' => ['min' => 2.0, 'max' => 2.0]], $statsOf());
+        $index->insert([['id' => 2, 'title' => 'item', 'color' => 'blue', 'mixed' => 'n/a']]);
+        $this->assertSame([], $statsOf());
+        $reader->close();
+        $index->close();
+    }
+
+    /** @return array<mixed> facet key name → facet_keys.has_strings */
+    private function stringFlags(string $path): array
+    {
+        $stmt = new \PDO('sqlite:' . $path)->query('SELECT name, has_strings FROM facet_keys ORDER BY name');
+        $this->assertNotFalse($stmt);
+        return $stmt->fetchAll(\PDO::FETCH_KEY_PAIR);
+    }
+
+    /**
+     * @param  array<string, mixed> $fields
+     * @return array<string, mixed>
+     */
+    private static function flagDoc(int $id, array $fields): array
+    {
+        return ['id' => $id, 'title' => 'item', ...$fields];
+    }
+
     public function testTheResponseIsUnchangedWithoutTheOption(): void
     {
         $index  = new Index(self::$shopPath, readonly: true);
