@@ -55,6 +55,10 @@ final readonly class SearchOptions
      *                              {order, value}, and 'bm25' {order, score, proximityFactor}. An empty
      *                              query and searchBoolean() rank by sort fields only, so they give the
      *                              sort entries alone ([] without sort). Off by default (no cost).
+     * @param list<string> $facetStatsOnly Numeric facet fields to return in $facetStats only: the
+     *                              same min/max over the same matches as listing them in $facets
+     *                              gives, without a $facetDistribution entry and without counting
+     *                              their values. A field may not be in both lists.
      */
     public function __construct(
         public readonly bool $asYouType = true,
@@ -76,6 +80,7 @@ final readonly class SearchOptions
         public readonly MatchingStrategy $matchingStrategy = MatchingStrategy::Last,
         public readonly array $sortFacetValuesBy = [],
         public readonly bool $showRankingScoreDetails = false,
+        public readonly array $facetStatsOnly = [],
     ) {
     }
 

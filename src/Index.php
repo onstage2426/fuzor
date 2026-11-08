@@ -242,6 +242,24 @@ final class Index implements \Countable
     private const float SORTED_WALK_ROWS_PER_MATCH_SLOW_PROBE = 0.6;
 
     /**
+     * SearchOptions::$facetStatsOnly: the min/max of a numeric key over the matches walks
+     * facet_numeric_index from each end to the first matching document, reading at most the
+     * expected matches / this share per end (at least STATS_WALK_MIN_ROWS; with SQL probes per
+     * row at most STATS_WALK_MAX_ROWS). Matches spread over the value range stop the walk within
+     * a few rows; when a walk runs out, the field is counted as a facet instead, so it costs at
+     * most the facet plus the walk. Reading every match's value was no cheaper than the facet
+     * (a 7.7k-product shop, category of 1,170: 1.8 vs 1.6 ms) and much dearer when another facet
+     * reads the same documents (5.7 vs 0.3 ms).
+     */
+    private const int STATS_WALK_SHARE = 8;
+
+    /** See STATS_WALK_SHARE. */
+    private const int STATS_WALK_MIN_ROWS = 16;
+
+    /** See STATS_WALK_SHARE: rows walked per end while each row is probed in SQL. */
+    private const int STATS_WALK_MAX_ROWS = 512;
+
+    /**
      * delete() purges the posting rows of every deleted document once deleted documents are this
      * share of all documents (live + deleted). Until then the per-term num_docs / num_hits keep
      * counting them (BM25 only; measured on ecom with 10% deleted: first hit unchanged, 97% of
@@ -329,6 +347,12 @@ final class Index implements \Countable
 
     /** @var array<int, bool> facet key ID → facet_keys.multi_valued, read lazily; cleared with the caches. */
     private array $keyMultiValued = [];
+
+    /**
+     * @var array<int, bool> facet key ID → hasOnlyNumbers(), read lazily from facet_counts;
+     * cleared with the caches and by every facet_counts change.
+     */
+    private array $keyOnlyNumbers = [];
 
     /**
      * @var array<int, array<int, array<string, int>>> key_id → is_num (0/1) → value → facet_value_ids.vid.
@@ -1543,6 +1567,7 @@ final class Index implements \Countable
         $this->facetKeyCache   = [];
         $this->multiValuedKeys = [];
         $this->keyMultiValued  = [];
+        $this->keyOnlyNumbers  = [];
         $this->facetValueIdCache = [];
         $this->facetValueCache   = [];
         $this->fieldNameCache  = [];
@@ -1596,6 +1621,7 @@ final class Index implements \Countable
         $this->facetKeyCache   = [];
         $this->multiValuedKeys = [];
         $this->keyMultiValued  = [];
+        $this->keyOnlyNumbers  = [];
         $this->fieldNameCache  = [];
         $this->synonymCache    = null;
         $this->hasDeleted      = null;
@@ -2250,6 +2276,7 @@ final class Index implements \Countable
         $this->facetKeyCache   = [];
         $this->multiValuedKeys = [];
         $this->keyMultiValued  = [];
+        $this->keyOnlyNumbers  = [];
         $this->fieldNameCache  = [];
         $this->hasDeleted      = false;
     }
@@ -3216,10 +3243,25 @@ final class Index implements \Countable
         $baseConditions = $candidatesCapped
             ? [...$this->phraseConditions($phraseGroups), ...$negations]
             : [];
+        // facetStatsOnly fields a walk settles; the others are counted with the facets.
+        $statsOnly = $options->facetStatsOnly === [] ? null : $this->walkStatsOnly(
+            $options->facetStatsOnly,
+            $candidatesCapped
+                ? $this->resultSetBounds($required, $baseConditions, $this->facetFilterConditions($filter))
+                // The facet's matches: the candidates, without the field's own positive filter.
+                : fn(string $name, int $keyId): ?array => $this->boundsOfDocSet(
+                    $keyId,
+                    isset($filterSets[$name])
+                        ? $this->withoutOwnFilter($rawDocScores, $filterSets, $name)
+                        : $docScores,
+                    $this->config->limits->facetCountDocs,
+                ),
+        );
+        $facetKeys = [...$facets, ...$statsOnly['count'] ?? []];
         // The whole result set in PHP, when its conditions fit: one read for facets and total.
-        $classified = $candidatesCapped && $facets !== [] && $baseConditions === []
+        $classified = $candidatesCapped && $facetKeys !== [] && $baseConditions === []
             ? $this->overClasses(
-                $facets,
+                $facetKeys,
                 [...$this->groupConditions($required), ...$this->facetFilterConditions($filter)],
                 (int) ($this->getInfoValues(['total_documents'])['total_documents'] ?? 0),
             )
@@ -3229,21 +3271,30 @@ final class Index implements \Countable
             'distribution' => $facetDistribution,
             'stats'        => $facetStats,
             'approximate'  => $approximateFacets,
-        ] = $classified ?? ($candidatesCapped && $facets !== []
+        ] = $classified ?? ($candidatesCapped && $facetKeys !== []
             ? $this->resultSetFacetCounts(
-                $facets,
+                $facetKeys,
                 $required,
                 $baseConditions,
                 $this->facetFilterConditions($filter),
                 $this->config->limits->facetCountDocs,
             )
             : $this->computeFacetCounts(
-                $facets,
+                $facetKeys,
                 $filterSets,
                 $rawDocScores,
                 $docScores,
                 $this->config->limits->facetCountDocs,
             ));
+        if ($statsOnly !== null) {
+            self::mergeStatsOnly(
+                $options->facetStatsOnly,
+                $statsOnly,
+                $facetDistribution,
+                $facetStats,
+                $approximateFacets,
+            );
+        }
         $facetDistribution = $this->orderFacetValues($facetDistribution, $options->sortFacetValuesBy);
         $exhaustive = !$candidatesCapped && !$prefixCapped;
         $warnings   = [
@@ -3719,19 +3770,39 @@ final class Index implements \Countable
             $docIds = array_keys($rawDocSet);
         }
 
-        // Compute disjunctive facet counts on the full filtered result.
+        // Compute disjunctive facet counts on the full filtered result; facetStatsOnly fields a
+        // walk does not settle are counted with them.
         $filteredDocSet = array_flip($docIds);
+        $statsOnly      = $options->facetStatsOnly === [] ? null : $this->walkStatsOnly(
+            $options->facetStatsOnly,
+            fn(string $name, int $keyId): ?array => $this->boundsOfDocSet(
+                $keyId,
+                isset($filterSets[$name])
+                    ? $this->withoutOwnFilter($rawDocSet, $filterSets, $name)
+                    : $filteredDocSet,
+                $this->config->limits->facetCountDocs,
+            ),
+        );
         [
             'distribution' => $facetDistribution,
             'stats'        => $facetStats,
             'approximate'  => $approximateFacets,
         ] = $this->computeFacetCounts(
-            $facets,
+            [...$facets, ...$statsOnly['count'] ?? []],
             $filterSets,
             $rawDocSet,
             $filteredDocSet,
             $this->config->limits->facetCountDocs,
         );
+        if ($statsOnly !== null) {
+            self::mergeStatsOnly(
+                $options->facetStatsOnly,
+                $statsOnly,
+                $facetDistribution,
+                $facetStats,
+                $approximateFacets,
+            );
+        }
         $facetDistribution = $this->orderFacetValues($facetDistribution, $options->sortFacetValuesBy);
         $exhaustive = !$candidatesCapped && !$prefixCapped;
         $warnings   = [
@@ -4010,7 +4081,8 @@ final class Index implements \Countable
         $totalDocuments = (int) ($info['total_documents'] ?? 0);
 
         // Fast path: skip all PHP-side work; one PK scan for the page, total from cache.
-        $plainBrowse = $filter === [] && $negations === [] && $sortSpecs === [] && $facets === [] && $distinct === null;
+        $plainBrowse = $filter === [] && $negations === [] && $sortSpecs === [] && $facets === [] && $distinct === null
+            && $options->facetStatsOnly === [];
         if ($plainBrowse) {
             $stmt  = $this->stmt(
                 'browsePageIds',
@@ -4039,6 +4111,25 @@ final class Index implements \Countable
             ...$negations,
         ]);
         $match      = $conditions === [] ? null : $this->matchingDocsSql($conditions);
+        // facetStatsOnly fields a walk settles; the others are counted with the facets.
+        $statsOnly = $options->facetStatsOnly === [] ? null : $this->walkStatsOnly(
+            $options->facetStatsOnly,
+            function (string $name, int $keyId) use ($conditions, $totalDocuments): ?array {
+                // The facet's matches: every condition but the field's own positive filter.
+                $counted  = array_values(array_filter(
+                    $conditions,
+                    fn(array $c): bool => !self::isDisjunctiveFor($c, $name),
+                ));
+                $estimate = $totalDocuments;
+                foreach ($counted as $c) {
+                    if (!$c['exclude']) {
+                        $estimate = min($estimate, $this->conditionRowCount($c));
+                    }
+                }
+                return $this->boundsOfConditions($keyId, [], $counted, $estimate);
+            },
+        );
+        $facets     = [...$facets, ...$statsOnly['count'] ?? []];
         // Conditions small enough to hold in PHP are read once, for the total, the facet groups
         // and an unsorted page; a single condition without facets needs none of that.
         $classified = $negations === [] && $match !== null && ($facets !== [] || count($conditions) > 1)
@@ -4073,6 +4164,15 @@ final class Index implements \Countable
             'stats'        => $facetStats,
             'approximate'  => $approximateFacets,
         ] = $classified ?? $this->browseFacetCounts($facets, $conditions, $matchIds);
+        if ($statsOnly !== null) {
+            self::mergeStatsOnly(
+                $options->facetStatsOnly,
+                $statsOnly,
+                $facetDistribution,
+                $facetStats,
+                $approximateFacets,
+            );
+        }
         $facetDistribution = $this->orderFacetValues($facetDistribution, $options->sortFacetValuesBy);
         $warnings = [...$warnings, ...$this->capWarnings(null, false, $approximateFacets)];
 
@@ -9132,6 +9232,7 @@ final class Index implements \Countable
         if ($deltas === []) {
             return;
         }
+        $this->keyOnlyNumbers = [];
         $json = json_encode($deltas, JSON_THROW_ON_ERROR | JSON_PRESERVE_ZERO_FRACTION);
         // "WHERE true" lets SQLite parse an upsert whose source is a SELECT.
         $this->stmt(
@@ -9460,9 +9561,10 @@ final class Index implements \Countable
      * is legitimately "no values".
      *
      * @return list<array{field: string, asc: bool}>
-     * @throws \InvalidArgumentException on a malformed sort spec
+     * @throws \InvalidArgumentException on a malformed sort spec, or a field in both facets and
+     *                                    facetStatsOnly
      * @throws QueryException             on a sort field that is not sortable, or a filter, facet,
-     *                                    or distinct field that is not filterable
+     *                                    facet stats or distinct field that is not filterable
      */
     private function checkDeclaredFields(SearchOptions $options): array
     {
@@ -9476,6 +9578,14 @@ final class Index implements \Countable
         }
         $this->checkFilterableFields('Filter', array_keys($options->filter));
         $this->checkFilterableFields('Facet', $options->facets);
+        $this->checkFilterableFields('Facet stats', $options->facetStatsOnly);
+        $both = array_intersect($options->facetStatsOnly, $options->facets);
+        if ($both !== []) {
+            throw new \InvalidArgumentException(
+                "Field '" . reset($both) . "' is listed in both SearchOptions::\$facets and \$facetStatsOnly;"
+                . ' its facetStats come with the facet, list it in one of them.'
+            );
+        }
         if ($options->distinct !== null) {
             $this->checkFilterableFields('Distinct', [$options->distinct]);
         }
@@ -10332,11 +10442,8 @@ final class Index implements \Countable
             }
 
             // Disjunctive: count against the raw result set with all OTHER filters applied.
-            $otherSets = array_diff_key($filterSets, [$keyName => true]);
-            $countSet  = $otherSets === []
-                ? $rawDocScores
-                : array_intersect_key($rawDocScores, $this->intersectFilterSets($otherSets));
-            $docIds = array_slice(array_keys($countSet), 0, $maxDocs);
+            $countSet = $this->withoutOwnFilter($rawDocScores, $filterSets, $keyName);
+            $docIds   = array_slice(array_keys($countSet), 0, $maxDocs);
             $this->collectFacetCounts([$keyName => $keyId], $docIds, $distribution, $stats);
             if (count($countSet) > $maxDocs) {
                 $approximate[] = $keyName;
@@ -10354,6 +10461,270 @@ final class Index implements \Countable
             'stats'        => $stats,
             'approximate'  => array_values(array_unique($approximate)),
         ];
+    }
+
+    /**
+     * facetStats of SearchOptions::$facetStatsOnly without counting values, where a walk settles
+     * them: the min/max a facet of the field gives over the same matches.
+     *
+     * $bounds walks the key's numeric rows (the matches' lowest and highest value, see
+     * boundsOfDocSet() / boundsOfConditions()); its result holds unless the walk ran out (null)
+     * or the key also has string rows (a key with both kinds has stats only when every counted
+     * row is numeric, summarizeFacetCounts()). No numeric value among the matches means no
+     * stats either way. The other fields are returned in `count`: the caller counts them with
+     * its facets, in the same read, and mergeStatsOnly() keeps only their stats.
+     *
+     * @param  list<string> $fields
+     * @param  callable(string, int): (array{stats: array{min: float, max: float}|null, approximate: bool}|null) $bounds
+     * @return array{
+     *     found: array<string, array{stats: array{min: float, max: float}|null, approximate: bool}>,
+     *     count: list<string>
+     * }
+     */
+    private function walkStatsOnly(array $fields, callable $bounds): array
+    {
+        $found = [];
+        $count = [];
+        foreach ($fields as $name) {
+            $keyId = $this->lookupFacetKeyId($name);
+            if ($keyId === null) {
+                continue;
+            }
+            // Stats found by a walk hold only when the key has no string rows (checked after the
+            // walk: a walk that runs out goes to the facet path, which needs no check).
+            $walk = $bounds($name, $keyId);
+            if ($walk !== null && ($walk['stats'] === null || $this->hasOnlyNumbers($keyId))) {
+                $found[$name] = $walk;
+            } else {
+                $count[] = $name;
+            }
+        }
+        return ['found' => $found, 'count' => $count];
+    }
+
+    /**
+     * Add the facetStatsOnly fields to a facet result: walkStatsOnly()'s found stats, and for the
+     * fields it left to count, their stats without their distribution. Stats of the facets come
+     * first, then the facetStatsOnly fields in their order.
+     *
+     * @param list<string> $fields
+     * @param array{
+     *     found: array<string, array{stats: array{min: float, max: float}|null, approximate: bool}>,
+     *     count: list<string>
+     * } $walked
+     * @param array<string, array<array-key, int>>         $distribution Mutated in place.
+     * @param array<string, array{min: float, max: float}> $stats        Mutated in place.
+     * @param list<string>                                 $approximate  Mutated in place.
+     */
+    private static function mergeStatsOnly(
+        array $fields,
+        array $walked,
+        array &$distribution,
+        array &$stats,
+        array &$approximate,
+    ): void {
+        $only  = array_flip($fields);
+        $found = $walked['found'];
+        foreach ($walked['count'] as $name) {
+            $found[$name] = ['stats' => $stats[$name] ?? null, 'approximate' => false];
+        }
+        $distribution = array_diff_key($distribution, $only);
+        $stats        = array_diff_key($stats, $only);
+        foreach ($fields as $name) {
+            if (($found[$name]['stats'] ?? null) !== null) {
+                $stats[$name] = $found[$name]['stats'];
+            }
+            if (($found[$name]['approximate'] ?? false) && !in_array($name, $approximate, true)) {
+                $approximate[] = $name;
+            }
+        }
+    }
+
+    /**
+     * Whether every row of a key is numeric, from facet_counts (O(values): 0.2 ms for 2.2k
+     * values, 1 ms for 12k); cached per connection.
+     */
+    private function hasOnlyNumbers(int $keyId): bool
+    {
+        if (!isset($this->keyOnlyNumbers[$keyId])) {
+            $stmt = $this->stmt(
+                'keyOnlyNumbers',
+                'SELECT COALESCE(SUM(count), 0), COALESCE(SUM(num_count), 0) FROM facet_counts WHERE key_id = ?'
+            );
+            $stmt->execute([$keyId]);
+            /** @var array{0: int, 1: int} $row */
+            $row = $stmt->fetch(PDO::FETCH_NUM);
+            $stmt->closeCursor();
+            $this->keyOnlyNumbers[$keyId] = $row[0] === $row[1];
+        }
+        return $this->keyOnlyNumbers[$keyId];
+    }
+
+    /**
+     * The lowest and highest numeric value of a key over the whole index: the two ends of
+     * facet_numeric_index. Null when the key has no numeric rows.
+     *
+     * @return array{min: float, max: float}|null
+     */
+    private function boundsOfKey(int $keyId): ?array
+    {
+        $stmt = $this->stmt(
+            'keyNumericBounds',
+            'SELECT (SELECT num_value FROM facet_values WHERE key_id = :k AND num_value IS NOT NULL
+                      ORDER BY num_value ASC LIMIT 1),
+                    (SELECT num_value FROM facet_values WHERE key_id = :k AND num_value IS NOT NULL
+                      ORDER BY num_value DESC LIMIT 1)'
+        );
+        $stmt->execute([':k' => $keyId]);
+        /** @var array{0: float|null, 1: float|null} $row */
+        $row = $stmt->fetch(PDO::FETCH_NUM);
+        [$min, $max] = $row;
+        $stmt->closeCursor();
+        return $min === null || $max === null ? null : ['min' => $min, 'max' => $max];
+    }
+
+    /**
+     * The lowest and highest numeric value of a key over a document set held in PHP, as the
+     * facet counts it: its first $maxDocs keys (approximate when there are more).
+     *
+     * Walks facet_numeric_index from each end to the first document of the set, at most
+     * count / STATS_WALK_SHARE rows (STATS_WALK_SHARE); null when a walk runs out.
+     *
+     * @param  array<int, mixed> $docSet Document ID → anything.
+     * @return array{stats: array{min: float, max: float}|null, approximate: bool}|null
+     */
+    private function boundsOfDocSet(int $keyId, array $docSet, int $maxDocs): ?array
+    {
+        $approximate = count($docSet) > $maxDocs;
+        $docIds      = array_slice(array_keys($docSet), 0, $maxDocs);
+        if ($docIds === []) {
+            return ['stats' => null, 'approximate' => $approximate];
+        }
+        $set    = array_flip($docIds);
+        $budget = max(self::STATS_WALK_MIN_ROWS, intdiv(count($docIds), self::STATS_WALK_SHARE));
+        $ends   = [];
+        foreach (['ASC', 'DESC'] as $dir) {
+            $stmt = $this->stmt(
+                "statsWalk:{$dir}",
+                "SELECT doc_id, num_value FROM facet_values WHERE key_id = ? AND num_value IS NOT NULL
+                  ORDER BY num_value {$dir} LIMIT ?"
+            );
+            $stmt->execute([$keyId, $budget]);
+            $read = 0;
+            while (($row = $stmt->fetch(PDO::FETCH_NUM)) !== false) {
+                /** @var array{0: int, 1: float} $row */
+                $read++;
+                if (isset($set[$row[0]])) {
+                    $ends[$dir] = $row[1];
+                    break;
+                }
+            }
+            $stmt->closeCursor();
+            if (!isset($ends[$dir])) {
+                if ($read < $budget) {
+                    // The key's rows ran out: no document of the set has a value.
+                    return ['stats' => null, 'approximate' => $approximate];
+                }
+                return null;
+            }
+        }
+        return ['stats' => ['min' => $ends['ASC'], 'max' => $ends['DESC']], 'approximate' => $approximate];
+    }
+
+    /**
+     * The lowest and highest numeric value of a key over the documents that hold every
+     * group (through any term) and satisfy every condition: the facet's matches when the
+     * conditions are the ones counting the key uses (its own positive filter left out).
+     *
+     * No groups and no conditions: the ends of the key (boundsOfKey()). Otherwise
+     * facet_numeric_index is walked from each end with the groups and conditions probed per
+     * row, at most $estimate / STATS_WALK_SHARE rows (STATS_WALK_MIN_ROWS … STATS_WALK_MAX_ROWS;
+     * exclusions only: unbounded, since only excluded documents' rows can be passed over); null
+     * when a walk runs out. A walk is exact at any number of matches, so the stats are never
+     * approximate here.
+     *
+     * @param  list<KeywordGroup>   $groups
+     * @param  list<FacetCondition> $conditions
+     * @param  int                  $estimate   About how many documents match (an upper bound will do).
+     * @return array{stats: array{min: float, max: float}|null, approximate: bool}|null
+     */
+    private function boundsOfConditions(int $keyId, array $groups, array $conditions, int $estimate): ?array
+    {
+        if ($groups === [] && $conditions === []) {
+            return ['stats' => $this->boundsOfKey($keyId), 'approximate' => false];
+        }
+        $probes = $this->renderFacetProbes([...$this->groupConditions($groups), ...$conditions], 'w.doc_id');
+        if ($probes === null) {
+            return ['stats' => null, 'approximate' => false];
+        }
+        $budget = $groups === [] && self::isExclusionOnly($conditions)
+            ? -1
+            : min(self::STATS_WALK_MAX_ROWS, max(self::STATS_WALK_MIN_ROWS, intdiv($estimate, self::STATS_WALK_SHARE)));
+        $ends = [];
+        foreach (['ASC', 'DESC'] as $dir) {
+            $stmt = $this->prepare(
+                "SELECT w.num_value FROM (SELECT doc_id, num_value FROM facet_values
+                  WHERE key_id = ? AND num_value IS NOT NULL ORDER BY num_value {$dir} LIMIT ?) w
+                  WHERE 1{$probes[0]} LIMIT 1"
+            );
+            $stmt->execute([$keyId, $budget, ...$probes[1]]);
+            /** @var float|false|null $value */
+            $value = $stmt->fetchColumn();
+            $stmt->closeCursor();
+            if ($value === false || $value === null) {
+                // Exclusions only: no row passed, so no match has a value. Else the walk ran out.
+                return $budget === -1 ? ['stats' => null, 'approximate' => false] : null;
+            }
+            $ends[$dir] = $value;
+        }
+        return ['stats' => ['min' => $ends['ASC'], 'max' => $ends['DESC']], 'approximate' => false];
+    }
+
+    /**
+     * $bounds for walkStatsOnly() over a capped search's result set, as resultSetFacetCounts()
+     * counts a field: the documents with every group that pass the base conditions and the
+     * filters, the field's own positive filter left out. The walk budget follows the rarest
+     * group's documents or the smallest positive filter, whichever is fewer.
+     *
+     * @param  list<KeywordGroup>   $groups
+     * @param  list<FacetCondition> $base    Phrase and negation conditions.
+     * @param  list<FacetCondition> $filters facetFilterConditions() of the filter.
+     * @return callable(string, int): (array{stats: array{min: float, max: float}|null, approximate: bool}|null)
+     */
+    private function resultSetBounds(array $groups, array $base, array $filters): callable
+    {
+        $estimate = min(array_column($groups, 'df') ?: [0]);
+        foreach ($filters as $c) {
+            if (!$c['exclude']) {
+                $estimate = min($estimate, $this->conditionRowCount($c));
+            }
+        }
+        return fn(string $name, int $keyId): ?array => $this->boundsOfConditions(
+            $keyId,
+            $groups,
+            [
+                ...$base,
+                ...array_values(array_filter($filters, fn(array $c): bool => $c['exclude'] || $c['name'] !== $name)),
+            ],
+            $estimate,
+        );
+    }
+
+    /**
+     * A disjunctive facet's documents: the unfiltered result set with every filter set but the
+     * key's own applied.
+     *
+     * @template T
+     * @param  array<int, T>                   $rawDocs    Result set before the facet filters.
+     * @param  array<string, array<int, true>> $filterSets Per-key filter doc ID sets.
+     * @return array<int, T>
+     */
+    private function withoutOwnFilter(array $rawDocs, array $filterSets, string $keyName): array
+    {
+        $otherSets = array_diff_key($filterSets, [$keyName => true]);
+        return $otherSets === []
+            ? $rawDocs
+            : array_intersect_key($rawDocs, $this->intersectFilterSets($otherSets));
     }
 
     /**

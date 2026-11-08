@@ -451,6 +451,25 @@ $result = $index->search('watch', new SearchOptions(
 
 **Compared with Meilisearch:** the same setting, orders and default (`alpha`), per query instead of per index. For a field with more values than the cap, ask for `Count` to keep the most used ones.
 
+### Stats without counts
+
+A price slider needs a field's lowest and highest value over the matches, not a count per value. List such fields in `facetStatsOnly` instead of `facets`:
+
+```php
+$result = $index->search('', new SearchOptions(
+    filter:         ['category' => 'tiles'],
+    facets:         ['brand'],
+    facetStatsOnly: ['price'],
+));
+
+$result->facetStats['price'];        // ['min' => 12.75, 'max' => 114.35]
+isset($result->facetDistribution['price']); // false
+```
+
+The stats are the ones `facets: ['price']` would give: over the same matches (filters, exclusions, query), without the field's own filter (see [Disjunctive counting](#disjunctive-counting)), and only for a field with numeric values. A field may not be in both lists (`\InvalidArgumentException`); a field outside `filterableAttributes` throws a `QueryException`.
+
+A field with a value per document (a price) is expensive to count, because nearly every match adds its own value. `facetStatsOnly` reads the field's numeric index from both ends instead and stops at the first matching document on each side, which takes a few rows when the matches are spread over the range: on a 7.7k-product shop the price bounds of the whole catalogue add 0.3 ms to a request instead of 3.9 ms, on 1.43M products 1.1 ms instead of 15 ms. When the matching values sit in the middle of the range, that walk gives up after a share of the expected matches and the field is counted with the other facets, so it never costs much more than listing it in `facets`. Stats found by the walk cover every match, so they are exact even where the facet's counts would be approximate (`$approximateFacets`).
+
 ### Disjunctive counting
 
 When a `filter` is active on a key that is also in `facets`, its counts are computed over the result set *without* that key's filter — so all values stay visible even while one is selected:
@@ -658,6 +677,7 @@ Documents with no value for the distinct field are never collapsed — each pass
 | `offset` | `0` | Hits to skip (pagination) |
 | `filter` | `[]` | Facet filters — `array<string, string\|list<string>\|FacetRange\|FacetExclude>` |
 | `facets` | `[]` | Filterable fields to compute value counts for |
+| `facetStatsOnly` | `[]` | Numeric filterable fields to return in `$facetStats` only, without value counts — see [Stats without counts](#stats-without-counts) |
 | `sort` | `[]` | Sort specs — `list<string>` of `'field:asc'` / `'field:desc'` |
 | `distinct` | `null` | Filterable field to collapse on |
 | `matchingStrategy` | `MatchingStrategy::Last` | Which documents a multi-word `search()` returns and how they rank first — see [Matching strategy](#matching-strategy) |
