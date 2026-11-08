@@ -96,7 +96,8 @@ final class BooleanParser
      *
      *   - whitespace between two operands is an implicit AND ("a b", "a ~b", "a (b)", ") a");
      *   - "or" is always the OR operator, so a leading or doubled "or" is dropped like '|';
-     *   - a leading "-" on a word is NOT ("a -b"); a hyphen inside a word is kept ("e-mail");
+     *   - a leading "-" on a word or a group is NOT ("a -b", "a -(b c)"); a hyphen inside a
+     *     word is kept ("e-mail");
      *   - runs with no letter, digit, or '@' ("-", "+", "…") carry nothing to search and are
      *     dropped, instead of becoming an operand that matches no documents;
      *   - a binary operator with nothing to its left, a repeated '~', and anything dangling
@@ -114,11 +115,11 @@ final class BooleanParser
     {
         // One pass in C: an operator character, or a run of other non-space characters split
         // into its leading '-' (group 1) and the rest (group 2) when the rest can hold a search
-        // term. A run with nothing searchable ("-", "+", "…") matches the last alternative and
-        // leaves group 2 empty.
+        // term, or the '-' of a negated group (group 3). A run with nothing searchable ("-",
+        // "+", "…") matches the last alternative and leaves group 2 empty.
         /** @infection-ignore-all MBString: lowercasing only affects word tokens; operator characters are ASCII */
         preg_match_all(
-            '/[|&~()]|(-*)([^\s|&~()]*[\p{L}\p{N}\p{Pc}@][^\s|&~()]*)|[^\s|&~()]+/u',
+            '/[|&~()]|(-*)([^\s|&~()]*[\p{L}\p{N}\p{Pc}@][^\s|&~()]*)|(-+)(?=\()|[^\s|&~()]+/u',
             mb_strtolower($expression, 'UTF-8'),
             $matches,
             PREG_SET_ORDER,
@@ -130,7 +131,8 @@ final class BooleanParser
         $depth         = 0;
 
         foreach ($matches as $match) {
-            $lexeme = $match[0];
+            // A '-' glued to '(' negates the group, as '~(' does.
+            $lexeme = ($match[3] ?? '') !== '' ? '~' : $match[0];
             if ($lexeme === '|' || $lexeme === '&' || $lexeme === 'or') {
                 if (!$expectOperand || $tokens === []) {
                     $tokens[]      = $lexeme === '&' ? '&' : '|';

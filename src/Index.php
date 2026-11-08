@@ -2658,7 +2658,7 @@ final class Index implements \Countable
             /** @infection-ignore-all Concat|ConcatOperandRemoval: '|' prepend is the OR identity; '|' . $phrase and $phrase . '|' both yield identical postfix because '|' is always the last operator popped */
             // searchBoolean() reads '-' as its own NOT, so its postfix covers the whole query.
             booleanPostfix:  $this->withoutStopWords(BooleanParser::toPostfix(
-                '|' . $this->filterQueryTokens($phrase, verbose: true)['free_phrase']
+                '|' . $this->filterQueryTokens(self::splitNegatedPhrases($phrase)['phrase'])['free_phrase']
             )[0]),
             phraseGroups:    $verbose['phrase_groups'],
             negations:       $negations,
@@ -3641,8 +3641,10 @@ final class Index implements \Countable
         $distinctCount = $options->distinctCount;
         $sortSpecs     = $this->checkDeclaredFields($options);
         $warnings      = [];
-        $parsed       = $this->filterQueryTokens($phrase);
-        $asYouType    = $asYouType && !self::endsInQuotedPhrase($phrase);
+        ['phrase' => $expression, 'negations' => $negatedPhrases] = self::splitNegatedPhrases($phrase);
+        $negations    = $this->negationConditions($negatedPhrases);
+        $parsed       = $this->filterQueryTokens($expression);
+        $asYouType    = $asYouType && !self::endsInQuotedPhrase($expression);
         // A phrase filters the whole boolean result, also the other side of an OR, so one with
         // a word the index lacks is left out rather than emptying the result.
         $phraseGroups = array_values(array_filter(
@@ -3769,7 +3771,7 @@ final class Index implements \Countable
         // Apply facet filters: load per-key doc ID sets and intersect with the result.
         // array_flip($docIds) gives doc_id → position, usable as a set for array_intersect_key.
         // Exclusions are removed first, so they also hold for disjunctive facet counts.
-        [$filterSets, $excluded] = $this->loadFacetKeySets($filter, $docIds);
+        [$filterSets, $excluded] = $this->loadFacetKeySets($filter, $docIds, $negations);
         $rawDocSet  = array_diff_key(array_flip($docIds), $excluded);
         if ($filterSets !== []) {
             $globalFilter = $this->intersectFilterSets($filterSets);
@@ -3828,6 +3830,7 @@ final class Index implements \Countable
                 $asYouType,
                 [
                     ...$this->phraseConditions($phraseGroups),
+                    ...$negations,
                     ...$this->facetFilterConditions($filter),
                 ],
             )
@@ -7747,7 +7750,9 @@ final class Index implements \Countable
                 if ($trimmed !== '') {
                     $groups[] = $trimmed;
                 }
-                return ' ' . $m[1] . ' ';
+                // Its words only: boolean operators inside quotes ('"black or white"', '"a -b"')
+                // are words of the phrase, which the phrase filter matches exactly.
+                return ' ' . (preg_replace('/[|&~()]|(?<!\S)-+|(?<!\S)or(?!\S)/iu', ' ', $m[1]) ?? $m[1]) . ' ';
             },
             $query,
         ) ?? $query;
@@ -7784,7 +7789,9 @@ final class Index implements \Countable
         }
         $negations = [];
         $positive  = preg_replace_callback(
-            '/(?<!\S)-(?:"([^"]*)"|([^\s"]+))/u',
+            // A quote pair is taken whole first: quotes pair from the left, so a '-"' inside one
+            // ('"a -" b') closes it and starts no negation.
+            '/"[^"]*"(*SKIP)(*FAIL)|(?<!\S)-(?:"([^"]*)"|([^\s"]+))/u',
             function (array $m) use (&$negations): string {
                 $negations[] = ($m[2] ?? '') !== '' ? $m[2] : $m[1];
                 return ' ';
@@ -7814,7 +7821,18 @@ final class Index implements \Countable
         if ($raw === []) {
             return ['phrase' => $phrase, 'conditions' => []];
         }
+        return ['phrase' => $positive, 'conditions' => $this->negationConditions($raw)];
+    }
 
+    /**
+     * One exclusion condition per negated word or phrase (see extractNegations()); a negation
+     * with a word the index lacks excludes nothing and is left out.
+     *
+     * @param  list<string> $raw The negations' text, without '-' and quotes.
+     * @return list<FacetCondition>
+     */
+    private function negationConditions(array $raw): array
+    {
         $conditions = [];
         foreach ($raw as $text) {
             $termIds = [];
@@ -7852,7 +7870,31 @@ final class Index implements \Countable
             }
             $conditions[] = $condition;
         }
-        return ['phrase' => $positive, 'conditions' => $conditions];
+        return $conditions;
+    }
+
+    /**
+     * Split the negated quoted phrases ('-"…"' or '~"…"', at the start, after whitespace or an
+     * opening parenthesis) off a searchBoolean() query. Its NOT takes words and groups; a
+     * negated phrase excludes its documents from the whole result, as a phrase filters it.
+     *
+     * @return array{phrase: string, negations: list<string>}
+     */
+    private static function splitNegatedPhrases(string $phrase): array
+    {
+        if (!str_contains($phrase, '"')) {
+            return ['phrase' => $phrase, 'negations' => []];
+        }
+        $negations = [];
+        $positive  = preg_replace_callback(
+            '/(?<![^\s(])[-~]+"([^"]*)"|"[^"]*"(*SKIP)(*FAIL)/u',
+            function (array $m) use (&$negations): string {
+                $negations[] = $m[1];
+                return ' ';
+            },
+            $phrase,
+        ) ?? $phrase;
+        return ['phrase' => $positive, 'negations' => $negations];
     }
 
     /**

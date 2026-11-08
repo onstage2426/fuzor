@@ -2914,6 +2914,70 @@ class IndexTest extends TestCase
         $this->assertSame($result->rawTokens, $result->filteredTokens);
     }
 
+    /** @return iterable<string, array{string, list<int>}> */
+    public static function booleanQuoteQueries(): iterable
+    {
+        yield 'negated phrase'       => ['bank -"blue bank"', [1, 3, 4]];
+        yield 'tilde phrase'         => ['bank ~"blue bank"', [1, 3, 4]];
+        yield 'phrase first'         => ['-"blue bank" bank', [1, 3, 4]];
+        yield 'negated unknown word' => ['bank -"zzz bank"', [1, 2, 3, 4]];
+        yield 'negated group'        => ['bank -(blue river)', [1, 2, 3, 4]];
+        yield 'negated or group'     => ['bank -(blue | river)', [1]];
+        yield 'only a negation'      => ['-"blue bank"', []];
+        yield 'minus in a phrase'    => ['"blue -bank"', [2]];
+        yield 'or in a phrase'       => ['"bank or england"', [1, 2]];
+        yield 'bar in a phrase'      => ['"blue | bank"', [2]];
+        yield 'quote pairs first'    => ['"bank -" england', [1, 2]];
+    }
+
+    /**
+     * Quoted text in searchBoolean() is a phrase: a '-' or '~' before it excludes the phrase
+     * (it used to require it), operators inside it are words, and a '-' before a group
+     * negates the group.
+     *
+     * @param list<int> $expected
+     */
+    #[DataProvider('booleanQuoteQueries')]
+    public function testBooleanSearchQuotedPhrases(string $query, array $expected): void
+    {
+        $index = new Index($this->dbPath);
+        $index->insert([
+            ['id' => 1, 'title' => 'bank of england'],
+            ['id' => 2, 'title' => 'blue bank of england'],
+            ['id' => 3, 'title' => 'bank blue house'],
+            ['id' => 4, 'title' => 'river bank'],
+        ]);
+        $ids = $index->searchBoolean($query, new SearchOptions(asYouType: false))->getIds();
+        sort($ids);
+        $this->assertSame($expected, $ids);
+    }
+
+    /** The exact total of a capped boolean search leaves the negated phrase's documents out too. */
+    public function testBooleanNegatedPhraseCountsInTheExactTotal(): void
+    {
+        $index = new Index($this->dbPath, config: new Config(limits: new Limits(candidatesPerWord: 2)));
+        $docs  = [];
+        for ($id = 1; $id <= 12; $id++) {
+            $docs[] = ['id' => $id, 'title' => $id % 3 === 0 ? 'blue bank' : 'bank blue'];
+        }
+        $index->insert($docs);
+        $result = $index->searchBoolean('bank -"blue bank"', new SearchOptions(asYouType: false));
+        $this->assertFalse($result->exhaustive);
+        $this->assertSame(8, $result->totalHits);
+    }
+
+    /** A quote pair is taken whole before negations: '"a -" b' holds no negation. */
+    public function testSearchNegationDoesNotStartInsideAQuotePair(): void
+    {
+        $index = new Index($this->dbPath);
+        $index->insert([
+            ['id' => 1, 'title' => 'bank of england'],
+            ['id' => 2, 'title' => 'river bank'],
+        ]);
+        $this->assertSame([], $index->inspectQuery('"bank -" "england"')->negations);
+        $this->assertSame([1], $index->search('"bank -" "england"')->getIds());
+    }
+
     /** @return iterable<string, array{string, list<int>, list<string>}> */
     public static function booleanStopWordQueries(): iterable
     {

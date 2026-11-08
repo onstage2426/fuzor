@@ -272,6 +272,9 @@ $result = $index->searchBoolean('(sedan or coupe) -electric');
 | `term1 term2` | AND | Both must be present |
 | `term1 or term2`, `term1 \| term2` | OR | Either present |
 | `-term`, `~term` | NOT | Term must be absent |
+| `-(term1 term2)`, `~(…)` | NOT | The group must not match |
+| `"term1 term2"` | phrase | The words in this order, next to each other |
+| `-"term1 term2"`, `~"…"` | NOT | The phrase must be absent |
 | `term1 & term2` | AND | Explicit AND |
 | `(term1 or term2)` | grouping | Override default precedence |
 
@@ -279,7 +282,7 @@ Default precedence (tightest to loosest): NOT → AND → OR. Use parentheses wh
 
 Spacing never changes the meaning: `a|b`, `a | b`, and `a or b` are the same query, and extra, leading, or trailing whitespace is ignored. The parser is forgiving with half-typed input — a dangling operator (`shirt |`), an unclosed parenthesis (`(shirt`), or a lone symbol such as `+` or `-` is dropped rather than emptying the result. A hyphen inside a word is part of the word (`e-mail`); only a leading one negates.
 
-NOT subtracts from the terms it is combined with by AND, in any order: `shirt -jeans` and `-jeans shirt` are the same. A query that is **only** negations (`-jeans`) matches nothing — there is no positive set to subtract from — and inside an OR a negation contributes nothing (`shirt or -jeans` behaves like `shirt`).
+NOT subtracts from the terms it is combined with by AND, in any order: `shirt -jeans` and `-jeans shirt` are the same. A quoted phrase applies to the whole result, also to the other side of an OR, and so does a negated one: `shirt -"slim fit"` leaves out every document with "slim fit". Inside quotes, operators are words of the phrase: `"black or white"` and `"t -shirt"` are phrases, not an OR or a NOT. A query that is **only** negations (`-jeans`) matches nothing — there is no positive set to subtract from — and inside an OR a negation contributes nothing (`shirt or -jeans` behaves like `shirt`).
 
 `searchBoolean()` accepts all the same `SearchOptions` as `search()`.
 
