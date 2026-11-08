@@ -2915,6 +2915,94 @@ class IndexTest extends TestCase
     }
 
     /** @return iterable<string, array{string, list<int>}> */
+    public static function stopWordPhraseQueries(): iterable
+    {
+        yield 'stop word between'    => ['"bank of england"', [1, 3, 6]];
+        yield 'none between'         => ['"bank england"', [2]];
+        yield 'two between'          => ['"bank of the england"', [4]];
+        yield 'leading stop word'    => ['"the bank england"', [2]];
+        yield 'with a word'          => ['blue "bank of england"', [6]];
+        yield 'negated'              => ['bank -"bank england"', [1, 3, 4, 5, 6]];
+        yield 'negated with a gap'   => ['bank -"bank of england"', [2, 4, 5]];
+    }
+
+    /**
+     * A stop word is not indexed but keeps its position: in a phrase it stands for any one
+     * word, and a phrase without it does not match across it.
+     *
+     * @param list<int> $expected
+     */
+    #[DataProvider('stopWordPhraseQueries')]
+    public function testStopWordKeepsItsPlaceInAPhrase(string $query, array $expected): void
+    {
+        foreach ([500, 1] as $candidatesPerWord) {
+            $path = $this->dbPath . $candidatesPerWord;
+            $index = new Index(
+                $path,
+                config: new Config(limits: new Limits(candidatesPerWord: $candidatesPerWord)),
+                schema: new SchemaConfig(stopWords: ['of', 'the'], filterableAttributes: ['tag']),
+            );
+            $index->insert([
+                ['id' => 1, 'title' => 'bank of england', 'tag' => 'a'],
+                ['id' => 2, 'title' => 'bank england', 'tag' => 'b'],
+                ['id' => 3, 'title' => 'bank the england', 'tag' => 'c'],
+                ['id' => 4, 'title' => 'bank of the england', 'tag' => 'd'],
+                ['id' => 5, 'title' => 'england bank', 'tag' => 'e'],
+                ['id' => 6, 'title' => 'blue bank of england', 'tag' => 'f'],
+            ]);
+            $options = new SearchOptions(asYouType: false, limit: 1);
+            $result  = $index->search($query, new SearchOptions(asYouType: false));
+            $ids     = $result->getIds();
+            sort($ids);
+            $this->assertSame($expected, $ids, "search, candidatesPerWord {$candidatesPerWord}");
+            // The exact total of a capped search counts in SQL (phrase conditions).
+            $this->assertSame(count($expected), $index->search($query, $options)->totalHits);
+            $tags = array_column(
+                $index->facetSearch(new FacetSearchQuery('tag', q: $query, limit: 10))->facetHits,
+                'value',
+            );
+            $this->assertSame(
+                array_map(fn(int $id): string => 'abcdef'[$id - 1], $expected),
+                $tags,
+                'facetSearch',
+            );
+            // A boolean page comes from the candidates: compared where nothing is cut.
+            if (!str_contains($query, '-') && $candidatesPerWord > 1) {
+                $boolean = $index->searchBoolean($query, new SearchOptions(asYouType: false))->getIds();
+                sort($boolean);
+                $this->assertSame($expected, $boolean, 'searchBoolean');
+            }
+            $index->close();
+            Index::remove($path);
+        }
+    }
+
+    /** The phrase check over many positions per document (in PHP) keeps the gaps too. */
+    public function testStopWordPhraseOverManyPositions(): void
+    {
+        $index = new Index($this->dbPath, schema: new SchemaConfig(stopWords: ['of']));
+        $repeat = fn(string $text): string => implode(' ', array_fill(0, 6, $text));
+        $index->insert([
+            ['id' => 1, 'title' => $repeat('bank river of england')],
+            ['id' => 2, 'title' => $repeat('bank river england')],
+            ['id' => 3, 'title' => $repeat('river blue of england')],
+        ]);
+        $this->assertSame([1], $index->search('"river of england"', new SearchOptions(asYouType: false))->getIds());
+        $this->assertSame([2], $index->search('"river england"', new SearchOptions(asYouType: false))->getIds());
+    }
+
+    /** Proximity counts a stop word between two query words. */
+    public function testProximityCountsAStopWord(): void
+    {
+        $index = new Index($this->dbPath, schema: new SchemaConfig(stopWords: ['of']));
+        $index->insert([
+            ['id' => 1, 'title' => 'red of car'],
+            ['id' => 2, 'title' => 'red car'],
+        ]);
+        $this->assertSame([2, 1], $index->search('red car', new SearchOptions(asYouType: false))->getIds());
+    }
+
+    /** @return iterable<string, array{string, list<int>}> */
     public static function booleanQuoteQueries(): iterable
     {
         yield 'negated phrase'       => ['bank -"blue bank"', [1, 3, 4]];

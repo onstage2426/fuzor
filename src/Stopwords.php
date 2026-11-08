@@ -20,6 +20,12 @@ final class Stopwords
         $this->words = array_fill_keys($words, true);
     }
 
+    /** Whether $token (lowercased) is a stop word. */
+    public function contains(string $token): bool
+    {
+        return isset($this->words[$token]);
+    }
+
     /**
      * Remove stop words from a token list.
      *

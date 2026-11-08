@@ -43,7 +43,7 @@ use PDO;
  *     values?: array{keyId: int, values: list<mixed>},
  *     selection?: true,
  *     rowCount?: int,
- *     slots?: list<array{termIds: list<int>, hits: int}>,
+ *     slots?: array<int, array{termIds: list<int>, hits: int}>,
  * }
  * @phpstan-type KeywordGroup array{
  *     words: list<array{id: int, term: string, num_hits: int, num_docs: int, distance?: int}>,
@@ -2641,7 +2641,7 @@ final class Index implements \Countable
             foreach ($negationTokens as $token) {
                 $applied = $applied && $this->lookupTermId($token) !== null;
             }
-            $negations[] = ['raw' => $text, 'tokens' => $negationTokens, 'applied' => $applied];
+            $negations[] = ['raw' => $text, 'tokens' => array_values($negationTokens), 'applied' => $applied];
         }
 
         $indexInfo = $this->getInfoValues(['total_documents', 'avg_doc_length']);
@@ -2660,7 +2660,7 @@ final class Index implements \Countable
             booleanPostfix:  $this->withoutStopWords(BooleanParser::toPostfix(
                 '|' . $this->filterQueryTokens(self::splitNegatedPhrases($phrase)['phrase'])['free_phrase']
             )[0]),
-            phraseGroups:    $verbose['phrase_groups'],
+            phraseGroups:    array_map(array_values(...), $verbose['phrase_groups']),
             negations:       $negations,
         );
     }
@@ -5997,19 +5997,25 @@ final class Index implements \Countable
             }
         }
         $tokens = Tokenizer::tokenize($text, $this->language);
-        if ($this->stopwords instanceof \Fuzor\Stopwords) {
-            $tokens = $this->stopwords->filter($tokens);
+        // A stop word is left out but keeps its position, so the words around it stay as far
+        // apart as typed: a phrase with it matches any word in its place, one without it does not
+        // match across it, and proximity counts it.
+        $count  = count($tokens);
+        $stopwords = $this->stopwords;
+        if ($stopwords instanceof \Fuzor\Stopwords) {
+            $tokens = array_filter($tokens, fn(string $token): bool => !$stopwords->contains($token));
         }
         /** @infection-ignore-all Assignment: changing += to = only matters for multi-field docs where the same term appears in both fields; single-field tests are unaffected */
         $length += count($tokens);
-        if ($this->stemmer instanceof \Fuzor\Stemmer) {
-            $tokens = $this->stemmer->stemTokens($tokens);
+        if ($this->stemmer instanceof \Fuzor\Stemmer && $tokens !== []) {
+            $tokens = array_combine(array_keys($tokens), $this->stemmer->stemTokens(array_values($tokens)));
         }
-        foreach ($tokens as $token) {
+        foreach ($tokens as $offset => $token) {
             $termCounts[$token]      = ($termCounts[$token] ?? 0) + 1;
-            $termPositions[$token][] = $position++;
+            $termPositions[$token][] = $position + $offset;
             $fieldTermCounts[$fieldName][$token] = ($fieldTermCounts[$fieldName][$token] ?? 0) + 1;
         }
+        $position += $count;
     }
 
     /**
@@ -7151,7 +7157,7 @@ final class Index implements \Countable
                     $right === null => $left,
                     default         => [...$left, ...$right, $token],
                 };
-            } elseif ($this->stopwords->filter([$token]) === []) {
+            } elseif ($this->stopwords->contains($token)) {
                 $stack[] = null;
             } else {
                 $stack[] = [$token];
@@ -7518,35 +7524,36 @@ final class Index implements \Countable
      * Check whether a document contains a phrase as a contiguous token sequence.
      *
      * Each phrase slot may expand to several term IDs (e.g. via prefix expansion), so
-     * the check is: does any start position p exist such that for every slot i, at least
-     * one term ID in phrasePosTermIds[i] has a recorded position of p + i in this
-     * doc?
+     * the check is: does any start position p exist such that for every slot at offset i, at
+     * least one term ID in phrasePosTermIds[i] has a recorded position of p + i in this
+     * doc? Offsets skip a stop word's place (normalizePhraseTokens()); the first is 0.
      *
      * @param array<int, list<int>> $docTermPositions  term_id → sorted position list.
-     * @param list<list<int>>       $phrasePosTermIds  Phrase slot → term IDs accepted at that slot.
+     * @param array<int, list<int>> $phrasePosTermIds  Offset in the phrase → term IDs accepted there.
      */
     private function docMatchesPhrase(array $docTermPositions, array $phrasePosTermIds): bool
     {
-        $len = count($phrasePosTermIds);
-
         // Build a position-set per phrase slot for O(1) membership tests.
-        /** @var list<array<int, true>> $posSets */
+        /** @var array<int, array<int, true>> $posSets */
         $posSets = [];
-        foreach ($phrasePosTermIds as $termIds) {
+        foreach ($phrasePosTermIds as $offset => $termIds) {
             $set = [];
             foreach ($termIds as $termId) {
                 foreach ($docTermPositions[$termId] ?? [] as $pos) {
                     $set[$pos] = true;
                 }
             }
-            $posSets[] = $set;
+            $posSets[$offset] = $set;
         }
+        $anchors = $posSets[0] ?? [];
+        unset($posSets[0]);
 
-        // Try each anchor position from the first slot; check that slot i has a hit at startPos + i.
-        foreach (array_keys($posSets[0]) as $startPos) {
+        // Try each anchor position from the first slot; check that the slot at offset i has a
+        // hit at startPos + i.
+        foreach (array_keys($anchors) as $startPos) {
             $matched = true;
-            for ($i = 1; $i < $len; $i++) {
-                if (!isset($posSets[$i][$startPos + $i])) {
+            foreach ($posSets as $offset => $set) {
+                if (!isset($set[$startPos + $offset])) {
                     $matched = false;
                     break;
                 }
@@ -7565,8 +7572,8 @@ final class Index implements \Countable
      * or a typo, as in Meilisearch). A phrase with a word absent from the index matches no
      * document, so none passes (Meilisearch never drops a phrase from a query either).
      *
-     * @param list<int>          $docIds       Candidate document IDs.
-     * @param list<list<string>> $phraseGroups Stemmed token lists, one per quoted phrase.
+     * @param list<int>                $docIds       Candidate document IDs.
+     * @param list<array<int, string>> $phraseGroups Stemmed tokens by offset, one per quoted phrase.
      * @return list<int>
      */
     private function filterDocsByPhrases(array $docIds, array $phraseGroups): array
@@ -7575,7 +7582,7 @@ final class Index implements \Countable
             return $docIds;
         }
 
-        /** @var list<list<list<int>>> $resolvedPhrases  phrase → slot → termIds */
+        /** @var list<array<int, list<int>>> $resolvedPhrases  phrase → offset → termIds */
         $resolvedPhrases = [];
         $allTermIds      = [];
         $scanRows        = count($docIds) * self::PHRASE_SCAN_ROWS_PER_DOC;
@@ -7585,7 +7592,7 @@ final class Index implements \Countable
             $rarest     = 0;
             $rarestHits = PHP_INT_MAX;
 
-            foreach ($group as $token) {
+            foreach ($group as $offset => $token) {
                 $rows    = $this->getWordlistByKeyword($token, false, false);
                 $termIds = array_column($rows, 'id');
 
@@ -7595,9 +7602,9 @@ final class Index implements \Countable
                 }
                 $hits = array_sum(array_column($rows, 'num_hits'));
                 if ($hits < $rarestHits) {
-                    [$rarest, $rarestHits] = [count($slots), $hits];
+                    [$rarest, $rarestHits] = [$offset, $hits];
                 }
-                $slots[] = $termIds;
+                $slots[$offset] = $termIds;
             }
 
             // Few rows for the rarest word against the candidates: the documents holding the
@@ -7639,12 +7646,12 @@ final class Index implements \Countable
     }
 
     /**
-     * The documents that hold a phrase (slot → term IDs, two or more slots) at consecutive
-     * positions, as a set: driven from the positions rows of slot $from, each other slot probed
-     * at its offset (positions_doc_id). Same test as docMatchesPhrase(); deleted documents are
+     * The documents that hold a phrase (offset → term IDs, two or more slots) at its offsets,
+     * as a set: driven from the positions rows of the slot at offset $from, each other slot
+     * probed at its offset (positions_doc_id). Same test as docMatchesPhrase(); deleted documents are
      * included (callers intersect with live candidates).
      *
-     * @param  list<list<int>> $slots
+     * @param  array<int, list<int>> $slots
      * @return array<int, true>
      */
     private function phraseDocs(array $slots, int $from): array
@@ -7654,7 +7661,7 @@ final class Index implements \Countable
         $params = $slots[$from];
         $shape  = [];
         foreach ($slots as $j => $termIds) {
-            $shape[] = count($termIds);
+            $shape[] = $j . ':' . count($termIds);
             if ($j === $from) {
                 continue;
             }
@@ -7688,7 +7695,7 @@ final class Index implements \Countable
      *
      * @infection-ignore-all FalseValue: default false→true only computes raw_tokens eagerly; correctness unaffected
      * @return array{raw_tokens: list<string>, filtered: list<string>, all_stripped: bool,
-     *               surviving_raw: list<string>, phrase_groups: list<list<string>>, free_phrase: string}
+     *               surviving_raw: list<string>, phrase_groups: list<array<int, string>>, free_phrase: string}
      */
     private function filterQueryTokens(string $phrase, bool $verbose = false): array
     {
@@ -7848,21 +7855,24 @@ final class Index implements \Countable
     {
         $conditions = [];
         foreach ($raw as $text) {
+            /** @var array<int, int> $termIds  offset → term */
             $termIds = [];
-            foreach ($this->normalizePhraseTokens($text) as $token) {
+            foreach ($this->normalizePhraseTokens($text) as $offset => $token) {
                 $termId = $this->lookupTermId($token);
                 if ($termId === null) {
                     continue 2;
                 }
-                $termIds[] = $termId;
+                $termIds[$offset] = $termId;
             }
             if ($termIds === []) {
                 continue;
             }
             $rows   = 'FROM ' . (count($termIds) === 1 ? 'doclist' : 'positions') . ' %1$s';
             $params = [];
-            foreach (array_slice($termIds, 1) as $i => $termId) {
-                $at       = $i + 1;
+            foreach ($termIds as $at => $termId) {
+                if ($at === 0) {
+                    continue;
+                }
                 $rows    .= " JOIN positions %1\$s_{$at} ON %1\$s_{$at}.term_id = ?"
                     . " AND %1\$s_{$at}.doc_id = %1\$s.doc_id AND %1\$s_{$at}.position = %1\$s.position + {$at}";
                 $params[] = $termId;
@@ -7915,16 +7925,28 @@ final class Index implements \Countable
      * Tokenise a quoted phrase (or negation) the way query words are: stopwords removed when
      * more than one token remains (an all-stopword phrase yields []), then stemmed.
      *
-     * @return list<string>
+     * Keyed by each word's offset in the phrase: a stop word left out keeps its place, as it
+     * does in the index (indexFieldColumn()), so `"bank of england"` is bank at 0 and england
+     * at 2, any word between them. Leading stop words are not counted (the first key is 0).
+     *
+     * @return array<int, string>
      */
     private function normalizePhraseTokens(string $text): array
     {
         $tokens = Tokenizer::tokenize($text, $this->language);
-        if ($this->stopwords instanceof \Fuzor\Stopwords && count($tokens) > 1) {
-            $tokens = $this->stopwords->filter($tokens);
+        $stopwords = $this->stopwords;
+        if ($stopwords instanceof \Fuzor\Stopwords && count($tokens) > 1) {
+            $tokens = array_filter($tokens, fn(string $token): bool => !$stopwords->contains($token));
+            $first  = array_key_first($tokens);
+            if ($first !== null && $first > 0) {
+                $tokens = array_combine(
+                    array_map(fn(int $offset): int => $offset - $first, array_keys($tokens)),
+                    $tokens,
+                );
+            }
         }
         if ($tokens !== [] && $this->stemmer instanceof \Fuzor\Stemmer) {
-            $tokens = $this->stemmer->stemTokens($tokens);
+            $tokens = array_combine(array_keys($tokens), $this->stemmer->stemTokens(array_values($tokens)));
         }
         return $tokens;
     }
@@ -8679,11 +8701,11 @@ final class Index implements \Countable
 
     /**
      * The quoted phrases as conditions for searchMatchesSql(): a document passes when it has
-     * the phrase's words, each exact, at consecutive positions (as docMatchesPhrase()). A phrase
+     * the phrase's words, each exact, at their offsets (as docMatchesPhrase()). A phrase
      * with a word the index lacks gives one impossible condition (no document passes, as in
      * filterDocsByPhrases()).
      *
-     * @param  list<list<string>> $phraseGroups
+     * @param  list<array<int, string>> $phraseGroups
      * @return list<FacetCondition>
      */
     private function phraseConditions(array $phraseGroups): array
@@ -8691,7 +8713,7 @@ final class Index implements \Countable
         $conditions = [];
         foreach ($phraseGroups as $group) {
             $slots = [];
-            foreach ($group as $token) {
+            foreach ($group as $offset => $token) {
                 $rows    = $this->getWordlistByKeyword($token, false, false);
                 $termIds = array_column($rows, 'id');
                 if ($termIds === []) {
@@ -8705,15 +8727,17 @@ final class Index implements \Countable
                         'exclude'    => false,
                     ]];
                 }
-                $slots[] = ['termIds' => $termIds, 'hits' => array_sum(array_column($rows, 'num_hits'))];
+                $slots[$offset] = ['termIds' => $termIds, 'hits' => array_sum(array_column($rows, 'num_hits'))];
             }
             if ($slots === []) {
                 continue;
             }
             $rows   = 'FROM ' . (count($slots) === 1 ? 'doclist' : 'positions') . ' %1$s';
             $params = [];
-            foreach (array_column(array_slice($slots, 1), 'termIds') as $i => $termIds) {
-                $at    = $i + 1;
+            foreach ($slots as $at => ['termIds' => $termIds]) {
+                if ($at === 0) {
+                    continue;
+                }
                 $rows .= " JOIN positions %1\$s_{$at} ON %1\$s_{$at}.doc_id = %1\$s.doc_id"
                     . " AND %1\$s_{$at}.position = %1\$s.position + {$at}"
                     . " AND %1\$s_{$at}.term_id IN (" . $this->placeholders(count($termIds)) . ')';

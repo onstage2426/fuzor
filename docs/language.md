@@ -35,6 +35,9 @@ $index->stopWords; // ['the', 'a', 'an', 'of']
 
 Each entry must be a single word (`\InvalidArgumentException` otherwise). The list is part of the
 schema: change it with `rebuild()`. A query made only of stop words searches its words as typed.
+A stop word left out still keeps its place between the other words: the phrase `"bank of england"`
+matches "bank of england" and "bank the england" (any one word between), `"bank england"` matches
+only the two words side by side, and proximity ranking counts the stop word as a word between.
 Fuzor ships no word lists: general-purpose lists remove words that matter in many catalogs, so
 choose the words for your own data.
 
