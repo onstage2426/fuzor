@@ -3,6 +3,25 @@
 Records of options that were evaluated and rejected, with the evidence, so they
 are not re-attempted without new information.
 
+## Rejected: reading a prefix group's rows once per search (2026-11-08)
+
+**Proposal:** a two-word query whose second word is a short prefix (a group of about 50 terms,
+24.7k doclist rows on a 7.7k-product shop) reads those rows in sequence three times: the group
+completion of the first walk (1,532 documents), the exact-bucket read (`exactBucketDocs()`: every
+document ID, intersected in PHP) and the completion of the second walk (346 documents). That is 12
+of 37 ms. Read each term's rows once per search into PHP (term → document → hit count), serve all
+three reads from that, and score the completed rows in PHP with the same expression.
+
+**Why rejected:** measured on homelab, the shop's search pages, alternating runs: slower on every
+page, including the target (37.4 → 38.5 ms). One-word prefixes got 17–26% slower (`t`, `te`, `a`,
+`k`: 21 → 27 ms), and the other searches 3–12% slower. Turning 24.7k rows into PHP arrays costs
+more than SQLite's sequential read with an IN test per row, even when three steps share the read.
+Moving the exact-bucket intersection into SQL (`doc_id IN` the driver's documents) was slower too:
+2.8 → 4.2 ms with the narrow index, 37 ms when the planner chose the primary key.
+
+**When to revisit:** if a group's rows can be read as one packed value per term (a list of
+document IDs in a blob), which would make the PHP side a single `unpack()`.
+
 ## Rejected: carrying the field columns in the scoring rows for field boosts (2026-11-08)
 
 **Proposal:** with `fieldBoosts` set, a search re-reads the doclist rows of its scored (term,
