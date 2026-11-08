@@ -3,6 +3,40 @@
 Records of options that were evaluated and rejected, with the evidence, so they
 are not re-attempted without new information.
 
+## Rejected: one blob read per candidate for a search's disjunctive facet groups (2026-11-08)
+
+**Proposal:** a search whose candidates were not cut counts each facet group (the common keys, and
+each key with a filter of its own) over its own slice of the candidates, so a document in several
+groups has its `doc_facets` row read several times. Classify the candidates by which filter sets
+hold them, as a filtered browse does, and read and count each row once.
+
+**Why rejected:** same results (both fingerprint sets identical), but no measurable gain
+(homelab, 106 pages of a 7.7k-product shop, alternating runs): the filtered results pages
+1.4–2.0% faster, everything else within ±1%, all pages together −0.2%. The candidates are a few
+thousand documents: the re-read rows cost about 0.45 ms of the roughly 5.6 ms these pages spend on
+facets.
+
+**When to revisit:** with candidate sets in the tens of thousands and several disjunctive keys
+per request.
+
+## Rejected: driving a capped search's result set from a filter (2026-11-08)
+
+**Proposal:** the exact total and facet counts of a search whose words were cut walk the rows of
+its rarest word and probe the filters per row. When a filter (a category) selects fewer documents
+than the word, drive from the filter's rows and probe the word instead.
+
+**Why rejected:** slower on every shape tried (1.43M products, a 28.6k-document category, laptop):
+a query word is a group of terms (the as-you-type prefix and its typo derivations, about 60 for a
+common five-letter word), and every filter row probes each of them, so 28.6k rows cost 1.7M index
+seeks against 138k rows with one probe each: 238 vs 96 ms. A cost rule (filter rows × group terms
+below the word's documents) never picked the filter on these shapes. What the faceted case did
+waste was a second walk of the same result set for the total; that walk is now skipped when the
+facet count read the whole set.
+
+**When to revisit:** for words without typo derivations or prefixes (one term each), or if
+SQLite's planner could be handed a materialised filter set cheaply (`IN (SELECT …)` measured 33 vs
+41 ms in the raw SQL).
+
 ## Rejected: reading a key's whole value range to name counted values (2026-11-07)
 
 **Proposal:** facet counts name each counted value ID with one rowid seek into `facet_value_ids`

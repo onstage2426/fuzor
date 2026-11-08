@@ -6265,6 +6265,62 @@ class IndexTest extends TestCase
         $this->assertSame(1, $result->facetDistribution['color']['blue']);
     }
 
+    public function testDisjunctiveCountsOverCandidatesWithSeveralOwnFilters(): void
+    {
+        $index = new Index($this->dbPath, schema: new SchemaConfig(
+            filterableAttributes: ['color', 'size', 'brand', 'stock'],
+        ));
+        $colors = ['red', 'blue', 'green'];
+        $sizes  = ['s', 'm', 'l', 'xl'];
+        $docs   = [];
+        /** @var array<int, array{car: bool, values: array<string, list<string>>}> $truth */
+        $truth = [];
+        for ($id = 1; $id <= 60; $id++) {
+            $values = ['brand' => ['b' . ($id % 5)], 'stock' => [$id % 3 === 0 ? 'out' : 'in']];
+            if ($id % 11 !== 0) {
+                $values['color'] = $id % 4 === 0
+                    ? [$colors[$id % 3], $colors[($id + 1) % 3]]
+                    : [$colors[$id % 3]];
+            }
+            if ($id % 13 !== 0) {
+                $values['size'] = [$sizes[$id % 4]];
+            }
+            $docs[]     = ['id' => $id, 'title' => $id % 7 === 0 ? 'lamp' : 'car', ...$values];
+            $truth[$id] = ['car' => $id % 7 !== 0, 'values' => $values];
+        }
+        $index->insert($docs);
+        $filter = [
+            'color' => ['red', 'green'],
+            'size'  => 'm',
+            'stock' => 'in',
+            'brand' => new FacetExclude('b2'),
+        ];
+        $wanted = ['color' => ['red', 'green'], 'size' => ['m'], 'stock' => ['in']];
+        $expected = ['color' => [], 'size' => [], 'brand' => []];
+        foreach (array_keys($expected) as $key) {
+            foreach ($truth as ['car' => $car, 'values' => $values]) {
+                $passes = $car && $values['brand'] !== ['b2'];
+                foreach ($wanted as $field => $list) {
+                    $passes = $passes && ($field === $key || array_intersect($values[$field] ?? [], $list) !== []);
+                }
+                foreach ($passes ? $values[$key] ?? [] : [] as $value) {
+                    $expected[$key][$value] = ($expected[$key][$value] ?? 0) + 1;
+                }
+            }
+            ksort($expected[$key]);
+        }
+        $options = new SearchOptions(asYouType: false, filter: $filter, facets: ['color', 'size', 'brand']);
+        foreach ([$index->search('car', $options), $index->searchBoolean('car', $options)] as $result) {
+            $this->assertSame(['color', 'size', 'brand'], array_keys($result->facetDistribution));
+            $actual = $result->facetDistribution;
+            foreach ($actual as &$counts) {
+                ksort($counts);
+            }
+            unset($counts);
+            $this->assertSame($expected, $actual);
+        }
+    }
+
     // --- Facets: multi-value per document ---
 
     public function testMultiValueFacetOnSingleDocument(): void
