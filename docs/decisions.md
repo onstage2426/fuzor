@@ -3,6 +3,32 @@
 Records of options that were evaluated and rejected, with the evidence, so they
 are not re-attempted without new information.
 
+## Rejected: carrying the field columns in the scoring rows for field boosts (2026-11-08)
+
+**Proposal:** with `fieldBoosts` set, a search re-reads the doclist rows of its scored (term,
+document) pairs for `field_id` / `field_split` (`fetchWeightedHits()`): 8k seeks, 9.8 of 37 ms for a
+two-word search-bar query with a short second word on a 7.7k-product shop. The group completion
+(`groupRowsOfDocs()`) has already read most of those pairs, so it could return the field columns
+as well and the re-read would seek only the pairs it lacks.
+
+**Why rejected:** measured on homelab, the shop's 47 search pages, alternating runs, same results:
+
+- Completion reading the primary key (the field columns are not in `doclist_term_hitcount`): the
+  re-read went from 9.8 to 1.7 ms, but the completion now reads wide rows for documents that the
+  filters and later passes drop. Totals got worse: 37.4 → 47.1 ms, a brand filter 27.7 → 49.6 ms,
+  two-word queries with a number as second word 33.7 → 52.1 ms.
+- Columns only in the completion shapes that already touch the primary-key row (the probe per
+  pair, the IN-list probe): every page stayed within noise, because the query in question uses
+  the narrow sequential read.
+- Choosing scan vs seek per term in `fetchWeightedHits()` instead of per query: 0–15% slower on
+  most pages, 4% faster on the slowest one.
+
+What is left is about 1.1 µs per primary-key seek, only for the documents that survive the
+filters. That order is what keeps a dropped document from costing a field read.
+
+**When to revisit:** if `doclist_term_hitcount` ever carries the field columns, or if the
+scoring rows come from the primary key for another reason.
+
 ## Rejected: one blob read per candidate for a search's disjunctive facet groups (2026-11-08)
 
 **Proposal:** a search whose candidates were not cut counts each facet group (the common keys, and
