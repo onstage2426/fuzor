@@ -44,6 +44,7 @@ use PDO;
  *     selection?: true,
  *     conjunctive?: true,
  *     compound?: true,
+ *     group?: FilterGroup,
  *     probe?: array{sql: string, params: list<mixed>},
  *     estimate?: int,
  *     rowCount?: int,
@@ -56,6 +57,12 @@ use PDO;
  *     df: int,
  *     truncated: bool,
  *     rows: list<array{0: int, 1: int, 2: float}>,
+ * }
+ * @phpstan-type ClassGroup array{
+ *     require: int,
+ *     forbid: int,
+ *     keys: array<string, int>,
+ *     tests?: list<\Closure(int): bool>,
  * }
  * @phpstan-type BooleanEntry array{
  *     not: bool,
@@ -4665,28 +4672,46 @@ final class Index implements \Countable
      */
     private function overClasses(array $facetKeys, array $conditions, int $totalDocuments): ?array
     {
-        // One condition shares nothing between reads; more than the bits of a mask are not told apart.
-        if (count($conditions) < 2 || count($conditions) > self::MAX_CLASS_CONDITIONS) {
-            return null;
-        }
+        // The conditions whose rows are read, one bit each: the top-level ones, and in place of a
+        // group (any(), not() of several) its leaves, the group becoming a test of the mask.
+        $leaves = [];
+        $top    = [];
+        $tests  = [];
         foreach ($conditions as $condition) {
-            if (isset($condition['compound'])) {
-                return null;
+            if (isset($condition['group'])) {
+                $tests[] = $this->groupTest($condition, $leaves);
+            } else {
+                $top[]    = count($leaves);
+                $leaves[] = $condition;
             }
         }
+        // One condition shares nothing between reads; more than the bits of a mask are not told apart.
+        if (count($leaves) < 2 || count($leaves) > self::MAX_CLASS_CONDITIONS) {
+            return null;
+        }
         $rows = [];
-        foreach ($conditions as $condition) {
+        foreach ($leaves as $condition) {
             $rows[] = $count = $condition['impossible'] ? 0 : $this->conditionRowCount($condition);
             if ($condition['impossible'] || $count > $this->config->limits->facetCountDocs) {
                 return null;
             }
         }
+        // What the SQL paths could drive from besides the top-level leaves: a positive group's estimate.
+        $groupRows = [];
+        foreach ($conditions as $condition) {
+            if (isset($condition['group']) && !$condition['exclude']) {
+                $groupRows[] = $this->conditionRowCount($condition);
+            }
+        }
         $positive = 0;
         $negative = 0;
-        foreach ($conditions as $i => $condition) {
-            $condition['exclude'] ? $negative |= 1 << $i : $positive |= 1 << $i;
+        foreach ($top as $i) {
+            $leaves[$i]['exclude'] ? $negative |= 1 << $i : $positive |= 1 << $i;
         }
         $all    = ['require' => $positive, 'forbid' => $negative, 'keys' => []];
+        if ($tests !== []) {
+            $all['tests'] = $tests;
+        }
         $groups = ['common' => $all];
         $names  = [];
         foreach ($facetKeys as $keyName) {
@@ -4695,11 +4720,12 @@ final class Index implements \Countable
                 continue;
             }
             $removed = 0;
-            foreach ($conditions as $i => $condition) {
-                $removed |= self::isDisjunctiveFor($condition, $keyName) ? 1 << $i : 0;
+            foreach ($top as $i) {
+                $removed |= self::isDisjunctiveFor($leaves[$i], $keyName) ? 1 << $i : 0;
             }
             $id = $removed === 0 ? 'common' : (string) $removed;
-            $groups[$id] ??= ['require' => $positive & ~$removed, 'forbid' => $negative & ~$removed, 'keys' => []];
+            $groups[$id] ??= ['require' => $positive & ~$removed, 'forbid' => $negative & ~$removed, 'keys' => []]
+                + ($tests !== [] ? ['tests' => $tests] : []);
             $groups[$id]['keys'][$keyName] = $keyId;
             $names[$removed === 0 ? 1 : 0][] = $keyName;
         }
@@ -4709,7 +4735,10 @@ final class Index implements \Countable
         // 0.2 ms probed, 4.2 ms read), and with one group needing a positive condition within
         // half that (a 7.7k-product shop, a small category + hidden products: 2.6 ms probed, 2.9 ms
         // read).
-        $positiveRows = array_filter($rows, fn(int $i): bool => !$conditions[$i]['exclude'], ARRAY_FILTER_USE_KEY);
+        $positiveRows = [
+            ...array_map(fn(int $i): int => $rows[$i], array_filter($top, fn(int $i): bool => !$leaves[$i]['exclude'])),
+            ...$groupRows,
+        ];
         $drivers      = 0;
         foreach ($groups as $id => $group) {
             $drivers += $group['require'] !== 0 && ($group['keys'] !== [] || $id === 'common') ? 1 : 0;
@@ -4733,15 +4762,18 @@ final class Index implements \Countable
                 $removed |= $positive & ~$group['require'];
             }
         }
-        $required = array_filter(
-            $rows,
-            fn(int $i): bool => ((($positive & ~$removed) >> $i) & 1) === 1,
-            ARRAY_FILTER_USE_KEY,
-        );
+        $required = [
+            ...array_filter(
+                $rows,
+                fn(int $i): bool => ((($positive & ~$removed) >> $i) & 1) === 1,
+                ARRAY_FILTER_USE_KEY,
+            ),
+            ...$groupRows,
+        ];
         if ($required !== [] && max($rows) > intdiv(self::CLASS_ROWS_PER_DRIVER_ROW, 2) * min($required)) {
             return null;
         }
-        $classes = $this->classifyDocs($conditions);
+        $classes = $this->classifyDocs($leaves);
         $rest    = $totalDocuments - array_sum(array_map(count(...), $classes));
 
         $counts       = $this->facetCountsOfClasses($classes, $rest, $groups);
@@ -4764,7 +4796,8 @@ final class Index implements \Countable
         }
         return [
             'total'        => $total,
-            'ids'          => $positive === 0 ? null : $ids,
+            // Class 0 (documents in no rows) in the result: "all except", which a list cannot give.
+            'ids'          => self::isClassInGroup(0, $all) ? null : $ids,
             'distribution' => $distribution,
             'stats'        => $stats,
             'approximate'  => [],
@@ -4817,11 +4850,57 @@ final class Index implements \Countable
     /**
      * Whether a class's documents belong to a facet group.
      *
-     * @param array{require: int, forbid: int, keys: array<string, int>} $group
+     * @param ClassGroup $group
      */
     private static function isClassInGroup(int $mask, array $group): bool
     {
-        return ($mask & $group['require']) === $group['require'] && ($mask & $group['forbid']) === 0;
+        if (($mask & $group['require']) !== $group['require'] || ($mask & $group['forbid']) !== 0) {
+            return false;
+        }
+        foreach ($group['tests'] ?? [] as $test) {
+            if (!$test($mask)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * A group condition as a test of a class mask, its leaves appended to $leaves (bit = their
+     * position): a child holds when its positive leaves' bits are set, its excluded ones' clear
+     * and its nested groups hold; any() when a child holds, not() when its child does not.
+     *
+     * @param  FacetCondition       $condition A condition with 'group'.
+     * @param  list<FacetCondition> $leaves
+     * @return \Closure(int): bool
+     */
+    private function groupTest(array $condition, array &$leaves): \Closure
+    {
+        $children = [];
+        foreach ($condition['group']->children ?? [] as $child) {
+            $require = 0;
+            $forbid  = 0;
+            $nested  = [];
+            foreach ($child as $c) {
+                if (isset($c['group'])) {
+                    $nested[] = $this->groupTest($c, $leaves);
+                    continue;
+                }
+                $bit      = 1 << count($leaves);
+                $leaves[] = $c;
+                $c['exclude'] ? $forbid |= $bit : $require |= $bit;
+            }
+            $children[] = ['require' => $require, 'forbid' => $forbid, 'keys' => [], 'tests' => $nested];
+        }
+        $any = static function (int $mask) use ($children): bool {
+            foreach ($children as $child) {
+                if (self::isClassInGroup($mask, $child)) {
+                    return true;
+                }
+            }
+            return false;
+        };
+        return $condition['exclude'] ? static fn(int $mask): bool => !$any($mask) : $any;
     }
 
     /**
@@ -4834,7 +4913,7 @@ final class Index implements \Countable
      * listed from doc_lengths only when the index is within Limits::$facetCountDocs.
      *
      * @param  array<int, list<int>> $classes From classifyDocs().
-     * @param  array<array-key, array{require: int, forbid: int, keys: array<string, int>}> $groups
+     * @param  array<array-key, ClassGroup> $groups
      * @return array<string, array{distribution: array<array-key, int>, stats: array{min: float, max: float}|null}>
      */
     private function facetCountsOfClasses(array $classes, int $rest, array $groups): array
@@ -4918,7 +4997,7 @@ final class Index implements \Countable
      * index: there a group holding it has to be inverted and one without it cannot be.
      *
      * @param  array<int, int> $sizes mask → documents
-     * @param  array<array-key, array{require: int, forbid: int, keys: array<string, int>}> $groups
+     * @param  array<array-key, ClassGroup> $groups
      * @return array<array-key, true>
      */
     private function chooseInvertedGroups(array $sizes, array $groups, int $rest): array
@@ -10411,6 +10490,7 @@ final class Index implements \Countable
             'multiRow'   => true,
             'exclude'    => $exclude,
             'compound'   => true,
+            'group'      => new FilterGroup($children),
             'probe'      => ['sql' => '(' . implode(' OR ', $probes) . ')', 'params' => $probeParams],
             'estimate'   => min($estimate, $total),
         ];
