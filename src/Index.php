@@ -433,6 +433,17 @@ final class Index implements \Countable
     private ?int $dataVersion = null;
 
     /**
+     * conditionRowCount() results of the current request, keyed by a condition's rows and
+     * params: browse asks for a condition's count up to three times (ordering, the classes
+     * gate, the total), and a range over a key with a value per document sums thousands of
+     * facet_counts rows each time. Emptied by checkDataVersion(), which every read entry and
+     * every write transaction calls first.
+     *
+     * @var array<string, int>
+     */
+    private array $conditionRowCounts = [];
+
+    /**
      * Device and inode of the index file captured at connection open; used by
      * reopenIfChanged() to detect atomic-rename rotation. Deliberately excludes
      * mtime/size: in-place writes keep the inode and are covered by the
@@ -1619,6 +1630,7 @@ final class Index implements \Countable
      */
     private function checkDataVersion(): void
     {
+        $this->conditionRowCounts = [];
         $stmt = $this->stmt('dataVersion', 'PRAGMA data_version');
         $stmt->execute();
         $version = (int) $stmt->fetchColumn();
@@ -10680,6 +10692,10 @@ final class Index implements \Countable
         if (isset($condition['estimate'])) {
             return $condition['estimate'];
         }
+        $memo = $condition['rows'] . "\0" . json_encode($condition['params'], JSON_THROW_ON_ERROR);
+        if (isset($this->conditionRowCounts[$memo])) {
+            return $this->conditionRowCounts[$memo];
+        }
         if (isset($condition['values'])) {
             $stmt = $this->stmt(
                 'facetValueRowCount',
@@ -10701,7 +10717,7 @@ final class Index implements \Countable
         }
         $count = (int) $stmt->fetchColumn();
         $stmt->closeCursor();
-        return $count;
+        return $this->conditionRowCounts[$memo] = $count;
     }
 
     /**
