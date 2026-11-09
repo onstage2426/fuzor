@@ -3,6 +3,22 @@
 Records of options that were evaluated and rejected, with the evidence, so they
 are not re-attempted without new information.
 
+## Rejected: a filter group's candidates from its conditions' candidate sets (2026-11-09)
+
+**Proposal:** a search with a query checks a `Filter::any()` or `not()` group on its candidates
+with one probe per candidate (`SELECT … FROM json_each(candidates) WHERE (…) OR (…)`). Read each
+condition inside the group the way a top-level filter is read (values in sequence or from the
+candidates' `doc_facets` rows), and combine the sets in PHP: intersect within a part, union across
+parts, subtract for `not()`.
+
+**Why rejected:** same results, no gain (homelab, 44k-product catalog, three facets, alternating
+runs, best of 21): a search with an OR group 10.8 → 11.0 ms, with a negated group 18.5 → 18.5 ms,
+a common word with an OR group 15.5 → 15.8 ms, a facet search with an OR group 2.4 → 2.4 ms. The
+probe touches the same index rows the set reads do, and the set reads add a PHP array per
+condition.
+
+**When to revisit:** with groups of many conditions over candidate sets in the tens of thousands.
+
 ## Rejected: reading a prefix group's rows once per search (2026-11-08)
 
 **Proposal:** a two-word query whose second word is a short prefix (a group of about 50 terms,
