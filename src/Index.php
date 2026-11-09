@@ -43,6 +43,9 @@ use PDO;
  *     values?: array{keyId: int, values: list<mixed>},
  *     selection?: true,
  *     conjunctive?: true,
+ *     compound?: true,
+ *     probe?: array{sql: string, params: list<mixed>},
+ *     estimate?: int,
  *     rowCount?: int,
  *     slots?: array<int, array{termIds: list<int>, hits: int}>,
  * }
@@ -4637,7 +4640,7 @@ final class Index implements \Countable
      */
     private static function isDisjunctiveFor(array $condition, string $keyName): bool
     {
-        return $condition['name'] === $keyName && !isset($condition['conjunctive'])
+        return $condition['name'] === $keyName && !isset($condition['conjunctive']) && !isset($condition['compound'])
             && (!$condition['exclude'] || isset($condition['selection']));
     }
 
@@ -4665,6 +4668,11 @@ final class Index implements \Countable
         // One condition shares nothing between reads; more than the bits of a mask are not told apart.
         if (count($conditions) < 2 || count($conditions) > self::MAX_CLASS_CONDITIONS) {
             return null;
+        }
+        foreach ($conditions as $condition) {
+            if (isset($condition['compound'])) {
+                return null;
+            }
         }
         $rows = [];
         foreach ($conditions as $condition) {
@@ -10233,14 +10241,15 @@ final class Index implements \Countable
      * The conditions of a filter map or Filter, combined by AND, as facetFilterConditions()
      * gives them for a map.
      *
-     * A Filter is simplified first (Filter::normalized()); each of its leaves is rendered like
-     * a one-key map, so all() of a map gives exactly the map's conditions. A Filter that matches
-     * nothing gives one impossible condition. Positive leaves on a key that holds several of
-     * them (values combined by AND) are flagged 'conjunctive': not disjunctive for that key.
+     * A Filter is simplified first (Filter::normalized()); each leaf of its root is rendered like
+     * a one-key map, so all() of a map gives exactly the map's conditions. A group (any(), or
+     * not() of several conditions) becomes one compound condition (groupCondition()). A Filter
+     * that matches nothing gives one impossible condition. Positive leaves on a key that holds
+     * several of them (values combined by AND) are flagged 'conjunctive': not disjunctive for
+     * that key.
      *
      * @param  array<array-key, string|list<string>|FacetRange|FacetExclude>|Filter $filter
      * @return list<FacetCondition>
-     * @throws \InvalidArgumentException For any() and not() groups, which are not supported yet.
      */
     private function filterConditions(array|Filter $filter): array
     {
@@ -10254,24 +10263,157 @@ final class Index implements \Countable
         $conditions = [];
         $positives  = [];
         foreach ($root->entries as $entry) {
-            if ($entry instanceof Filter) {
-                throw new \InvalidArgumentException(
-                    'Filter::any() and Filter::not() of a group are not supported yet.'
-                );
+            // A root leaf as in a map (an impossible one kept as such); a group folded by the schema.
+            $part = is_array($entry) ? $this->facetFilterConditions($entry) : $this->entryConditions($entry);
+            if ($part === false) {
+                return [self::NO_MATCH_CONDITION];
             }
-            foreach ($this->facetFilterConditions($entry) as $condition) {
-                if (!$condition['exclude']) {
+            foreach ($part === true ? [] : $part as $condition) {
+                if (!$condition['exclude'] && !isset($condition['compound'])) {
                     $positives[$condition['name']] = ($positives[$condition['name']] ?? 0) + 1;
                 }
                 $conditions[] = $condition;
             }
         }
         foreach ($conditions as $i => $condition) {
-            if (!$condition['exclude'] && $positives[$condition['name']] > 1) {
+            if (!$condition['exclude'] && !isset($condition['compound']) && $positives[$condition['name']] > 1) {
                 $conditions[$i]['conjunctive'] = true;
             }
         }
         return $conditions;
+    }
+
+    /**
+     * The conditions (combined by AND) of a normalised Filter entry, with what the schema knows
+     * folded in: true when it holds for every document, false when for none. A leaf on a field
+     * no document has a value for is false (positive) or true (exclusion), as in a map, and
+     * folds away inside its group.
+     *
+     * @param  array<string, string|list<string>|FacetRange|FacetExclude>|Filter $entry
+     * @return non-empty-list<FacetCondition>|bool
+     */
+    private function entryConditions(array|Filter $entry): array|bool
+    {
+        if (is_array($entry)) {
+            $conditions = $this->facetFilterConditions($entry);
+            return match (true) {
+                $conditions === []           => true,
+                $conditions[0]['impossible'] => false,
+                default                      => $conditions,
+            };
+        }
+        if ($entry->operator === Filter::ALL) {
+            $conditions = [];
+            foreach ($entry->entries as $child) {
+                $part = $this->entryConditions($child);
+                if ($part === false) {
+                    return false;
+                }
+                if ($part !== true) {
+                    array_push($conditions, ...$part);
+                }
+            }
+            return $conditions === [] ? true : $conditions;
+        }
+        if ($entry->operator === Filter::ANY) {
+            $children = [];
+            foreach ($entry->entries as $child) {
+                $part = $this->entryConditions($child);
+                if ($part === true) {
+                    return true;
+                }
+                if ($part !== false) {
+                    $children[] = $part;
+                }
+            }
+            return match (count($children)) {
+                0       => false,
+                1       => $children[0],
+                default => [$this->groupCondition($children, exclude: false)],
+            };
+        }
+        // not() of an all() group (Filter::normalized()).
+        $inner = $entry->entries[0];
+        if (!$inner instanceof Filter) {
+            $flipped = Filter::not($inner)->normalized();
+            return is_bool($flipped) ? $flipped : $this->entryConditions($flipped);
+        }
+        $kept       = [];
+        $conditions = [];
+        foreach ($inner->entries as $child) {
+            $part = $this->entryConditions($child);
+            if ($part === false) {
+                return true;
+            }
+            if ($part !== true) {
+                $kept[] = $child;
+                array_push($conditions, ...$part);
+            }
+        }
+        if ($kept === [] || $conditions === []) {
+            return false;
+        }
+        if (count($kept) < count($inner->entries)) {
+            // Entries the schema settled are gone: what is left may simplify further (one leaf
+            // flips to its exclusion, as in a map).
+            $rest = Filter::not(Filter::all(...$kept))->normalized();
+            return is_bool($rest) ? $rest : $this->entryConditions($rest);
+        }
+        return [$this->groupCondition([$conditions], exclude: true)];
+    }
+
+    /**
+     * One condition for a group: any() of its children (exclude false), each a list of
+     * conditions combined by AND, or not() of one such list (exclude true, one child).
+     *
+     * Its rows are the group's matching documents, as a subquery: the UNION ALL of each child's
+     * matchingDocsSql() (each driven from its own most selective condition), so it can drive a
+     * query or list what an exclusion removes like any other condition ('multiRow': a document
+     * can appear once per child). Its 'probe' is the predicate on a document, (child AND …) OR
+     * (child AND …), with '%1$s' for the document expression (renderFacetProbes()). 'estimate'
+     * bounds its documents from above (Σ over the children of their smallest positive
+     * condition, the index size for a child without one), for ordering and the cost choices;
+     * it is never a count.
+     *
+     * @param  non-empty-list<non-empty-list<FacetCondition>> $children
+     * @return FacetCondition
+     */
+    private function groupCondition(array $children, bool $exclude): array
+    {
+        $total    = (int) ($this->getInfoValues(['total_documents'])['total_documents'] ?? 0);
+        $matches  = [];
+        $params   = [];
+        $probes   = [];
+        $probeParams = [];
+        $estimate = 0;
+        foreach ($children as $child) {
+            $ordered = $this->orderBySelectivity($child);
+            $match   = ($ordered === [] ? null : $this->matchingDocsSql($ordered))
+                ?? ['SELECT doc_id FROM doc_lengths WHERE 0', []];
+            $matches[] = $match[0];
+            array_push($params, ...$match[1]);
+            [$probe, $childParams] = $this->renderFacetProbes($ordered, '%1$s') ?? [' AND 0', []];
+            $probes[] = '(1' . $probe . ')';
+            array_push($probeParams, ...$childParams);
+            $bound = $total;
+            foreach ($ordered as $condition) {
+                if (!$condition['exclude']) {
+                    $bound = min($bound, $this->conditionRowCount($condition));
+                }
+            }
+            $estimate += $bound;
+        }
+        return [
+            'name'       => '',
+            'rows'       => 'FROM (' . implode(' UNION ALL ', $matches) . ') %1$s WHERE 1',
+            'params'     => $params,
+            'impossible' => false,
+            'multiRow'   => true,
+            'exclude'    => $exclude,
+            'compound'   => true,
+            'probe'      => ['sql' => '(' . implode(' OR ', $probes) . ')', 'params' => $probeParams],
+            'estimate'   => min($estimate, $total),
+        ];
     }
 
     /**
@@ -10429,6 +10571,9 @@ final class Index implements \Countable
         if (isset($condition['rowCount'])) {
             return $condition['rowCount'];
         }
+        if (isset($condition['estimate'])) {
+            return $condition['estimate'];
+        }
         if (isset($condition['values'])) {
             $stmt = $this->stmt(
                 'facetValueRowCount',
@@ -10542,6 +10687,12 @@ final class Index implements \Countable
             }
             $alias  = "ff{$i}";
             $not    = $condition['exclude'] ? 'NOT ' : '';
+            if (isset($condition['probe'])) {
+                // A group: its predicate on the document, not a lookup of its rows.
+                $sql .= " AND {$not}" . sprintf($condition['probe']['sql'], $docExpr);
+                array_push($params, ...$condition['probe']['params']);
+                continue;
+            }
             $sql   .= " AND {$not}EXISTS (SELECT 1 " . sprintf($condition['rows'], $alias)
                 . " AND {$alias}.doc_id = {$docExpr})";
             array_push($params, ...$condition['params']);
@@ -10619,6 +10770,21 @@ final class Index implements \Countable
             // A negated word's rows are read in sequence the same way when they are few ("casual
             // shirt -formal", 4,834 candidates, 3,472 rows: 7.6 → 2.7 ms); other conditions (ranges,
             // negated phrases) are probed per candidate.
+            if (isset($condition['probe'])) {
+                // A group is checked on each candidate, not listed: its rows are a whole subquery.
+                $stmt = $this->prepare(
+                    'SELECT c.value FROM json_each(?) c WHERE ' . sprintf($condition['probe']['sql'], 'c.value')
+                );
+                $stmt->execute([$candidateJson, ...$condition['probe']['params']]);
+                /** @var list<int> $ids */
+                $ids = $stmt->fetchAll(PDO::FETCH_COLUMN);
+                if ($condition['exclude']) {
+                    $excluded += array_fill_keys($ids, true);
+                } else {
+                    $sets[$position] = array_fill_keys($ids, true);
+                }
+                continue;
+            }
             $rows = $condition['rowCount']
                 ?? (isset($condition['values']) ? $this->conditionRowCount($condition) : null);
             $scan = $rows !== null && $rows <= count($candidateDocIds) * self::KEY_SET_SCAN_ROWS;

@@ -313,14 +313,15 @@ $index->optimize();   // exact word statistics again, e.g. after a large cleanup
 
 ### Deleting by filter
 
-`deleteByFilter()` removes every document that matches a filter and returns how many it removed. The filter has the same shape and meaning as `SearchOptions::$filter` (values, lists, `FacetRange`, `FacetExclude`, combined with AND) and may name filterable fields only. Deleted documents go the same way as with `delete()`.
+`deleteByFilter()` removes every document that matches a filter and returns how many it removed. The filter has the same shape and meaning as `SearchOptions::$filter` (values, lists, `FacetRange`, `FacetExclude`, combined with AND, or a [`Filter`](search.md#combining-filters) for AND / OR / NOT) and may name filterable fields only. Deleted documents go the same way as with `delete()`.
 
 ```php
 $removed = $index->deleteByFilter(['brand' => 'Acme']);
 $index->deleteByFilter(['status' => 'discontinued', 'stock' => new FacetRange(lte: 0)]);
+$index->deleteByFilter(Filter::any(['status' => 'discontinued'], ['brand' => 'Acme', 'stock' => new FacetRange(lte: 0)]));
 ```
 
-An empty filter throws an `\InvalidArgumentException`; use `clear()` to remove everything. A filter of only exclusions keeps its search meaning: `['brand' => new FacetExclude('Acme')]` deletes every document that is not Acme. On a 44k-product catalog, deleting one brand takes 9 ms for 57 products and 120 ms for 2,203.
+An empty filter, or a `Filter` that matches every document (`Filter::all()`), throws an `\InvalidArgumentException`; use `clear()` to remove everything. A filter of only exclusions keeps its search meaning: `['brand' => new FacetExclude('Acme')]` deletes every document that is not Acme. On a 44k-product catalog, deleting one brand takes 9 ms for 57 products and 120 ms for 2,203.
 
 ## Check existence
 
@@ -550,7 +551,7 @@ Every exception Fuzor throws for its own reasons extends `Fuzor\Exceptions\Fuzor
 |---|---|
 | `Fuzor\Exceptions\QueryException` | Domain and state errors: an unsupported language, a missing, duplicate or unknown document ID, a field outside the schema's lists, a disabled document store, a schema passed to an existing index, a file of another schema revision |
 | `Fuzor\Exceptions\IOException` | File problems: a missing directory or index file, a write on a `readonly` index, a failed publish, a file that is not a Fuzor index |
-| `\InvalidArgumentException` | A malformed argument: a bad sort spec, an out-of-range size in `Config` or `TypoTolerance`, a stop word of several words, an empty `deleteByFilter()` filter, an unknown `checkpoint()` mode |
+| `\InvalidArgumentException` | A malformed argument: a bad sort spec, an out-of-range size in `Config` or `TypoTolerance`, a stop word of several words, an empty `deleteByFilter()` filter, a malformed `Filter` entry, an unknown `checkpoint()` mode |
 | `\LogicException` | A method called on an index after `close()` |
 | `\PDOException` | SQLite itself: the database stayed locked longer than `Config::$busyTimeoutMs`, the disk is full, the file is damaged |
 | `\JsonException` | A document that cannot be stored as JSON (invalid UTF-8) or a damaged stored document |

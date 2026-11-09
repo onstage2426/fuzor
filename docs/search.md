@@ -417,11 +417,44 @@ new FacetExclude(FacetRange::max(0));                              // hide free 
 - A document that does not have the field at all passes — it has nothing to exclude.
 - An exclusion on a field that is not declared in `filterableAttributes` throws a `QueryException`, like a positive filter, so a typo in a filter meant to hide something cannot pass silently.
 - An exclusion on a declared field that no document has a value for yet, or with an empty list, excludes nothing.
-- One key holds one condition, so a field cannot be both included and excluded in the same filter. Listing the values to include already excludes the rest.
+- In a filter map one key holds one condition, so a field cannot be both included and excluded there. Listing the values to include already excludes the rest; to combine several conditions on one field, use [`Filter::all()`](#combining-filters).
 
 A browse or `facetSearch()` whose only filters are exclusions is answered from the excluded documents rather than the kept ones: the total is the index size minus the excluded documents, and facet counts are the whole index's counts minus theirs. Its cost grows with the number of excluded documents, not the kept ones, and its facet counts stay exact at any index size. On a 44k-document catalog, excluding 4,025 products with three facets takes 3 ms, against 0.6 ms unfiltered, and excluding 34,409 with five facets 18 ms; the page and its total alone take under 1 ms.
 
 **Compared with Meilisearch:** `NOT genres = horror` / `genres NOT IN [horror, comedy]` also return documents without the field, and `NOT` applies to ranges too. Both reject filters on attributes that are not filterable. Like every Fuzor filter, values match exactly, whereas Meilisearch compares strings case-insensitively.
+
+### Combining filters
+
+The filter map combines its keys with AND and a list of values with OR. For anything else — two values of one key that must both be present, an OR across keys, a NOT around several conditions — build a `Filter`:
+
+```php
+use Fuzor\Filter;
+
+// Tagged both sale and new
+Filter::all(['tags' => 'sale'], ['tags' => 'new']);
+
+// Casio, or anything in the watches category
+Filter::any(['brand' => 'Casio'], ['category' => 'Watches']);
+
+// Not (black and in stock)
+Filter::not(['colour' => 'Black', 'stock' => 'in']);
+
+// Nested: in stock, and either a discount or a price under 20
+Filter::all(
+    ['stock' => 'in'],
+    Filter::any(['tags' => 'discount'], ['price' => FacetRange::max(20.0)]),
+);
+```
+
+A `Filter` goes wherever a filter map does: `SearchOptions::$filter`, `FacetSearchQuery::$filter` and `deleteByFilter()`.
+
+- Each entry is another `Filter` or a filter map with its usual meaning: keys AND, a list OR, `FacetRange`, `FacetExclude`. Inside `any()`, a map with several keys is one entry: all of its keys must hold.
+- `not()` takes one entry, which may be a group. As with `FacetExclude`, a document without the field passes `not()` of a condition on it. `Filter::not(['brand' => 'Casio'])` and `['brand' => new FacetExclude('Casio')]` are the same filter.
+- `Filter::all()` without entries matches every document, and `Filter::any()` without entries matches none, as an empty value list does. So `deleteByFilter(Filter::all())` throws like `deleteByFilter([])`, while `deleteByFilter(Filter::any())` deletes nothing.
+- A field outside `filterableAttributes` throws a `QueryException` wherever it sits in the tree, also under `not()`. A malformed entry — a list instead of a field-to-value map, a value that is not a string, a list of strings, a `FacetRange` or a `FacetExclude`, or more than `Filter::MAX_DEPTH` (32) levels of nesting — throws an `\InvalidArgumentException` when the `Filter` is built.
+- `Filter::all($map)` gives exactly the result of `$map`, and other ways of writing the same condition give the same result too: nested `all()` and `any()` are flattened, `any()` of values of one key becomes a value list, `not()` of `any()` becomes the exclusion of each entry.
+
+Facet counts follow the rule below: a key with one condition of its own at the top level of the filter is counted without it; a key inside a group, or with several conditions combined by AND, is counted over the filtered result.
 
 ## Facet counts
 
@@ -495,6 +528,11 @@ $result->facetDistribution['category'];
 ```
 
 An [exclusion](#excluding-values) is not a selection among alternatives, so it always applies — also when its own field is counted, and inside every other key's disjunctive count. Excluded documents never show up in `facetDistribution`.
+
+With a [`Filter`](#combining-filters), a key is counted this way when it has exactly one positive condition of its own at the top level, the shape of a sidebar selection (`Filter::all(['brand' => ['Casio', 'Seiko']], …)`; `any()` of values of one key counts as such a list). Every other key is counted over the filtered result, in particular:
+
+- a key whose values are combined by AND (`Filter::all(['tags' => 'sale'], ['tags' => 'new'])`): adding another value narrows the result further, so the counts show what each value would leave;
+- a key that appears only inside `any()` or `not()` of several conditions: the group applies as a whole when any key is counted.
 
 ## Facet value search
 

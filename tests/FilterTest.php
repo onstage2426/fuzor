@@ -172,7 +172,7 @@ class FilterTest extends TestCase
         $index->close();
     }
 
-    /** @return array<string, array{Filter, FilterMap}> */
+    /** @return array<string, array{Filter, FilterMap|Filter}> */
     public static function equivalents(): array
     {
         return [
@@ -216,6 +216,22 @@ class FilterTest extends TestCase
                 Filter::all(Filter::all(), [], ['stock' => 'back']),
                 ['stock' => 'back'],
             ],
+            'a field without values in any()' => [
+                Filter::any(['unused' => 'x'], ['stock' => 'in']),
+                ['stock' => 'in'],
+            ],
+            'a field without values in an all() in any()' => [
+                Filter::all(Filter::any(['unused' => 'x', 'size' => 's'], ['size' => 'l']), ['stock' => 'out']),
+                ['size' => 'l', 'stock' => 'out'],
+            ],
+            'an exclusion without values in not()' => [
+                Filter::not(['unused' => new FacetExclude('x'), 'stock' => 'in']),
+                ['stock' => new FacetExclude('in')],
+            ],
+            'an exclusion without values in not() of a group' => [
+                Filter::not(['unused' => new FacetExclude('x'), 'color' => 'red', 'size' => 'm']),
+                Filter::not(['color' => 'red', 'size' => 'm']),
+            ],
             'any() with all() matches everything' => [
                 Filter::all(Filter::any(Filter::all(), ['color' => 'red']), ['size' => 'l']),
                 ['size' => 'l'],
@@ -227,10 +243,10 @@ class FilterTest extends TestCase
      * Different ways of writing the same filter give the same result, also the facet counts:
      * which keys count without their own filter is decided after the filter is simplified.
      *
-     * @param FilterMap $map
+     * @param FilterMap|Filter $map
      */
     #[DataProvider('equivalents')]
-    public function testEquivalentFiltersGiveTheSameResult(Filter $tree, array $map): void
+    public function testEquivalentFiltersGiveTheSameResult(Filter $tree, array|Filter $map): void
     {
         foreach ([500, 8] as $cap) {
             $index = $this->open($cap);
