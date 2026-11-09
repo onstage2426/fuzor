@@ -3193,7 +3193,9 @@ final class Index implements \Countable
 
         // Apply facet filters: load per-key doc ID sets and intersect with the score map.
         // Exclusions are removed first, so they also hold for disjunctive facet counts.
-        [$filterSets, $excluded] = $this->loadFacetKeySets($filter, array_keys($docScores), $negations);
+        $filterConditions = $this->facetFilterConditions($filter);
+        $keySetConditions = [...$filterConditions, ...$negations];
+        [$filterSets, $excluded] = $this->loadFacetKeySets($keySetConditions, array_keys($docScores));
         $docScores    = array_diff_key($docScores, $excluded);
         $rawDocScores = $docScores;
         if ($filterSets !== []) {
@@ -3253,12 +3255,12 @@ final class Index implements \Countable
         $statsOnly = $options->facetStatsOnly === [] ? null : $this->walkStatsOnly(
             $options->facetStatsOnly,
             $candidatesCapped
-                ? $this->resultSetBounds($required, $baseConditions, $this->facetFilterConditions($filter))
+                ? $this->resultSetBounds($required, $baseConditions, $filterConditions)
                 // The facet's matches: the candidates, without the field's own positive filter.
                 : fn(string $name, int $keyId): ?array => $this->boundsOfDocSet(
                     $keyId,
-                    isset($filterSets[$name])
-                        ? $this->withoutOwnFilter($rawDocScores, $filterSets, $name)
+                    self::ownFilterSets($filterSets, $keySetConditions, $name) !== []
+                        ? $this->withoutOwnFilter($rawDocScores, $filterSets, $keySetConditions, $name)
                         : $docScores,
                     $this->config->limits->facetCountDocs,
                 ),
@@ -3268,7 +3270,7 @@ final class Index implements \Countable
         $classified = $candidatesCapped && $facetKeys !== [] && $baseConditions === []
             ? $this->overClasses(
                 $facetKeys,
-                [...$this->groupConditions($required), ...$this->facetFilterConditions($filter)],
+                [...$this->groupConditions($required), ...$filterConditions],
                 (int) ($this->getInfoValues(['total_documents'])['total_documents'] ?? 0),
             )
             : null;
@@ -3282,12 +3284,13 @@ final class Index implements \Countable
                 $facetKeys,
                 $required,
                 $baseConditions,
-                $this->facetFilterConditions($filter),
+                $filterConditions,
                 $this->config->limits->facetCountDocs,
             )
             : $this->computeFacetCounts(
                 $facetKeys,
                 $filterSets,
+                $keySetConditions,
                 $rawDocScores,
                 $docScores,
                 $this->config->limits->facetCountDocs,
@@ -3318,7 +3321,7 @@ final class Index implements \Countable
                 ? min($counted, $this->config->limits->totalHits + 1)
                 : $this->countSearchMatches(
                     $required,
-                    [...$baseConditions, ...$this->facetFilterConditions($filter)],
+                    [...$baseConditions, ...$filterConditions],
                     $this->config->limits->totalHits + 1,
                 );
         }
@@ -3403,7 +3406,7 @@ final class Index implements \Countable
             );
             if ($candidatesCapped) {
                 // The candidates hold only part of the matches: collapse all of them in SQL.
-                $conditions   = [...$baseConditions, ...$this->facetFilterConditions($filter)];
+                $conditions   = [...$baseConditions, ...$filterConditions];
                 $distinctHits = $keyId === null
                     ? $this->countSearchMatches($required, $conditions, $this->config->limits->totalHits + 1)
                     : $this->countDistinctMatches(
@@ -3463,7 +3466,7 @@ final class Index implements \Countable
         if ($candidatesCapped && $total > $ranked && ($sortSpecs !== [] || $offset + $limit > $ranked)) {
             $rest = $this->restOfResultSet(
                 $required,
-                [...$baseConditions, ...$this->facetFilterConditions($filter)],
+                [...$baseConditions, ...$filterConditions],
                 $docScores,
                 min($total, $sortSpecs !== [] ? $this->config->limits->totalHits : $offset + $limit) - $ranked,
             );
@@ -3777,7 +3780,9 @@ final class Index implements \Countable
         // Apply facet filters: load per-key doc ID sets and intersect with the result.
         // array_flip($docIds) gives doc_id → position, usable as a set for array_intersect_key.
         // Exclusions are removed first, so they also hold for disjunctive facet counts.
-        [$filterSets, $excluded] = $this->loadFacetKeySets($filter, $docIds, $negations);
+        $filterConditions = $this->facetFilterConditions($filter);
+        $keySetConditions = [...$filterConditions, ...$negations];
+        [$filterSets, $excluded] = $this->loadFacetKeySets($keySetConditions, $docIds);
         $rawDocSet  = array_diff_key(array_flip($docIds), $excluded);
         if ($filterSets !== []) {
             $globalFilter = $this->intersectFilterSets($filterSets);
@@ -3793,8 +3798,8 @@ final class Index implements \Countable
             $options->facetStatsOnly,
             fn(string $name, int $keyId): ?array => $this->boundsOfDocSet(
                 $keyId,
-                isset($filterSets[$name])
-                    ? $this->withoutOwnFilter($rawDocSet, $filterSets, $name)
+                self::ownFilterSets($filterSets, $keySetConditions, $name) !== []
+                    ? $this->withoutOwnFilter($rawDocSet, $filterSets, $keySetConditions, $name)
                     : $filteredDocSet,
                 $this->config->limits->facetCountDocs,
             ),
@@ -3806,6 +3811,7 @@ final class Index implements \Countable
         ] = $this->computeFacetCounts(
             [...$facets, ...$statsOnly['count'] ?? []],
             $filterSets,
+            $keySetConditions,
             $rawDocSet,
             $filteredDocSet,
             $this->config->limits->facetCountDocs,
@@ -3837,7 +3843,7 @@ final class Index implements \Countable
                 [
                     ...$this->phraseConditions($phraseGroups),
                     ...$negations,
-                    ...$this->facetFilterConditions($filter),
+                    ...$filterConditions,
                 ],
             )
             : null;
@@ -3968,9 +3974,8 @@ final class Index implements \Countable
         $excludedSql = null;
         if ($ftsCandidates !== null && ($query->filter !== [] || $negations !== [])) {
             [$filterSets, $excluded] = $this->loadFacetKeySets(
-                $query->filter,
+                [...$this->facetFilterConditions($query->filter), ...$negations],
                 array_keys($ftsCandidates),
-                $negations,
             );
             $ftsCandidates = array_diff_key($ftsCandidates, $excluded);
             if ($filterSets !== []) {
@@ -8587,7 +8592,7 @@ final class Index implements \Countable
             if ($keyId === null) {
                 continue;
             }
-            $own = array_filter($filters, fn(array $c): bool => !$c['exclude'] && $c['name'] === $keyName) !== [];
+            $own = array_filter($filters, fn(array $c): bool => self::isDisjunctiveFor($c, $keyName)) !== [];
             $byGroup[$own ? $keyName : ''][$keyName] = $keyId;
         }
         // Keys with a filter of their own first, then the others, as computeFacetCounts() merges them.
@@ -8604,7 +8609,7 @@ final class Index implements \Countable
         $carrier = null;
         if (isset($byGroup[''])) {
             foreach ($filters as $c) {
-                if (!$c['exclude'] && isset($c['values'], $byGroup[$c['name']])) {
+                if (isset($c['values'], $byGroup[$c['name']]) && self::isDisjunctiveFor($c, $c['name'])) {
                     $subset  = [
                         'vids'     => $this->facetValueIdsOf($c['values']['keyId'], $c['values']['values']),
                         'nameToId' => $byGroup[''],
@@ -8629,9 +8634,9 @@ final class Index implements \Countable
                 $this->mergeFacetCounts($common, $distribution, $stats);
                 continue;
             }
-            $conditions = array_values(array_filter(
+            $conditions = $own === '' ? $filters : array_values(array_filter(
                 $filters,
-                fn(array $c): bool => $c['exclude'] || $c['name'] !== $own,
+                fn(array $c): bool => !self::isDisjunctiveFor($c, $own),
             ));
             /** @var list<string> $excluded */
             $excluded = [];
@@ -9733,7 +9738,7 @@ final class Index implements \Countable
     /**
      * Intersect all sets in $filterSets; returns [] when $filterSets is empty.
      *
-     * @param  array<string, array<int, true>> $filterSets
+     * @param  array<int, array<int, true>> $filterSets
      * @return array<int, true>
      */
     private function intersectFilterSets(array $filterSets): array
@@ -10503,21 +10508,24 @@ final class Index implements \Countable
      * counted. An exclusion that can never be satisfied (an undeclared field) is returned as an
      * empty positive set instead, which fails the whole filter closed.
      *
-     * @param  array<string, string|list<string>|FacetRange|FacetExclude> $filter
+     * The sets are keyed by the condition's position in $conditions, not by its field: a
+     * disjunctive facet finds its own through isDisjunctiveFor() (see withoutOwnFilter()).
+     *
+     * @param  list<FacetCondition> $conditions Filter conditions (facetFilterConditions()) and further
+     *                                          ones, e.g. query negations (extractNegations()).
      * @param  list<int> $candidateDocIds BM25/boolean candidates to scope query.
-     * @param  list<FacetCondition> $extra Further conditions, e.g. query negations (extractNegations()).
-     * @return array{0: array<string, array<int, true>>, 1: array<int, true>}
-     *         Key name → flipped doc ID set for positive filters, and the excluded doc ID set.
+     * @return array{0: array<int, array<int, true>>, 1: array<int, true>}
+     *         Condition position → flipped doc ID set for positive conditions, and the excluded doc ID set.
      */
-    private function loadFacetKeySets(array $filter, array $candidateDocIds, array $extra = []): array
+    private function loadFacetKeySets(array $conditions, array $candidateDocIds): array
     {
         $sets          = [];
         $excluded      = [];
         $candidateJson = json_encode($candidateDocIds, JSON_THROW_ON_ERROR);
-        foreach ([...$this->facetFilterConditions($filter), ...$extra] as $condition) {
-            $name = $condition['name'];
+        foreach ($conditions as $position => $condition) {
             if ($condition['impossible'] || $candidateDocIds === []) {
-                $sets[$name] = [];
+                // No candidates: an exclusion's set is empty too, which removes nothing more.
+                $sets[$position] = [];
                 continue;
             }
             // A value list is read from the candidates' doc_facets rows, one per candidate, or, when
@@ -10544,7 +10552,7 @@ final class Index implements \Countable
             if ($condition['exclude']) {
                 $excluded += array_fill_keys($ids, true);
             } else {
-                $sets[$name] = array_fill_keys($ids, true);
+                $sets[$position] = array_fill_keys($ids, true);
             }
         }
         return [$sets, $excluded];
@@ -10620,7 +10628,8 @@ final class Index implements \Countable
      * result set is used.
      *
      * @param  list<string>                $facetKeys      Facet key names to count.
-     * @param  array<string, array<int, true>> $filterSets Per-key filter doc ID sets.
+     * @param  array<int, array<int, true>> $filterSets    loadFacetKeySets() sets, by condition position.
+     * @param  list<FacetCondition>        $conditions     The conditions the sets were loaded for.
      * @param  array<int, mixed>           $rawDocScores   All scored docs before any facet filter.
      * @param  array<int, mixed>           $filteredScores Docs after all facet filters.
      * @param  int                         $maxDocs        Cap on doc IDs sent in the IN() clause.
@@ -10633,6 +10642,7 @@ final class Index implements \Countable
     private function computeFacetCounts(
         array $facetKeys,
         array $filterSets,
+        array $conditions,
         array $rawDocScores,
         array $filteredScores,
         int $maxDocs,
@@ -10653,13 +10663,13 @@ final class Index implements \Countable
                 continue;
             }
 
-            if (!isset($filterSets[$keyName])) {
+            if (self::ownFilterSets($filterSets, $conditions, $keyName) === []) {
                 $commonNameToId[$keyName] = $keyId;
                 continue;
             }
 
             // Disjunctive: count against the raw result set with all OTHER filters applied.
-            $countSet = $this->withoutOwnFilter($rawDocScores, $filterSets, $keyName);
+            $countSet = $this->withoutOwnFilter($rawDocScores, $filterSets, $conditions, $keyName);
             $docIds   = array_slice(array_keys($countSet), 0, $maxDocs);
             $this->collectFacetCounts([$keyName => $keyId], $docIds, $distribution, $stats);
             if (count($countSet) > $maxDocs) {
@@ -10902,7 +10912,7 @@ final class Index implements \Countable
             $groups,
             [
                 ...$base,
-                ...array_values(array_filter($filters, fn(array $c): bool => $c['exclude'] || $c['name'] !== $name)),
+                ...array_values(array_filter($filters, fn(array $c): bool => !self::isDisjunctiveFor($c, $name))),
             ],
             $estimate,
         );
@@ -10913,16 +10923,34 @@ final class Index implements \Countable
      * key's own applied.
      *
      * @template T
-     * @param  array<int, T>                   $rawDocs    Result set before the facet filters.
-     * @param  array<string, array<int, true>> $filterSets Per-key filter doc ID sets.
+     * @param  array<int, T>                $rawDocs    Result set before the facet filters.
+     * @param  array<int, array<int, true>> $filterSets loadFacetKeySets() sets, by condition position.
+     * @param  list<FacetCondition>         $conditions The conditions the sets were loaded for.
      * @return array<int, T>
      */
-    private function withoutOwnFilter(array $rawDocs, array $filterSets, string $keyName): array
+    private function withoutOwnFilter(array $rawDocs, array $filterSets, array $conditions, string $keyName): array
     {
-        $otherSets = array_diff_key($filterSets, [$keyName => true]);
+        $otherSets = array_diff_key($filterSets, self::ownFilterSets($filterSets, $conditions, $keyName));
         return $otherSets === []
             ? $rawDocs
             : array_intersect_key($rawDocs, $this->intersectFilterSets($otherSets));
+    }
+
+    /**
+     * The sets of a key's own filter (isDisjunctiveFor()), left out when counting the key; none
+     * means the key is counted over the filtered result.
+     *
+     * @param  array<int, array<int, true>> $filterSets loadFacetKeySets() sets, by condition position.
+     * @param  list<FacetCondition>         $conditions The conditions the sets were loaded for.
+     * @return array<int, array<int, true>>
+     */
+    private static function ownFilterSets(array $filterSets, array $conditions, string $keyName): array
+    {
+        return array_filter(
+            $filterSets,
+            fn(int $position): bool => self::isDisjunctiveFor($conditions[$position], $keyName),
+            ARRAY_FILTER_USE_KEY,
+        );
     }
 
     /**
