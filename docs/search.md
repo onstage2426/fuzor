@@ -375,6 +375,8 @@ $result = $index->search('watch', new SearchOptions(
 ));
 ```
 
+A number matches the values stored as that number or as the same text: `['stars' => 5]` finds documents with `5`, `5.0` and `'5'`, like `['stars' => '5']`. A value no document can hold — `true`/`false`, `null`, NaN or an infinite number — throws an `\InvalidArgumentException`. Use [`FacetRange`](#numeric-range-filters) to filter numbers by size.
+
 Filtering on a field that is not declared in `filterableAttributes` throws a `QueryException` (see [Undeclared fields](#undeclared-fields)).
 
 ### Numeric range filters
@@ -451,7 +453,7 @@ A `Filter` goes wherever a filter map does: `SearchOptions::$filter`, `FacetSear
 - Each entry is another `Filter` or a filter map with its usual meaning: keys AND, a list OR, `FacetRange`, `FacetExclude`. Inside `any()`, a map with several keys is one entry: all of its keys must hold.
 - `not()` takes one entry, which may be a group. As with `FacetExclude`, a document without the field passes `not()` of a condition on it. `Filter::not(['brand' => 'Casio'])` and `['brand' => new FacetExclude('Casio')]` are the same filter.
 - `Filter::all()` without entries matches every document, and `Filter::any()` without entries matches none, as an empty value list does. So `deleteByFilter(Filter::all())` throws like `deleteByFilter([])`, while `deleteByFilter(Filter::any())` deletes nothing.
-- A field outside `filterableAttributes` throws a `QueryException` wherever it sits in the tree, also under `not()`. A malformed entry — a list instead of a field-to-value map, a value that is not a string, a list of strings, a `FacetRange` or a `FacetExclude`, or more than `Filter::MAX_DEPTH` (32) levels of nesting — throws an `\InvalidArgumentException` when the `Filter` is built.
+- A field outside `filterableAttributes` throws a `QueryException` wherever it sits in the tree, also under `not()`. A malformed entry — a list instead of a field-to-value map, a value that is not a string, a number, a list of them, a `FacetRange` or a `FacetExclude`, or more than `Filter::MAX_DEPTH` (32) levels of nesting — throws an `\InvalidArgumentException` when the `Filter` is built.
 - `Filter::all($map)` gives exactly the result of `$map`, and other ways of writing the same condition give the same result too: nested `all()` and `any()` are flattened, `any()` of values of one key becomes a value list, `not()` of `any()` becomes the exclusion of each entry.
 
 Facet counts follow the rule below: a key with one condition of its own at the top level of the filter is counted without it; a key inside a group, or with several conditions combined by AND, is counted over the filtered result.

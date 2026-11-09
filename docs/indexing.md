@@ -551,7 +551,7 @@ Every exception Fuzor throws for its own reasons extends `Fuzor\Exceptions\Fuzor
 |---|---|
 | `Fuzor\Exceptions\QueryException` | Domain and state errors: an unsupported language, a missing, duplicate or unknown document ID, a field outside the schema's lists, a disabled document store, a schema passed to an existing index, a file of another schema revision |
 | `Fuzor\Exceptions\IOException` | File problems: a missing directory or index file, a write on a `readonly` index, a failed publish, a file that is not a Fuzor index |
-| `\InvalidArgumentException` | A malformed argument: a bad sort spec, an out-of-range size in `Config` or `TypoTolerance`, a stop word of several words, an empty `deleteByFilter()` filter, a malformed `Filter` entry, an unknown `checkpoint()` mode |
+| `\InvalidArgumentException` | A malformed argument: a bad sort spec, an out-of-range size in `Config` or `TypoTolerance`, a stop word of several words, an empty `deleteByFilter()` filter, a malformed `Filter` entry, a filter value no document can hold (a bool, `null`, NaN, infinity), an unknown `checkpoint()` mode |
 | `\LogicException` | A method called on an index after `close()` |
 | `\PDOException` | SQLite itself: the database stayed locked longer than `Config::$busyTimeoutMs`, the disk is full, the file is damaged |
 | `\JsonException` | A document that cannot be stored as JSON (invalid UTF-8) or a damaged stored document |

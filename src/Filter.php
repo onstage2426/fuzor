@@ -34,7 +34,7 @@ final readonly class Filter
 
     /**
      * @param self::ALL|self::ANY|self::NOT                              $operator
-     * @param list<array<string, string|list<string>|FacetRange|FacetExclude>|Filter> $entries
+     * @param list<array<string, string|int|float|list<string|int|float>|FacetRange|FacetExclude>|Filter> $entries
      */
     private function __construct(
         public string $operator,
@@ -46,7 +46,7 @@ final readonly class Filter
     /**
      * Documents that match every entry.
      *
-     * @param  array<string, string|list<string>|FacetRange|FacetExclude>|Filter ...$entries
+     * @param  array<string, string|int|float|list<string|int|float>|FacetRange|FacetExclude>|Filter ...$entries
      * @throws \InvalidArgumentException If an entry is not a filter map or a Filter, or the nesting is too deep.
      */
     public static function all(array|Filter ...$entries): self
@@ -57,7 +57,7 @@ final readonly class Filter
     /**
      * Documents that match at least one entry.
      *
-     * @param  array<string, string|list<string>|FacetRange|FacetExclude>|Filter ...$entries
+     * @param  array<string, string|int|float|list<string|int|float>|FacetRange|FacetExclude>|Filter ...$entries
      * @throws \InvalidArgumentException If an entry is not a filter map or a Filter, or the nesting is too deep.
      */
     public static function any(array|Filter ...$entries): self
@@ -68,7 +68,7 @@ final readonly class Filter
     /**
      * Documents that do not match the entry.
      *
-     * @param  array<string, string|list<string>|FacetRange|FacetExclude>|Filter $entry
+     * @param  array<string, string|int|float|list<string|int|float>|FacetRange|FacetExclude>|Filter $entry
      * @throws \InvalidArgumentException If the entry is not a filter map or a Filter, or the nesting is too deep.
      */
     public static function not(array|Filter $entry): self
@@ -117,8 +117,8 @@ final readonly class Filter
     }
 
     /**
-     * @param  array<string, string|list<string>|FacetRange|FacetExclude>|Filter $entry
-     * @return array<string, string|list<string>|FacetRange|FacetExclude>|Filter|bool
+     * @param  array<string, string|int|float|list<string|int|float>|FacetRange|FacetExclude>|Filter $entry
+     * @return array<string, string|int|float|list<string|int|float>|FacetRange|FacetExclude>|Filter|bool
      */
     private static function simplify(array|self $entry): array|self|bool
     {
@@ -159,8 +159,8 @@ final readonly class Filter
     /**
      * The simplified negation of a simplified entry.
      *
-     * @param  array<string, string|list<string>|FacetRange|FacetExclude>|Filter|bool $node
-     * @return array<string, string|list<string>|FacetRange|FacetExclude>|Filter|bool
+     * @param  array<string, string|int|float|list<string|int|float>|FacetRange|FacetExclude>|Filter|bool $node
+     * @return array<string, string|int|float|list<string|int|float>|FacetRange|FacetExclude>|Filter|bool
      */
     private static function negate(array|self|bool $node): array|self|bool
     {
@@ -186,8 +186,8 @@ final readonly class Filter
     /**
      * A simplified node as an entry again (true and false as the empty groups they stand for).
      *
-     * @param  array<string, string|list<string>|FacetRange|FacetExclude>|Filter|bool $node
-     * @return array<string, string|list<string>|FacetRange|FacetExclude>|Filter
+     * @param  array<string, string|int|float|list<string|int|float>|FacetRange|FacetExclude>|Filter|bool $node
+     * @return array<string, string|int|float|list<string|int|float>|FacetRange|FacetExclude>|Filter
      */
     private static function wrap(array|self|bool $node): array|self
     {
@@ -199,8 +199,8 @@ final readonly class Filter
      * excluded value lists on one field as one exclusion list. Ranges are never merged: on a
      * field with several values per document two ranges are not one.
      *
-     * @param  list<array<string, string|list<string>|FacetRange|FacetExclude>|Filter> $parts
-     * @return list<array<string, string|list<string>|FacetRange|FacetExclude>|Filter>
+     * @param  list<array<string, string|int|float|list<string|int|float>|FacetRange|FacetExclude>|Filter> $parts
+     * @return list<array<string, string|int|float|list<string|int|float>|FacetRange|FacetExclude>|Filter>
      */
     private static function mergeLeaves(array $parts, bool $exclude): array
     {
@@ -269,7 +269,7 @@ final readonly class Filter
         if ($depth > self::MAX_DEPTH) {
             throw new \InvalidArgumentException(sprintf('A Filter may nest at most %d levels.', self::MAX_DEPTH));
         }
-        /** @var list<array<string, string|list<string>|FacetRange|FacetExclude>|Filter> $entries */
+        /** @var list<array<string, string|int|float|list<string|int|float>|FacetRange|FacetExclude>|Filter> $entries */
         return new self($operator, $entries, $depth);
     }
 
@@ -288,15 +288,15 @@ final readonly class Filter
         }
         foreach ($map as $field => $value) {
             $inner = $value instanceof FacetExclude ? $value->filter : $value;
-            $valid = is_string($inner) || $inner instanceof FacetRange
+            $valid = is_string($inner) || is_int($inner) || is_float($inner) || $inner instanceof FacetRange
                 || is_array($inner) && array_is_list($inner) && array_filter(
                     $inner,
-                    fn(mixed $v): bool => !is_string($v),
+                    fn(mixed $v): bool => !is_string($v) && !is_int($v) && !is_float($v),
                 ) === [];
             if (!$valid) {
                 throw new \InvalidArgumentException(sprintf(
-                    'Filter::%s() entry %d: the value of "%s" must be a string, a list of strings, a FacetRange'
-                    . ' or a FacetExclude, %s given.',
+                    'Filter::%s() entry %d: the value of "%s" must be a string, a number, a list of them, a'
+                    . ' FacetRange or a FacetExclude, %s given.',
                     $operator,
                     $position,
                     $field,

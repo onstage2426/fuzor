@@ -133,7 +133,7 @@ class FacetClassesTest extends TestCase
         $index->close();
     }
 
-    /** @return array<string, list<string>|string|FacetRange|FacetExclude> */
+    /** @return array<string, list<string|int|float>|string|int|float|FacetRange|FacetExclude> */
     private function randomFilter(Randomizer $random): array
     {
         $filter = [];
@@ -175,7 +175,7 @@ class FacetClassesTest extends TestCase
     }
 
     /**
-     * @param  array<string, list<string>|string|FacetRange|FacetExclude> $filter
+     * @param  array<string, list<string|int|float>|string|int|float|FacetRange|FacetExclude> $filter
      * @return array<int, Doc>
      */
     private function scan(array $filter): array
@@ -192,8 +192,8 @@ class FacetClassesTest extends TestCase
         });
     }
 
-    /** @param list<string>|string|FacetRange|FacetExclude $wanted */
-    private static function holds(mixed $values, string|array|FacetRange|FacetExclude $wanted): bool
+    /** @param list<string|int|float>|string|int|float|FacetRange|FacetExclude $wanted */
+    private static function holds(mixed $values, string|int|float|array|FacetRange|FacetExclude $wanted): bool
     {
         if ($values === null) {
             return false;
@@ -215,8 +215,8 @@ class FacetClassesTest extends TestCase
     }
 
     /**
-     * @param  array<string, list<string>|string|FacetRange|FacetExclude> $filter
-     * @return array<string, list<string>|string|FacetRange|FacetExclude>
+     * @param  array<string, list<string|int|float>|string|int|float|FacetRange|FacetExclude> $filter
+     * @return array<string, list<string|int|float>|string|int|float|FacetRange|FacetExclude>
      */
     private static function withoutOwnFilter(array $filter, string $key): array
     {

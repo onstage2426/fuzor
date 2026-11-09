@@ -17,9 +17,11 @@ final readonly class SearchOptions
      * @param bool    $asYouType  Match the last keyword as a prefix (as-you-type / autocomplete mode).
      * @param int     $limit      Maximum number of hits to return.
      * @param int     $offset     Number of top-ranked results to skip (pagination).
-     * @param array<string, string|list<string>|FacetRange|FacetExclude>|Filter $filter Facet filters; keyed by
-     *                                              facet field name. Wrap a value in FacetExclude to exclude it;
-     *                                              Filter::all() / any() / not() combine conditions freely.
+     * @param array<string, string|int|float|list<string|int|float>|FacetRange|FacetExclude>|Filter $filter
+     *                                              Facet filters; keyed by facet field name; a number matches the
+     *                                              values it is stored as (5 and '5'). Wrap a value in
+     *                                              FacetExclude to exclude it; Filter::all() / any() / not()
+     *                                              combine conditions freely.
      * @param list<string>  $facets  Facet field names to compute value counts for.
      * @param list<string>  $sort    Sort specs: 'field:asc' / 'field:desc'; left-to-right priority.
      * @param string|null   $distinct      Facet field to collapse duplicate values on (null = off).

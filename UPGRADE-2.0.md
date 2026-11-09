@@ -295,3 +295,15 @@ now filled with the other matches, after the ranked ones, so every page up to `$
 With `sort` the candidates and the other matches are sorted together, so even the first page of a
 sorted search can show different documents. Callers that stopped paging at the first empty page
 get more pages; nothing else changes.
+
+## A number as a filter value matches, other non-strings throw
+
+A number in a filter (`['stars' => 5]`, `['stars' => [4.5, 5]]`, `new FacetExclude(0)`) matched
+nothing in 1.x, even where documents held that number, because values are stored as text. It now
+matches what its text matches: documents with `5`, `5.0` or `'5'`, the same as `['stars' => '5']`.
+Check filters that pass numbers from a request or a database: they start filtering.
+
+A value no document can hold — `true`, `false`, `null`, NaN, an infinite number, an object or a
+nested list — now throws an `\InvalidArgumentException` naming the field, in `search()`,
+`searchBoolean()`, `facetSearch()` and `deleteByFilter()`, instead of returning no documents (and
+deleting none).

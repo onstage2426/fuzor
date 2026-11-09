@@ -28,7 +28,7 @@ use Random\Randomizer;
  * (after simplification) is counted without that leaf; every other key over the filtered result.
  *
  * @phpstan-type Doc array{id: int, title: string, color: list<string>, size?: string, stock: string, price: float}
- * @phpstan-type FilterMap array<string, list<string>|string|FacetRange|FacetExclude>
+ * @phpstan-type FilterMap array<string, list<string|int|float>|string|int|float|FacetRange|FacetExclude>
  */
 class FilterTreeTest extends TestCase
 {
@@ -334,8 +334,8 @@ class FilterTreeTest extends TestCase
         };
     }
 
-    /** @param list<string>|string|FacetRange $wanted */
-    private static function holds(mixed $values, string|array|FacetRange $wanted): bool
+    /** @param list<string|int|float>|string|int|float|FacetRange $wanted */
+    private static function holds(mixed $values, string|int|float|array|FacetRange $wanted): bool
     {
         if ($values === null) {
             return false;

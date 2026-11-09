@@ -24,7 +24,7 @@ use Random\Randomizer;
  * AND, against the plain filter map and a scan of the documents.
  *
  * @phpstan-type Doc array{id: int, title: string, color: list<string>, size?: string, stock: string, price: float}
- * @phpstan-type FilterMap array<string, list<string>|string|FacetRange|FacetExclude>
+ * @phpstan-type FilterMap array<string, list<string|int|float>|string|int|float|FacetRange|FacetExclude>
  */
 class FilterTest extends TestCase
 {
@@ -83,10 +83,10 @@ class FilterTest extends TestCase
     {
         return [
             'a list instead of a map'  => ['all', [['color', 'red']]],
-            'a number as value'        => ['any', [['price' => 5]]],
-            'a number in a list'       => ['all', [['color' => ['red', 5]]]],
             'a nested map as value'    => ['all', [['color' => ['a' => 'red']]]],
             'null as value'            => ['not', [['color' => null]]],
+            'a bool as value'          => ['any', [['color' => true]]],
+            'a bool in a list'         => ['all', [['color' => ['red', false]]]],
             'an object as value'       => ['all', [['color' => new \stdClass()]]],
             'named entries'            => ['all', ['first' => ['color' => 'red']]],
         ];
@@ -100,14 +100,6 @@ class FilterTest extends TestCase
         $this->assertTrue(is_callable($build));
         $this->expectException(\InvalidArgumentException::class);
         call_user_func_array($build, $arguments);
-    }
-
-    public function testANumberInAnExclusionThrows(): void
-    {
-        $this->expectException(\InvalidArgumentException::class);
-        /** @var list<string> $numbers */
-        $numbers = json_decode('[1]', true);
-        Filter::all(['price' => new FacetExclude($numbers)]);
     }
 
     public function testNestingIsLimited(): void

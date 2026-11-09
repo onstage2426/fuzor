@@ -2178,7 +2178,7 @@ final class Index implements \Countable
      * FacetExclude, all combined with AND — and names filterable fields only. Matching and
      * deletion happen in one transaction.
      *
-     * @param  array<string, FacetExclude|FacetRange|list<string>|string>|Filter $filter
+     * @param  array<string, FacetExclude|FacetRange|list<string|int|float>|string|int|float>|Filter $filter
      * @return int The number of documents deleted.
      * @throws \InvalidArgumentException If $filter is empty or a Filter without a constraint (clear() removes
      *                                   every document).
@@ -10327,7 +10327,7 @@ final class Index implements \Countable
      * several of them (values combined by AND) are flagged 'conjunctive': not disjunctive for
      * that key.
      *
-     * @param  array<array-key, string|list<string>|FacetRange|FacetExclude>|Filter $filter
+     * @param  array<array-key, string|int|float|list<string|int|float>|FacetRange|FacetExclude>|Filter $filter
      * @return list<FacetCondition>
      */
     private function filterConditions(array|Filter $filter): array
@@ -10368,7 +10368,7 @@ final class Index implements \Countable
      * no document has a value for is false (positive) or true (exclusion), as in a map, and
      * folds away inside its group.
      *
-     * @param  array<string, string|list<string>|FacetRange|FacetExclude>|Filter $entry
+     * @param  array<string, string|int|float|list<string|int|float>|FacetRange|FacetExclude>|Filter $entry
      * @return non-empty-list<FacetCondition>|bool
      */
     private function entryConditions(array|Filter $entry): array|bool
@@ -10500,7 +10500,7 @@ final class Index implements \Countable
      * Whether a filter map or Filter constrains anything: false for [] and for a Filter that
      * matches every document (all() of nothing).
      *
-     * @param array<array-key, string|list<string>|FacetRange|FacetExclude>|Filter $filter
+     * @param array<array-key, string|int|float|list<string|int|float>|FacetRange|FacetExclude>|Filter $filter
      */
     private static function hasFilter(array|Filter $filter): bool
     {
@@ -10510,7 +10510,7 @@ final class Index implements \Countable
     /**
      * The fields a filter map or Filter names, for checkFilterableFields().
      *
-     * @param  array<array-key, string|list<string>|FacetRange|FacetExclude>|Filter $filter
+     * @param  array<array-key, string|int|float|list<string|int|float>|FacetRange|FacetExclude>|Filter $filter
      * @return list<array-key>
      */
     private static function filterFields(array|Filter $filter): array
@@ -10540,7 +10540,7 @@ final class Index implements \Countable
      * has populated yet, or with an empty value list, it excludes nothing and is left out of the
      * list.
      *
-     * @param  array<array-key, string|list<string>|FacetRange|FacetExclude> $filter
+     * @param  array<array-key, string|int|float|list<string|int|float>|FacetRange|FacetExclude> $filter
      * @return list<FacetCondition>
      */
     private function facetFilterConditions(array $filter): array
@@ -10570,7 +10570,10 @@ final class Index implements \Countable
                     }
                 }
             } else {
-                $params = is_array($filterValue) ? $filterValue : [$filterValue];
+                $params = array_map(
+                    fn(mixed $v): string => self::filterValueText($name, $v),
+                    is_array($filterValue) ? $filterValue : [$filterValue],
+                );
                 // One value as "= ?": with "IN (?)" SQLite probes a bound value through
                 // facet_doc_id_index instead of the primary key, whose rows for one value are
                 // adjacent (amazon, 57k-row walk probing a category: 62 vs 20 ms).
@@ -10601,6 +10604,29 @@ final class Index implements \Countable
             $conditions[] = $condition;
         }
         return $conditions;
+    }
+
+    /**
+     * A filter value as the text facet_values stores: a string as is, a number as PHP writes it
+     * (normalizeFacets() stores (string) $value), so 5, 5.0 and '5' select the same documents —
+     * a stored number 5 and a stored string '5'.
+     *
+     * @throws \InvalidArgumentException For a value no document can hold: a bool, null, NaN or an
+     *                                   infinite number, an array or an object.
+     */
+    private static function filterValueText(string $field, mixed $value): string
+    {
+        if (is_string($value)) {
+            return $value;
+        }
+        if (is_int($value) || is_float($value) && is_finite($value)) {
+            return (string) $value;
+        }
+        throw new \InvalidArgumentException(sprintf(
+            'The filter value of "%s" must be a string or a finite number, %s given.',
+            $field,
+            is_float($value) ? 'a number that is not finite' : get_debug_type($value),
+        ));
     }
 
     /**

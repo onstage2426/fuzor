@@ -18,10 +18,11 @@ namespace Fuzor;
 final readonly class FacetExclude
 {
     /**
-     * @param string|list<string>|FacetRange $filter Values (or numeric range) whose documents are excluded.
+     * @param string|int|float|list<string|int|float>|FacetRange $filter Values (or numeric range) whose
+     *                                                             documents are excluded.
      */
     public function __construct(
-        public string|array|FacetRange $filter,
+        public string|int|float|array|FacetRange $filter,
     ) {
     }
 }
