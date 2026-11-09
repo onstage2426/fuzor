@@ -3,6 +3,7 @@
 namespace Fuzor\Tests;
 
 use Fuzor\FacetExclude;
+use Fuzor\Filter;
 use Fuzor\Index;
 use Fuzor\MatchingStrategy;
 use Fuzor\SearchOptions;
@@ -78,6 +79,10 @@ final class ReferenceRanker
      */
     public function search(string $query, SearchOptions $o): array
     {
+        $filter = $o->filter;
+        if ($filter instanceof Filter) {
+            throw new \LogicException('The reference ranker takes filter maps only.');
+        }
         $negations = [];
         $positive  = preg_replace_callback(
             '/(?<=^|\s)-("[^"]*"|\S+)/',
@@ -172,7 +177,7 @@ final class ReferenceRanker
             $match[$id] = [$bucket, $typos, $score];
         }
 
-        $passing = array_filter(array_keys($match), fn(int $id): bool => $this->passesFilter($id, $o->filter));
+        $passing = array_filter(array_keys($match), fn(int $id): bool => $this->passesFilter($id, $filter));
         $keys    = [];
         foreach ($passing as $id) {
             [$bucket, $typos, $score] = $match[$id];
@@ -209,13 +214,13 @@ final class ReferenceRanker
 
         $facets = [];
         foreach ($o->facets as $field) {
-            $own    = $o->filter[$field] ?? null;
-            $filter = $own === null || $own instanceof FacetExclude
-                ? $o->filter
-                : array_diff_key($o->filter, [$field => true]);
+            $own     = $filter[$field] ?? null;
+            $counted = $own === null || $own instanceof FacetExclude
+                ? $filter
+                : array_diff_key($filter, [$field => true]);
             $counts = [];
             foreach (array_keys($match) as $id) {
-                if ($this->passesFilter($id, $filter) && isset($this->doc($id)[$field])) {
+                if ($this->passesFilter($id, $counted) && isset($this->doc($id)[$field])) {
                     $v          = self::str($this->doc($id)[$field]);
                     $counts[$v] = ($counts[$v] ?? 0) + 1;
                 }

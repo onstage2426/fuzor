@@ -42,6 +42,7 @@ use PDO;
  *     range?: array{keyId: int, sql: string, params: list<mixed>},
  *     values?: array{keyId: int, values: list<mixed>},
  *     selection?: true,
+ *     conjunctive?: true,
  *     rowCount?: int,
  *     slots?: array<int, array{termIds: list<int>, hits: int}>,
  * }
@@ -114,6 +115,16 @@ final class Index implements \Countable
 
     /** Max rows per chunk when each row uses 5 bind variables (doclist bulk INSERT). */
     private const int CHUNK_5P = 6_553;
+
+    /** filterConditions() of a Filter that matches no document. */
+    private const array NO_MATCH_CONDITION = [
+        'name'       => '',
+        'rows'       => 'FROM doc_lengths %1$s WHERE 0',
+        'params'     => [],
+        'impossible' => true,
+        'multiRow'   => false,
+        'exclude'    => false,
+    ];
 
     /** booleanMatchesSql() entry that matches no document. */
     private const array BOOLEAN_NONE = [
@@ -2157,23 +2168,24 @@ final class Index implements \Countable
      * FacetExclude, all combined with AND — and names filterable fields only. Matching and
      * deletion happen in one transaction.
      *
-     * @param  array<string, FacetExclude|FacetRange|list<string>|string> $filter
+     * @param  array<string, FacetExclude|FacetRange|list<string>|string>|Filter $filter
      * @return int The number of documents deleted.
-     * @throws \InvalidArgumentException If $filter is empty (clear() removes every document).
+     * @throws \InvalidArgumentException If $filter is empty or a Filter without a constraint (clear() removes
+     *                                   every document).
      * @throws QueryException            If a field is not declared in filterableAttributes.
      * @throws IOException               If the index is read-only.
      */
-    public function deleteByFilter(array $filter): int
+    public function deleteByFilter(array|Filter $filter): int
     {
         $this->assertWritable();
-        if ($filter === []) {
+        if (!self::hasFilter($filter)) {
             throw new \InvalidArgumentException('deleteByFilter() needs a filter; clear() removes every document.');
         }
-        $this->checkFilterableFields('Filter', array_keys($filter));
+        $this->checkFilterableFields('Filter', self::filterFields($filter));
 
         $deleted = 0;
         $this->wrapInTransaction(function () use ($filter, &$deleted): void {
-            $conditions = $this->orderBySelectivity($this->facetFilterConditions($filter));
+            $conditions = $this->orderBySelectivity($this->filterConditions($filter));
             // No conditions left: only exclusions of values no document holds, which keep every document.
             $match = $conditions === [] ? ['SELECT doc_id FROM doc_lengths', []] : $this->matchingDocsSql($conditions);
             if ($match === null) {
@@ -2952,7 +2964,7 @@ final class Index implements \Countable
         $exactFrom    = count($order) + 1;   // buckets >= this hold every document they should
         $fastComplete = !$candidatesCapped;   // every fetched group was read whole
         // Sort fields pick the page from every full match, not from the candidates' best rows.
-        $settles      = $filter === [] && $negations === [] && $distinct === null && $sortSpecs === [];
+        $settles      = !self::hasFilter($filter) && $negations === [] && $distinct === null && $sortSpecs === [];
         // Quoted phrases filter after scoring; for the settle checks the documents counted must
         // pass them, so each document is checked once and the result kept for the phrase filter.
         /** @var array<int, bool> $phraseOk */
@@ -3193,7 +3205,7 @@ final class Index implements \Countable
 
         // Apply facet filters: load per-key doc ID sets and intersect with the score map.
         // Exclusions are removed first, so they also hold for disjunctive facet counts.
-        $filterConditions = $this->facetFilterConditions($filter);
+        $filterConditions = $this->filterConditions($filter);
         $keySetConditions = [...$filterConditions, ...$negations];
         [$filterSets, $excluded] = $this->loadFacetKeySets($keySetConditions, array_keys($docScores));
         $docScores    = array_diff_key($docScores, $excluded);
@@ -3780,7 +3792,7 @@ final class Index implements \Countable
         // Apply facet filters: load per-key doc ID sets and intersect with the result.
         // array_flip($docIds) gives doc_id → position, usable as a set for array_intersect_key.
         // Exclusions are removed first, so they also hold for disjunctive facet counts.
-        $filterConditions = $this->facetFilterConditions($filter);
+        $filterConditions = $this->filterConditions($filter);
         $keySetConditions = [...$filterConditions, ...$negations];
         [$filterSets, $excluded] = $this->loadFacetKeySets($keySetConditions, $docIds);
         $rawDocSet  = array_diff_key(array_flip($docIds), $excluded);
@@ -3923,7 +3935,7 @@ final class Index implements \Countable
     {
         $this->checkDataVersion();
         $this->checkFilterableFields('Facet', [$query->facetName]);
-        $this->checkFilterableFields('Filter', array_keys($query->filter));
+        $this->checkFilterableFields('Filter', self::filterFields($query->filter));
         $warnings = [];
         $keyId = $this->lookupFacetKeyId($query->facetName);
         if ($keyId === null) {
@@ -3972,18 +3984,19 @@ final class Index implements \Countable
         }
         $match       = null;
         $excludedSql = null;
-        if ($ftsCandidates !== null && ($query->filter !== [] || $negations !== [])) {
+        $hasFilter = self::hasFilter($query->filter);
+        if ($ftsCandidates !== null && ($hasFilter || $negations !== [])) {
             [$filterSets, $excluded] = $this->loadFacetKeySets(
-                [...$this->facetFilterConditions($query->filter), ...$negations],
+                [...$this->filterConditions($query->filter), ...$negations],
                 array_keys($ftsCandidates),
             );
             $ftsCandidates = array_diff_key($ftsCandidates, $excluded);
             if ($filterSets !== []) {
                 $ftsCandidates = array_intersect_key($ftsCandidates, $this->intersectFilterSets($filterSets));
             }
-        } elseif ($query->filter !== [] || $negations !== []) {
+        } elseif ($hasFilter || $negations !== []) {
             // Exclusions that exclude nothing are dropped, which can leave no condition at all.
-            $conditions = $this->orderBySelectivity([...$this->facetFilterConditions($query->filter), ...$negations]);
+            $conditions = $this->orderBySelectivity([...$this->filterConditions($query->filter), ...$negations]);
             if ($conditions !== [] && self::isExclusionOnly($conditions)) {
                 // Scan the key and skip the excluded documents rather than probe every kept one:
                 // 13–21 ms instead of 58–103 ms for brandName on the 45k ecom set.
@@ -4103,7 +4116,8 @@ final class Index implements \Countable
         $totalDocuments = (int) ($info['total_documents'] ?? 0);
 
         // Fast path: skip all PHP-side work; one PK scan for the page, total from cache.
-        $plainBrowse = $filter === [] && $negations === [] && $sortSpecs === [] && $facets === [] && $distinct === null
+        $plainBrowse = !self::hasFilter($filter) && $negations === [] && $sortSpecs === [] && $facets === []
+            && $distinct === null
             && $options->facetStatsOnly === [];
         if ($plainBrowse) {
             $stmt  = $this->stmt(
@@ -4129,7 +4143,7 @@ final class Index implements \Countable
         }
 
         $conditions = $this->orderBySelectivity([
-            ...$this->complementSelections($this->facetFilterConditions($filter), $totalDocuments),
+            ...$this->complementSelections($this->filterConditions($filter), $totalDocuments),
             ...$negations,
         ]);
         $match      = $conditions === [] ? null : $this->matchingDocsSql($conditions);
@@ -4286,6 +4300,7 @@ final class Index implements \Countable
                 $values === null
                 || $condition['exclude']
                 || $condition['impossible']
+                || isset($condition['conjunctive'])
                 || $this->isMultiValuedKey($keyId)
             ) {
                 $result[] = $condition;
@@ -4615,13 +4630,15 @@ final class Index implements \Countable
     /**
      * Whether a condition is left out when counting $keyName: only positive filters are
      * disjunctive. An exclusion also applies to its own field, unless it stands for a positive
-     * one (complementSelections()).
+     * one (complementSelections()). Values of one key combined by AND (filterConditions(),
+     * 'conjunctive') count over the filtered result: adding another value narrows it further.
      *
      * @param FacetCondition $condition
      */
     private static function isDisjunctiveFor(array $condition, string $keyName): bool
     {
-        return $condition['name'] === $keyName && (!$condition['exclude'] || isset($condition['selection']));
+        return $condition['name'] === $keyName && !isset($condition['conjunctive'])
+            && (!$condition['exclude'] || isset($condition['selection']));
     }
 
     /**
@@ -9798,7 +9815,7 @@ final class Index implements \Countable
                 );
             }
         }
-        $this->checkFilterableFields('Filter', array_keys($options->filter));
+        $this->checkFilterableFields('Filter', self::filterFields($options->filter));
         $this->checkFilterableFields('Facet', $options->facets);
         $this->checkFilterableFields('Facet stats', $options->facetStatsOnly);
         $both = array_intersect($options->facetStatsOnly, $options->facets);
@@ -10210,6 +10227,73 @@ final class Index implements \Countable
             $surviving[] = $id;
         }
         return [array_slice($surviving, $offset, $limit), count($surviving)];
+    }
+
+    /**
+     * The conditions of a filter map or Filter, combined by AND, as facetFilterConditions()
+     * gives them for a map.
+     *
+     * A Filter is simplified first (Filter::normalized()); each of its leaves is rendered like
+     * a one-key map, so all() of a map gives exactly the map's conditions. A Filter that matches
+     * nothing gives one impossible condition. Positive leaves on a key that holds several of
+     * them (values combined by AND) are flagged 'conjunctive': not disjunctive for that key.
+     *
+     * @param  array<array-key, string|list<string>|FacetRange|FacetExclude>|Filter $filter
+     * @return list<FacetCondition>
+     * @throws \InvalidArgumentException For any() and not() groups, which are not supported yet.
+     */
+    private function filterConditions(array|Filter $filter): array
+    {
+        if (is_array($filter)) {
+            return $this->facetFilterConditions($filter);
+        }
+        $root = $filter->normalized();
+        if (is_bool($root)) {
+            return $root ? [] : [self::NO_MATCH_CONDITION];
+        }
+        $conditions = [];
+        $positives  = [];
+        foreach ($root->entries as $entry) {
+            if ($entry instanceof Filter) {
+                throw new \InvalidArgumentException(
+                    'Filter::any() and Filter::not() of a group are not supported yet.'
+                );
+            }
+            foreach ($this->facetFilterConditions($entry) as $condition) {
+                if (!$condition['exclude']) {
+                    $positives[$condition['name']] = ($positives[$condition['name']] ?? 0) + 1;
+                }
+                $conditions[] = $condition;
+            }
+        }
+        foreach ($conditions as $i => $condition) {
+            if (!$condition['exclude'] && $positives[$condition['name']] > 1) {
+                $conditions[$i]['conjunctive'] = true;
+            }
+        }
+        return $conditions;
+    }
+
+    /**
+     * Whether a filter map or Filter constrains anything: false for [] and for a Filter that
+     * matches every document (all() of nothing).
+     *
+     * @param array<array-key, string|list<string>|FacetRange|FacetExclude>|Filter $filter
+     */
+    private static function hasFilter(array|Filter $filter): bool
+    {
+        return is_array($filter) ? $filter !== [] : $filter->normalized() !== true;
+    }
+
+    /**
+     * The fields a filter map or Filter names, for checkFilterableFields().
+     *
+     * @param  array<array-key, string|list<string>|FacetRange|FacetExclude>|Filter $filter
+     * @return list<array-key>
+     */
+    private static function filterFields(array|Filter $filter): array
+    {
+        return is_array($filter) ? array_keys($filter) : $filter->fields();
     }
 
     /**

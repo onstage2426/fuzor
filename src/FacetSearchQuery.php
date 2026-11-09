@@ -21,8 +21,8 @@ final readonly class FacetSearchQuery
      *                           Quoted phrases (e.g. '"science fiction"') are applied as contiguous-word constraints.
      *                           Candidates are capped at Limits::$facetCountDocs, so counts may be approximate
      *                           for queries that match a very large portion of the corpus.
-     * @param array<string, string|list<string>|FacetRange|FacetExclude> $filter Facet filters applied before counting;
-     *                           same type as SearchOptions::$filter.
+     * @param array<string, string|list<string>|FacetRange|FacetExclude>|Filter $filter Facet filters applied before
+     *                           counting; same type as SearchOptions::$filter.
      * @param int    $limit      Maximum number of facet values to return.
      * @param FacetOrder $sortFacetValuesBy Order of the returned values (applied before $limit); Alpha
      *                           by default, as in Meilisearch.
@@ -31,7 +31,7 @@ final readonly class FacetSearchQuery
         public readonly string $facetName,
         public readonly string $facetQuery = '',
         public readonly string $q = '',
-        public readonly array $filter = [],
+        public readonly array|Filter $filter = [],
         public readonly int $limit = 100,
         public readonly FacetOrder $sortFacetValuesBy = FacetOrder::Alpha,
     ) {

@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Fuzor\Tests;
 
 use Fuzor\FacetExclude;
+use Fuzor\Filter;
 use Fuzor\FacetRange;
 use Fuzor\Index;
 use Fuzor\SearchOptions;
@@ -215,11 +216,14 @@ class ShopWorkloadTest extends TestCase
     /**
      * The documents passing a filter, by a plain loop.
      *
-     * @param  array<string, mixed> $filter
+     * @param  array<string, mixed>|Filter $filter
      * @return array<int, ShopDoc>
      */
-    private static function scan(array $filter): array
+    private static function scan(array|Filter $filter): array
     {
+        if ($filter instanceof Filter) {
+            throw new \LogicException('The scan takes filter maps only.');
+        }
         return array_filter(self::$docs, function (array $doc) use ($filter): bool {
             foreach ($filter as $key => $wanted) {
                 $values = self::valuesOf($doc, $key);
@@ -248,11 +252,14 @@ class ShopWorkloadTest extends TestCase
     /**
      * A key's own selection does not narrow its counts; an exclusion always does.
      *
-     * @param  array<string, mixed> $filter
+     * @param  array<string, mixed>|Filter $filter
      * @return array<string, mixed>
      */
-    private static function withoutSelection(array $filter, string $key): array
+    private static function withoutSelection(array|Filter $filter, string $key): array
     {
+        if ($filter instanceof Filter) {
+            throw new \LogicException('Filter maps only.');
+        }
         if (isset($filter[$key]) && !$filter[$key] instanceof FacetExclude) {
             unset($filter[$key]);
         }
