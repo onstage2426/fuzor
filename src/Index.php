@@ -216,6 +216,9 @@ final class Index implements \Countable
      */
     private const int RANGE_DRIVER_GAIN = 8;
 
+    /** matchDriver(): index terms of the words that cost a filter row as much as one keyword row. */
+    private const int FILTER_DRIVER_TERMS_PER_ROW = 4;
+
     /**
      * rangeRowCount(): a key with at most this many distinct values has its range summed from
      * its facet_counts rows; the same rows are the sample that decides for a larger key (read
@@ -8558,7 +8561,7 @@ final class Index implements \Countable
         }
         // A filter or quoted phrase with far fewer rows than the expression's driver lists the
         // documents instead (see matchDriver()); the predicate holds the whole expression.
-        $driver = $this->matchDriver($conditions, $root['df'], impliesWords: false);
+        $driver = $this->matchDriver($conditions, $root['df'], count($root['params']), impliesWords: false);
         if ($driver !== null) {
             $listed = $this->conditionDrivenSql($driver, [], [$driver['at'] => $conditions[$driver['at']]], false);
             unset($conditions[$driver['at']]);
@@ -8737,7 +8740,7 @@ final class Index implements \Countable
         }
         usort($groups, fn(array $a, array $b): int => $a['df'] <=> $b['df']);
         if ($orderFree) {
-            $listed = $this->matchDriver($conditions, $groups[0]['df']);
+            $listed = $this->matchDriver($conditions, $groups[0]['df'], self::termCount($groups));
             if ($listed !== null) {
                 return $this->conditionDrivenSql($listed, $groups, $conditions, $grouped);
             }
@@ -8787,7 +8790,7 @@ final class Index implements \Countable
         if ($rows < $total) {
             $walk = (int) ceil($walk * $rows / $total);
         }
-        $listed = $this->matchDriver($conditions, $walk);
+        $listed = $this->matchDriver($conditions, $walk, self::termCount($groups));
         if ($listed !== null && $total > $this->config->limits->totalHits) {
             $documents = max(1, (int) ($this->getInfoValues(['total_documents'])['total_documents'] ?? 0));
             $share     = 1.0;
@@ -8797,7 +8800,7 @@ final class Index implements \Countable
                 }
             }
             $walk   = (int) min($walk, $rows / max($share, 1 / $documents));
-            $listed = $this->matchDriver($conditions, $walk);
+            $listed = $this->matchDriver($conditions, $walk, self::termCount($groups));
         }
         if ($listed === null) {
             return $this->searchMatchesSql($groups, $conditions);
@@ -8845,7 +8848,10 @@ final class Index implements \Countable
      * positions rows (`slot`), while those are fewer than PHRASE_DRIVER_ROWS per keyword row;
      * a positive filter through its rows, while they are at most 1 / FILTER_DRIVER_GAIN of the
      * keyword rows (a range: RANGE_DRIVER_GAIN) and fewer than the phrase's share. Exclusions list what they remove and
-     * never qualify. Without $impliesWords (searchBoolean(): the whole expression is still
+     * never qualify. $terms (the words' index terms, each probed per filter row) scales the
+     * filter's rows: one row per FILTER_DRIVER_TERMS_PER_ROW terms (10k long documents, a
+     * prefix of 28 terms: 6 ms walked, 19 ms listed from a value with a fifth of the rows).
+     * Without $impliesWords (searchBoolean(): the whole expression is still
      * probed per row, where a search skips the words its phrase holds) a phrase must be as
      * selective as a filter (500k documents, a phrase with 1.2 times the driver's rows: 46 ms
      * walked, 56 ms listed from the phrase).
@@ -8853,8 +8859,10 @@ final class Index implements \Countable
      * @param  array<int, FacetCondition> $conditions
      * @return array{at: int, slot: int|null, rows: int}|null
      */
-    private function matchDriver(array $conditions, int $walk, bool $impliesWords = true): ?array
+    private function matchDriver(array $conditions, int $walk, int $terms, bool $impliesWords = true): ?array
     {
+        // A filter row probes the words term by term, a keyword row is one read.
+        $perRow = max(1, intdiv($terms, self::FILTER_DRIVER_TERMS_PER_ROW));
         $best = null;
         $cost = $impliesWords ? $walk * self::PHRASE_DRIVER_ROWS : intdiv($walk, self::RANGE_DRIVER_GAIN) + 1;
         foreach ($conditions as $c => $condition) {
@@ -8867,7 +8875,7 @@ final class Index implements \Countable
                 }
             }
         }
-        $limit = intdiv($walk, self::FILTER_DRIVER_GAIN);
+        $limit = intdiv($walk, self::FILTER_DRIVER_GAIN * $perRow);
         if ($best !== null) {
             // Fewer rows than the phrase's share of a keyword walk.
             $limit = min($limit, intdiv($best['rows'] - 1, $impliesWords ? self::PHRASE_DRIVER_ROWS : 1));
@@ -8876,13 +8884,25 @@ final class Index implements \Countable
             if ($condition['exclude'] || $condition['impossible'] || isset($condition['slots']) || $limit < 0) {
                 continue;
             }
-            $most = isset($condition['range']) ? min($limit, intdiv($walk, self::RANGE_DRIVER_GAIN)) : $limit;
+            $most = isset($condition['range'])
+                ? min($limit, intdiv($walk, self::RANGE_DRIVER_GAIN * $perRow))
+                : $limit;
             $rows = $this->conditionRowCount($condition, $most);
             if ($rows <= $most) {
                 [$best, $limit] = [['at' => $c, 'slot' => null, 'rows' => $rows], $rows - 1];
             }
         }
         return $best;
+    }
+
+    /**
+     * The index terms of all groups together.
+     *
+     * @param list<KeywordGroup> $groups
+     */
+    private static function termCount(array $groups): int
+    {
+        return (int) array_sum(array_map(fn(array $group): int => count($group['termIds']), $groups));
     }
 
     /**
