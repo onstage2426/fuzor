@@ -3,6 +3,41 @@
 Records of options that were evaluated and rejected, with the evidence, so they
 are not re-attempted without new information.
 
+## Rejected: variants of the listing condition for a capped search (2026-11-10)
+
+**Context:** since 2026-11-10 a search whose words were cut lists its result set from the most
+selective positive condition (a filter's rows, a quoted phrase's rarest word) instead of walking
+the rarest word's rows, where that reads fewer rows (`matchDriver()`). Measured on generated
+catalogues of 10k, 100k and 500k documents (homelab, alternating runs, results identical in every
+variant). The variants below lost.
+
+- **One rule for every filter (rows at most half the word's documents).** A range has to be
+  counted to know its rows; counted up to half the word's documents this added 0.4 to 4 ms to
+  searches where no filter could take over (a boolean search with a wide range 1.4 → 4.6 ms, a
+  two-word search with two ranges 16.4 → 20.3 ms). Ranges now qualify at an eighth, counted along
+  the numeric index and stopped there; value filters, whose rows are a lookup, at half.
+- **An eighth for value filters too.** No request got slower, but searches with a filter holding
+  a quarter to half of the word's documents lost their gain (a word with a negation and a filter
+  tree 113 → 161 ms, a boolean search 44 → 120 ms).
+- **Ignoring the number of terms of the words.** A filter row probes every index term of every
+  word. A prefix of 28 terms on long documents: 6 ms walked, 19 ms listed from a value with a
+  fifth of the rows. The filter's rows count once per four terms, which matches the entry of
+  2026-11-08 below (60 terms: never chosen there).
+- **A quoted phrase listing a boolean search by the rule of `search()`** (its rarest word's
+  positions rows under three per word row). A search skips the words its phrase holds, a boolean
+  expression is still probed whole per row: 43 → 55 ms with a phrase of 1.2 times the driver's
+  rows. In a boolean search a phrase now has to be as selective as a range.
+- **Choosing the form for pages past the candidates once per request** (from the rows the word
+  walk needs for `totalHits` matches), so that every page comes from one form. The first pages
+  then read every match of the filter where the walk stops after a few rows (a 33-term prefix
+  with a value list: 31 → 37 ms). Both forms return the same rows in the same order, so the choice
+  follows the page.
+- **Sampling 2,000 value rows to choose how a range is counted.** A key with 3,000 values read
+  2,000 rows twice: +0.3 ms on seven browse requests. 256 rows decide as well.
+
+**When to revisit:** if the row costs change (another index on the posting rows, a different
+SQLite plan for the term probes).
+
 ## Rejected: a filter group's candidates from its conditions' candidate sets (2026-11-09)
 
 **Proposal:** a search with a query checks a `Filter::any()` or `not()` group on its candidates
@@ -97,6 +132,11 @@ facet count read the whole set.
 **When to revisit:** for words without typo derivations or prefixes (one term each), or if
 SQLite's planner could be handed a materialised filter set cheaply (`IN (SELECT …)` measured 33 vs
 41 ms in the raw SQL).
+
+**Revisited 2026-11-10:** done for words of few terms. A filter with at most half the word's
+documents (a range: an eighth), counted once per four terms of the words, lists the result set;
+with 60 terms it is still never chosen on the shape above. 500k documents, a one-term word in 185k
+and a value in 174: 91 → 0.4 ms per walk. See the entry of 2026-11-10 for the variants that lost.
 
 ## Rejected: reading a key's whole value range to name counted values (2026-11-07)
 
