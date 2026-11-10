@@ -203,6 +203,13 @@ final class Index implements \Countable
     private const int PHRASE_DRIVER_ROWS = 3;
 
     /**
+     * matchDriver(): a filter lists a search's result set instead of the rarest keyword group
+     * when its rows are at most 1 / this of the group's documents (a row costs about the same
+     * either way: one read and a probe per other condition).
+     */
+    private const int FILTER_DRIVER_GAIN = 2;
+
+    /**
      * rangeRowCount(): a key with at most this many distinct values has its range summed from
      * its facet_counts rows; the same rows are the sample that decides for a larger key (read
      * twice then: 2,000 sampled rows added 0.3 ms to a range on a 3,000-value key).
@@ -3525,6 +3532,7 @@ final class Index implements \Countable
                 [...$baseConditions, ...$filterConditions],
                 $docScores,
                 min($total, $sortSpecs !== [] ? $this->config->limits->totalHits : $offset + $limit) - $ranked,
+                $total,
             );
             // Each holds the groups up to minBucket; its bucket and typos are not known, so it
             // ranks as the last of that bucket: the bucket's typo budget, score 0.
@@ -8380,11 +8388,17 @@ final class Index implements \Countable
      * @param  list<KeywordGroup>   $groups
      * @param  list<FacetCondition> $conditions
      * @param  array<int, mixed>    $candidates
+     * @param  int                  $total      The result set's size, up to one past totalHits.
      * @return list<int>
      */
-    private function restOfResultSet(array $groups, array $conditions, array $candidates, int $count): array
-    {
-        $match = $count > 0 ? $this->searchMatchesSql($groups, $conditions) : null;
+    private function restOfResultSet(
+        array $groups,
+        array $conditions,
+        array $candidates,
+        int $count,
+        int $total,
+    ): array {
+        $match = $count > 0 ? $this->orderedMatchesSql($groups, $conditions, $total) : null;
         if ($match === null) {
             return [];
         }
@@ -8479,7 +8493,18 @@ final class Index implements \Countable
         if ($root['driver'] === null) {
             return null;
         }
-        $probes = $this->renderFacetProbes($conditions, 'bm.doc_id');
+        // A filter or quoted phrase with far fewer rows than the expression's driver lists the
+        // documents instead (see matchDriver()); the predicate holds the whole expression.
+        $driver = $this->matchDriver($conditions, $root['df']);
+        if ($driver !== null) {
+            $listed = $this->conditionDrivenSql($driver, [], [$driver['at'] => $conditions[$driver['at']]], false);
+            unset($conditions[$driver['at']]);
+            if ($listed === null) {
+                return null;
+            }
+            [$root['driver'], $root['driverParams']] = $listed;
+        }
+        $probes = $this->renderFacetProbes(array_values($conditions), 'bm.doc_id');
         if ($probes === null) {
             return null;
         }
@@ -8631,9 +8656,8 @@ final class Index implements \Countable
      * and a narrow one the driver's rows.
      *
      * $orderFree (the caller counts or reads every row, or the stream cannot be cut) lets a
-     * quoted phrase drive instead (phraseMatchesSql()) when its rarest word has fewer positions
-     * rows than PHRASE_DRIVER_ROWS per document of the rarest group: the other groups are then
-     * probed only when the phrase does not imply them. The rows come in another order.
+     * condition with fewer rows list the documents instead (matchDriver(): a quoted phrase's
+     * rarest word, a selective filter), the groups probed from it. The rows come in another order.
      *
      * @param  list<KeywordGroup>   $groups
      * @param  list<FacetCondition> $conditions
@@ -8650,9 +8674,9 @@ final class Index implements \Countable
         }
         usort($groups, fn(array $a, array $b): int => $a['df'] <=> $b['df']);
         if ($orderFree) {
-            $phrase = $this->phraseMatchesSql($groups, $conditions, $grouped);
-            if ($phrase !== false) {
-                return $phrase;
+            $listed = $this->matchDriver($conditions, $groups[0]['df']);
+            if ($listed !== null) {
+                return $this->conditionDrivenSql($listed, $groups, $conditions, $grouped);
             }
         }
         $driver = array_shift($groups);
@@ -8675,48 +8699,159 @@ final class Index implements \Countable
     }
 
     /**
-     * searchMatchesSql() driven from a quoted phrase: the positions rows of the phrase's word with
-     * the fewest (its `slots`), each other word probed at its offset from that row
-     * (positions_doc_id), the groups the phrase does not imply (no word of it whose terms all
-     * belong to the group) probed on doclist, the other conditions as usual. false when no
-     * phrase of two or more words reads fewer rows than PHRASE_DRIVER_ROWS per document of the
-     * rarest group ($groups sorted by df), null when a condition can never match.
+     * searchMatchesSql() in the order of its keyword-driven form, whichever condition lists the
+     * documents: restOfResultSet() takes the first rows, so the order decides the pages.
      *
-     * @param  non-empty-list<KeywordGroup> $groups
-     * @param  list<FacetCondition>         $conditions
-     * @return array{0: string, 1: list<mixed>}|null|false
+     * The keyword-driven SQL walks the rarest group's rows by term, then (read from the narrow
+     * index) most hits first, then document, a document at its first row. When a
+     * filter or phrase lists the result set instead (matchDriver()), its documents are sorted
+     * by that same key, looked up per match. The walk stops at the caller's LIMIT while the
+     * sorted form reads every match, so past totalHits matches the choice weighs the rows the
+     * walk is expected to read for totalHits of them (by the filters' shares of all documents);
+     * it does not depend on the page, so every page of a request comes from one order.
+     *
+     * @param  list<KeywordGroup>   $groups
+     * @param  list<FacetCondition> $conditions
+     * @return array{0: string, 1: list<mixed>}|null
      */
-    private function phraseMatchesSql(array $groups, array $conditions, bool $grouped): array|null|false
+    private function orderedMatchesSql(array $groups, array $conditions, int $total): ?array
+    {
+        if ($groups === [] || in_array([], array_column($groups, 'termIds'), true)) {
+            return null;
+        }
+        usort($groups, fn(array $a, array $b): int => $a['df'] <=> $b['df']);
+        $walk   = $groups[0]['df'];
+        $listed = $this->matchDriver($conditions, $walk);
+        $cap    = $this->config->limits->totalHits;
+        if ($listed !== null && $total > $cap) {
+            $documents = max(1, (int) ($this->getInfoValues(['total_documents'])['total_documents'] ?? 0));
+            $share     = 1.0;
+            foreach ($conditions as $condition) {
+                if (!$condition['exclude'] && !$condition['impossible'] && !isset($condition['slots'])) {
+                    $share *= min(1.0, $this->conditionRowCount($condition, $documents) / $documents);
+                }
+            }
+            $walk   = (int) min($walk, $cap / max($share, 1 / $documents));
+            $listed = $this->matchDriver($conditions, $walk) === $listed ? $listed : null;
+        }
+        if ($listed === null) {
+            return $this->searchMatchesSql($groups, $conditions);
+        }
+        $match = $this->conditionDrivenSql($listed, $groups, $conditions, false);
+        if ($match === null) {
+            return null;
+        }
+        // The order the keyword-driven walk would give: SQLite reads the group's rows from the
+        // narrow (term, hits) index or from the primary key (by term, then document), depending
+        // on its version and statistics, so its plan is asked.
+        $walked = $this->searchMatchesSql($groups, $conditions);
+        if ($walked === null) {
+            return null;
+        }
+        $plan = $this->prepare("EXPLAIN QUERY PLAN {$walked[0]}");
+        $plan->execute($walked[1]);
+        $byHits = false;
+        /** @var list<array{detail: string}> $steps */
+        $steps = $plan->fetchAll(PDO::FETCH_ASSOC);
+        foreach ($steps as $step) {
+            if (str_contains($step['detail'], ' d USING ')) {
+                $byHits = str_contains($step['detail'], 'doclist_term_hitcount');
+                break;
+            }
+        }
+        $terms = $groups[0]['termIds'];
+        $key   = $byHits ? 'MIN(o.term_id * 4294967296 - o.hit_count)' : 'MIN(o.term_id)';
+        return [
+            "SELECT m.doc_id FROM ({$match[0]}) m ORDER BY (SELECT {$key}"
+                . ' FROM doclist o WHERE o.doc_id = m.doc_id AND o.term_id IN ('
+                . $this->placeholders(count($terms)) . ')), m.doc_id',
+            [...$match[1], ...$terms],
+        ];
+    }
+
+    /**
+     * The condition that lists a search's result set with fewer rows than the keyword rows the
+     * match SQL would walk ($walk: the rarest group's documents), or null when none does.
+     *
+     * The match SQL probes every condition per keyword row, so a common word next to a filter
+     * with a few rows read the word's whole posting list for a handful of matches (500k
+     * documents, a word in 185k and a value in 174: 91 ms per walk, 0.4 ms listed from the
+     * value). Candidates: a quoted phrase of two or more words through its rarest word's
+     * positions rows (`slot`), while those are fewer than PHRASE_DRIVER_ROWS per keyword row;
+     * a positive filter through its rows, while they are at most 1 / FILTER_DRIVER_GAIN of the
+     * keyword rows and fewer than the phrase's share. Exclusions list what they remove and
+     * never qualify.
+     *
+     * @param  array<int, FacetCondition> $conditions
+     * @return array{at: int, slot: int|null, rows: int}|null
+     */
+    private function matchDriver(array $conditions, int $walk): ?array
     {
         $best = null;
-        $cost = $groups[0]['df'] * self::PHRASE_DRIVER_ROWS;
+        $cost = $walk * self::PHRASE_DRIVER_ROWS;
         foreach ($conditions as $c => $condition) {
-            if ($condition['exclude'] || count($condition['slots'] ?? []) < 2) {
+            if ($condition['exclude'] || $condition['impossible'] || count($condition['slots'] ?? []) < 2) {
                 continue;
             }
             foreach ($condition['slots'] as $k => $slot) {
                 if ($slot['hits'] < $cost) {
-                    [$best, $cost] = [[$c, $k], $slot['hits']];
+                    [$best, $cost] = [['at' => $c, 'slot' => $k, 'rows' => $slot['hits']], $slot['hits']];
                 }
             }
         }
-        if ($best === null) {
-            return false;
-        }
-        [$c, $k] = $best;
-        $slots   = $conditions[$c]['slots'] ?? [];
-        unset($conditions[$c]);
-        $sql    = 'SELECT ' . ($grouped ? '' : 'DISTINCT ') . 'p.doc_id FROM positions p WHERE p.term_id IN ('
-            . $this->placeholders(count($slots[$k]['termIds'])) . ')' . $this->liveDocsSql('p.doc_id');
-        $params = $slots[$k]['termIds'];
-        foreach ($slots as $j => $slot) {
-            if ($j === $k) {
+        $limit = min(intdiv($walk, self::FILTER_DRIVER_GAIN), intdiv($cost - 1, self::PHRASE_DRIVER_ROWS));
+        foreach ($conditions as $c => $condition) {
+            if ($condition['exclude'] || $condition['impossible'] || isset($condition['slots']) || $limit < 0) {
                 continue;
             }
-            $sql .= " AND EXISTS (SELECT 1 FROM positions s{$j} WHERE s{$j}.doc_id = p.doc_id"
-                . " AND s{$j}.position = p.position + (" . ($j - $k) . ") AND s{$j}.term_id IN ("
-                . $this->placeholders(count($slot['termIds'])) . '))';
-            array_push($params, ...$slot['termIds']);
+            $rows = $this->conditionRowCount($condition, $limit);
+            if ($rows <= $limit) {
+                [$best, $limit] = [['at' => $c, 'slot' => null, 'rows' => $rows], $rows - 1];
+            }
+        }
+        return $best;
+    }
+
+    /**
+     * searchMatchesSql() listed from a condition (matchDriver()) instead of the keyword rows.
+     *
+     * A filter: its rows, every group probed on doclist. A quoted phrase: the positions rows of
+     * its `slot` word, each other word probed at its offset from that row (positions_doc_id),
+     * and only the groups the phrase does not imply (no word of it whose terms all belong to
+     * the group). The other conditions are probed as usual. null when one can never match.
+     *
+     * @param  array{at: int, slot: int|null, rows: int} $listed
+     * @param  list<KeywordGroup>                         $groups
+     * @param  array<int, FacetCondition>                 $conditions
+     * @return array{0: string, 1: list<mixed>}|null
+     */
+    private function conditionDrivenSql(array $listed, array $groups, array $conditions, bool $grouped): ?array
+    {
+        $driver = $conditions[$listed['at']];
+        $slots  = $driver['slots'] ?? [];
+        $k      = $listed['slot'];
+        unset($conditions[$listed['at']]);
+        if ($k === null) {
+            $doc    = 'md.doc_id';
+            $multi  = $driver['multiRow'];
+            $sql    = "{$doc} " . sprintf($driver['rows'], 'md') . $this->liveDocsSql($doc);
+            $params = $driver['params'];
+            $slots  = [];
+        } else {
+            $doc    = 'p.doc_id';
+            $multi  = true;
+            $sql    = "{$doc} FROM positions p WHERE p.term_id IN ("
+                . $this->placeholders(count($slots[$k]['termIds'])) . ')' . $this->liveDocsSql($doc);
+            $params = $slots[$k]['termIds'];
+            foreach ($slots as $j => $slot) {
+                if ($j === $k) {
+                    continue;
+                }
+                $sql .= " AND EXISTS (SELECT 1 FROM positions s{$j} WHERE s{$j}.doc_id = p.doc_id"
+                    . " AND s{$j}.position = p.position + (" . ($j - $k) . ") AND s{$j}.term_id IN ("
+                    . $this->placeholders(count($slot['termIds'])) . '))';
+                array_push($params, ...$slot['termIds']);
+            }
         }
         foreach ($groups as $i => $group) {
             foreach ($slots as $slot) {
@@ -8724,15 +8859,19 @@ final class Index implements \Countable
                     continue 2;
                 }
             }
-            $sql .= " AND EXISTS (SELECT 1 FROM doclist g{$i} WHERE g{$i}.doc_id = p.doc_id AND g{$i}.term_id IN ("
+            $sql .= " AND EXISTS (SELECT 1 FROM doclist g{$i} WHERE g{$i}.doc_id = {$doc} AND g{$i}.term_id IN ("
                 . $this->placeholders(count($group['termIds'])) . '))';
             array_push($params, ...$group['termIds']);
         }
-        $probes = $this->renderFacetProbes(array_values($conditions), 'p.doc_id');
+        $probes = $this->renderFacetProbes(array_values($conditions), $doc);
         if ($probes === null) {
             return null;
         }
-        return [$sql . $probes[0] . ($grouped ? ' GROUP BY +p.doc_id' : ''), [...$params, ...$probes[1]]];
+        return [
+            'SELECT ' . ($multi && !$grouped ? 'DISTINCT ' : '') . $sql . $probes[0]
+                . ($multi && $grouped ? " GROUP BY +{$doc}" : ''),
+            [...$params, ...$probes[1]],
+        ];
     }
 
     /**
@@ -8805,7 +8944,9 @@ final class Index implements \Countable
         // value stays a probe: it drops most rows before their doc_facets read, ecom gender Men
         // +2% on the blob.) Otherwise the order decides which documents are counted, and it is
         // the plan SQLite picks for the probed SQL.
-        $whole  = $groups !== [] && min(array_column($groups, 'df')) <= $maxDocs;
+        // The same holds when a positive filter or a quoted phrase bounds it (per facet group:
+        // a key's own filter is left out of its group).
+        $uncut  = $groups !== [] && min(array_column($groups, 'df')) <= $maxDocs;
         $common = null;
         $total  = null;
         foreach ($byGroup as $own => $nameToId) {
@@ -8817,6 +8958,7 @@ final class Index implements \Countable
                 $filters,
                 fn(array $c): bool => !self::isDisjunctiveFor($c, $own),
             ));
+            $whole = $uncut || $this->boundedBy([...$base, ...$conditions], $maxDocs);
             /** @var list<string> $excluded */
             $excluded = [];
             $probed   = [];
@@ -8867,6 +9009,29 @@ final class Index implements \Countable
             'approximate'  => $approximate,
             'total'        => $total,
         ];
+    }
+
+    /**
+     * Whether a positive condition holds at most $maxDocs rows, so no more documents can
+     * satisfy the conditions together: a filter by its rows, a quoted phrase by the hits of
+     * its rarest word.
+     *
+     * @param list<FacetCondition> $conditions
+     */
+    private function boundedBy(array $conditions, int $maxDocs): bool
+    {
+        foreach ($conditions as $condition) {
+            if ($condition['exclude'] || $condition['impossible']) {
+                continue;
+            }
+            $rows = isset($condition['slots'])
+                ? min(array_column($condition['slots'], 'hits') ?: [PHP_INT_MAX])
+                : $this->conditionRowCount($condition, $maxDocs);
+            if ($rows <= $maxDocs) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**

@@ -7,6 +7,7 @@ use Fuzor\FacetExclude;
 use Fuzor\FacetOrder;
 use Fuzor\FacetRange;
 use Fuzor\FacetSearchQuery;
+use Fuzor\Filter;
 use Fuzor\Index;
 use Fuzor\Limits;
 use Fuzor\MatchType;
@@ -12179,5 +12180,136 @@ class IndexTest extends TestCase
             $again = $capped->search('', new SearchOptions(filter: [$field => $range], limit: 1));
             $this->assertSame($expected, $again->totalHits, $field);
         }
+    }
+
+    /**
+     * A common word next to a selective filter or quoted phrase: the exact total, the pages past
+     * the ranked candidates, the facet counts, the distinct total and searchBoolean()'s total are
+     * read from the selective condition instead of the word's rows. Every one must equal a plain
+     * scan of the documents.
+     *
+     * @param array<string, string|FacetRange|FacetExclude>|Filter               $filter
+     * @param \Closure(int, string): bool $matches
+     */
+    #[DataProvider('selectiveConditionCases')]
+    public function testResultSetReadFromASelectiveConditionEqualsAScan(
+        string $query,
+        array|Filter $filter,
+        \Closure $matches,
+        ?string $boolean,
+    ): void {
+        $docs = [];
+        for ($i = 1; $i <= 1200; $i++) {
+            $docs[] = [
+                'id'    => $i,
+                'title' => match (true) {
+                    $i % 10 === 0 => 'red shirt cotton',
+                    $i % 2 === 0  => 'shirt cotton red',
+                    default       => 'cotton plain',
+                },
+                'tag'   => $i % 100 === 0 ? 'rare' : 'common',
+                'rank'  => $i,
+                'brand' => 'b' . ($i % 7),
+            ];
+        }
+        $index = new Index(
+            $this->dbPath,
+            config: new Config(limits: new Limits(candidatesPerWord: 20, totalHits: 10_000)),
+            schema: new SchemaConfig(filterableAttributes: ['tag', 'rank', 'brand'], sortableAttributes: ['rank']),
+        );
+        $index->insert($docs);
+
+        $expected = array_values(array_filter($docs, fn(array $d): bool => $matches($d['id'], $d['brand'])));
+        $ids      = array_column($expected, 'id');
+        $brands   = array_count_values(array_column($expected, 'brand'));
+        ksort($brands);
+        $this->assertNotSame([], $ids);
+
+        $seen = [];
+        for ($offset = 0; $offset <= count($ids); $offset += 50) {
+            $page = $index->search($query, new SearchOptions(
+                asYouType: false,
+                filter: $filter,
+                facets: ['brand'],
+                offset: $offset,
+                limit: 50,
+                attributesToRetrieve: [],
+            ));
+            $this->assertSame(count($ids), $page->totalHits, "total at offset {$offset}");
+            $this->assertSame($brands, $page->facetDistribution['brand'] ?? [], "facets at offset {$offset}");
+            array_push($seen, ...$page->getIds());
+        }
+        $this->assertCount(count($ids), $seen, 'a document repeats or is missing over the pages');
+        sort($seen);
+        $this->assertSame($ids, $seen);
+
+        $sorted = $index->search($query, new SearchOptions(
+            asYouType: false,
+            filter: $filter,
+            sort: ['rank:desc'],
+            limit: 1200,
+            attributesToRetrieve: [],
+        ));
+        $this->assertSame(array_reverse($ids), $sorted->getIds());
+
+        $distinct = $index->search($query, new SearchOptions(asYouType: false, filter: $filter, distinct: 'brand'));
+        if ($distinct->getIds() !== []) {
+            // A distinct page comes from the ranked candidates; its total is counted when one passes.
+            $this->assertSame(count($brands), $distinct->totalHits);
+        }
+
+        if ($boolean !== null) {
+            $result = $index->searchBoolean($boolean, new SearchOptions(asYouType: false, filter: $filter));
+            $this->assertSame(count($ids), $result->totalHits);
+        }
+    }
+
+    /**
+     * @return iterable<string, array{
+     *     string,
+     *     array<string, string|FacetRange|FacetExclude>|Filter,
+     *     \Closure(int, string): bool,
+     *     string|null,
+     * }>
+     */
+    public static function selectiveConditionCases(): iterable
+    {
+        $rare   = fn(int $id, string $brand): bool => $id % 100 === 0;
+        $shirt  = fn(int $id, string $brand): bool => $id % 2 === 0;
+        $phrase = fn(int $id, string $brand): bool => $id % 10 === 0;
+        $ranked = fn(int $id, string $brand): bool => $id >= 100 && $id <= 260;
+        yield 'one value' => ['cotton', ['tag' => 'rare'], $rare, 'cotton'];
+        yield 'range' => ['cotton', ['rank' => FacetRange::between(100, 260)], $ranked, 'cotton'];
+        yield 'phrase and value' => [
+            'cotton "red shirt"',
+            ['tag' => 'rare'],
+            fn(int $id, string $brand): bool => $id % 100 === 0,
+            'cotton "red shirt"',
+        ];
+        yield 'phrase alone' => ['cotton "red shirt"', [], $phrase, 'cotton "red shirt"'];
+        yield 'negated word and range' => [
+            'cotton -shirt',
+            ['rank' => FacetRange::between(100, 260)],
+            fn(int $id, string $brand): bool => $ranked($id, $brand) && !$shirt($id, $brand),
+            'cotton -shirt',
+        ];
+        yield 'negated phrase and range' => [
+            'cotton -"red shirt"',
+            ['rank' => FacetRange::between(100, 260)],
+            fn(int $id, string $brand): bool => $ranked($id, $brand) && !$phrase($id, $brand),
+            'cotton -"red shirt"',
+        ];
+        yield 'tree' => [
+            'cotton',
+            Filter::all(['rank' => FacetRange::between(100, 260)], Filter::any(['brand' => 'b1'], ['tag' => 'rare'])),
+            fn(int $id, string $brand): bool => $ranked($id, $brand) && ($brand === 'b1' || $rare($id, $brand)),
+            'cotton',
+        ];
+        yield 'value and exclusion' => [
+            'cotton',
+            ['rank' => FacetRange::between(100, 260), 'tag' => new FacetExclude('rare')],
+            fn(int $id, string $brand): bool => $ranked($id, $brand) && !$rare($id, $brand),
+            'cotton',
+        ];
     }
 }
