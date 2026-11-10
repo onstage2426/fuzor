@@ -3455,7 +3455,7 @@ final class Index implements \Countable
         }
 
         /** @infection-ignore-all DecrementInteger: $total is count(); -1 is impossible, so the guard fires identically for any realistic input */
-        if ($total === 0) {
+        if ($total === 0 && !($candidatesCapped && $distinct !== null)) {
             return new SearchResult(
                 ids: [],
                 totalHits: 0,
@@ -3473,18 +3473,41 @@ final class Index implements \Countable
 
         if ($distinct !== null) {
             $keyId = $this->lookupFacetKeyId($distinct);
+            // When candidatesPerWord cut the candidates, the other matches follow them (unscored, or
+            // sorted with them), as without distinct: the candidates alone left the pages short of
+            // the total, and empty when a filter passed none of them.
+            $rest = [];
+            if ($candidatesCapped) {
+                $cap  = $this->config->limits->totalHits;
+                $rest = $this->restOfResultSet(
+                    $required,
+                    [...$baseConditions, ...$filterConditions],
+                    $docScores,
+                    $cap,
+                    $cap + 1,
+                );
+                $restTypos = $maxTypos()[$minBucket] ?? 0;
+                foreach ($rest as $docId) {
+                    $docBucket[$docId] = $minBucket;
+                    $docTypos[$docId]  = $restTypos;
+                    if ($docRank !== null) {
+                        $docRank[$docId] = $minBucket * 1000 - $restTypos;
+                    }
+                }
+            }
             if ($sortSpecs !== []) {
-                $sortedIds = $this->sortDocIdsBySpecs(
+                $docScores += array_fill_keys($rest, 0.0);
+                $sortedIds  = $this->sortDocIdsBySpecs(
                     array_keys($docScores),
                     $sortSpecs,
                     $docScores,
                     leading: $docRank,
                 );
             } elseif ($docRank !== null) {
-                $sortedIds = self::rankByBucketThenScore($docScores, $docRank);
+                $sortedIds = [...self::rankByBucketThenScore($docScores, $docRank), ...$rest];
             } else {
                 arsort($docScores);
-                $sortedIds = array_keys($docScores);
+                $sortedIds = [...array_keys($docScores), ...$rest];
             }
             $valueMap = $this->fetchSortValues($sortedIds, $keyId);
             [$pagedIds, $distinctHits] = $this->applyDistinctPagination(

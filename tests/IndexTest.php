@@ -12253,10 +12253,9 @@ class IndexTest extends TestCase
         $this->assertSame(array_reverse($ids), $sorted->getIds());
 
         $distinct = $index->search($query, new SearchOptions(asYouType: false, filter: $filter, distinct: 'brand'));
-        if ($distinct->getIds() !== []) {
-            // A distinct page comes from the ranked candidates; its total is counted when one passes.
-            $this->assertSame(count($brands), $distinct->totalHits);
-        }
+        $this->assertSame(count($brands), $distinct->totalHits);
+        $this->assertCount(min(20, count($brands)), $distinct->getIds());
+        $this->assertSame([], array_diff($distinct->getIds(), $ids));
 
         if ($boolean !== null) {
             $result = $index->searchBoolean($boolean, new SearchOptions(asYouType: false, filter: $filter));
