@@ -12312,4 +12312,78 @@ class IndexTest extends TestCase
             'cotton',
         ];
     }
+
+    /**
+     * An unfiltered facet over a key of numbers in value order reads only the values the
+     * response keeps; the result must equal the one from reading every value, which a key
+     * holding a string, a count-ordered request and an uncapped config still do.
+     */
+    public function testWholeKeyFacetOfNumbersKeepsTheSmallestValues(): void
+    {
+        $docs   = [];
+        $prices = [];
+        for ($i = 1; $i <= 420; $i++) {
+            $price = match (true) {
+                $i === 7      => 0,
+                $i === 8      => -0.0,
+                $i % 5 === 0  => ($i % 40) - 20,
+                $i % 3 === 0  => $i / 8,
+                default       => $i * 3,
+            };
+            $docs[]   = ['id' => $i, 'title' => 'item', 'price' => $price, 'label' => $i % 2 === 0 ? 'even' : 7];
+            $prices[] = $price;
+        }
+        $schema = new SchemaConfig(filterableAttributes: ['price', 'label']);
+        $index  = new Index($this->dbPath, schema: $schema);
+        $index->insert($docs);
+
+        $counts = [];
+        foreach ($prices as $price) {
+            $counts[(string) $price] = ($counts[(string) $price] ?? 0) + 1;
+        }
+        $texts = array_map(strval(...), array_keys($counts));
+        usort($texts, fn(string $a, string $b): int => (float) $a <=> (float) $b ?: strcmp($a, $b));
+        $expected = [];
+        foreach (array_slice($texts, 0, 100) as $text) {
+            $expected[$text] = $counts[$text];
+        }
+        $stats = ['min' => (float) min($prices), 'max' => (float) max($prices)];
+
+        $facets = new SearchOptions(facets: ['price', 'label'], limit: 1);
+        $result = $index->search('', $facets);
+        $this->assertSame($expected, $result->facetDistribution['price']);
+        $this->assertSame($stats, $result->facetStats['price']);
+        $this->assertSame([7 => 210, 'even' => 210], $result->facetDistribution['label']);
+        $this->assertSame($result->facetDistribution, $index->search('item', $facets)->facetDistribution);
+        $this->assertSame($result->facetDistribution, $index->searchBoolean('', $facets)->facetDistribution);
+
+        // With a filter on the key itself the facet is still counted over the whole key.
+        $own = $index->search('', new SearchOptions(
+            filter: ['price' => FacetRange::between(100, 200)],
+            facets: ['price'],
+            limit: 1,
+        ));
+        $this->assertSame($expected, $own->facetDistribution['price']);
+        $this->assertSame($stats, $own->facetStats['price']);
+
+        // Every value read: no cap, and count order.
+        $all = new Index($this->dbPath, config: new Config(maxValuesPerFacet: 0));
+        $this->assertSame(
+            $expected,
+            array_slice($all->search('', $facets)->facetDistribution['price'], 0, 100, true),
+        );
+        $byCount = $index->search('', new SearchOptions(
+            facets: ['price'],
+            sortFacetValuesBy: ['price' => FacetOrder::Count],
+            limit: 1,
+        ));
+        $this->assertSame(max($counts), array_values($byCount->facetDistribution['price'])[0]);
+        $this->assertSame($stats, $byCount->facetStats['price']);
+
+        // One string among the numbers: no stats, the string after the numbers.
+        $index->insert([['id' => 500, 'title' => 'item', 'price' => 'on request', 'label' => 'even']]);
+        $mixed = $index->search('', $facets);
+        $this->assertSame($expected, $mixed->facetDistribution['price']);
+        $this->assertArrayNotHasKey('price', $mixed->facetStats);
+    }
 }

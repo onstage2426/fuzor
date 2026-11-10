@@ -480,6 +480,15 @@ final class Index implements \Countable
     private array $conditionRowFloors = [];
 
     /**
+     * The running request's SearchOptions::$sortFacetValuesBy (set at the entry of search,
+     * searchBoolean and browse): a whole-key count of a number-only key in value order reads
+     * only the values that orderFacetValues() keeps (firstKeyCounts()).
+     *
+     * @var array<string, FacetOrder>
+     */
+    private array $facetValueOrders = [];
+
+    /**
      * Device and inode of the index file captured at connection open; used by
      * reopenIfChanged() to detect atomic-rename rotation. Deliberately excludes
      * mtime/size: in-place writes keep the inode and are covered by the
@@ -2828,6 +2837,7 @@ final class Index implements \Countable
     /** search() for a page inside Limits::$totalHits; totalHits not capped yet. */
     private function rankedSearch(string $phrase, SearchOptions $options): SearchResult
     {
+        $this->facetValueOrders = $options->sortFacetValuesBy;
         $this->checkDataVersion();
         ['phrase' => $positive, 'conditions' => $negations] = $this->extractNegations($phrase);
         if (trim($positive) === '') {
@@ -3709,6 +3719,7 @@ final class Index implements \Countable
     /** searchBoolean() for a page inside Limits::$totalHits; totalHits not capped yet. */
     private function booleanSearch(string $phrase, SearchOptions $options): SearchResult
     {
+        $this->facetValueOrders = $options->sortFacetValuesBy;
         $this->checkDataVersion();
         if (trim($phrase) === '') {
             return $this->browse($phrase, $options);
@@ -4159,6 +4170,7 @@ final class Index implements \Countable
      */
     private function browse(string $phrase, SearchOptions $options, array $negations = []): SearchResult
     {
+        $this->facetValueOrders = $options->sortFacetValuesBy;
         $formatPhrase  = $negations === [] ? $phrase : '';
         $limit         = $options->limit;
         $offset        = $options->offset;
@@ -11633,7 +11645,8 @@ final class Index implements \Countable
     /**
      * Count facet values for $nameToId over a document set and merge them into $distribution / $stats.
      *
-     * $docIds null counts over the whole index from facet_counts (O(values) per key). Otherwise
+     * $docIds null counts over the whole index from facet_counts (keyCountsWithout(): O(values)
+     * per key, or firstKeyCounts(): only the values the response keeps). Otherwise
      * the documents' doc_facets rows are counted (fetchFacetCountsOfDocs()), one row per document
      * for all keys. That beats a scan of the key's rows even for one key over half the index (45k
      * ecom set, articleType over 22k docs: 18.6 vs 27.2 ms; gender over 34k: 25.5 vs 39.7 ms).
@@ -11651,10 +11664,12 @@ final class Index implements \Countable
         }
         $results = $docIds !== null
             ? $this->fetchFacetCountsOfDocs($nameToId, $docIds)
-            : array_map(
-                fn(int $keyId): array => self::summarizeFacetCounts($this->wholeKeyFacetCountRows($keyId)),
+            : array_combine(array_keys($nameToId), array_map(
+                fn(int $keyId, string $name): array => $this->firstKeyCounts($keyId, $name)
+                    ?? $this->keyCountsWithout($keyId, []),
                 $nameToId,
-            );
+                array_keys($nameToId),
+            ));
         $this->mergeFacetCounts($results, $distribution, $stats);
     }
 
@@ -11721,6 +11736,80 @@ final class Index implements \Countable
                 $stats[$keyName] = $counts['stats'];
             }
         }
+    }
+
+    /**
+     * The whole-key counts of a number-only key, limited to the values a response in value
+     * order keeps: the maxValuesPerFacet smallest numbers, with the key's bounds as stats.
+     * null when it does not apply (count order, no value cap, a key that ever stored a string,
+     * or a value outside the plain numbers below); keyCountsWithout() then reads every value.
+     *
+     * Reading and ordering all values to keep 100 cost 59 ms for 38k prices and 530 ms for a
+     * key with a value per document at 500k documents. Each next number is one seek in
+     * facet_numeric_index, its text the first row there, its count a facet_counts row. Value
+     * order puts numbers first by value, so for a key of numbers these are the values
+     * orderFacetValues() would keep: checked per value (a numeric text that reads back as the
+     * number, below 2^53 in size, so two texts cannot share a number; zero is looked up under
+     * both of its texts).
+     *
+     * @return array{distribution: array<array-key, int>, stats: array{min: float, max: float}|null}|null
+     */
+    private function firstKeyCounts(int $keyId, string $name): ?array
+    {
+        $limit = $this->config->maxValuesPerFacet;
+        $order = $this->facetValueOrders[$name] ?? $this->facetValueOrders['*'] ?? FacetOrder::Alpha;
+        if ($limit <= 0 || $order !== FacetOrder::Alpha || $this->hasStrings($keyId)) {
+            return null;
+        }
+        $stmt = $this->stmt(
+            'firstNumbersOfKey',
+            'WITH RECURSIVE walk(v, n) AS (
+                 SELECT (SELECT MIN(num_value) FROM facet_values WHERE key_id = :k AND num_value IS NOT NULL), 1
+                 UNION ALL
+                 SELECT (SELECT MIN(num_value) FROM facet_values WHERE key_id = :k AND num_value > walk.v), n + 1
+                   FROM walk WHERE walk.v IS NOT NULL AND n < CAST(:limit AS INTEGER)
+             )
+             SELECT v, (SELECT value FROM facet_values
+                         WHERE key_id = :k AND num_value IS NOT NULL AND num_value = walk.v LIMIT 1)
+               FROM walk WHERE v IS NOT NULL'
+        );
+        $stmt->execute([':k' => $keyId, ':limit' => $limit]);
+        /** @var list<array{0: mixed, 1: mixed}> $rows */
+        $rows  = $stmt->fetchAll(PDO::FETCH_NUM);
+        $texts = [];
+        foreach ($rows as [$number, $text]) {
+            if (
+                !is_float($number) || !is_string($text) || !is_numeric($text) || (float) $text !== $number
+                || abs($number) >= 2 ** 53
+            ) {
+                return null;
+            }
+            array_push($texts, ...($number === 0.0 ? ['0', '-0'] : [$text]));
+        }
+        $bounds = $this->boundsOfKey($keyId);
+        if ($texts === [] || $bounds === null || !is_finite($bounds['min']) || !is_finite($bounds['max'])) {
+            return null;
+        }
+        $stmt = $this->stmt(
+            'facetCountsOfValues',
+            'SELECT value, count, num_count FROM facet_counts
+              WHERE key_id = ? AND value IN (SELECT value FROM json_each(?))'
+        );
+        $stmt->execute([$keyId, json_encode($texts)]);
+        $values = [];
+        $counts = [];
+        /** @var list<array{0: string, 1: int, 2: int}> $counted */
+        $counted = $stmt->fetchAll(PDO::FETCH_NUM);
+        foreach ($counted as [$value, $n, $numeric]) {
+            if ($numeric !== $n) {
+                return null;
+            }
+            $values[] = $value;
+            $counts[] = $n;
+        }
+        // Count desc, then value, as keyCountsWithout() returns a key.
+        array_multisort($counts, SORT_DESC, SORT_NUMERIC, $values, SORT_ASC, SORT_STRING);
+        return ['distribution' => array_combine($values, $counts), 'stats' => $bounds];
     }
 
     /**
@@ -12172,31 +12261,6 @@ final class Index implements \Countable
         return $counts;
     }
 
-    /**
-     * Per-value counts of a facet key over the whole index, most frequent first: the maintained
-     * facet_counts rows (O(values)) instead of a scan of every row of the key.
-     *
-     * @return list<array{value: string, n: int, min_num: float|null, max_num: float|null, num_count: int}>
-     */
-    private function wholeKeyFacetCountRows(int $keyId): array
-    {
-        $stmt = $this->stmt(
-            'facetCountsForKeyAll',
-            'SELECT value,
-                    count                                              AS n,
-                    CASE WHEN num_count > 0 THEN num_value END         AS min_num,
-                    CASE WHEN num_count > 0 THEN num_value END         AS max_num,
-                    num_count
-               FROM facet_counts
-              WHERE key_id = ?
-              ORDER BY count DESC, value'
-        );
-        $stmt->execute([$keyId]);
-        /** @var list<array{value: string, n: int, min_num: float|null, max_num: float|null, num_count: int}> $rows */
-        $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
-        return $rows;
-    }
-
     /** How many facet_values rows a key has, summed from facet_counts (one row per value). */
     private function keyRowCount(int $keyId): int
     {
@@ -12208,7 +12272,7 @@ final class Index implements \Countable
     }
 
     /**
-     * Turn per-value count rows (wholeKeyFacetCountRows(), fetchFacetCountsOfDocs()) into a
+     * Turn per-value count rows (fetchFacetCountsOfDocs()) into a
      * value → count distribution (in row order) plus min/max stats when every counted row is
      * numeric.
      *
