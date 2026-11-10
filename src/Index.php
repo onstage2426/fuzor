@@ -210,6 +210,13 @@ final class Index implements \Countable
     private const int FILTER_DRIVER_GAIN = 2;
 
     /**
+     * matchDriver(): the same for a range, whose rows have to be counted to find out (a value
+     * list's are a lookup). The count stops at this share of the group's documents, 0.4% of
+     * the walk it can replace; at half of them it added 0.5 ms to walks that stop early.
+     */
+    private const int RANGE_DRIVER_GAIN = 8;
+
+    /**
      * rangeRowCount(): a key with at most this many distinct values has its range summed from
      * its facet_counts rows; the same rows are the sample that decides for a larger key (read
      * twice then: 2,000 sampled rows added 0.3 ms to a range on a 3,000-value key).
@@ -218,7 +225,8 @@ final class Index implements \Countable
 
     /**
      * rangeRowCount(): a facet_numeric_index row costs about 0.027 us to count, a facet_counts
-     * row 0.07 us to test and sum, so the index wins while a value holds fewer rows than this.
+     * row 0.07 us to test and sum, so the index wins while it reads fewer rows than this per
+     * value of the key.
      */
     private const int RANGE_COUNT_ROWS_PER_VALUE = 2;
 
@@ -8398,7 +8406,9 @@ final class Index implements \Countable
         int $count,
         int $total,
     ): array {
-        $match = $count > 0 ? $this->orderedMatchesSql($groups, $conditions, $total) : null;
+        $match = $count > 0
+            ? $this->orderedMatchesSql($groups, $conditions, $total, $count + count($candidates))
+            : null;
         if ($match === null) {
             return [];
         }
@@ -8495,7 +8505,7 @@ final class Index implements \Countable
         }
         // A filter or quoted phrase with far fewer rows than the expression's driver lists the
         // documents instead (see matchDriver()); the predicate holds the whole expression.
-        $driver = $this->matchDriver($conditions, $root['df']);
+        $driver = $this->matchDriver($conditions, $root['df'], impliesWords: false);
         if ($driver !== null) {
             $listed = $this->conditionDrivenSql($driver, [], [$driver['at'] => $conditions[$driver['at']]], false);
             unset($conditions[$driver['at']]);
@@ -8700,30 +8710,32 @@ final class Index implements \Countable
 
     /**
      * searchMatchesSql() in the order of its keyword-driven form, whichever condition lists the
-     * documents: restOfResultSet() takes the first rows, so the order decides the pages.
+     * documents: restOfResultSet() takes the first $rows rows, so the order decides the pages.
      *
      * The keyword-driven SQL walks the rarest group's rows by term, then (read from the narrow
      * index) most hits first, then document, a document at its first row. When a
      * filter or phrase lists the result set instead (matchDriver()), its documents are sorted
-     * by that same key, looked up per match. The walk stops at the caller's LIMIT while the
-     * sorted form reads every match, so past totalHits matches the choice weighs the rows the
-     * walk is expected to read for totalHits of them (by the filters' shares of all documents);
-     * it does not depend on the page, so every page of a request comes from one order.
+     * by that same key, looked up per match, so both forms return the same rows. The walk stops
+     * once it has $rows matches while the sorted form reads every match, so the choice weighs
+     * the part of the walk expected for $rows of the $total matches (past totalHits, where the
+     * total is not known: by the filters' shares of all documents).
      *
      * @param  list<KeywordGroup>   $groups
      * @param  list<FacetCondition> $conditions
      * @return array{0: string, 1: list<mixed>}|null
      */
-    private function orderedMatchesSql(array $groups, array $conditions, int $total): ?array
+    private function orderedMatchesSql(array $groups, array $conditions, int $total, int $rows): ?array
     {
         if ($groups === [] || in_array([], array_column($groups, 'termIds'), true)) {
             return null;
         }
         usort($groups, fn(array $a, array $b): int => $a['df'] <=> $b['df']);
-        $walk   = $groups[0]['df'];
+        $walk = $groups[0]['df'];
+        if ($rows < $total) {
+            $walk = (int) ceil($walk * $rows / $total);
+        }
         $listed = $this->matchDriver($conditions, $walk);
-        $cap    = $this->config->limits->totalHits;
-        if ($listed !== null && $total > $cap) {
+        if ($listed !== null && $total > $this->config->limits->totalHits) {
             $documents = max(1, (int) ($this->getInfoValues(['total_documents'])['total_documents'] ?? 0));
             $share     = 1.0;
             foreach ($conditions as $condition) {
@@ -8731,8 +8743,8 @@ final class Index implements \Countable
                     $share *= min(1.0, $this->conditionRowCount($condition, $documents) / $documents);
                 }
             }
-            $walk   = (int) min($walk, $cap / max($share, 1 / $documents));
-            $listed = $this->matchDriver($conditions, $walk) === $listed ? $listed : null;
+            $walk   = (int) min($walk, $rows / max($share, 1 / $documents));
+            $listed = $this->matchDriver($conditions, $walk);
         }
         if ($listed === null) {
             return $this->searchMatchesSql($groups, $conditions);
@@ -8779,16 +8791,19 @@ final class Index implements \Countable
      * value). Candidates: a quoted phrase of two or more words through its rarest word's
      * positions rows (`slot`), while those are fewer than PHRASE_DRIVER_ROWS per keyword row;
      * a positive filter through its rows, while they are at most 1 / FILTER_DRIVER_GAIN of the
-     * keyword rows and fewer than the phrase's share. Exclusions list what they remove and
-     * never qualify.
+     * keyword rows (a range: RANGE_DRIVER_GAIN) and fewer than the phrase's share. Exclusions list what they remove and
+     * never qualify. Without $impliesWords (searchBoolean(): the whole expression is still
+     * probed per row, where a search skips the words its phrase holds) a phrase must be as
+     * selective as a filter (500k documents, a phrase with 1.2 times the driver's rows: 46 ms
+     * walked, 56 ms listed from the phrase).
      *
      * @param  array<int, FacetCondition> $conditions
      * @return array{at: int, slot: int|null, rows: int}|null
      */
-    private function matchDriver(array $conditions, int $walk): ?array
+    private function matchDriver(array $conditions, int $walk, bool $impliesWords = true): ?array
     {
         $best = null;
-        $cost = $walk * self::PHRASE_DRIVER_ROWS;
+        $cost = $impliesWords ? $walk * self::PHRASE_DRIVER_ROWS : intdiv($walk, self::RANGE_DRIVER_GAIN) + 1;
         foreach ($conditions as $c => $condition) {
             if ($condition['exclude'] || $condition['impossible'] || count($condition['slots'] ?? []) < 2) {
                 continue;
@@ -8799,13 +8814,18 @@ final class Index implements \Countable
                 }
             }
         }
-        $limit = min(intdiv($walk, self::FILTER_DRIVER_GAIN), intdiv($cost - 1, self::PHRASE_DRIVER_ROWS));
+        $limit = intdiv($walk, self::FILTER_DRIVER_GAIN);
+        if ($best !== null) {
+            // Fewer rows than the phrase's share of a keyword walk.
+            $limit = min($limit, intdiv($best['rows'] - 1, $impliesWords ? self::PHRASE_DRIVER_ROWS : 1));
+        }
         foreach ($conditions as $c => $condition) {
             if ($condition['exclude'] || $condition['impossible'] || isset($condition['slots']) || $limit < 0) {
                 continue;
             }
-            $rows = $this->conditionRowCount($condition, $limit);
-            if ($rows <= $limit) {
+            $most = isset($condition['range']) ? min($limit, intdiv($walk, self::RANGE_DRIVER_GAIN)) : $limit;
+            $rows = $this->conditionRowCount($condition, $most);
+            if ($rows <= $most) {
                 [$best, $limit] = [['at' => $c, 'slot' => null, 'rows' => $rows], $rows - 1];
             }
         }
@@ -10958,10 +10978,11 @@ final class Index implements \Countable
      * range there reads every value of the key: nothing for a rating, 35 ms for a key with a
      * value per document at 500k documents, whatever the range. The first
      * RANGE_COUNT_SAMPLE_VALUES rows of the key decide: a key with no more values is summed
-     * from them. A larger key whose sampled values hold at most RANGE_COUNT_ROWS_PER_VALUE rows
-     * each is counted along facet_numeric_index instead, which reads the range's rows (2.6
-     * times cheaper per row, and stops at $upTo); one with many rows per value is summed from
-     * facet_counts as before. Both give the same number: num_count is the value's numeric rows.
+     * from them. For a larger key the sample gives the rows per value, and with the document
+     * count the values facet_counts would read; facet_numeric_index reads the range's rows
+     * instead (2.6 times cheaper per row), at most $upTo + 1 of them. The cheaper read is
+     * taken (RANGE_COUNT_ROWS_PER_VALUE). Both give the same number: num_count is the value's
+     * numeric rows.
      *
      * @param array{keyId: int, sql: string, params: list<mixed>} $range
      */
@@ -10982,7 +11003,11 @@ final class Index implements \Countable
         if ($values <= self::RANGE_COUNT_SAMPLE_VALUES) {
             return $inRange;
         }
-        if ($rows <= $values * self::RANGE_COUNT_ROWS_PER_VALUE) {
+        // Rows the index count reads at most, against the values facet_counts would read
+        // (the documents over the sampled rows per value).
+        $documents = (int) ($this->getInfoValues(['total_documents'])['total_documents'] ?? 0);
+        $indexRows = $upTo === null ? $documents : min($upTo + 1, $documents);
+        if ($indexRows * $rows <= $documents * $values * self::RANGE_COUNT_ROWS_PER_VALUE) {
             $limit = $upTo === null ? '' : ' LIMIT ?';
             $stmt  = $this->prepare(
                 'SELECT COUNT(*) FROM (SELECT 1 FROM facet_values fv WHERE fv.key_id = ? AND '
