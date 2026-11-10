@@ -224,6 +224,12 @@ final class Index implements \Countable
     private const int RANGE_COUNT_SAMPLE_VALUES = 256;
 
     /**
+     * numbersOfKey(): batches of maxValuesPerFacet values walked for the first values of a
+     * number-only key before every value is read instead (most of them were removed).
+     */
+    private const int FIRST_VALUES_MAX_BATCHES = 20;
+
+    /**
      * rangeRowCount(): a facet_numeric_index row costs about 0.027 us to count, a facet_counts
      * row 0.07 us to test and sum, so the index wins while it reads fewer rows than this per
      * value of the key.
@@ -4256,7 +4262,7 @@ final class Index implements \Countable
             $conditions === []                         => $totalDocuments,
             $match === null                            => 0,
             $classified !== null                       => $classified['total'],
-            self::isExclusionOnly($conditions)         => $totalDocuments - $this->countExcludedDocs($conditions),
+            self::isExclusionOnly($conditions)         => $this->countKeptDocs($conditions, $totalDocuments),
             $matchIds !== null && !$matchIds['capped'] => count($matchIds['ids']),
             default                                    => $this->countBrowseDocs($conditions, $match),
         };
@@ -4458,6 +4464,27 @@ final class Index implements \Countable
                     : $this->countBrowseDocs($positive, $positiveMatch);
                 return $kept - $this->countExcludedDocs($exclusions, $positive);
             }
+        }
+        $stmt = $this->prepare("SELECT COUNT(*) FROM ({$match[0]})");
+        $stmt->execute($match[1]);
+        return (int) $stmt->fetchColumn();
+    }
+
+    /**
+     * Total of an exclusion-only browse: the kept documents counted themselves when an
+     * exclusion leaves few values (keptValueConditions()), else all minus the excluded.
+     *
+     * @param non-empty-list<FacetCondition> $conditions Exclusions only (see isExclusionOnly()).
+     */
+    private function countKeptDocs(array $conditions, int $totalDocuments): int
+    {
+        $kept = $this->keptValueConditions($conditions);
+        if ($kept === null) {
+            return $totalDocuments - $this->countExcludedDocs($conditions);
+        }
+        $match = $this->matchingDocsSql($kept);
+        if ($match === null) {
+            return 0;
         }
         $stmt = $this->prepare("SELECT COUNT(*) FROM ({$match[0]})");
         $stmt->execute($match[1]);
@@ -11696,6 +11723,19 @@ final class Index implements \Countable
         array &$distribution,
         array &$stats,
     ): void {
+        $kept = $this->keptValueConditions($conditions);
+        if ($kept !== null) {
+            // Few documents are kept: they are counted themselves.
+            $match = $this->matchingDocsSql($kept);
+            if ($match !== null) {
+                $this->mergeFacetCounts(
+                    $this->facetCountsOfDocsSql($nameToId, $match[0], $match[1]),
+                    $distribution,
+                    $stats,
+                );
+            }
+            return;
+        }
         [$excludedSql, $excludedParams] = $this->excludedDocsSql($conditions);
 
         // The excluded documents' counts per (key, value), from their doc_facets rows. The
@@ -11707,9 +11747,81 @@ final class Index implements \Countable
         );
         $results = [];
         foreach ($nameToId as $keyName => $keyId) {
-            $results[$keyName] = $this->keyCountsWithout($keyId, $removed[$keyId] ?? []);
+            $results[$keyName] = $this->firstKeyCounts($keyId, $keyName, $removed[$keyId] ?? [])
+                ?? $this->keyCountsWithout($keyId, $removed[$keyId] ?? []);
         }
         $this->mergeFacetCounts($results, $distribution, $stats);
+    }
+
+    /**
+     * Exclusion-only conditions with one exclusion turned into the values it keeps, when those
+     * hold at most half the rows it removes; null when no exclusion does.
+     *
+     * The complement paths read the excluded documents, which is most of the index when an
+     * exclusion names all but a few values (500k documents, 408k excluded, 5 facets: 977 ms).
+     * On a single-valued key that every document holds, "none of these values" is "one of the
+     * others": a positive value list that drives matchingDocsSql(), the other exclusions
+     * probed. No kept value at all gives an impossible condition.
+     *
+     * @param  list<FacetCondition> $conditions Exclusions only (see isExclusionOnly()).
+     * @return non-empty-list<FacetCondition>|null
+     */
+    private function keptValueConditions(array $conditions): ?array
+    {
+        $documents = (int) ($this->getInfoValues(['total_documents'])['total_documents'] ?? 0);
+        $best      = null;
+        $fewest    = PHP_INT_MAX;
+        foreach ($conditions as $i => $condition) {
+            $values = $condition['values'] ?? null;
+            if ($values === null || isset($condition['selection']) || $this->isMultiValuedKey($values['keyId'])) {
+                continue;
+            }
+            $stmt = $this->stmt(
+                'selectionShare',
+                'SELECT COALESCE(SUM(count), 0),
+                        COALESCE(SUM(CASE WHEN value IN (SELECT value FROM json_each(?)) THEN count END), 0)
+                   FROM facet_counts WHERE key_id = ?'
+            );
+            $stmt->execute([json_encode($values['values']), $values['keyId']]);
+            /** @var array{0: int, 1: int} $rows */
+            $rows = $stmt->fetch(PDO::FETCH_NUM);
+            $stmt->closeCursor();
+            $others = $rows[0] - $rows[1];
+            if ($rows[0] === $documents && $others * 2 <= $rows[1] && $others < $fewest) {
+                [$best, $fewest] = [$i, $others];
+            }
+        }
+        if ($best === null) {
+            return null;
+        }
+        $values = $conditions[$best]['values'] ?? ['keyId' => 0, 'values' => []];
+        $stmt   = $this->stmt(
+            'otherFacetValues',
+            'SELECT value FROM facet_counts
+              WHERE key_id = ? AND value NOT IN (SELECT value FROM json_each(?)) LIMIT 1001'
+        );
+        $stmt->execute([$values['keyId'], json_encode($values['values'])]);
+        /** @var list<string> $others */
+        $others = $stmt->fetchAll(PDO::FETCH_COLUMN);
+        if (count($others) > 1000) {
+            return null;
+        }
+        $rest = $conditions;
+        unset($rest[$best]);
+        return [
+            [
+                'name'       => $conditions[$best]['name'],
+                'rows'       => 'FROM facet_values %1$s WHERE %1$s.key_id = ? AND ' . (count($others) === 1
+                    ? '%1$s.value = ?'
+                    : '%1$s.value IN (' . $this->placeholders(count($others)) . ')'),
+                'params'     => [$values['keyId'], ...$others],
+                'impossible' => $others === [],
+                'multiRow'   => false,
+                'exclude'    => false,
+                'values'     => ['keyId' => $values['keyId'], 'values' => $others],
+            ],
+            ...array_values($rest),
+        ];
     }
 
     /**
@@ -11750,66 +11862,124 @@ final class Index implements \Countable
      * order puts numbers first by value, so for a key of numbers these are the values
      * orderFacetValues() would keep: checked per value (a numeric text that reads back as the
      * number, below 2^53 in size, so two texts cannot share a number; zero is looked up under
-     * both of its texts).
+     * both of its texts). $removed (an exclusion complement's counts to subtract, as for
+     * keyCountsWithout()) is taken off each value; one left without a count is passed over.
      *
+     * @param  array<int|string, array{0: int, 1: int, 2: float|null}> $removed
      * @return array{distribution: array<array-key, int>, stats: array{min: float, max: float}|null}|null
      */
-    private function firstKeyCounts(int $keyId, string $name): ?array
+    private function firstKeyCounts(int $keyId, string $name, array $removed = []): ?array
     {
         $limit = $this->config->maxValuesPerFacet;
         $order = $this->facetValueOrders[$name] ?? $this->facetValueOrders['*'] ?? FacetOrder::Alpha;
         if ($limit <= 0 || $order !== FacetOrder::Alpha || $this->hasStrings($keyId)) {
             return null;
         }
-        $stmt = $this->stmt(
-            'firstNumbersOfKey',
-            'WITH RECURSIVE walk(v, n) AS (
-                 SELECT (SELECT MIN(num_value) FROM facet_values WHERE key_id = :k AND num_value IS NOT NULL), 1
-                 UNION ALL
-                 SELECT (SELECT MIN(num_value) FROM facet_values WHERE key_id = :k AND num_value > walk.v), n + 1
-                   FROM walk WHERE walk.v IS NOT NULL AND n < CAST(:limit AS INTEGER)
-             )
-             SELECT v, (SELECT value FROM facet_values
-                         WHERE key_id = :k AND num_value IS NOT NULL AND num_value = walk.v LIMIT 1)
-               FROM walk WHERE v IS NOT NULL'
-        );
-        $stmt->execute([':k' => $keyId, ':limit' => $limit]);
-        /** @var list<array{0: mixed, 1: mixed}> $rows */
-        $rows  = $stmt->fetchAll(PDO::FETCH_NUM);
-        $texts = [];
-        foreach ($rows as [$number, $text]) {
-            if (
-                !is_float($number) || !is_string($text) || !is_numeric($text) || (float) $text !== $number
-                || abs($number) >= 2 ** 53
-            ) {
-                return null;
-            }
-            array_push($texts, ...($number === 0.0 ? ['0', '-0'] : [$text]));
-        }
-        $bounds = $this->boundsOfKey($keyId);
-        if ($texts === [] || $bounds === null || !is_finite($bounds['min']) || !is_finite($bounds['max'])) {
+        $first = $this->numbersOfKey($keyId, true, $limit, $removed);
+        if ($first === null) {
             return null;
         }
-        $stmt = $this->stmt(
-            'facetCountsOfValues',
-            'SELECT value, count, num_count FROM facet_counts
-              WHERE key_id = ? AND value IN (SELECT value FROM json_each(?))'
-        );
-        $stmt->execute([$keyId, json_encode($texts)]);
+        if ($first === []) {
+            return ['distribution' => [], 'stats' => null];
+        }
+        $max = $removed === []
+            ? ($this->boundsOfKey($keyId)['max'] ?? null)
+            : ($this->numbersOfKey($keyId, false, 1, $removed)[0][0] ?? null);
+        if ($max === null || !is_finite($max)) {
+            return null;
+        }
         $values = [];
         $counts = [];
-        /** @var list<array{0: string, 1: int, 2: int}> $counted */
-        $counted = $stmt->fetchAll(PDO::FETCH_NUM);
-        foreach ($counted as [$value, $n, $numeric]) {
-            if ($numeric !== $n) {
-                return null;
-            }
+        foreach ($first as [, $n, $value]) {
             $values[] = $value;
             $counts[] = $n;
         }
         // Count desc, then value, as keyCountsWithout() returns a key.
         array_multisort($counts, SORT_DESC, SORT_NUMERIC, $values, SORT_ASC, SORT_STRING);
-        return ['distribution' => array_combine($values, $counts), 'stats' => $bounds];
+        return [
+            'distribution' => array_combine($values, $counts),
+            'stats'        => ['min' => $first[0][0], 'max' => $max],
+        ];
+    }
+
+    /**
+     * The first $limit values of a number-only key from its smallest (or largest) number on
+     * that keep a count after $removed, as [number, count, text]; null when a value is not a
+     * plain number (see firstKeyCounts()) or too many values in a row are removed.
+     *
+     * The walk is a recursive query read row by row, so it stops with the values needed.
+     *
+     * @param  array<int|string, array{0: int, 1: int, 2: float|null}> $removed
+     * @return list<array{0: float, 1: int, 2: string}>|null
+     */
+    private function numbersOfKey(int $keyId, bool $ascending, int $limit, array $removed): ?array
+    {
+        [$next, $beyond] = $ascending ? ['MIN', '>'] : ['MAX', '<'];
+        $walk = $this->prepare(
+            "WITH RECURSIVE walk(v) AS (
+                 SELECT (SELECT {$next}(num_value) FROM facet_values WHERE key_id = :k AND num_value IS NOT NULL)
+                 UNION ALL
+                 SELECT (SELECT {$next}(num_value) FROM facet_values WHERE key_id = :k AND num_value {$beyond} walk.v)
+                   FROM walk WHERE walk.v IS NOT NULL
+             )
+             SELECT v, (SELECT value FROM facet_values
+                         WHERE key_id = :k AND num_value IS NOT NULL AND num_value = walk.v LIMIT 1)
+               FROM walk WHERE v IS NOT NULL"
+        );
+        $walk->execute([':k' => $keyId]);
+        $counts = $this->stmt(
+            'facetCountsOfValues',
+            'SELECT value, count, num_count FROM facet_counts
+              WHERE key_id = ? AND value IN (SELECT value FROM json_each(?))'
+        );
+        $kept = [];
+        for ($batch = 0; $batch < self::FIRST_VALUES_MAX_BATCHES && count($kept) < $limit; $batch++) {
+            $numbers = [];
+            while (count($numbers) < $limit && ($row = $walk->fetch(PDO::FETCH_NUM)) !== false) {
+                /** @var array{0: mixed, 1: mixed} $row */
+                [$number, $text] = $row;
+                if (
+                    !is_float($number) || !is_string($text) || !is_numeric($text) || (float) $text !== $number
+                    || abs($number) >= 2 ** 53
+                ) {
+                    $walk->closeCursor();
+                    return null;
+                }
+                foreach ($number === 0.0 ? ['0', '-0'] : [$text] as $value) {
+                    $numbers[$value] = $number;
+                }
+            }
+            if ($numbers === []) {
+                break;
+            }
+            $counts->execute([$keyId, json_encode(array_map(strval(...), array_keys($numbers)))]);
+            $found = [];
+            /** @var list<array{0: string, 1: int, 2: int}> $rows */
+            $rows = $counts->fetchAll(PDO::FETCH_NUM);
+            foreach ($rows as [$value, $n, $numeric]) {
+                if ($numeric !== $n) {
+                    $walk->closeCursor();
+                    return null;
+                }
+                $n -= $removed[$value][0] ?? 0;
+                if ($n > 0) {
+                    $found[$value] = $n;
+                }
+            }
+            // In the walk's order; the two texts of zero by their bytes.
+            foreach ($numbers as $value => $number) {
+                $value = (string) $value;
+                if (isset($found[$value])) {
+                    $kept[] = [$number, $found[$value], $value];
+                }
+            }
+        }
+        $more = $walk->fetch(PDO::FETCH_NUM) !== false;
+        $walk->closeCursor();
+        if (count($kept) < $limit && $more) {
+            return null;
+        }
+        return $kept;
     }
 
     /**

@@ -12386,4 +12386,95 @@ class IndexTest extends TestCase
         $this->assertSame($expected, $mixed->facetDistribution['price']);
         $this->assertArrayNotHasKey('price', $mixed->facetStats);
     }
+
+    /**
+     * Exclusion-only browse: when an exclusion keeps few values the kept documents are counted
+     * themselves, and a number facet reads its first values minus the excluded documents'.
+     * Totals, counts and stats must equal a plain scan.
+     *
+     * @param array<string, FacetExclude> $filter
+     * @param \Closure(int): bool          $kept
+     */
+    #[DataProvider('exclusionOnlyCases')]
+    public function testExclusionOnlyBrowseEqualsAScan(array $filter, \Closure $kept): void
+    {
+        $docs = [];
+        for ($i = 1; $i <= 900; $i++) {
+            $docs[] = [
+                'id'       => $i,
+                'title'    => 'item',
+                'audience' => match (true) {
+                    $i % 10 === 0 => 'kids',
+                    $i % 10 < 3   => 'women',
+                    default       => 'men',
+                },
+                'kind'     => 'k' . ($i % 4),
+                'price'    => $i * 1.5,
+            ];
+        }
+        $index = new Index(
+            $this->dbPath,
+            schema: new SchemaConfig(filterableAttributes: ['audience', 'kind', 'price']),
+        );
+        $index->insert($docs);
+
+        $expected = array_values(array_filter($docs, fn(array $d): bool => $kept($d['id'])));
+        $count    = function (string $field) use ($expected): array {
+            $counts = array_count_values(array_map(strval(...), array_column($expected, $field)));
+            ksort($counts, SORT_STRING);
+            return $counts;
+        };
+        $prices = array_column($expected, 'price');
+        $first  = [];
+        foreach (array_slice($prices, 0, 100) as $price) {
+            $first[(string) $price] = 1;
+        }
+
+        $result = $index->search('', new SearchOptions(
+            filter: $filter,
+            facets: ['audience', 'kind', 'price'],
+            limit: 5,
+        ));
+        $this->assertSame(count($expected), $result->totalHits);
+        $this->assertSame($count('audience'), $result->facetDistribution['audience'] ?? []);
+        $this->assertSame($count('kind'), $result->facetDistribution['kind'] ?? []);
+        $this->assertSame($first, $result->facetDistribution['price'] ?? []);
+        $this->assertSame(
+            $prices === [] ? [] : ['price' => ['min' => min($prices), 'max' => max($prices)]],
+            $result->facetStats,
+        );
+        $this->assertSame(
+            array_slice(array_reverse(array_column($expected, 'id')), 0, 5),
+            $result->getIds(),
+        );
+    }
+
+    /** @return iterable<string, array{array<string, FacetExclude>, \Closure(int): bool}> */
+    public static function exclusionOnlyCases(): iterable
+    {
+        yield 'all but one value' => [
+            ['audience' => new FacetExclude(['men', 'women'])],
+            fn(int $id): bool => $id % 10 === 0,
+        ];
+        yield 'all but one value and another exclusion' => [
+            ['audience' => new FacetExclude(['men', 'women']), 'kind' => new FacetExclude('k0')],
+            fn(int $id): bool => $id % 10 === 0 && $id % 4 !== 0,
+        ];
+        yield 'every value' => [
+            ['audience' => new FacetExclude(['men', 'women', 'kids'])],
+            fn(int $id): bool => false,
+        ];
+        yield 'a few values' => [
+            ['audience' => new FacetExclude('kids')],
+            fn(int $id): bool => $id % 10 !== 0,
+        ];
+        yield 'the first numbers' => [
+            ['price' => new FacetExclude(FacetRange::max(400))],
+            fn(int $id): bool => $id * 1.5 > 400,
+        ];
+        yield 'the last numbers and a value' => [
+            ['price' => new FacetExclude(FacetRange::min(900)), 'kind' => new FacetExclude('k1')],
+            fn(int $id): bool => $id * 1.5 < 900 && $id % 4 !== 1,
+        ];
+    }
 }
