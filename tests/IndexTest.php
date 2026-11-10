@@ -12140,4 +12140,44 @@ class IndexTest extends TestCase
         $this->assertSame(range(41, 50), $page->getIds());
         $this->assertFalse($page->exhaustive);
     }
+
+    /**
+     * A range's row count is taken from the key's value counts (few values, or many rows per
+     * value) or along the numeric index (many values with a row or two each): the same number
+     * on every path, with a string value left out.
+     */
+    public function testRangeRowCountIsTheSameOnEveryCountingPath(): void
+    {
+        $index = new Index(
+            $this->dbPath,
+            config: new Config(limits: new Limits(totalHits: 10_000)),
+            schema: new SchemaConfig(filterableAttributes: ['stars', 'sku', 'lot']),
+        );
+        $docs = [];
+        for ($i = 1; $i <= 6300; $i++) {
+            $docs[] = ['id' => $i, 'title' => 'item', 'stars' => $i % 5, 'sku' => $i, 'lot' => $i % 2100];
+        }
+        $docs[] = ['id' => 6301, 'title' => 'item', 'stars' => 'four', 'sku' => 'none', 'lot' => 'spare'];
+        $index->insert($docs);
+
+        $cases = [
+            'stars' => [FacetRange::between(1, 3), 3780],
+            'sku'   => [FacetRange::between(1000.5, 4000), 3000],
+            'lot'   => [FacetRange::gt(2089), 30],
+        ];
+        foreach ($cases as $field => [$range, $expected]) {
+            $browse = $index->search('', new SearchOptions(filter: [$field => $range], limit: 1));
+            $this->assertSame($expected, $browse->totalHits, $field);
+        }
+        // Next to a keyword and facets the count is only asked up to the facet limit.
+        $capped = new Index($this->dbPath, config: new Config(
+            limits: new Limits(candidatesPerWord: 50, facetCountDocs: 500, totalHits: 10_000),
+        ));
+        foreach ($cases as $field => [$range, $expected]) {
+            $result = $capped->search('item', new SearchOptions(filter: [$field => $range], facets: ['stars']));
+            $this->assertSame($expected, $result->totalHits, $field);
+            $again = $capped->search('', new SearchOptions(filter: [$field => $range], limit: 1));
+            $this->assertSame($expected, $again->totalHits, $field);
+        }
+    }
 }

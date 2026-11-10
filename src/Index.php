@@ -203,6 +203,19 @@ final class Index implements \Countable
     private const int PHRASE_DRIVER_ROWS = 3;
 
     /**
+     * rangeRowCount(): a key with at most this many distinct values has its range summed from
+     * its facet_counts rows; the same rows are the sample that decides for a larger key (read
+     * twice then: 2,000 sampled rows added 0.3 ms to a range on a 3,000-value key).
+     */
+    private const int RANGE_COUNT_SAMPLE_VALUES = 256;
+
+    /**
+     * rangeRowCount(): a facet_numeric_index row costs about 0.027 us to count, a facet_counts
+     * row 0.07 us to test and sum, so the index wins while a value holds fewer rows than this.
+     */
+    private const int RANGE_COUNT_ROWS_PER_VALUE = 2;
+
+    /**
      * filterDocsByPhrases(): a positions row of a phrase's rarest word (phraseDocs(), one probe
      * per other word) counted against a candidate checked in PHP (its positions of every phrase
      * word read, docMatchesPhrase()).
@@ -442,6 +455,14 @@ final class Index implements \Countable
      * @var array<string, int>
      */
     private array $conditionRowCounts = [];
+
+    /**
+     * Lower bounds from conditionRowCount() calls that only asked whether a range exceeds a
+     * limit (the count stopped one past it). Emptied with $conditionRowCounts.
+     *
+     * @var array<string, int>
+     */
+    private array $conditionRowFloors = [];
 
     /**
      * Device and inode of the index file captured at connection open; used by
@@ -1631,6 +1652,7 @@ final class Index implements \Countable
     private function checkDataVersion(): void
     {
         $this->conditionRowCounts = [];
+        $this->conditionRowFloors = [];
         $stmt = $this->stmt('dataVersion', 'PRAGMA data_version');
         $stmt->execute();
         $version = (int) $stmt->fetchColumn();
@@ -4703,7 +4725,9 @@ final class Index implements \Countable
         }
         $rows = [];
         foreach ($leaves as $condition) {
-            $rows[] = $count = $condition['impossible'] ? 0 : $this->conditionRowCount($condition);
+            $rows[] = $count = $condition['impossible']
+                ? 0
+                : $this->conditionRowCount($condition, $this->config->limits->facetCountDocs);
             if ($condition['impossible'] || $count > $this->config->limits->facetCountDocs) {
                 return null;
             }
@@ -10720,7 +10744,7 @@ final class Index implements \Countable
      *
      * @param FacetCondition $condition
      */
-    private function conditionRowCount(array $condition): int
+    private function conditionRowCount(array $condition, ?int $upTo = null): int
     {
         if ($condition['impossible']) {
             return 0;
@@ -10735,6 +10759,16 @@ final class Index implements \Countable
         if (isset($this->conditionRowCounts[$memo])) {
             return $this->conditionRowCounts[$memo];
         }
+        if (isset($condition['range'])) {
+            if ($upTo !== null && ($this->conditionRowFloors[$memo] ?? 0) > $upTo) {
+                return $this->conditionRowFloors[$memo];
+            }
+            $count = $this->rangeRowCount($condition['range'], $upTo);
+            if ($upTo !== null && $count > $upTo) {
+                return $this->conditionRowFloors[$memo] = $count;
+            }
+            return $this->conditionRowCounts[$memo] = $count;
+        }
         if (isset($condition['values'])) {
             $stmt = $this->stmt(
                 'facetValueRowCount',
@@ -10742,14 +10776,6 @@ final class Index implements \Countable
                   WHERE key_id = ? AND value IN (SELECT value FROM json_each(?))'
             );
             $stmt->execute([$condition['values']['keyId'], json_encode($condition['values']['values'])]);
-        } elseif (isset($condition['range'])) {
-            // The range's own WHERE fits facet_counts too: num_value is the value as a number.
-            $range = $condition['range'];
-            $stmt  = $this->prepare(
-                'SELECT COALESCE(SUM(fc.num_count), 0) FROM facet_counts fc
-                  WHERE fc.key_id = ? AND ' . sprintf($range['sql'], 'fc')
-            );
-            $stmt->execute([$range['keyId'], ...$range['params']]);
         } else {
             $stmt = $this->prepare('SELECT COUNT(*) ' . sprintf($condition['rows'], 'ff'));
             $stmt->execute($condition['params']);
@@ -10757,6 +10783,56 @@ final class Index implements \Countable
         $count = (int) $stmt->fetchColumn();
         $stmt->closeCursor();
         return $this->conditionRowCounts[$memo] = $count;
+    }
+
+    /**
+     * The numeric rows of a key inside a range, or with $upTo some number above it when there
+     * are more (the caller only asks whether the range fits a limit).
+     *
+     * facet_counts holds a row per distinct value and has no order by number, so summing the
+     * range there reads every value of the key: nothing for a rating, 35 ms for a key with a
+     * value per document at 500k documents, whatever the range. The first
+     * RANGE_COUNT_SAMPLE_VALUES rows of the key decide: a key with no more values is summed
+     * from them. A larger key whose sampled values hold at most RANGE_COUNT_ROWS_PER_VALUE rows
+     * each is counted along facet_numeric_index instead, which reads the range's rows (2.6
+     * times cheaper per row, and stops at $upTo); one with many rows per value is summed from
+     * facet_counts as before. Both give the same number: num_count is the value's numeric rows.
+     *
+     * @param array{keyId: int, sql: string, params: list<mixed>} $range
+     */
+    private function rangeRowCount(array $range, ?int $upTo): int
+    {
+        // The range's own WHERE fits facet_counts too: num_value is the value as a number.
+        $where  = sprintf($range['sql'], 'fc');
+        $sample = $this->prepare(
+            'SELECT COUNT(*), COALESCE(SUM(fc.count), 0),
+                    COALESCE(SUM(CASE WHEN ' . $where . ' THEN fc.num_count END), 0)
+               FROM (SELECT count, num_count, num_value FROM facet_counts WHERE key_id = ? LIMIT ?) fc'
+        );
+        $sample->execute([...$range['params'], $range['keyId'], self::RANGE_COUNT_SAMPLE_VALUES + 1]);
+        /** @var array{0: int|string, 1: int|string, 2: int|string} $row */
+        $row = $sample->fetch(PDO::FETCH_NUM);
+        $sample->closeCursor();
+        [$values, $rows, $inRange] = [(int) $row[0], (int) $row[1], (int) $row[2]];
+        if ($values <= self::RANGE_COUNT_SAMPLE_VALUES) {
+            return $inRange;
+        }
+        if ($rows <= $values * self::RANGE_COUNT_ROWS_PER_VALUE) {
+            $limit = $upTo === null ? '' : ' LIMIT ?';
+            $stmt  = $this->prepare(
+                'SELECT COUNT(*) FROM (SELECT 1 FROM facet_values fv WHERE fv.key_id = ? AND '
+                . sprintf($range['sql'], 'fv') . $limit . ')'
+            );
+            $stmt->execute([$range['keyId'], ...$range['params'], ...($upTo === null ? [] : [$upTo + 1])]);
+        } else {
+            $stmt = $this->prepare(
+                'SELECT COALESCE(SUM(fc.num_count), 0) FROM facet_counts fc WHERE fc.key_id = ? AND ' . $where
+            );
+            $stmt->execute([$range['keyId'], ...$range['params']]);
+        }
+        $count = (int) $stmt->fetchColumn();
+        $stmt->closeCursor();
+        return $count;
     }
 
     /**
