@@ -12477,4 +12477,49 @@ class IndexTest extends TestCase
             fn(int $id): bool => $id * 1.5 < 900 && $id % 4 !== 1,
         ];
     }
+
+    /**
+     * A browse facet next to an excluded value is counted from the documents' value rows when
+     * the kept documents are expected under the facet limit, else with a probe per document:
+     * the same counts when they fit, whatever the expectation said.
+     */
+    public function testBrowseFacetNextToAnExcludedValueCountsTheSameOnBothReads(): void
+    {
+        $docs = [];
+        for ($i = 1; $i <= 400; $i++) {
+            $docs[] = [
+                'id'    => $i,
+                'title' => 'item',
+                'kind'  => $i <= 100 ? 'first' : 'other',
+                // 80% of the first kind is hidden, 13% of the rest.
+                'state' => ($i <= 100 ? $i % 5 !== 0 : $i % 8 === 0) ? 'hidden' : 'shown',
+                'size'  => 's' . ($i % 3),
+            ];
+        }
+        $index = new Index(
+            $this->dbPath,
+            config: new Config(limits: new Limits(facetCountDocs: 50)),
+            schema: new SchemaConfig(filterableAttributes: ['kind', 'state', 'size']),
+        );
+        $index->insert($docs);
+
+        foreach (['first', 'other'] as $kind) {
+            $kept = array_filter($docs, fn(array $d): bool => $d['kind'] === $kind && $d['state'] === 'shown');
+            $result = $index->search('', new SearchOptions(
+                filter: ['kind' => $kind, 'state' => new FacetExclude('hidden')],
+                facets: ['size'],
+                limit: 1,
+            ));
+            $this->assertSame(count($kept), $result->totalHits, $kind);
+            if (count($kept) <= 50) {
+                $sizes = array_count_values(array_column($kept, 'size'));
+                ksort($sizes);
+                $this->assertSame($sizes, $result->facetDistribution['size'], $kind);
+                $this->assertSame([], $result->approximateFacets, $kind);
+            } else {
+                $this->assertSame(['size'], $result->approximateFacets, $kind);
+                $this->assertSame(50, array_sum($result->facetDistribution['size']), $kind);
+            }
+        }
+    }
 }

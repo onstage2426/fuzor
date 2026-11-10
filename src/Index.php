@@ -5324,6 +5324,20 @@ final class Index implements \Countable
                 $probed[] = $c;
             }
         }
+        // That second read costs more than the checks save, so the stream is only taken when
+        // it is expected to stay under the cap: the driver's rows less the excluded values'
+        // share of all documents (500k documents, 230k driver rows, a value on 73% excluded:
+        // 62k expected, 205 ms probed against 353 ms read twice).
+        if ($excluded !== [] && $probed !== [] && !$probed[0]['exclude']) {
+            $documents = max(1, (int) ($this->getInfoValues(['total_documents'])['total_documents'] ?? 0));
+            $removed   = 0;
+            foreach ($conditions as $c) {
+                $removed += isset($c['values']) && $c['exclude'] ? $this->conditionRowCount($c) : 0;
+            }
+            if ($this->conditionRowCount($probed[0]) * (1 - min(1, $removed / $documents)) > $cap) {
+                $excluded = [];
+            }
+        }
         if ($excluded !== [] && $probed !== []) {
             $match = $this->matchingDocsSql($probed);
             if ($match === null) {
