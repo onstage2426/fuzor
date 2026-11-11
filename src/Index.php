@@ -220,6 +220,19 @@ final class Index implements \Countable
     private const int FILTER_DRIVER_TERMS_PER_ROW = 4;
 
     /**
+     * newestWordMatchesSql() / countedDocsSql(): most terms (values) whose rows are merged in
+     * document order, one read each; above it the rows are read whole and sorted (SQLite
+     * compiles a compound of at most 500 parts, and every part repeats the probes).
+     */
+    private const int NEWEST_MERGE_MAX_TERMS = 64;
+
+    /**
+     * countedDocsSql(): rows of a range read into PHP for the cost of one probe of a document
+     * (500k documents: a range's rows 0.26 µs each to read and sort, a probe 0.45 µs).
+     */
+    private const float COUNTED_ROWS_PER_PROBE = 1.8;
+
+    /**
      * rangeRowCount(): a key with at most this many distinct values has its range summed from
      * its facet_counts rows; the same rows are the sample that decides for a larger key (read
      * twice then: 2,000 sampled rows added 0.3 ms to a range on a 3,000-value key).
@@ -3484,7 +3497,6 @@ final class Index implements \Countable
                     [...$baseConditions, ...$filterConditions],
                     $docScores,
                     $cap,
-                    $cap + 1,
                 );
                 $restTypos = $maxTypos()[$minBucket] ?? 0;
                 foreach ($rest as $docId) {
@@ -3571,7 +3583,7 @@ final class Index implements \Countable
         }
 
         // When candidatesPerWord cut the candidates, the matches the total counts beyond them follow the
-        // ranked candidates (unscored, in result-set order), so no page up to the total is
+        // ranked candidates (unscored, newest first), so no page up to the total is
         // empty. With sort fields they are sorted together with the candidates on every page,
         // so all pages come from one order.
         $ranked = count($docScores);
@@ -3582,7 +3594,6 @@ final class Index implements \Countable
                 [...$baseConditions, ...$filterConditions],
                 $docScores,
                 min($total, $sortSpecs !== [] ? $this->config->limits->totalHits : $offset + $limit) - $ranked,
-                $total,
             );
             // Each holds the groups up to minBucket; its bucket and typos are not known, so it
             // ranks as the last of that bucket: the bucket's typo budget, score 0.
@@ -5304,7 +5315,8 @@ final class Index implements \Countable
      *
      * Exclusion-only conditions are counted as the whole index minus the excluded documents
      * (collectFacetCountsExcluding()), exactly; none over the whole index; anything else over
-     * the first Limits::$facetCountDocs documents of matchingDocsSql(), streamed into the
+     * the matching documents, the newest Limits::$facetCountDocs when there are more
+     * (countedDocsSql()), streamed into the
      * count (the documents browseFacetDocIds() lists, without the round trip through PHP;
      * $subset as in facetValueCountsOfDocs(), counted into $subsetCounts on that path only).
      * Returns true when the counts are approximate because the matches exceeded the cap.
@@ -5337,8 +5349,8 @@ final class Index implements \Countable
         // Excluded value lists are checked on each document's doc_facets row, which the count
         // reads anyway, instead of a NOT EXISTS probe per document (a 100k catalogue, category
         // counted over a price range minus 6.8k hidden products: 47.7k documents, 121 -> 82 ms).
-        // When that stream reaches the cap, which documents are counted is the probed SQL's
-        // choice: counted again that way, so the counts never differ.
+        // When that stream reaches the cap, the newest documents are counted (countedDocsSql()),
+        // as on every path: counted again that way.
         $excluded = [];
         $probed   = [];
         foreach ($conditions as $c) {
@@ -5387,27 +5399,206 @@ final class Index implements \Countable
                 return false;
             }
         }
-        $match = $this->matchingDocsSql($conditions);
-        if ($match === null) {
+        $counted = $this->countedDocsSql($conditions, $cap);
+        if ($counted === null) {
             return false;
         }
-        $truncated = false;
-        $results   = $this->facetCountsOfDocsSql(
-            $nameToId,
-            "{$match[0]} LIMIT ?",
-            [...$match[1], $cap + 1],
-            $cap,
-            $truncated,
-            $subset,
-            $subsetCounts,
-        );
+        $truncated    = false;
+        $subsetCounts = [];
+        if ($counted[2]) {
+            $results = $this->facetCountsOfDocsSql(
+                $nameToId,
+                "{$counted[0]} LIMIT ?",
+                [...$counted[1], $cap + 1],
+                $cap,
+                $truncated,
+                $subset,
+                $subsetCounts,
+            );
+        } else {
+            $ids     = $this->countedDocIds($counted, $cap, $truncated);
+            $unused  = false;
+            $results = $this->facetCountsOfDocsSql(
+                $nameToId,
+                'SELECT value AS doc_id FROM json_each(?)',
+                [json_encode($ids)],
+                null,
+                $unused,
+                $subset,
+                $subsetCounts,
+            );
+        }
         $this->mergeFacetCounts($results, $distribution, $stats);
         return $truncated;
     }
 
     /**
+     * The documents a facet count takes from a set held in PHP: all of them, or when there are
+     * more than $max its newest $max (highest document IDs), the rule of every facet count
+     * that Limits::$facetCountDocs cuts.
+     *
+     * @param  array<int, mixed> $docSet Document ID → anything.
+     * @return list<int>
+     */
+    private static function newestDocIds(array $docSet, int $max): array
+    {
+        $docIds = array_keys($docSet);
+        if (count($docIds) <= $max) {
+            return $docIds;
+        }
+        rsort($docIds);
+        return array_slice($docIds, 0, $max);
+    }
+
+    /**
+     * matchingDocsSql() for a browse facet count that Limits::$facetCountDocs may cut: the
+     * counted documents are the newest $cap matches (document ID descending), whichever
+     * condition lists them.
+     *
+     * Returns [sql, params, limit]. With limit the caller appends `LIMIT $cap + 1`: a driver
+     * with at most $cap rows cannot be cut and is listed as it comes; one value is read
+     * backwards along its primary-key rows, a value list as a merge of its values' rows (a
+     * range on a key with few distinct values likewise, numbersInRange()), exclusions along
+     * doc_lengths: in document order at the cost of the plain read. Another range (or a
+     * compound, or a longer list) has no document order: its matches are listed whole
+     * (limit = false) and the caller keeps the newest (countedDocIds()), unless walking the
+     * documents newest first with every condition probed is expected to cost less
+     * (COUNTED_ROWS_PER_PROBE; the matches taken as spread evenly over the documents).
+     *
+     * @param  non-empty-list<FacetCondition> $conditions Ordered by orderBySelectivity().
+     * @return array{0: string, 1: list<mixed>, 2: bool}|null  null when nothing can match.
+     */
+    private function countedDocsSql(array $conditions, int $cap): ?array
+    {
+        $match = $this->matchingDocsSql($conditions);
+        if ($match === null) {
+            return null;
+        }
+        $driver = $conditions[0];
+        if ($driver['exclude']) {
+            return ["{$match[0]} ORDER BY md.doc_id DESC", $match[1], true];
+        }
+        if ($this->conditionRowCount($driver, $cap) <= $cap) {
+            return [...$match, true];
+        }
+        // The driver's rows as runs in document order: one per value of a list, one per
+        // number a range holds on a key with few distinct values.
+        /** @var list<array{0: string, 1: list<mixed>}> $runs */
+        $runs = [];
+        if (isset($driver['values'])) {
+            $values = array_values(array_unique(array_map(
+                fn(mixed $value): string => is_scalar($value) ? (string) $value : '',
+                $driver['values']['values'],
+            )));
+            foreach ($values as $value) {
+                $runs[] = ['md.key_id = ? AND md.value = ?', [$driver['values']['keyId'], $value]];
+            }
+        } elseif (isset($driver['range'])) {
+            foreach ($this->numbersInRange($driver['range']) ?? [] as $number) {
+                $runs[] = [
+                    'md.key_id = ? AND md.num_value IS NOT NULL AND md.num_value = ?',
+                    [$driver['range']['keyId'], $number],
+                ];
+            }
+        }
+        if ($runs !== [] && count($runs) <= self::NEWEST_MERGE_MAX_TERMS) {
+            $probes = $this->renderFacetProbes(array_slice($conditions, 1), 'md.doc_id');
+            if ($probes === null) {
+                return null;
+            }
+            $arms   = [];
+            $params = [];
+            foreach ($runs as [$where, $bound]) {
+                $arms[] = "SELECT md.doc_id FROM facet_values md WHERE {$where}{$probes[0]}";
+                array_push($params, ...$bound, ...$probes[1]);
+            }
+            // A document of a multi-valued key may hold several of the values: once.
+            return [
+                implode($driver['multiRow'] ? ' UNION ' : ' UNION ALL ', $arms) . ' ORDER BY 1 DESC',
+                $params,
+                true,
+            ];
+        }
+        $documents = max(1, (int) ($this->getInfoValues(['total_documents'])['total_documents'] ?? 0));
+        $expected  = (float) $documents;
+        foreach ($conditions as $condition) {
+            if (!$condition['exclude']) {
+                $expected *= min(1.0, $this->conditionRowCount($condition) / $documents);
+            } elseif (isset($condition['values'])) {
+                $expected *= 1.0 - min(1.0, $this->conditionRowCount($condition) / $documents);
+            }
+        }
+        // Documents walked for $cap matches spread evenly, a probe per condition each, against
+        // the driver's rows read, cut in PHP and probed for the other conditions. A compound's
+        // row estimate is an upper bound, which would make the walk look short: listed.
+        $others = count($conditions) - 1;
+        $walked = $documents * min(1.0, ($cap + 1) / max($expected, $cap + 1)) * ($others + 1);
+        $listed = $this->conditionRowCount($driver) * (1 + $others * self::COUNTED_ROWS_PER_PROBE);
+        if (!isset($driver['compound']) && $walked * self::COUNTED_ROWS_PER_PROBE <= $listed) {
+            $probes = $this->renderFacetProbes($conditions, 'md.doc_id');
+            return $probes === null ? null : [
+                "SELECT md.doc_id FROM doc_lengths md WHERE 1{$probes[0]} ORDER BY md.doc_id DESC",
+                $probes[1],
+                true,
+            ];
+        }
+        return [...$match, false];
+    }
+
+    /**
+     * The documents of countedDocsSql(): the matches, the newest $cap when there are more
+     * ($capped). A list without a document order is read whole and cut here.
+     *
+     * @param  array{0: string, 1: list<mixed>, 2: bool} $counted
+     * @param-out bool $capped
+     * @return list<int>
+     */
+    private function countedDocIds(array $counted, int $cap, bool &$capped): array
+    {
+        $stmt = $this->prepare($counted[0] . ($counted[2] ? ' LIMIT ?' : ''));
+        $stmt->execute($counted[2] ? [...$counted[1], $cap + 1] : $counted[1]);
+        /** @var list<int> $ids */
+        $ids = $stmt->fetchAll(PDO::FETCH_COLUMN);
+        if (!$counted[2] && count($ids) > $cap) {
+            // PHP's sort of the IDs, not SQLite's of the rows (250k rows: 111 against 172 ms).
+            rsort($ids);
+        }
+        return $this->capDocIds($ids, $cap, $capped);
+    }
+
+    /**
+     * The distinct numbers a range selects on a key with at most RANGE_COUNT_SAMPLE_VALUES
+     * distinct values (a rating), so its rows can be read as one run per number; null for a
+     * key with more.
+     *
+     * @param  array{keyId: int, sql: string, params: list<mixed>} $range
+     * @return list<float>|null
+     */
+    private function numbersInRange(array $range): ?array
+    {
+        $more = $this->stmt(
+            'facetKeyHasManyValues',
+            'SELECT 1 FROM facet_counts WHERE key_id = ? LIMIT 1 OFFSET ' . self::RANGE_COUNT_SAMPLE_VALUES,
+        );
+        $more->execute([$range['keyId']]);
+        $many = $more->fetchColumn() !== false;
+        $more->closeCursor();
+        if ($many) {
+            return null;
+        }
+        $stmt = $this->prepare(
+            'SELECT DISTINCT fc.num_value FROM facet_counts fc WHERE fc.key_id = ? AND ' . sprintf($range['sql'], 'fc')
+        );
+        $stmt->execute([$range['keyId'], ...$range['params']]);
+        /** @var list<float|int|string> $numbers */
+        $numbers = $stmt->fetchAll(PDO::FETCH_COLUMN);
+        return array_map(floatval(...), $numbers);
+    }
+
+    /**
      * Documents to count browse facets over: null (the whole index) without conditions,
-     * otherwise up to Limits::$facetCountDocs matching documents.
+     * otherwise the matching documents, at most the newest Limits::$facetCountDocs
+     * (countedDocsSql()).
      *
      * @param  list<FacetCondition> $conditions
      * @param  bool                 $capped Set to true when more documents matched than the cap.
@@ -5419,16 +5610,9 @@ final class Index implements \Countable
         if ($conditions === []) {
             return null;
         }
-        $match = $this->matchingDocsSql($conditions);
-        if ($match === null) {
-            return [];
-        }
-        $cap  = $this->config->limits->facetCountDocs;
-        $stmt = $this->prepare($match[0] . ' LIMIT ?');
-        $stmt->execute([...$match[1], $cap + 1]);
-        /** @var list<int> $ids */
-        $ids = $stmt->fetchAll(PDO::FETCH_COLUMN);
-        return $this->capDocIds($ids, $cap, $capped);
+        $cap     = $this->config->limits->facetCountDocs;
+        $counted = $this->countedDocsSql($conditions, $cap);
+        return $counted === null ? [] : $this->countedDocIds($counted, $cap, $capped);
     }
 
     /**
@@ -8468,14 +8652,13 @@ final class Index implements \Countable
 
     /**
      * Up to $count documents of the result set (searchMatchesSql() of $groups and $conditions)
-     * that are not keys of $candidates, in the SQL's order (stable for the same data, so the
-     * same documents fill every page). rankedSearch() appends them after its ranked candidates
-     * when candidatesPerWord cut those.
+     * that are not keys of $candidates, newest first (document ID descending, as browse), so
+     * the same documents fill every page. rankedSearch() appends them after its ranked
+     * candidates when candidatesPerWord cut those.
      *
      * @param  list<KeywordGroup>   $groups
      * @param  list<FacetCondition> $conditions
      * @param  array<int, mixed>    $candidates
-     * @param  int                  $total      The result set's size, up to one past totalHits.
      * @return list<int>
      */
     private function restOfResultSet(
@@ -8483,15 +8666,12 @@ final class Index implements \Countable
         array $conditions,
         array $candidates,
         int $count,
-        int $total,
     ): array {
-        $match = $count > 0
-            ? $this->orderedMatchesSql($groups, $conditions, $total, $count + count($candidates))
-            : null;
+        $match = $count > 0 ? $this->newestMatchesSql($groups, $conditions) : null;
         if ($match === null) {
             return [];
         }
-        $stmt = $this->prepare("SELECT doc_id FROM ({$match[0]}) LIMIT ?");
+        $stmt = $this->prepare("{$match[0]} LIMIT ?");
         $stmt->execute([...$match[1], $count + count($candidates)]);
         $rest = [];
         /** @var list<int|string> $ids */
@@ -8788,76 +8968,87 @@ final class Index implements \Countable
     }
 
     /**
-     * searchMatchesSql() in the order of its keyword-driven form, whichever condition lists the
-     * documents: restOfResultSet() takes the first $rows rows, so the order decides the pages.
+     * searchMatchesSql() newest document first (document ID descending), for a caller that
+     * takes its first rows: restOfResultSet()'s pages past the ranked candidates, and a facet
+     * group that Limits::$facetCountDocs may cut (resultSetFacetCounts()). The order is part
+     * of the statement in every form, so the rows do not depend on SQLite's plan.
      *
-     * The keyword-driven SQL walks the rarest group's rows by term, then (read from the narrow
-     * index) most hits first, then document, a document at its first row. When a
-     * filter or phrase lists the result set instead (matchDriver()), its documents are sorted
-     * by that same key, looked up per match, so both forms return the same rows. The walk stops
-     * once it has $rows matches while the sorted form reads every match, so the choice weighs
-     * the part of the walk expected for $rows of the $total matches (past totalHits, where the
-     * total is not known: by the filters' shares of all documents).
+     * Listed from a filter or phrase with fewer rows than the rarest group (matchDriver():
+     * every match read, then sorted), else from that group's rows (newestWordMatchesSql(),
+     * which stops once the caller has its rows). The keyword walk is weighed whole, not by
+     * the part expected for the rows asked: matches are not spread evenly over the document
+     * IDs (a range on a key that follows the insertion order puts them in one band), and a
+     * walk in document order then reads every row above them (500k documents, a word with a
+     * negation and two narrow ranges: 52 ms walked for 24 rows, 6.7 ms in the former order).
      *
      * @param  list<KeywordGroup>   $groups
      * @param  list<FacetCondition> $conditions
      * @return array{0: string, 1: list<mixed>}|null
      */
-    private function orderedMatchesSql(array $groups, array $conditions, int $total, int $rows): ?array
+    private function newestMatchesSql(array $groups, array $conditions): ?array
     {
         if ($groups === [] || in_array([], array_column($groups, 'termIds'), true)) {
             return null;
         }
         usort($groups, fn(array $a, array $b): int => $a['df'] <=> $b['df']);
-        $walk = $groups[0]['df'];
-        if ($rows < $total) {
-            $walk = (int) ceil($walk * $rows / $total);
-        }
-        $listed = $this->matchDriver($conditions, $walk, self::termCount($groups));
-        if ($listed !== null && $total > $this->config->limits->totalHits) {
-            $documents = max(1, (int) ($this->getInfoValues(['total_documents'])['total_documents'] ?? 0));
-            $share     = 1.0;
-            foreach ($conditions as $condition) {
-                if (!$condition['exclude'] && !$condition['impossible'] && !isset($condition['slots'])) {
-                    $share *= min(1.0, $this->conditionRowCount($condition, $documents) / $documents);
-                }
-            }
-            $walk   = (int) min($walk, $rows / max($share, 1 / $documents));
-            $listed = $this->matchDriver($conditions, $walk, self::termCount($groups));
-        }
+        $listed = $this->matchDriver($conditions, $groups[0]['df'], self::termCount($groups));
         if ($listed === null) {
-            return $this->searchMatchesSql($groups, $conditions);
+            return $this->newestWordMatchesSql($groups, $conditions);
         }
         $match = $this->conditionDrivenSql($listed, $groups, $conditions, false);
         if ($match === null) {
             return null;
         }
-        // The order the keyword-driven walk would give: SQLite reads the group's rows from the
-        // narrow (term, hits) index or from the primary key (by term, then document), depending
-        // on its version and statistics, so its plan is asked.
-        $walked = $this->searchMatchesSql($groups, $conditions);
-        if ($walked === null) {
+        return ["SELECT m.doc_id FROM ({$match[0]}) m ORDER BY m.doc_id DESC", $match[1]];
+    }
+
+    /**
+     * searchMatchesSql() driven from the rarest group's rows, newest document first.
+     *
+     * A term's rows are in document order on the primary key, so each term is read backwards
+     * and the terms are merged (a compound SELECT ordered by document: each document once,
+     * nothing sorted, and a LIMIT stops every read). The other groups and the conditions are
+     * probed per row, inside each term's read. A group of more than NEWEST_MERGE_MAX_TERMS
+     * terms is read whole and sorted instead.
+     *
+     * @param  list<KeywordGroup>   $groups     Rarest first.
+     * @param  list<FacetCondition> $conditions
+     * @return array{0: string, 1: list<mixed>}|null
+     */
+    private function newestWordMatchesSql(array $groups, array $conditions): ?array
+    {
+        $driver = array_shift($groups);
+        if ($driver === null) {
             return null;
         }
-        $plan = $this->prepare("EXPLAIN QUERY PLAN {$walked[0]}");
-        $plan->execute($walked[1]);
-        $byHits = false;
-        /** @var list<array{detail: string}> $steps */
-        $steps = $plan->fetchAll(PDO::FETCH_ASSOC);
-        foreach ($steps as $step) {
-            if (str_contains($step['detail'], ' d USING ')) {
-                $byHits = str_contains($step['detail'], 'doclist_term_hitcount');
-                break;
-            }
+        $tail   = $this->liveDocsSql('d.doc_id');
+        $bound  = [];
+        foreach ($groups as $i => $group) {
+            $tail .= " AND EXISTS (SELECT 1 FROM doclist g{$i} WHERE g{$i}.doc_id = d.doc_id AND g{$i}.term_id IN ("
+                . $this->placeholders(count($group['termIds'])) . '))';
+            array_push($bound, ...$group['termIds']);
         }
-        $terms = $groups[0]['termIds'];
-        $key   = $byHits ? 'MIN(o.term_id * 4294967296 - o.hit_count)' : 'MIN(o.term_id)';
-        return [
-            "SELECT m.doc_id FROM ({$match[0]}) m ORDER BY (SELECT {$key}"
-                . ' FROM doclist o WHERE o.doc_id = m.doc_id AND o.term_id IN ('
-                . $this->placeholders(count($terms)) . ')), m.doc_id',
-            [...$match[1], ...$terms],
-        ];
+        $probes = $this->renderFacetProbes($conditions, 'd.doc_id');
+        if ($probes === null) {
+            return null;
+        }
+        $tail .= $probes[0];
+        array_push($bound, ...$probes[1]);
+        $terms = $driver['termIds'];
+        if (count($terms) > self::NEWEST_MERGE_MAX_TERMS) {
+            return [
+                'SELECT DISTINCT d.doc_id FROM doclist d WHERE d.term_id IN ('
+                    . $this->placeholders(count($terms)) . "){$tail} ORDER BY d.doc_id DESC",
+                [...$terms, ...$bound],
+            ];
+        }
+        $arms   = [];
+        $params = [];
+        foreach ($terms as $termId) {
+            $arms[] = "SELECT d.doc_id FROM doclist d WHERE d.term_id = ?{$tail}";
+            array_push($params, $termId, ...$bound);
+        }
+        return [implode(' UNION ', $arms) . ' ORDER BY 1 DESC', $params];
     }
 
     /**
@@ -9058,8 +9249,8 @@ final class Index implements \Countable
         // instead of DISTINCT, and excluded values checked on each document's doc_facets row,
         // which the count reads anyway, instead of a NOT EXISTS probe per document. (A positive
         // value stays a probe: it drops most rows before their doc_facets read, ecom gender Men
-        // +2% on the blob.) Otherwise the order decides which documents are counted, and it is
-        // the plan SQLite picks for the probed SQL.
+        // +2% on the blob.) Otherwise the order decides which documents are counted: the
+        // newest $maxDocs (document ID descending), the rule of every facet count at the cap.
         // The same holds when a positive filter or a quoted phrase bounds it (per facet group:
         // a key's own filter is left out of its group).
         $uncut  = $groups !== [] && min(array_column($groups, 'df')) <= $maxDocs;
@@ -9087,7 +9278,10 @@ final class Index implements \Countable
                     $probed[] = $c;
                 }
             }
-            $match = $this->searchMatchesSql($groups, [...$base, ...$probed], $whole, $whole);
+            // A group that may be cut counts its newest documents: listed newest first.
+            $match = $whole
+                ? $this->searchMatchesSql($groups, [...$base, ...$probed], true, true)
+                : $this->newestMatchesSql($groups, [...$base, ...$probed]);
             if ($match === null) {
                 continue;
             }
@@ -11443,14 +11637,14 @@ final class Index implements \Countable
 
             // Disjunctive: count against the raw result set with all OTHER filters applied.
             $countSet = $this->withoutOwnFilter($rawDocScores, $filterSets, $conditions, $keyName);
-            $docIds   = array_slice(array_keys($countSet), 0, $maxDocs);
+            $docIds   = self::newestDocIds($countSet, $maxDocs);
             $this->collectFacetCounts([$keyName => $keyId], $docIds, $distribution, $stats);
             if (count($countSet) > $maxDocs) {
                 $approximate[] = $keyName;
             }
         }
 
-        $docIds = array_slice(array_keys($filteredScores), 0, $maxDocs);
+        $docIds = self::newestDocIds($filteredScores, $maxDocs);
         $this->collectFacetCounts($commonNameToId, $docIds, $distribution, $stats);
         if (count($filteredScores) > $maxDocs) {
             array_push($approximate, ...array_keys($commonNameToId));
@@ -11566,7 +11760,7 @@ final class Index implements \Countable
 
     /**
      * The lowest and highest numeric value of a key over a document set held in PHP, as the
-     * facet counts it: its first $maxDocs keys (approximate when there are more).
+     * facet counts it: its newest $maxDocs documents (approximate when there are more).
      *
      * Walks facet_numeric_index from each end to the first document of the set, at most
      * count / STATS_WALK_SHARE rows (STATS_WALK_SHARE); null when a walk runs out.
@@ -11577,7 +11771,7 @@ final class Index implements \Countable
     private function boundsOfDocSet(int $keyId, array $docSet, int $maxDocs): ?array
     {
         $approximate = count($docSet) > $maxDocs;
-        $docIds      = array_slice(array_keys($docSet), 0, $maxDocs);
+        $docIds      = self::newestDocIds($docSet, $maxDocs);
         if ($docIds === []) {
             return ['stats' => null, 'approximate' => $approximate];
         }

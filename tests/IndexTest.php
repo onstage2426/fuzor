@@ -2568,6 +2568,202 @@ class IndexTest extends TestCase
     }
 
     /**
+     * The matches past the ranked candidates follow newest first (document ID descending),
+     * whichever way they are listed: from a word's rows, from the merged rows of a prefix's
+     * terms, or from a filter with fewer rows than the word.
+     *
+     * @param array<string, string> $filter
+     */
+    #[\PHPUnit\Framework\Attributes\DataProvider('restOrderCases')]
+    public function testMatchesPastCutCandidatesAreNewestFirst(string $query, bool $asYouType, array $filter): void
+    {
+        $schema = new SchemaConfig(filterableAttributes: ['colour']);
+        $index  = new Index($this->dbPath, schema: $schema);
+        $docs   = [];
+        for ($id = 1; $id <= 90; $id++) {
+            $docs[] = [
+                'id'     => $id,
+                'title'  => str_repeat($id % 5 === 0 ? 'jurken ' : 'jurk ', 1 + $id % 4) . "model {$id}",
+                'colour' => $id % 4 === 0 ? 'red' : 'blue',
+            ];
+        }
+        $index->insert($docs);
+        $index->delete(84, 90);
+        $capped = new Index($this->dbPath, config: new Config(
+            limits: new Limits(candidatesPerWord: 3),
+        ), readonly: true);
+
+        $ids = [];
+        for ($offset = 0; $offset < 90; $offset += 10) {
+            $result = $capped->search($query, new SearchOptions(
+                asYouType: $asYouType,
+                limit: 10,
+                offset: $offset,
+                filter: $filter,
+                attributesToRetrieve: [],
+            ));
+            $ids = [...$ids, ...$result->getIds()];
+        }
+        $matching = array_filter($docs, fn(array $d): bool => $d['id'] !== 84 && $d['id'] !== 90
+            && ($filter === [] || $d['colour'] === $filter['colour'])
+            && ($asYouType || !str_contains($d['title'], 'jurken')));
+        $this->assertSame(self::sorted(array_column($matching, 'id')), self::sorted($ids));
+        // The ranked candidates come first (at most 4 x candidatesPerWord are scored); the
+        // rest is in descending document order.
+        $rest     = array_slice($ids, 12);
+        $expected = $rest;
+        rsort($expected);
+        $this->assertGreaterThan(2, count($rest));
+        $this->assertSame($expected, $rest);
+    }
+
+    /**
+     * @return array<string, array{0: string, 1: bool, 2: array<string, string>}>
+     */
+    public static function restOrderCases(): array
+    {
+        return [
+            'one term'              => ['jurk', false, []],
+            'prefix of two terms'   => ['jur', true, []],
+            'word walk with filter' => ['jurk', false, ['colour' => 'blue']],
+            'listed from a filter'  => ['jurk', false, ['colour' => 'red']],
+        ];
+    }
+
+    /**
+     * A facet count over more matches than facetCountDocs counts the newest of them (highest
+     * document IDs), the same documents whichever condition lists them.
+     *
+     * @param array<string, string|list<string>|FacetRange|FacetExclude> $filter
+     * @param list<string>                                                $facets
+     */
+    #[\PHPUnit\Framework\Attributes\DataProvider('cappedFacetCases')]
+    public function testFacetCountsAtTheCapCountTheNewestMatches(string $query, array $filter, array $facets): void
+    {
+        $schema = new SchemaConfig(
+            filterableAttributes: ['price', 'stock', 'stars', 'colour', 'tags', 'brand'],
+        );
+        $index  = new Index($this->dbPath, schema: $schema);
+        $docs   = [];
+        for ($id = 1; $id <= 60; $id++) {
+            $doc = [
+                'id'    => $id,
+                'title' => ($id % 4 === 0 ? 'widgets' : 'widget') . ' ' . ($id % 2 === 0 ? 'even' : 'odd'),
+                'price' => $id,
+                'stock' => $id,
+                'stars' => $id % 5,
+                'tags'  => $id % 3 === 0 ? ['a', 'b'] : [$id % 3 === 1 ? 'a' : 'c'],
+                'brand' => 'brand' . $id % 7,
+            ];
+            if ($id % 10 !== 0) {
+                $doc['colour'] = ['red', 'blue', 'green', 'green', 'blue', 'blue'][$id % 6];
+            }
+            $docs[$id] = $doc;
+        }
+        $index->insert(array_values($docs));
+        $capped = new Index($this->dbPath, config: new Config(
+            limits: new Limits(candidatesPerWord: 2, facetCountDocs: 6),
+        ), readonly: true);
+
+        $result = $capped->search($query, new SearchOptions(filter: $filter, facets: $facets, limit: 1));
+
+        foreach ($facets as $facet) {
+            $counted = array_filter($docs, function (array $doc) use ($query, $filter, $facet): bool {
+                if ($query !== '' && !str_contains(self::heldValues($doc, 'title')[0], rtrim($query, 's'))) {
+                    return false;
+                }
+                foreach ($filter as $key => $value) {
+                    $own = $key === $facet && !$value instanceof FacetExclude;
+                    if (!$own && !self::passesFilter($doc, $key, $value)) {
+                        return false;
+                    }
+                }
+                return true;
+            });
+            $this->assertGreaterThan(6, count($counted), $facet);
+            krsort($counted);
+            $expected = [];
+            foreach (array_slice($counted, 0, 6) as $doc) {
+                foreach (self::heldValues($doc, $facet) as $value) {
+                    $expected[$value] = ($expected[$value] ?? 0) + 1;
+                }
+            }
+            ksort($expected);
+            $this->assertSame($expected, $result->facetDistribution[$facet] ?? [], $facet);
+            $this->assertContains($facet, $result->approximateFacets);
+        }
+    }
+
+    /**
+     * A document's values of a key, as text.
+     *
+     * @param  array<string, mixed> $doc
+     * @return list<string>
+     */
+    private static function heldValues(array $doc, string $key): array
+    {
+        return array_map(
+            fn(mixed $value): string => is_scalar($value) ? (string) $value : '',
+            array_values((array) ($doc[$key] ?? [])),
+        );
+    }
+
+    /**
+     * @param array<string, mixed>                       $doc
+     * @param string|list<string>|FacetRange|FacetExclude $value
+     */
+    private static function passesFilter(array $doc, string $key, string|array|FacetRange|FacetExclude $value): bool
+    {
+        $held = self::heldValues($doc, $key);
+        if ($value instanceof FacetExclude) {
+            return is_string($value->filter) && !in_array($value->filter, $held, true);
+        }
+        if ($value instanceof FacetRange) {
+            return $held !== [] && (float) $held[0] >= $value->gte && (float) $held[0] <= $value->lte;
+        }
+        return array_intersect($held, (array) $value) !== [];
+    }
+
+    /**
+     * @return array<string, array{
+     *     0: string,
+     *     1: array<string, string|list<string>|FacetRange|FacetExclude>,
+     *     2: list<string>,
+     * }>
+     */
+    public static function cappedFacetCases(): array
+    {
+        return [
+            'browse, wide range (documents walked)'   => ['', ['price' => FacetRange::between(11, 50)], ['brand']],
+            'browse, narrow range (rows sorted)'      => ['', ['price' => FacetRange::between(1, 7)], ['brand']],
+            'browse, two ranges on the same docs'     => [
+                '',
+                ['price' => FacetRange::between(21, 35), 'stock' => FacetRange::between(21, 35)],
+                ['brand'],
+            ],
+            'browse, range over a few numbers'        => ['', ['stars' => FacetRange::between(1, 3)], ['brand']],
+            'browse, one value'                       => ['', ['colour' => 'blue'], ['brand', 'tags']],
+            'browse, value list'                      => ['', ['colour' => ['red', 'green']], ['brand']],
+            'browse, list on a multi-valued key'      => ['', ['tags' => ['a', 'b']], ['brand']],
+            'browse, own key counted over the others' => [
+                '',
+                ['colour' => 'red', 'price' => FacetRange::between(11, 50)],
+                ['colour'],
+            ],
+            'browse, exclusion next to a range'       => [
+                '',
+                ['price' => FacetRange::between(11, 50), 'colour' => new FacetExclude('red')],
+                ['brand'],
+            ],
+            'search, one term'                        => ['widget', [], ['brand']],
+            'search, prefix of two terms'             => ['widg', [], ['brand', 'colour']],
+            'search, word walk with a filter'         => ['widg', ['colour' => 'blue'], ['brand']],
+            'search, listed from a filter'            => ['widg', ['colour' => 'red'], ['brand']],
+            'search, own key over the word'           => ['widg', ['colour' => 'red'], ['colour']],
+        ];
+    }
+
+    /**
      * @param  list<int> $ids
      * @return list<int>
      */
@@ -8145,13 +8341,13 @@ class IndexTest extends TestCase
         $this->assertSame([], $exact->approximateFacets);
         $index->close();
 
-        // The 5 Men documents exceed the cap of 3, so color is counted over the first 3; the 2
-        // documents with both filters are under it and their brands stay exact.
+        // The 5 Men documents exceed the cap of 3, so color is counted over the newest 3 (ids 5,
+        // 4, 3); the 2 documents with both filters are under it and their brands stay exact.
         Index::remove($this->dbPath);
         $capped = new Index($this->dbPath, config: new Config(limits: new Limits(facetCountDocs: 3)), schema: $schema);
         $capped->insert($docs);
         $result = $capped->search('', $options);
-        $this->assertSame(['Blue' => 2, 'Red' => 1], $result->facetDistribution['color']);
+        $this->assertSame(['Black' => 2, 'Red' => 1], $result->facetDistribution['color']);
         $this->assertSame(['c' => 1, 'd' => 1], $result->facetDistribution['brand']);
         $this->assertSame(['color'], $result->approximateFacets);
         $this->assertSame(2, $result->totalHits);
