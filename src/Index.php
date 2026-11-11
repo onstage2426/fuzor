@@ -216,6 +216,14 @@ final class Index implements \Countable
      */
     private const int RANGE_DRIVER_GAIN = 8;
 
+    /**
+     * rankedSearch(): rows of the first word's read by score that cost as much as one row
+     * listed from a filter with its probes (100k documents: 0.22 against 2.4 µs; a value
+     * with a fifth of the word's documents 15.7 → 47 ms listed). With matchDriver()'s own
+     * factor a filter lists the matches from a sixteenth of the word's documents down.
+     */
+    private const int BY_SCORE_ROWS_PER_LISTED_ROW = 8;
+
     /** matchDriver(): index terms of the words that cost a filter row as much as one keyword row. */
     private const int FILTER_DRIVER_TERMS_PER_ROW = 4;
 
@@ -2963,6 +2971,23 @@ final class Index implements \Countable
             }
         }
         $scoredDocs = self::EXACT_RANKED_DOCS_PER_MAX_DOCS * $this->config->limits->candidatesPerWord;
+        // The first word's best rows by score are read over all its rows, then filtered. When a
+        // filter holds far fewer documents than the word (matchDriver()), the matches are
+        // listed from it and their rows ranked instead: a read of the filter's size, and the
+        // rows kept are the best of the documents that pass (500k documents, a word in 185k
+        // and a value in 174: 42 → 0.5 ms).
+        // A listed row costs about ten rows of the sorted read (BY_SCORE_ROWS_PER_LISTED_ROW).
+        $within = function (int $g) use (&$groups, $phraseGroups, $negations, $filter): ?array {
+            $group      = $groups[$g];
+            $conditions = [
+                ...$this->phraseConditions($phraseGroups),
+                ...$negations,
+                ...$this->filterConditions($filter),
+            ];
+            $walk       = intdiv($group['df'], self::BY_SCORE_ROWS_PER_LISTED_ROW);
+            $listed     = $this->matchDriver($conditions, $walk, count($group['termIds']));
+            return $listed === null ? null : $this->conditionDrivenSql($listed, [$group], $conditions, false);
+        };
         foreach ($fetch as $g) {
             if ($groups[$g]['words'] === []) {
                 continue;
@@ -2992,6 +3017,7 @@ final class Index implements \Countable
                 $k1_1mb,
                 $k1b_avgdl,
                 $byScore,
+                $byScore ? $within($g) : null,
             );
         }
 
@@ -3220,6 +3246,7 @@ final class Index implements \Countable
                         $k1_1mb,
                         $k1b_avgdl,
                         true,
+                        $within($first),
                     );
                     foreach ($best as $row) {
                         if (!isset($held["{$row[0]}:{$row[1]}"]) && !($settles && isset($unscored[$row[1]]))) {
@@ -9578,6 +9605,8 @@ final class Index implements \Countable
      * @param  int  $limit   Maximum rows to return.
      * @param  bool $isFuzzy Whether some of $words carry a distance key.
      * @param  bool $byScore Order by BM25 score (reads every row of the terms) instead of hit count.
+     * @param  array{0: string, 1: list<mixed>}|null $within With $byScore: a SELECT of doc_id; only
+     *         the rows of its documents are read and ranked (a probe per document and term).
      * @return list<array{0: int, 1: int, 2: float}> Rows as [term_id, doc_id, bm25_score].
      */
     private function fetchDocsByTermIds(
@@ -9588,6 +9617,7 @@ final class Index implements \Countable
         float $k1_1mb,
         float $k1b_avgdl,
         bool $byScore = false,
+        ?array $within = null,
     ): array {
         if ($isFuzzy) {
             // The word's own terms first, then its typo derivations by distance, each tier with
@@ -9614,6 +9644,7 @@ final class Index implements \Countable
                         $k1_1mb,
                         $k1b_avgdl,
                         $byScore,
+                        $within,
                     ),
                 );
             }
@@ -9621,6 +9652,19 @@ final class Index implements \Countable
         }
         $ids  = array_column($words, 'id');
         $n    = count($ids);
+        if ($byScore && $within !== null) {
+            $stmt = $this->prepare(
+                'SELECT d.term_id, d.doc_id, ' . self::bm25Sql('d') . " AS score
+                  FROM ({$within[0]}) m
+                 CROSS JOIN doclist d ON d.doc_id = m.doc_id AND d.term_id IN ({$this->placeholders($n)})
+                  JOIN doc_lengths dl ON dl.doc_id = d.doc_id
+                 ORDER BY score DESC, d.doc_id ASC LIMIT ?"
+            );
+            $stmt->execute([$idfK1p1, $k1_1mb, $k1b_avgdl, ...$within[1], ...$ids, $limit]);
+            /** @var list<array{0: int, 1: int, 2: float}> $rows */
+            $rows = $stmt->fetchAll(PDO::FETCH_NUM);
+            return $rows;
+        }
         if ($byScore) {
             $live = $this->liveDocsSql('d.doc_id');
             $stmt = $this->stmt(

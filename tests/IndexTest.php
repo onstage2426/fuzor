@@ -2568,6 +2568,51 @@ class IndexTest extends TestCase
     }
 
     /**
+     * A one-word search whose filter holds far fewer documents than the word ranks the
+     * filtered matches themselves: the page is the uncapped ranking's, although none of the
+     * word's best documents passes the filter.
+     */
+    public function testOneWordSearchRanksTheMatchesOfASelectiveFilter(): void
+    {
+        $schema = new SchemaConfig(filterableAttributes: ['colour']);
+        $index  = new Index($this->dbPath, schema: $schema);
+        $docs   = [];
+        for ($id = 1; $id <= 240; $id++) {
+            $rare   = $id % 20 === 0;
+            $docs[] = [
+                'id'     => $id,
+                // Documents of the rare colour hold the word once, in texts of different lengths.
+                'title'  => $rare
+                    ? 'jurk ' . str_repeat('model ', 1 + intdiv($id, 20) * 7 % 12)
+                    : str_repeat('jurk ', 3 + $id % 4) . 'model',
+                'colour' => $rare ? 'red' : 'blue',
+            ];
+        }
+        $index->insert($docs);
+        $index->close();
+        $options = new SearchOptions(
+            asYouType: false,
+            filter: ['colour' => 'red'],
+            limit: 12,
+            attributesToRetrieve: [],
+        );
+
+        $exact  = new Index($this->dbPath, config: new Config(limits: Limits::exact()), readonly: true);
+        $capped = new Index($this->dbPath, config: new Config(
+            limits: new Limits(candidatesPerWord: 3),
+        ), readonly: true);
+        $expected = $exact->search('jurk', $options);
+        $result   = $capped->search('jurk', $options);
+
+        $this->assertSame(12, $expected->totalHits);
+        $this->assertSame(12, $result->totalHits);
+        $this->assertFalse($result->exhaustive);
+        // The three ranked documents are the best three of the matches; the rest follow newest first.
+        $this->assertSame(array_slice($expected->getIds(), 0, 3), array_slice($result->getIds(), 0, 3));
+        $this->assertSame(self::sorted($expected->getIds()), self::sorted($result->getIds()));
+    }
+
+    /**
      * The matches past the ranked candidates follow newest first (document ID descending),
      * whichever way they are listed: from a word's rows, from the merged rows of a prefix's
      * terms, or from a filter with fewer rows than the word.
