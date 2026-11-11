@@ -68,7 +68,7 @@ Fuzor bounds the work behind a query with a few caps (see [tuning.md](tuning.md)
 |---|---|---|
 | `$exhaustive === false` | A keyword matched more than `Limits::$candidatesPerWord` documents, or the last keyword's prefix matched more than `Config::$fuzzyMaxExpansions` terms | Hits come from the best candidates, so the page can differ from a full ranking. Pages past the ranked candidates are filled with the other matches (unscored, after the ranked ones, newest first as in a browse), so every page up to `$totalHits` is full; with `sort` the candidates and those matches are sorted together. `search()` and `searchBoolean()` still count `$totalHits` (also with `distinct`) exactly over every match, and `search()` its facet counts; `searchBoolean()`'s facet counts and a capped prefix's total are estimates |
 | `$totalHitsCapped === true` | More documents match than `Limits::$totalHits` (1000) | `$totalHits` is the cap; no hit past it can be paged to |
-| `$approximateFacets` lists a field | That field's counts covered more than `Limits::$facetCountDocs` matching documents | Its counts in `$facetDistribution` / `$facetStats` are approximate: they cover the newest `facetCountDocs` matches (highest document IDs) |
+| `$approximateFacets` lists a field | That field's counts covered more than `Limits::$facetCountDocs` matching documents | Its counts in `$facetDistribution` / `$facetStats` are approximate: they cover the newest `facetCountDocs` matches (highest document IDs); for an empty query whose matches are read from a numeric range filter, those with the lowest values of that field |
 
 ```php
 $result = $index->search('shoe', new SearchOptions(facets: ['brand']));

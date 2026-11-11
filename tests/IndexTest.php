@@ -2677,14 +2677,20 @@ class IndexTest extends TestCase
 
     /**
      * A facet count over more matches than facetCountDocs counts the newest of them (highest
-     * document IDs), the same documents whichever condition lists them.
+     * document IDs), the same documents whichever condition lists them; a browse whose
+     * matches are listed from a range on a single-valued key ($rangeKey) counts those with
+     * the lowest values of that key.
      *
      * @param array<string, string|list<string>|FacetRange|FacetExclude> $filter
      * @param list<string>                                                $facets
      */
     #[\PHPUnit\Framework\Attributes\DataProvider('cappedFacetCases')]
-    public function testFacetCountsAtTheCapCountTheNewestMatches(string $query, array $filter, array $facets): void
-    {
+    public function testFacetCountsAtTheCapCountTheNewestMatches(
+        string $query,
+        array $filter,
+        array $facets,
+        ?string $rangeKey = null,
+    ): void {
         $schema = new SchemaConfig(
             filterableAttributes: ['price', 'stock', 'stars', 'colour', 'tags', 'brand'],
         );
@@ -2727,6 +2733,12 @@ class IndexTest extends TestCase
             });
             $this->assertGreaterThan(6, count($counted), $facet);
             krsort($counted);
+            if ($rangeKey !== null) {
+                // Listed from the range: lowest value first, then document ID.
+                ksort($counted);
+                $values = array_map(fn(array $doc): float => (float) self::heldValues($doc, $rangeKey)[0], $counted);
+                array_multisort($values, SORT_ASC, SORT_NUMERIC, $counted);
+            }
             $expected = [];
             foreach (array_slice($counted, 0, 6) as $doc) {
                 foreach (self::heldValues($doc, $facet) as $value) {
@@ -2774,19 +2786,36 @@ class IndexTest extends TestCase
      *     0: string,
      *     1: array<string, string|list<string>|FacetRange|FacetExclude>,
      *     2: list<string>,
+     *     3?: string,
      * }>
      */
     public static function cappedFacetCases(): array
     {
         return [
-            'browse, wide range (documents walked)'   => ['', ['price' => FacetRange::between(11, 50)], ['brand']],
-            'browse, narrow range (rows sorted)'      => ['', ['price' => FacetRange::between(1, 7)], ['brand']],
+            'browse, wide range'                      => [
+                '',
+                ['price' => FacetRange::between(11, 50)],
+                ['brand'],
+                'price',
+            ],
+            'browse, narrow range'                    => [
+                '',
+                ['price' => FacetRange::between(1, 7)],
+                ['brand'],
+                'price',
+            ],
             'browse, two ranges on the same docs'     => [
                 '',
                 ['price' => FacetRange::between(21, 35), 'stock' => FacetRange::between(21, 35)],
                 ['brand'],
+                'price',
             ],
-            'browse, range over a few numbers'        => ['', ['stars' => FacetRange::between(1, 3)], ['brand']],
+            'browse, range over a few numbers'        => [
+                '',
+                ['stars' => FacetRange::between(1, 3)],
+                ['brand'],
+                'stars',
+            ],
             'browse, one value'                       => ['', ['colour' => 'blue'], ['brand', 'tags']],
             'browse, value list'                      => ['', ['colour' => ['red', 'green']], ['brand']],
             'browse, list on a multi-valued key'      => ['', ['tags' => ['a', 'b']], ['brand']],
@@ -2794,11 +2823,13 @@ class IndexTest extends TestCase
                 '',
                 ['colour' => 'red', 'price' => FacetRange::between(11, 50)],
                 ['colour'],
+                'price',
             ],
             'browse, exclusion next to a range'       => [
                 '',
                 ['price' => FacetRange::between(11, 50), 'colour' => new FacetExclude('red')],
                 ['brand'],
+                'price',
             ],
             'search, one term'                        => ['widget', [], ['brand']],
             'search, prefix of two terms'             => ['widg', [], ['brand', 'colour']],

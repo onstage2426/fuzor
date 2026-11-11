@@ -5478,19 +5478,20 @@ final class Index implements \Countable
     }
 
     /**
-     * matchingDocsSql() for a browse facet count that Limits::$facetCountDocs may cut: the
-     * counted documents are the newest $cap matches (document ID descending), whichever
-     * condition lists them.
+     * matchingDocsSql() for a browse facet count that Limits::$facetCountDocs may cut, in an
+     * order the statement states, so the counted documents never depend on SQLite's plan:
+     * the newest $cap matches (document ID descending), except when a range on a
+     * single-valued key lists them: then the $cap matches with the lowest values of that key
+     * (ties by document ID), the order its index is read in.
      *
      * Returns [sql, params, limit]. With limit the caller appends `LIMIT $cap + 1`: a driver
-     * with at most $cap rows cannot be cut and is listed as it comes; one value is read
-     * backwards along its primary-key rows, a value list as a merge of its values' rows (a
-     * range on a key with few distinct values likewise, numbersInRange()), exclusions along
-     * doc_lengths: in document order at the cost of the plain read. Another range (or a
-     * compound, or a longer list) has no document order: its matches are listed whole
-     * (limit = false) and the caller keeps the newest (countedDocIds()), unless walking the
-     * documents newest first with every condition probed is expected to cost less
-     * (COUNTED_ROWS_PER_PROBE; the matches taken as spread evenly over the documents).
+     * with at most $cap rows cannot be cut and is listed as it comes; a range as above; one
+     * value is read backwards along its primary-key rows, a value list as a merge of its
+     * values' rows, exclusions along doc_lengths. A range on a multi-valued key, a compound
+     * or a longer list has no usable order: its matches are listed whole (limit = false) and
+     * the caller keeps the newest (countedDocIds()), unless walking the documents newest
+     * first with every condition probed is expected to cost less (COUNTED_ROWS_PER_PROBE;
+     * the matches taken as spread evenly over the documents).
      *
      * @param  non-empty-list<FacetCondition> $conditions Ordered by orderBySelectivity().
      * @return array{0: string, 1: list<mixed>, 2: bool}|null  null when nothing can match.
@@ -5508,8 +5509,15 @@ final class Index implements \Countable
         if ($this->conditionRowCount($driver, $cap) <= $cap) {
             return [...$match, true];
         }
-        // The driver's rows as runs in document order: one per value of a list, one per
-        // number a range holds on a key with few distinct values.
+        // A range's rows come in the order of its index: by value, then document. That order
+        // is kept (explicitly, so no plan can change it): the walk stops at the cap, where
+        // any document order has to read the whole range (500k documents, a range over half
+        // of them: 46 ms against 136). On a multi-valued key a document has no single place
+        // in that order, so those take the document order below.
+        if (isset($driver['range']) && !$driver['multiRow']) {
+            return ["{$match[0]} ORDER BY md.num_value, md.doc_id", $match[1], true];
+        }
+        // The driver's rows as runs in document order: one per value of a list.
         /** @var list<array{0: string, 1: list<mixed>}> $runs */
         $runs = [];
         if (isset($driver['values'])) {
@@ -5519,13 +5527,6 @@ final class Index implements \Countable
             )));
             foreach ($values as $value) {
                 $runs[] = ['md.key_id = ? AND md.value = ?', [$driver['values']['keyId'], $value]];
-            }
-        } elseif (isset($driver['range'])) {
-            foreach ($this->numbersInRange($driver['range']) ?? [] as $number) {
-                $runs[] = [
-                    'md.key_id = ? AND md.num_value IS NOT NULL AND md.num_value = ?',
-                    [$driver['range']['keyId'], $number],
-                ];
             }
         }
         if ($runs !== [] && count($runs) <= self::NEWEST_MERGE_MAX_TERMS) {
@@ -5591,35 +5592,6 @@ final class Index implements \Countable
             rsort($ids);
         }
         return $this->capDocIds($ids, $cap, $capped);
-    }
-
-    /**
-     * The distinct numbers a range selects on a key with at most RANGE_COUNT_SAMPLE_VALUES
-     * distinct values (a rating), so its rows can be read as one run per number; null for a
-     * key with more.
-     *
-     * @param  array{keyId: int, sql: string, params: list<mixed>} $range
-     * @return list<float>|null
-     */
-    private function numbersInRange(array $range): ?array
-    {
-        $more = $this->stmt(
-            'facetKeyHasManyValues',
-            'SELECT 1 FROM facet_counts WHERE key_id = ? LIMIT 1 OFFSET ' . self::RANGE_COUNT_SAMPLE_VALUES,
-        );
-        $more->execute([$range['keyId']]);
-        $many = $more->fetchColumn() !== false;
-        $more->closeCursor();
-        if ($many) {
-            return null;
-        }
-        $stmt = $this->prepare(
-            'SELECT DISTINCT fc.num_value FROM facet_counts fc WHERE fc.key_id = ? AND ' . sprintf($range['sql'], 'fc')
-        );
-        $stmt->execute([$range['keyId'], ...$range['params']]);
-        /** @var list<float|int|string> $numbers */
-        $numbers = $stmt->fetchAll(PDO::FETCH_COLUMN);
-        return array_map(floatval(...), $numbers);
     }
 
     /**
