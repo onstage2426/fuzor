@@ -256,15 +256,15 @@ final class Index implements \Countable
     private const int RANGE_COUNT_SAMPLE_VALUES = 256;
 
     /**
-     * numbersOfKey(): batches of maxValuesPerFacet values walked for the first values of a
-     * number-only key before every value is read instead (most of them were removed).
+     * numbersOfKey(): times maxValuesPerFacet values read in number order for the first values
+     * of a number-only key before every value is read instead (most of them were removed).
      */
     private const int FIRST_VALUES_MAX_BATCHES = 20;
 
     /**
-     * rangeRowCount(): a facet_numeric_index row costs about 0.027 us to count, a facet_counts
-     * row 0.07 us to test and sum, so the index wins while it reads fewer rows than this per
-     * value of the key.
+     * rangeRowCount(): a facet_numeric_index row costs about 0.026 us to count, a
+     * facet_counts_number row (one per value) 0.043 us to sum, so the row index wins while it
+     * reads fewer rows than this per value of the key.
      */
     private const int RANGE_COUNT_ROWS_PER_VALUE = 2;
 
@@ -1372,7 +1372,8 @@ final class Index implements \Countable
                 id           INTEGER PRIMARY KEY,
                 name         TEXT NOT NULL UNIQUE,
                 multi_valued INTEGER NOT NULL DEFAULT 0,
-                has_strings  INTEGER NOT NULL DEFAULT 0
+                has_strings  INTEGER NOT NULL DEFAULT 0,
+                row_count    INTEGER NOT NULL DEFAULT 0
             ) STRICT"
         );
         // facet_values: inverted index clustered on (key_id, value, doc_id).
@@ -1406,6 +1407,13 @@ final class Index implements \Countable
                 num_value REAL,
                 PRIMARY KEY (key_id, value)
             ) WITHOUT ROWID, STRICT"
+        );
+        // A key's numeric values in number order, with their counts: a range is summed from the
+        // values inside it (rangeRowCount()) and the smallest numbers are read in order
+        // (numbersOfKey()) without touching the key's other values.
+        $pdo->exec(
+            "CREATE INDEX IF NOT EXISTS 'main'.'facet_counts_number'
+                 ON facet_counts (key_id, num_value, value, count, num_count) WHERE num_value IS NOT NULL"
         );
         // facet_value_ids: one integer ID per filterable (key, value), separate for a number and
         // a string with the same text (is_num), so doc_facets can hold a document's values as
@@ -2381,7 +2389,8 @@ final class Index implements \Countable
             $pdo->exec('DELETE FROM doc_facets');
             $pdo->exec('DELETE FROM sort_keys');
             $pdo->exec(
-                'UPDATE facet_keys SET multi_valued = 0, has_strings = 0 WHERE multi_valued = 1 OR has_strings = 1'
+                'UPDATE facet_keys SET multi_valued = 0, has_strings = 0, row_count = 0
+                  WHERE multi_valued = 1 OR has_strings = 1 OR row_count <> 0'
             );
             $pdo->exec('DELETE FROM deleted_docs');
 
@@ -10184,7 +10193,9 @@ final class Index implements \Countable
     }
 
     /**
-     * Apply facet_counts deltas in one statement, then drop the (key, value) rows they emptied.
+     * Apply facet_counts deltas in one statement, then drop the (key, value) rows they emptied,
+     * and keep each key's facet_keys.row_count (the sum of its counts: its facet_values rows,
+     * read by keyRowCount()) in step. Every change of facet_counts goes through here or clear().
      *
      * @param list<array{0: int, 1: string, 2: int, 3: int, 4: float|null}> $deltas From facetCountDeltas().
      */
@@ -10205,6 +10216,18 @@ final class Index implements \Countable
                  num_count = facet_counts.num_count + excluded.num_count,
                  num_value = COALESCE(facet_counts.num_value, excluded.num_value)"
         )->execute([$json]);
+        $rowsPerKey = [];
+        foreach ($deltas as [$keyId, , $count]) {
+            $rowsPerKey[$keyId] = ($rowsPerKey[$keyId] ?? 0) + $count;
+        }
+        $rowsPerKey = array_filter($rowsPerKey);
+        if ($rowsPerKey !== []) {
+            $this->stmt(
+                'facetKeyRowsAdjust',
+                'UPDATE facet_keys SET row_count = row_count + j.value
+                   FROM json_each(?) j WHERE facet_keys.id = CAST(j.key AS INTEGER)'
+            )->execute([json_encode($rowsPerKey, JSON_THROW_ON_ERROR | JSON_FORCE_OBJECT)]);
+        }
         if (min(array_column($deltas, 2)) < 0) {
             $this->stmt(
                 'facetCountsPrune',
@@ -11401,14 +11424,12 @@ final class Index implements \Countable
      * The numeric rows of a key inside a range, or with $upTo some number above it when there
      * are more (the caller only asks whether the range fits a limit).
      *
-     * facet_counts holds a row per distinct value and has no order by number, so summing the
-     * range there reads every value of the key: nothing for a rating, 35 ms for a key with a
-     * value per document at 500k documents, whatever the range. The first
-     * RANGE_COUNT_SAMPLE_VALUES rows of the key decide: a key with no more values is summed
-     * from them. For a larger key the sample gives the rows per value, and with the document
-     * count the values facet_counts would read; facet_numeric_index reads the range's rows
-     * instead (2.6 times cheaper per row), at most $upTo + 1 of them. The cheaper read is
-     * taken (RANGE_COUNT_ROWS_PER_VALUE). Both give the same number: num_count is the value's
+     * The first RANGE_COUNT_SAMPLE_VALUES rows of the key decide: a key with no more values is
+     * summed from them. For a larger key the sample gives the rows per value, and with the
+     * document count the values the key has. facet_counts_number sums the values inside the
+     * range (one row per distinct value); facet_numeric_index counts the range's rows instead
+     * (cheaper per row), at most $upTo + 1 of them. The cheaper read is taken
+     * (RANGE_COUNT_ROWS_PER_VALUE). Both give the same number: num_count is the value's
      * numeric rows.
      *
      * @param array{keyId: int, sql: string, params: list<mixed>} $range
@@ -11443,7 +11464,8 @@ final class Index implements \Countable
             $stmt->execute([$range['keyId'], ...$range['params'], ...($upTo === null ? [] : [$upTo + 1])]);
         } else {
             $stmt = $this->prepare(
-                'SELECT COALESCE(SUM(fc.num_count), 0) FROM facet_counts fc WHERE fc.key_id = ? AND ' . $where
+                'SELECT COALESCE(SUM(fc.num_count), 0) FROM facet_counts fc INDEXED BY facet_counts_number
+                  WHERE fc.key_id = ? AND fc.num_value IS NOT NULL AND ' . $where
             );
             $stmt->execute([$range['keyId'], ...$range['params']]);
         }
@@ -12295,74 +12317,44 @@ final class Index implements \Countable
      * that keep a count after $removed, as [number, count, text]; null when a value is not a
      * plain number (see firstKeyCounts()) or too many values in a row are removed.
      *
-     * The walk is a recursive query read row by row, so it stops with the values needed.
+     * The values come in number order from facet_counts_number (the two texts of zero by
+     * their bytes), read row by row, so the read stops with the values needed; at most
+     * FIRST_VALUES_MAX_BATCHES × $limit rows are read.
      *
      * @param  array<int|string, array{0: int, 1: int, 2: float|null}> $removed
      * @return list<array{0: float, 1: int, 2: string}>|null
      */
     private function numbersOfKey(int $keyId, bool $ascending, int $limit, array $removed): ?array
     {
-        [$next, $beyond] = $ascending ? ['MIN', '>'] : ['MAX', '<'];
-        $walk = $this->prepare(
-            "WITH RECURSIVE walk(v) AS (
-                 SELECT (SELECT {$next}(num_value) FROM facet_values WHERE key_id = :k AND num_value IS NOT NULL)
-                 UNION ALL
-                 SELECT (SELECT {$next}(num_value) FROM facet_values WHERE key_id = :k AND num_value {$beyond} walk.v)
-                   FROM walk WHERE walk.v IS NOT NULL
-             )
-             SELECT v, (SELECT value FROM facet_values
-                         WHERE key_id = :k AND num_value IS NOT NULL AND num_value = walk.v LIMIT 1)
-               FROM walk WHERE v IS NOT NULL"
+        $order = $ascending ? 'ASC' : 'DESC';
+        $walk  = $this->stmt(
+            "numbersOfKey{$order}",
+            "SELECT num_value, value, count, num_count FROM facet_counts INDEXED BY facet_counts_number
+              WHERE key_id = ? AND num_value IS NOT NULL ORDER BY num_value {$order}, value {$order}"
         );
-        $walk->execute([':k' => $keyId]);
-        $counts = $this->stmt(
-            'facetCountsOfValues',
-            'SELECT value, count, num_count FROM facet_counts
-              WHERE key_id = ? AND value IN (SELECT value FROM json_each(?))'
-        );
+        $walk->execute([$keyId]);
         $kept = [];
-        for ($batch = 0; $batch < self::FIRST_VALUES_MAX_BATCHES && count($kept) < $limit; $batch++) {
-            $numbers = [];
-            while (count($numbers) < $limit && ($row = $walk->fetch(PDO::FETCH_NUM)) !== false) {
-                /** @var array{0: mixed, 1: mixed} $row */
-                [$number, $text] = $row;
-                if (
-                    !is_float($number) || !is_string($text) || !is_numeric($text) || (float) $text !== $number
-                    || abs($number) >= 2 ** 53
-                ) {
-                    $walk->closeCursor();
-                    return null;
-                }
-                foreach ($number === 0.0 ? ['0', '-0'] : [$text] as $value) {
-                    $numbers[$value] = $number;
-                }
-            }
-            if ($numbers === []) {
+        $more = false;
+        $left = self::FIRST_VALUES_MAX_BATCHES * $limit;
+        while (($row = $walk->fetch(PDO::FETCH_NUM)) !== false) {
+            if (count($kept) >= $limit || $left-- <= 0) {
+                $more = true;
                 break;
             }
-            $counts->execute([$keyId, json_encode(array_map(strval(...), array_keys($numbers)))]);
-            $found = [];
-            /** @var list<array{0: string, 1: int, 2: int}> $rows */
-            $rows = $counts->fetchAll(PDO::FETCH_NUM);
-            foreach ($rows as [$value, $n, $numeric]) {
-                if ($numeric !== $n) {
-                    $walk->closeCursor();
-                    return null;
-                }
-                $n -= $removed[$value][0] ?? 0;
-                if ($n > 0) {
-                    $found[$value] = $n;
-                }
+            /** @var array{0: mixed, 1: mixed, 2: int, 3: int} $row */
+            [$number, $text, $n, $numeric] = $row;
+            if (
+                !is_float($number) || !is_string($text) || !is_numeric($text) || (float) $text !== $number
+                || abs($number) >= 2 ** 53 || $numeric !== $n
+            ) {
+                $walk->closeCursor();
+                return null;
             }
-            // In the walk's order; the two texts of zero by their bytes.
-            foreach ($numbers as $value => $number) {
-                $value = (string) $value;
-                if (isset($found[$value])) {
-                    $kept[] = [$number, $found[$value], $value];
-                }
+            $n -= $removed[$text][0] ?? 0;
+            if ($n > 0) {
+                $kept[] = [$number, $n, $text];
             }
         }
-        $more = $walk->fetch(PDO::FETCH_NUM) !== false;
         $walk->closeCursor();
         if (count($kept) < $limit && $more) {
             return null;
@@ -12819,10 +12811,14 @@ final class Index implements \Countable
         return $counts;
     }
 
-    /** How many facet_values rows a key has, summed from facet_counts (one row per value). */
+    /**
+     * How many facet_values rows a key has: facet_keys.row_count, kept by adjustFacetCounts()
+     * (summing the key's facet_counts rows cost 20 ms on a key with a value per document at
+     * 500k documents).
+     */
     private function keyRowCount(int $keyId): int
     {
-        $stmt = $this->stmt('keyRowCount', 'SELECT COALESCE(SUM(count), 0) FROM facet_counts WHERE key_id = ?');
+        $stmt = $this->stmt('keyRowCount', 'SELECT row_count FROM facet_keys WHERE id = ?');
         $stmt->execute([$keyId]);
         $count = (int) $stmt->fetchColumn();
         $stmt->closeCursor();

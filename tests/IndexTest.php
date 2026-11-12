@@ -11095,7 +11095,10 @@ class IndexTest extends TestCase
 
     // --- facet_counts ---
 
-    /** facet_counts and a fresh GROUP BY over facet_values, both as key_id|value => [count, num_count, num]. */
+    /**
+     * facet_counts and a fresh GROUP BY over facet_values, both as key_id|value => [count, num_count, num],
+     * and each key's stored row count against its rows.
+     */
     private function assertFacetCountsMatchFacetValues(string $when): void
     {
         $pdo   = new \PDO('sqlite:' . $this->dbPath);
@@ -11116,6 +11119,21 @@ class IndexTest extends TestCase
                             FROM facet_values GROUP BY key_id, value'),
             $table($pdo, 'SELECT key_id, value, count, num_count, num_value FROM facet_counts'),
             $when,
+        );
+        // facet_keys.row_count is the key's number of facet_values rows.
+        $rows = static function (\PDO $pdo, string $sql): array {
+            $stmt = $pdo->query($sql);
+            \assert($stmt !== false);
+            return array_map(
+                static fn(mixed $n): int => is_numeric($n) ? (int) $n : -1,
+                $stmt->fetchAll(\PDO::FETCH_KEY_PAIR),
+            );
+        };
+        $this->assertSame(
+            $rows($pdo, 'SELECT k.id, COUNT(fv.doc_id) FROM facet_keys k
+                           LEFT JOIN facet_values fv ON fv.key_id = k.id GROUP BY k.id ORDER BY k.id'),
+            $rows($pdo, 'SELECT id, row_count FROM facet_keys ORDER BY id'),
+            "row_count {$when}",
         );
     }
 
