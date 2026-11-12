@@ -2568,6 +2568,52 @@ class IndexTest extends TestCase
     }
 
     /**
+     * A negated phrase whose rarest word is rare next to the searched word is excluded by a
+     * list of its documents; the total, the facet counts and the documents returned are the
+     * uncapped search's, in search() and searchBoolean().
+     */
+    public function testCappedSearchExcludesANegatedPhraseListedFromItsRarestWord(): void
+    {
+        $schema = new SchemaConfig(filterableAttributes: ['colour']);
+        $index  = new Index($this->dbPath, schema: $schema);
+        $docs   = [];
+        for ($id = 1; $id <= 80; $id++) {
+            $docs[] = [
+                'id'     => $id,
+                // "long sleeve" as a phrase in every 8th, both words apart in every 5th.
+                'title'  => 'jurk ' . match (true) {
+                    $id % 8 === 0 => 'with long sleeve',
+                    $id % 5 === 0 => 'sleeve not long',
+                    default       => 'plain',
+                } . " model {$id}",
+                'colour' => $id % 3 === 0 ? 'red' : 'blue',
+            ];
+        }
+        $index->insert($docs);
+        $index->delete(16);
+        $index->close();
+        $options = new SearchOptions(asYouType: false, facets: ['colour'], limit: 80, attributesToRetrieve: []);
+
+        $exact  = new Index($this->dbPath, config: new Config(limits: Limits::exact()), readonly: true);
+        $capped = new Index($this->dbPath, config: new Config(
+            limits: new Limits(candidatesPerWord: 4),
+        ), readonly: true);
+        foreach (['search' => 'jurk -"long sleeve"', 'searchBoolean' => 'jurk -"long sleeve"'] as $method => $query) {
+            $expected = $exact->{$method}($query, $options);
+            $result   = $capped->{$method}($query, $options);
+            $this->assertInstanceOf(SearchResult::class, $expected);
+            $this->assertInstanceOf(SearchResult::class, $result);
+            $this->assertSame(70, $expected->totalHits, $method);   // 79 live, 9 with the phrase
+            $this->assertSame(70, $result->totalHits, $method);
+            $this->assertFalse($result->exhaustive, $method);
+            if ($method === 'search') {
+                $this->assertSame($expected->facetDistribution, $result->facetDistribution);
+                $this->assertSame(self::sorted($expected->getIds()), self::sorted($result->getIds()));
+            }
+        }
+    }
+
+    /**
      * A one-word search whose filter holds far fewer documents than the word ranks the
      * filtered matches themselves: the page is the uncapped ranking's, although none of the
      * word's best documents passes the filter.

@@ -49,6 +49,7 @@ use PDO;
  *     estimate?: int,
  *     rowCount?: int,
  *     slots?: array<int, array{termIds: list<int>, hits: int}>,
+ *     negated?: array{terms: array<int, int>, hits: array<int, int>},
  * }
  * @phpstan-type KeywordGroup array{
  *     words: list<array{id: int, term: string, num_hits: int, num_docs: int, distance?: int}>,
@@ -223,6 +224,13 @@ final class Index implements \Countable
      * factor a filter lists the matches from a sixteenth of the word's documents down.
      */
     private const int BY_SCORE_ROWS_PER_LISTED_ROW = 8;
+
+    /**
+     * listedNegations(): keyword rows a result-set walk has to hold per occurrence of a
+     * negated phrase's rarest word before the phrase's documents are listed up front (a walk
+     * may stop early, the listing never does).
+     */
+    private const int NEGATED_PHRASE_WALK_ROWS = 2;
 
     /** matchDriver(): index terms of the words that cost a filter row as much as one keyword row. */
     private const int FILTER_DRIVER_TERMS_PER_ROW = 4;
@@ -3378,9 +3386,36 @@ final class Index implements \Countable
         // groups up to minBucket, through any of their terms (typos, prefix, synonyms), that
         // pass the quoted phrases, negations and filters.
         $required       = array_map(fn(int $g): array => $groups[$g], array_slice($order, 0, $minBucket));
-        $baseConditions = $candidatesCapped
-            ? [...$this->phraseConditions($phraseGroups), ...$negations]
-            : [];
+        $baseConditions = [];
+        if ($candidatesCapped) {
+            $baseConditions = $this->phraseConditions($phraseGroups);
+            // The rows the longest walk of the result set reads. The rarest word's; those of
+            // the condition that lists it, unless a facet is counted without its own filter
+            // (that group may walk the word again); and when nothing passes only some of the
+            // rows and the walks only count to the total (no facets, no distinct, which reads
+            // every match), no more than that total.
+            $wanted = [...$facets, ...$options->facetStatsOnly];
+            $walk   = min([PHP_INT_MAX, ...array_column($required, 'df')]);
+            $ownKey = false;
+            foreach ($filterConditions as $condition) {
+                $ownKey = $ownKey || in_array($condition['name'], $wanted, true)
+                    && self::isDisjunctiveFor($condition, $condition['name']);
+            }
+            if (!$ownKey) {
+                $walk = $this->matchDriver(
+                    [...$baseConditions, ...$filterConditions],
+                    $walk,
+                    self::termCount($required),
+                )['rows'] ?? $walk;
+            }
+            if (
+                $wanted === [] && $distinct === null && $baseConditions === []
+                && !self::thinsMatches($filterConditions)
+            ) {
+                $walk = min($walk, $this->config->limits->totalHits + 1);
+            }
+            $baseConditions = [...$baseConditions, ...$this->listedNegations($negations, $walk)];
+        }
         // facetStatsOnly fields a walk settles; the others are counted with the facets.
         $statsOnly = $options->facetStatsOnly === [] ? null : $this->walkStatsOnly(
             $options->facetStatsOnly,
@@ -3998,6 +4033,7 @@ final class Index implements \Countable
                     ...$negations,
                     ...$filterConditions,
                 ],
+                $distinct !== null,
             )
             : null;
         if ($candidatesCapped && $distinct === null) {
@@ -8358,10 +8394,81 @@ final class Index implements \Countable
                 $stmt = $this->stmt('termNumDocs', 'SELECT num_docs FROM wordlist WHERE id = ?');
                 $stmt->execute([$termIds[0]]);
                 $condition['rowCount'] = (int) $stmt->fetchColumn();
+            } else {
+                // Each word's occurrences: listedNegations() lists the phrase from the rarest.
+                $hits = [];
+                $stmt = $this->stmt('termNumHits', 'SELECT num_hits FROM wordlist WHERE id = ?');
+                foreach ($termIds as $at => $termId) {
+                    $stmt->execute([$termId]);
+                    $hits[$at] = (int) $stmt->fetchColumn();
+                }
+                $condition['negated'] = ['terms' => $termIds, 'hits' => $hits];
             }
             $conditions[] = $condition;
         }
         return $conditions;
+    }
+
+    /**
+     * Negated phrases for a result-set SQL that walks $walk rows: one whose rarest word has
+     * at most $walk / NEGATED_PHRASE_WALK_ROWS occurrences has its documents listed once
+     * (that word's positions rows, the other words probed at their offsets) and is probed as
+     * a membership test, instead of a positions join per walked row (100k long documents, a
+     * word in 90k: 292 ms per walk probed per row). The same documents are excluded.
+     *
+     * @param  list<FacetCondition> $conditions
+     * @return list<FacetCondition>
+     */
+    private function listedNegations(array $conditions, int $walk): array
+    {
+        foreach ($conditions as $c => $condition) {
+            if (!isset($condition['negated']) || isset($condition['probe'])) {
+                continue;
+            }
+            ['terms' => $terms, 'hits' => $hits] = $condition['negated'];
+            asort($hits);
+            $from = array_key_first($hits);
+            if ($from === null || $hits[$from] * self::NEGATED_PHRASE_WALK_ROWS > $walk) {
+                continue;
+            }
+            $sql    = 'SELECT np.doc_id FROM positions np WHERE np.term_id = ?';
+            $params = [$terms[$from]];
+            foreach ($terms as $at => $termId) {
+                if ($at === $from) {
+                    continue;
+                }
+                $sql .= " AND EXISTS (SELECT 1 FROM positions ns{$at} WHERE ns{$at}.term_id = ?"
+                    . " AND ns{$at}.doc_id = np.doc_id AND ns{$at}.position = np.position + (" . ($at - $from) . '))';
+                $params[] = $termId;
+            }
+            $stmt = $this->prepare($sql);
+            $stmt->execute($params);
+            /** @var list<int> $listed */
+            $listed = $stmt->fetchAll(PDO::FETCH_COLUMN);
+            $docIds = array_keys(array_flip($listed));
+            $conditions[$c]['probe'] = [
+                'sql'    => '%1$s IN (SELECT value FROM json_each(?))',
+                'params' => [json_encode($docIds)],
+            ];
+        }
+        return $conditions;
+    }
+
+    /**
+     * Whether a positive condition (a filter, a quoted phrase) is among $conditions: a walk
+     * of the result set then passes only some of its rows and may read all of them before
+     * it has the matches it counts to.
+     *
+     * @param list<FacetCondition> $conditions
+     */
+    private static function thinsMatches(array $conditions): bool
+    {
+        foreach ($conditions as $condition) {
+            if (!$condition['exclude']) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
@@ -8753,10 +8860,16 @@ final class Index implements \Countable
      *
      * @param  list<string>         $postfix    BooleanParser::toPostfix() output.
      * @param  list<FacetCondition> $conditions Quoted phrases and filters.
+     * @param  bool                 $whole      The caller reads every match (the distinct total).
      * @return array{0: string, 1: list<mixed>}|null
      */
-    private function booleanMatchesSql(array $postfix, ?string $lastTerm, bool $asYouType, array $conditions): ?array
-    {
+    private function booleanMatchesSql(
+        array $postfix,
+        ?string $lastTerm,
+        bool $asYouType,
+        array $conditions,
+        bool $whole = false,
+    ): ?array {
         $root = $this->booleanRoot($postfix, $lastTerm, $asYouType);
         if ($root['driver'] === null) {
             return null;
@@ -8772,7 +8885,15 @@ final class Index implements \Countable
             }
             [$root['driver'], $root['driverParams']] = $listed;
         }
-        $probes = $this->renderFacetProbes(array_values($conditions), 'bm.doc_id');
+        // booleanSearch() only counts here: with nothing that passes only some of the rows
+        // the walk stops at the total it counts to.
+        $conditions = array_values($conditions);
+        $walk       = $driver['rows'] ?? $root['df'];
+        if (!$whole && !self::thinsMatches($conditions)) {
+            $walk = min($walk, $this->config->limits->totalHits + 1);
+        }
+        $conditions = $this->listedNegations($conditions, $walk);
+        $probes = $this->renderFacetProbes($conditions, 'bm.doc_id');
         if ($probes === null) {
             return null;
         }
