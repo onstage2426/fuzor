@@ -3,6 +3,38 @@
 Records of options that were evaluated and rejected, with the evidence, so they
 are not re-attempted without new information.
 
+## Rejected: testing a many-term word against a document's terms in one read (2026-11-12)
+
+**Proposal:** when a filter lists the result set of a search whose words were cut, every filter
+row probes each index term of each word, so a prefix of 50 terms costs up to 50 seeks per row and
+the filter's rows count once per four terms in the choice of what lists the result set. Test a
+word of more than 16 terms against the document's own terms instead, read once in a range
+(`doc_id = ? AND CAST(term_id AS INTEGER) IN (…)`), count such a word as 16 terms, and so let a
+filter with up to an eighth of the word's documents list the result set.
+
+**Why rejected:** the read costs by the document's terms, the seeks by the word's, and only very
+short documents make the read cheaper (homelab, raw SQL per filter row, a 50-term prefix):
+documents of 4 words 0.7 µs read against 2.3 µs of seeks, 60 words 2.5 against 1.8 µs, 280 words
+11 against 7 µs. In Fuzor, same results in every case:
+
+- 500k documents of 4 words, a value with 1.5k rows: 28 → 12 ms. Values with 4k to 59k rows: no
+  change (the word walk stays cheaper).
+- 100k documents of 60 words: a value with 1.5k rows 24.1 → 25.7 ms, with 5k rows 31.7 → 29.7 ms
+  (48.5 → 40.9 ms with a facet), larger values unchanged.
+- 10k documents of 280 words, a value with 1.9k rows: 13.9 → 16.7 ms.
+
+Limited to documents averaging at most half as many words as the word has terms, only the first
+case is left, and none of 2,800 generated requests on four catalogues took it (0 faster, 0
+slower, results identical). A rule and a second probe form for one shape on title-only data are
+not worth carrying.
+
+A unary plus on the column (`+term_id IN (…)`) is not a way to write the read: it drops the
+column's integer affinity, the bound term IDs arrive as text, and nothing compares equal (the
+first cut returned no matches).
+
+**When to revisit:** with a workload of very short documents (titles only) where prefix searches
+next to a filter of a few thousand documents matter.
+
 ## Rejected: variants of the listing condition for a capped search (2026-11-10)
 
 **Context:** since 2026-11-10 a search whose words were cut lists its result set from the most
