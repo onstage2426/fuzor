@@ -39,6 +39,7 @@ Breaking:
 - Two swapped neighbouring characters count as one typo (`casaul` finds `casual`).
 - Each field's word positions start on their own instead of continuing from the previous field: a quoted phrase no longer matches across the end of one field and the start of the next. Proximity scoring measures the distance between query words inside one field; a window whose words lie in different fields counts a fixed cross-field distance per word gap. On the 44k catalog 99% of 300 multi-word searches keep their top hit (mean top-24 overlap 0.98).
 - A number as a filter value (`['stars' => 5]`, also in a list or `FacetExclude`) matches what its text matches (documents with `5`, `5.0` or `'5'`); it matched nothing, since values are stored as text. A value no document can hold (`true`/`false`, `null`, NaN, infinity, an object, a nested list) throws an `\InvalidArgumentException` instead of matching nothing. Same speed: the filter's SQL is the one its text gets.
+- Combining marks (an accent written as its own code point, the vowel signs and tone marks of Indic scripts, Arabic, Hebrew and Thai) stay inside their word. A word was cut at every mark, so "हिन्दी" was indexed as three single consonants and "İstanbul" as `i` and `stanbul`; such words now match whole, also by prefix and with typos, and are highlighted whole. Text without combining marks is indexed as before. Tokenising is as fast as before on Latin and Greek text and faster on text with marks (a third less time on Hindi and Thai, half on vocalised Arabic).
 
 Added:
 
@@ -54,6 +55,8 @@ Added:
 - `Index::remove($path)` deletes an index with everything Fuzor keeps next to it: the link at the path, every `{path}.v-{8 hex}` version, their `-wal`/`-shm` files, and temp files of builds that are no longer running, and returns the deleted paths. Unlinking the path alone, as before 1.7.1, leaves the version files behind.
 - `Index::install($file, $path, check: false)` puts an index file made elsewhere (a snapshot from another server) at a path: copied next to it, synced, rejected unless it is a complete Fuzor index this version opens (optionally `PRAGMA quick_check`), then published like `rebuild()`. A file with a non-empty `-wal` is refused.
 - A multi-document `insert()`, `update()` or `upsert()` tokenises and writes its documents in chunks of the new `Config::$insertChunkSize` (default 2,000) inside its single transaction, reading a generator one chunk at a time. On the 44k catalog, a streamed `insert()` peaks at 127 MB instead of 2 GB and `rebuild()` at about 150 MB instead of 2 GB, at the same speed. The `progress` callback's `$total` is `0` for a generator or other non-countable input.
+- `new Index()` throws a `FuzorException` naming both versions when PHP's SQLite library is older than `Index::MIN_SQLITE_VERSION` (3.46.0), instead of failing later on a statement. `composer.json` now requires `ext-pdo_sqlite` and `ext-mbstring`. The tests run in CI against SQLite 3.46.0 and the current release (`.github/scripts/build-sqlite.sh` builds either one locally).
+- `new Index()` also refuses a 32-bit PHP with a `FuzorException`. Statements that keep the first rows by hit count or score now name the order of rows that tie (document ID, term), so the kept rows do not depend on the plan SQLite chooses; the results are the same as before on SQLite 3.46.0 and 3.54.1.
 
 Performance (44k-product catalog, against 1.7.1, measured 2026-10-26 with the same requests on both sides):
 
@@ -137,6 +140,10 @@ Faster, same results:
 - A numeric range on a field with many distinct values is counted along the numeric index instead of over every value of the field.
 - A browse facet next to an excluded value and a filter matching more than `facetCountDocs` documents is read once instead of twice.
 - A numeric range on a field where several documents share each of many values (a price) is counted from the values inside the range, and a sort or `distinct` on a field with many values no longer adds up the field's rows first. Indexes built with an earlier 2.0 development version have to be rebuilt.
+- A search that is sorted, or whose page reaches past its ranked candidates, reads those matches and the total in one pass instead of two when words match more than `candidatesPerWord` documents.
+- The matches past the ranked candidates are read newest first from a filter value, a value list or a `Filter::any()` of values without listing and sorting all of them first.
+- A `facetSearch()` with `q`, and a search, test a filter with few matching documents against the candidates in memory; the candidates were handed to SQLite once per filter.
+- A filtered browse with few matches reads its total and its page together.
 
 ## 1.7.1 - 2026-10-07
 
