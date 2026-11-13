@@ -91,7 +91,6 @@ lower 012A 012B
 lower 012C 012D
 lower 012E 012F
 lower 0130 0069+0307
-word 00F8-012F
 lower 0132 0133
 lower 0134 0135
 lower 0136 0137
@@ -237,7 +236,12 @@ lower 0248 0249
 lower 024A 024B
 lower 024C 024D
 lower 024E 024F
-word 0131-02AF
+word 00F8-02C1
+word 02C6-02D1
+word 02E0-02E4
+word 02EC-02EC
+word 02EE-02EE
+word 0300-036F
 lower 0370 0371
 lower 0372 0373
 word 0370-0374
@@ -453,7 +457,7 @@ lower 0528 0529
 lower 052A 052B
 lower 052C 052D
 lower 052E 052F
-word 048A-052F
+word 0483-052F
 lower 0531 0561
 lower 0532 0562
 lower 0533 0563
@@ -495,19 +499,25 @@ lower 0556 0586
 word 0531-0556
 word 0559-0559
 word 0560-0588
+word 0591-05BD
+word 05BF-05BF
+word 05C1-05C2
+word 05C4-05C5
+word 05C7-05C7
 word 05D0-05EA
 word 05EF-05F2
-word 0620-064A
-word 0660-0669
-word 066E-066F
-word 0671-06D3
-word 06D5-06D5
-word 06E5-06E6
-word 06EE-06FC
+word 0610-061A
+word 0620-0669
+word 066E-06D3
+word 06D5-06DC
+word 06DF-06E8
+word 06EA-06FC
 word 06FF-06FF
-word 0E01-0E30
-word 0E32-0E33
-word 0E40-0E46
+word 0900-0963
+word 0966-096F
+word 0971-097F
+word 0E01-0E3A
+word 0E40-0E4E
 word 0E50-0E59
 lower 10A0 2D00
 lower 10A1 2D01
@@ -965,6 +975,7 @@ lower 216F 217F
 lower 2183 2184
 word 2150-2189
 word 3041-3096
+word 3099-309A
 word 309D-309F
 word 30A1-30FA
 word 30FC-30FF

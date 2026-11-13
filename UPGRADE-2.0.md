@@ -222,6 +222,18 @@ that assert an exact order may need updating:
   query words inside one field; words that only meet across two fields count a fixed cross-field
   distance per gap. On a 44k-product catalog 99% of multi-word searches keep their top hit.
 
+## Combining marks stay inside their word
+
+A combining mark (an accent written as its own code point, the vowel signs and tone marks of
+Devanagari and other Indic scripts, Arabic, Hebrew and Thai) is now part of the word it sits
+in. 1.x ended the word at every mark: "हिन्दी" was indexed as the three consonants ह, न, द, and
+"İstanbul" as `i` and `stanbul`. Words in these scripts now match as whole words, also by
+prefix and with typos, and are highlighted whole. Nothing in your code changes; the index you
+recreate for 2.0 holds the new terms. Text without combining marks is indexed as before.
+
+Accents are still not folded: a word written with a separate accent mark and the same word
+written with the precomposed letter are different terms.
+
 ## `inspectQuery()` reports negations separately
 
 Like `search()`, `inspectQuery()` splits `-word` and `-"phrase"` off the query first: they are no

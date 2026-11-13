@@ -11134,6 +11134,34 @@ class IndexTest extends TestCase
         $this->assertSame([], $this->facetValues($index, 'ova'));
     }
 
+    public function testWordsWithCombiningMarksAreIndexedWhole(): void
+    {
+        // Without typos: the two Hindi words below are one vowel sign apart.
+        $index = new Index($this->dbPath, config: new Config(typoTolerance: new TypoTolerance(enabled: false)));
+        $index->insert([
+            ['id' => 1, 'title' => 'हिन्दी भाषा'],
+            ['id' => 2, 'title' => 'हिन्द महासागर'],
+            ['id' => 3, 'title' => 'ที่นี่ น้ำ'],
+        ]);
+        $exact = new SearchOptions(asYouType: false);
+        // Cut at its marks, either word was the consonants ह न द and matched both documents.
+        $this->assertSame([1], $index->search('हिन्दी', $exact)->getIds());
+        $this->assertSame([2], $index->search('हिन्द', $exact)->getIds());
+        $asYouType = $index->search('हिन्द')->getIds();
+        sort($asYouType);
+        $this->assertSame([1, 2], $asYouType);
+        $this->assertSame([3], $index->search('น้ำ', $exact)->getIds());
+        $this->assertSame([], $index->search('ह', $exact)->getIds());
+        $this->assertSame(
+            '<mark>हिन्दी</mark> भाषा',
+            $index->highlighter(asYouType: false)->highlight('हिन्दी', 'हिन्दी भाषा'),
+        );
+        $this->assertSame(
+            'हिन्दी <mark>भाषा</mark>',
+            $index->highlighter(asYouType: false)->highlight('भाषा', 'हिन्दी भाषा'),
+        );
+    }
+
     public function testSqliteLibraryBelowTheMinimumIsRefused(): void
     {
         $check = new \ReflectionMethod(Index::class, 'checkSqliteVersion');

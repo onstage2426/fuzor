@@ -19,8 +19,8 @@ namespace Fuzor;
  */
 final readonly class Highlighter
 {
-    /** A word as the patterns bound it. */
-    private const string WORD_CHARS = '[\p{L}\p{N}\p{Pc}]';
+    /** A word as the patterns bound it; combining marks belong to the letter before them. */
+    private const string WORD_CHARS = '[\p{L}\p{N}\p{Pc}\p{M}]';
 
     /** N-gram window size for the configured language. */
     private int $ngramSize;

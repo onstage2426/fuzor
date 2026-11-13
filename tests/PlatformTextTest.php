@@ -28,9 +28,10 @@ class PlatformTextTest extends TestCase
      * @var list<array{int, int}>
      */
     private const array RANGES = [
-        [0x0000, 0x02AF],   // Latin, IPA
+        [0x0000, 0x036F],   // Latin, IPA, modifier letters, combining marks
         [0x0370, 0x058F],   // Greek, Cyrillic, Armenian
         [0x0590, 0x06FF],   // Hebrew, Arabic
+        [0x0900, 0x097F],   // Devanagari
         [0x0E00, 0x0E7F],   // Thai
         [0x10A0, 0x10FF],   // Georgian
         [0x13A0, 0x13FF],   // Cherokee
@@ -82,8 +83,13 @@ class PlatformTextTest extends TestCase
         $cases = [
             // A capital sigma at the end of a word becomes the final form.
             'ΟΔΟΣ ΣΟΦΟΣ Σ'   => ['οδος', 'σοφος', 'σ'],
-            // The dotted capital I lowercases to i + a combining dot, which ends the word.
-            'İstanbul ISPARTA' => ['i', 'stanbul', 'isparta'],
+            // The dotted capital I lowercases to i + a combining dot, which stays in the word.
+            'İstanbul ISPARTA' => ["i\u{307}stanbul", 'isparta'],
+            // Combining marks belong to the letter before them; one without a letter is dropped.
+            "E\u{301}cole \u{301}x" => ["e\u{301}cole", 'x'],
+            'हिन्दी भाषा'        => ['हिन्दी', 'भाषा'],
+            'العَرَبِيَّةُ'         => ['العَرَبِيَّةُ'],
+            'ที่นี่ น้ำ'          => ['ที่นี่', 'น้ำ'],
             // The sharp s stays one letter in both cases.
             'Straße STRASSE ẞ' => ['straße', 'strasse', 'ß'],
             // Scripts that received their capitals late.

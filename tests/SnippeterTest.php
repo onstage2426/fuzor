@@ -260,8 +260,9 @@ class SnippeterTest extends TestCase
         // Use short padding so the window is large enough to reach the target.
         $text   = 'คำอื่นคำ' . 'กรุงเทพ' . 'คำอื่นคำ';
         $result = $snip->snippet('กรุงเท', $text);
-        // The window finds the densest cluster of matching trigrams inside 'กรุงเทพ'.
-        $this->assertStringContainsString('รุงเท', $result);
+        // The window finds the densest cluster of matching trigrams inside 'กรุงเทพ': it opens
+        // at the query's first trigram (the vowel sign under ร is part of the query word).
+        $this->assertStringContainsString('กรุง', $result);
     }
 
     // --- windowSize default ---

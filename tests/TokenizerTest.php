@@ -7,6 +7,33 @@ use PHPUnit\Framework\TestCase;
 
 class TokenizerTest extends TestCase
 {
+    // --- Combining marks ---
+
+    public function testCombiningMarksStayInsideTheirWord(): void
+    {
+        // Vowel signs and the virama of Devanagari, Arabic vowel marks, Thai tone marks, and an
+        // accent written as its own code point.
+        $this->assertSame(['हिन्दी', 'भाषा'], Tokenizer::split('हिन्दी भाषा'));
+        $this->assertSame(['العَرَبِيَّةُ', 'جَمِيلَةٌ'], Tokenizer::split('العَرَبِيَّةُ جَمِيلَةٌ'));
+        $this->assertSame(['ที่นี่', 'น้ำ'], Tokenizer::split('ที่นี่ น้ำ'));
+        $this->assertSame(["e\u{301}cole"], Tokenizer::split("E\u{301}cole"));
+    }
+
+    public function testCombiningMarkWithoutALetterStartsNoWord(): void
+    {
+        $this->assertSame(['x'], Tokenizer::split("\u{301} \u{301}x"));
+        $this->assertSame([], Tokenizer::split("\u{301}\u{308}"));
+    }
+
+    public function testOffsetsOfWordsWithCombiningMarks(): void
+    {
+        $text = 'नमस्ते हिन्दी';
+        $this->assertSame(
+            [['नमस्ते', 0], ['हिन्दी', strlen('नमस्ते ')]],
+            Tokenizer::splitWithOffsets($text),
+        );
+    }
+
     // --- ASCII fast-path ---
 
     public function testAsciiLowercases(): void

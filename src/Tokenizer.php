@@ -54,6 +54,14 @@ final class Tokenizer
     {
     }
 
+    /**
+     * A word in text with non-ASCII characters: letters, digits, connectors and '@', and after
+     * the first character also combining marks, which belong to the letter before them (an
+     * accent written as its own code point, the vowel signs and tone marks of Indic scripts,
+     * Arabic, Hebrew and Thai). Without them a word was cut in two at every mark.
+     */
+    private const string WORD_PATTERN = '/[\p{L}\p{N}\p{Pc}@][\p{L}\p{N}\p{Pc}\p{M}@]*/u';
+
     /** Languages that use contiguous scripts with no whitespace word delimiters. */
     private const array NGRAM_SCRIPTS = [
         'zh' => 2, 'ja' => 2, 'ko' => 2, 'th' => 3,
@@ -123,7 +131,7 @@ final class Tokenizer
             /** @infection-ignore-all both paths produce identical output for ASCII; fast-path exists for performance only */
             return preg_split('/[^\w@]+/', strtolower($text), -1, PREG_SPLIT_NO_EMPTY) ?: [];
         }
-        preg_match_all('/[\p{L}\p{N}\p{Pc}@]+/u', mb_strtolower($text, 'UTF-8'), $m);
+        preg_match_all(self::WORD_PATTERN, mb_strtolower($text, 'UTF-8'), $m);
         return $m[0];
     }
 
@@ -139,7 +147,7 @@ final class Tokenizer
         if (!preg_match('/[^\x00-\x7F]/', $text)) {
             preg_match_all('/[\w@]+/', strtolower($text), $m, PREG_OFFSET_CAPTURE);
         } else {
-            preg_match_all('/[\p{L}\p{N}\p{Pc}@]+/u', mb_strtolower($text, 'UTF-8'), $m, PREG_OFFSET_CAPTURE);
+            preg_match_all(self::WORD_PATTERN, mb_strtolower($text, 'UTF-8'), $m, PREG_OFFSET_CAPTURE);
         }
         /** @var list<array{0: string, 1: int<0, max>}> */
         return $m[0];
