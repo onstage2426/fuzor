@@ -96,8 +96,8 @@ final class Index implements \Countable
      */
     public const string MIN_SQLITE_VERSION = '3.46.0';
 
-    /** Whether this process's SQLite library has passed requireSqlite(). */
-    private static bool $sqliteChecked = false;
+    /** Whether this process has passed requirePlatform(). */
+    private static bool $platformChecked = false;
 
     /**
      * facet_doc_id_index: leads with doc_id for DELETE-by-doc, and covers key_id, value and
@@ -572,7 +572,7 @@ final class Index implements \Countable
      * @throws QueryException If $schema->language is set but not supported (Language::supports()),
      *                        or if both $readonly and $force are true.
      * @throws \InvalidArgumentException If an entry of $schema->stopWords is not exactly one word.
-     * @throws FuzorException If PHP's SQLite library is older than MIN_SQLITE_VERSION.
+     * @throws FuzorException If PHP's SQLite library is older than MIN_SQLITE_VERSION, or PHP is a 32-bit build.
      */
     public function __construct(
         string $path,
@@ -584,7 +584,7 @@ final class Index implements \Countable
         $schemaProvided = $schema !== null;
         $schema         = $schema ?? new SchemaConfig();
         $this->config   = $config ?? new Config();
-        self::requireSqlite();
+        self::requirePlatform();
         if ($this->readonly && $force) {
             throw new QueryException("Cannot force-create a readonly index.");
         }
@@ -614,22 +614,29 @@ final class Index implements \Countable
     }
 
     /**
-     * Refuse a SQLite library older than MIN_SQLITE_VERSION before any file is touched: on one,
-     * statements fail later with a syntax error that does not name the cause.
+     * Refuse a platform this class cannot run on, before any file is touched: a 32-bit PHP
+     * (facet value IDs are 64-bit integers, packed and shifted as such) and a SQLite library
+     * older than MIN_SQLITE_VERSION, on which statements fail later with a syntax error that
+     * does not name the cause.
      *
-     * Asked of an in-memory connection once per process (the library cannot change while it runs).
+     * Checked once per process; the SQLite version is asked of an in-memory connection (the
+     * library cannot change while the process runs).
      *
-     * @throws FuzorException If the library is too old.
+     * @throws FuzorException If the platform is not supported.
      */
-    private static function requireSqlite(): void
+    private static function requirePlatform(): void
     {
-        if (self::$sqliteChecked) {
+        if (self::$platformChecked) {
             return;
+        }
+        /** @infection-ignore-all a 32-bit PHP cannot be simulated in the tests */
+        if (PHP_INT_SIZE < 8) {
+            throw new FuzorException('Fuzor needs a 64-bit PHP; this one has ' . (PHP_INT_SIZE * 8) . '-bit integers.');
         }
         /** @var string $version */
         $version = new PDO('sqlite::memory:')->getAttribute(PDO::ATTR_CLIENT_VERSION);
         self::checkSqliteVersion($version);
-        self::$sqliteChecked = true;
+        self::$platformChecked = true;
     }
 
     /**

@@ -11219,9 +11219,9 @@ class IndexTest extends TestCase
         }
     }
 
-    public function testTheSqliteLibraryIsCheckedWhenAnIndexIsConstructed(): void
+    public function testThePlatformIsCheckedWhenAnIndexIsConstructed(): void
     {
-        $checked = new \ReflectionProperty(Index::class, 'sqliteChecked');
+        $checked = new \ReflectionProperty(Index::class, 'platformChecked');
         $checked->setValue(null, false);
         new Index($this->dbPath)->close();
         $this->assertTrue($checked->getValue());
