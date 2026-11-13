@@ -5607,6 +5607,77 @@ final class Index implements \Countable
     }
 
     /**
+     * The rows of a positive filter condition as runs that are each in document order, for a
+     * listing newest first that a LIMIT can stop (countedDocsSql(), conditionDrivenSql()), or
+     * null when it has no such runs.
+     *
+     * A value's rows are in document order on the primary key of facet_values, so a value
+     * list gives one run per value. A group (Filter::any()) gives the runs of each child's
+     * most selective condition, which must be a value or value list, with the child's other
+     * conditions probed inside the run. A range, a child without a value condition, or more
+     * than NEWEST_MERGE_MAX_TERMS runs: null (the caller lists the matches whole).
+     *
+     * Each run is [where, params]: a predicate on `facet_values md` and its parameters.
+     *
+     * @param  FacetCondition $driver
+     * @return non-empty-list<array{0: string, 1: list<mixed>}>|null
+     */
+    private function newestRuns(array $driver): ?array
+    {
+        if ($driver['exclude'] || $driver['impossible']) {
+            return null;
+        }
+        $runs = [];
+        if (isset($driver['group'])) {
+            foreach ($driver['group']->children as $child) {
+                $ordered = $this->orderBySelectivity($child);
+                $first   = $ordered[0] ?? null;
+                if ($first === null || isset($first['group'])) {
+                    return null;
+                }
+                $inner  = $this->newestRuns($first);
+                $probes = $this->renderFacetProbes(array_slice($ordered, 1), 'md.doc_id');
+                if ($inner === null || $probes === null) {
+                    return null;
+                }
+                foreach ($inner as [$where, $bound]) {
+                    $runs[] = [$where . $probes[0], [...$bound, ...$probes[1]]];
+                }
+            }
+        } elseif (isset($driver['values']) && !isset($driver['compound']) && !isset($driver['range'])) {
+            $values = array_values(array_unique(array_map(
+                fn(mixed $value): string => is_scalar($value) ? (string) $value : '',
+                $driver['values']['values'],
+            )));
+            foreach ($values as $value) {
+                $runs[] = ['md.key_id = ? AND md.value = ?', [$driver['values']['keyId'], $value]];
+            }
+        }
+        return $runs === [] || count($runs) > self::NEWEST_MERGE_MAX_TERMS ? null : $runs;
+    }
+
+    /**
+     * The runs of newestRuns() merged newest document first: a compound SELECT ordered by
+     * document, each arm reading its run backwards with $tail (the probes of everything
+     * else) inside it, so nothing is sorted and a LIMIT stops every read. With $once a
+     * document that several runs hold comes once.
+     *
+     * @param  non-empty-list<array{0: string, 1: list<mixed>}> $runs
+     * @param  list<mixed>                                      $tailParams
+     * @return array{0: string, 1: list<mixed>}
+     */
+    private function mergedRunsSql(array $runs, string $tail, array $tailParams, bool $once): array
+    {
+        $arms   = [];
+        $params = [];
+        foreach ($runs as [$where, $bound]) {
+            $arms[] = "SELECT md.doc_id FROM facet_values md WHERE {$where}{$tail}";
+            array_push($params, ...$bound, ...$tailParams);
+        }
+        return [implode($once ? ' UNION ' : ' UNION ALL ', $arms) . ' ORDER BY 1 DESC', $params];
+    }
+
+    /**
      * matchingDocsSql() for a browse facet count that Limits::$facetCountDocs may cut, in an
      * order the statement states, so the counted documents never depend on SQLite's plan:
      * the newest $cap matches (document ID descending), except when a range on a
@@ -5615,9 +5686,10 @@ final class Index implements \Countable
      *
      * Returns [sql, params, limit]. With limit the caller appends `LIMIT $cap + 1`: a driver
      * with at most $cap rows cannot be cut and is listed as it comes; a range as above; one
-     * value is read backwards along its primary-key rows, a value list as a merge of its
-     * values' rows, exclusions along doc_lengths. A range on a multi-valued key, a compound
-     * or a longer list has no usable order: its matches are listed whole (limit = false) and
+     * value is read backwards along its primary-key rows, a value list or a group of values
+     * as a merge of the values' rows (newestRuns()), exclusions along doc_lengths. A range on
+     * a multi-valued key, a group with a range or a longer list has no usable order: its
+     * matches are listed whole (limit = false) and
      * the caller keeps the newest (countedDocIds()), unless walking the documents newest
      * first with every condition probed is expected to cost less (COUNTED_ROWS_PER_PROBE;
      * the matches taken as spread evenly over the documents).
@@ -5646,35 +5718,14 @@ final class Index implements \Countable
         if (isset($driver['range']) && !$driver['multiRow']) {
             return ["{$match[0]} ORDER BY md.num_value, md.doc_id", $match[1], true];
         }
-        // The driver's rows as runs in document order: one per value of a list.
-        /** @var list<array{0: string, 1: list<mixed>}> $runs */
-        $runs = [];
-        if (isset($driver['values'])) {
-            $values = array_values(array_unique(array_map(
-                fn(mixed $value): string => is_scalar($value) ? (string) $value : '',
-                $driver['values']['values'],
-            )));
-            foreach ($values as $value) {
-                $runs[] = ['md.key_id = ? AND md.value = ?', [$driver['values']['keyId'], $value]];
-            }
-        }
-        if ($runs !== [] && count($runs) <= self::NEWEST_MERGE_MAX_TERMS) {
+        // The driver's rows as runs in document order: one per value of a list or of a group.
+        $runs = $this->newestRuns($driver);
+        if ($runs !== null) {
             $probes = $this->renderFacetProbes(array_slice($conditions, 1), 'md.doc_id');
             if ($probes === null) {
                 return null;
             }
-            $arms   = [];
-            $params = [];
-            foreach ($runs as [$where, $bound]) {
-                $arms[] = "SELECT md.doc_id FROM facet_values md WHERE {$where}{$probes[0]}";
-                array_push($params, ...$bound, ...$probes[1]);
-            }
-            // A document of a multi-valued key may hold several of the values: once.
-            return [
-                implode($driver['multiRow'] ? ' UNION ' : ' UNION ALL ', $arms) . ' ORDER BY 1 DESC',
-                $params,
-                true,
-            ];
+            return [...$this->mergedRunsSql($runs, $probes[0], $probes[1], $driver['multiRow']), true];
         }
         $documents = max(1, (int) ($this->getInfoValues(['total_documents'])['total_documents'] ?? 0));
         $expected  = (float) $documents;
@@ -9187,7 +9238,8 @@ final class Index implements \Countable
      * of the statement in every form, so the rows do not depend on SQLite's plan.
      *
      * Listed from a filter or phrase with fewer rows than the rarest group (matchDriver(): a
-     * filter's matches read, then sorted; a phrase word read backwards, conditionDrivenSql()),
+     * phrase word or a filter's values read backwards, a range's matches read, then sorted;
+     * conditionDrivenSql()),
      * else from that group's rows (newestWordMatchesSql(),
      * which stops once the caller has its rows). The keyword walk is weighed whole, not by
      * the part expected for the rows asked: matches are not spread evenly over the document
@@ -9341,7 +9393,8 @@ final class Index implements \Countable
      * one exact term whose positions rows are in document order, so it is read backwards and
      * a LIMIT stops the read: listing every match and sorting it cost 283 ms where the
      * ordered read takes 2.7 ms (500k documents, a phrase on a word in 349k, first 1,000). A
-     * filter's matches are read whole and sorted.
+     * value list or a group of them is read as its values' rows merged backwards
+     * (newestRuns()); any other filter's matches are read whole and sorted.
      *
      * @param  array{at: int, slot: int|null, rows: int} $listed
      * @param  list<KeywordGroup>                         $groups
@@ -9402,6 +9455,10 @@ final class Index implements \Countable
         array_push($params, ...$probes[1]);
         if ($newest && count($terms) === 1) {
             return ["SELECT DISTINCT {$doc} FROM positions p WHERE p.term_id = ?{$sql} ORDER BY {$doc} DESC", $params];
+        }
+        $runs = $newest && $k === null ? $this->newestRuns($driver) : null;
+        if ($runs !== null) {
+            return $this->mergedRunsSql($runs, $sql, array_slice($params, count($driver['params'])), $multi);
         }
         $match = 'SELECT ' . ($multi && !$grouped ? 'DISTINCT ' : '') . $from . $sql
             . ($multi && $grouped ? " GROUP BY +{$doc}" : '');

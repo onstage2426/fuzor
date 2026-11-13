@@ -2740,21 +2740,29 @@ class IndexTest extends TestCase
     /**
      * The matches past the ranked candidates follow newest first (document ID descending),
      * whichever way they are listed: from a word's rows, from the merged rows of a prefix's
-     * terms, or from a filter with fewer rows than the word.
+     * terms, or from a filter with fewer rows than the word (one value, a value list, a
+     * group of values on two keys, a range), and every page reports the same exact total.
      *
-     * @param array<string, string> $filter
+     * @param array<string, string|list<string>|FacetRange>|Filter $filter
+     * @param \Closure(array<string, mixed>): bool                 $passes
      */
     #[\PHPUnit\Framework\Attributes\DataProvider('restOrderCases')]
-    public function testMatchesPastCutCandidatesAreNewestFirst(string $query, bool $asYouType, array $filter): void
-    {
-        $schema = new SchemaConfig(filterableAttributes: ['colour']);
+    public function testMatchesPastCutCandidatesAreNewestFirst(
+        string $query,
+        bool $asYouType,
+        array|Filter $filter,
+        \Closure $passes,
+    ): void {
+        $schema = new SchemaConfig(filterableAttributes: ['colour', 'sizes', 'price']);
         $index  = new Index($this->dbPath, schema: $schema);
         $docs   = [];
         for ($id = 1; $id <= 90; $id++) {
             $docs[] = [
                 'id'     => $id,
                 'title'  => str_repeat($id % 5 === 0 ? 'jurken ' : 'jurk ', 1 + $id % 4) . "model {$id}",
-                'colour' => $id % 4 === 0 ? 'red' : 'blue',
+                'colour' => $id % 4 === 0 ? 'red' : ($id % 9 === 0 ? 'green' : 'blue'),
+                'sizes'  => $id % 5 === 0 ? ['big', 'wide'] : ['small'],
+                'price'  => $id,
             ];
         }
         $index->insert($docs);
@@ -2763,7 +2771,8 @@ class IndexTest extends TestCase
             limits: new Limits(candidatesPerWord: 3),
         ), readonly: true);
 
-        $ids = [];
+        $ids    = [];
+        $totals = [];
         for ($offset = 0; $offset < 90; $offset += 10) {
             $result = $capped->search($query, new SearchOptions(
                 asYouType: $asYouType,
@@ -2772,12 +2781,14 @@ class IndexTest extends TestCase
                 filter: $filter,
                 attributesToRetrieve: [],
             ));
-            $ids = [...$ids, ...$result->getIds()];
+            $ids      = [...$ids, ...$result->getIds()];
+            $totals[] = $result->totalHits;
         }
         $matching = array_filter($docs, fn(array $d): bool => $d['id'] !== 84 && $d['id'] !== 90
-            && ($filter === [] || $d['colour'] === $filter['colour'])
+            && $passes($d)
             && ($asYouType || !str_contains($d['title'], 'jurken')));
         $this->assertSame(self::sorted(array_column($matching, 'id')), self::sorted($ids));
+        $this->assertSame([count($matching)], array_values(array_unique($totals)));
         // The ranked candidates come first (at most 4 x candidatesPerWord are scored); the
         // rest is in descending document order.
         $rest     = array_slice($ids, 12);
@@ -2788,15 +2799,64 @@ class IndexTest extends TestCase
     }
 
     /**
-     * @return array<string, array{0: string, 1: bool, 2: array<string, string>}>
+     * @return array<string, array{
+     *     0: string,
+     *     1: bool,
+     *     2: array<string, string|list<string>|FacetRange>|Filter,
+     *     3: \Closure(array<string, mixed>): bool,
+     * }>
      */
     public static function restOrderCases(): array
     {
+        $sizes = static fn(array $d): array => is_array($d['sizes']) ? $d['sizes'] : [];
         return [
-            'one term'              => ['jurk', false, []],
-            'prefix of two terms'   => ['jur', true, []],
-            'word walk with filter' => ['jurk', false, ['colour' => 'blue']],
-            'listed from a filter'  => ['jurk', false, ['colour' => 'red']],
+            'one term'              => ['jurk', false, [], static fn(array $d): bool => true],
+            'prefix of two terms'   => ['jur', true, [], static fn(array $d): bool => true],
+            'word walk with filter' => [
+                'jurk',
+                false,
+                ['colour' => 'blue'],
+                static fn(array $d): bool => $d['colour'] === 'blue',
+            ],
+            'listed from a value' => [
+                'jurk',
+                false,
+                ['colour' => 'red'],
+                static fn(array $d): bool => $d['colour'] === 'red',
+            ],
+            'listed from a value list' => [
+                'jurk',
+                false,
+                ['colour' => ['red', 'green']],
+                static fn(array $d): bool => $d['colour'] !== 'blue',
+            ],
+            // Both values of a document's key: the document comes once.
+            'listed from a list on a multi-valued key' => [
+                'jur',
+                true,
+                ['sizes' => ['big', 'wide']],
+                static fn(array $d): bool => in_array('big', $sizes($d), true),
+            ],
+            // Documents 20, 40, … hold both values: once each.
+            'listed from a group of values' => [
+                'jur',
+                true,
+                Filter::any(['colour' => 'red'], ['sizes' => 'big']),
+                static fn(array $d): bool => $d['colour'] === 'red' || in_array('big', $sizes($d), true),
+            ],
+            'listed from a group with a second condition' => [
+                'jur',
+                true,
+                Filter::any(['colour' => 'red', 'sizes' => 'small'], ['sizes' => 'wide']),
+                static fn(array $d): bool => ($d['colour'] === 'red' && in_array('small', $sizes($d), true))
+                    || in_array('wide', $sizes($d), true),
+            ],
+            'word walk with a range' => [
+                'jur',
+                true,
+                ['price' => FacetRange::between(30.0, 55.0)],
+                static fn(array $d): bool => $d['price'] >= 30 && $d['price'] <= 55,
+            ],
         ];
     }
 
