@@ -4374,10 +4374,16 @@ final class Index implements \Countable
             $ids      = $this->browseFacetDocIds($conditions, $capped) ?? [];
             $matchIds = ['ids' => $ids, 'capped' => $capped];
         }
+        // An unsorted page of few matches comes with their number, from one read.
+        $counted    = $match !== null && $classified === null && $matchIds === null && $distinct === null
+            && $sortSpecs === [] && $limit > 0 && !self::isExclusionOnly($conditions)
+            ? $this->browseCountedPage($conditions, $match, $totalDocuments, $offset, $limit)
+            : null;
         $total      = match (true) {
             $conditions === []                         => $totalDocuments,
             $match === null                            => 0,
             $classified !== null                       => $classified['total'],
+            $counted !== null                          => $counted['total'],
             self::isExclusionOnly($conditions)         => $this->countKeptDocs($conditions, $totalDocuments),
             $matchIds !== null && !$matchIds['capped'] => count($matchIds['ids']),
             default                                    => $this->countBrowseDocs($conditions, $match),
@@ -4446,6 +4452,8 @@ final class Index implements \Countable
             );
         } elseif (isset($classified['ids'])) {
             $pagedIds = array_slice(self::newestFirst($classified['ids']) ?? [], $offset, $limit);
+        } elseif ($counted !== null) {
+            $pagedIds = $counted['ids'];
         } else {
             $pagedIds = $this->browseUnsortedPage($conditions, $probe, $offset, $limit);
         }
@@ -4545,6 +4553,75 @@ final class Index implements \Countable
             }
         }
         return $result;
+    }
+
+    /**
+     * The total and one unsorted page (newest first) of a filtered browse from one read of
+     * its matches, or null when the count and the page are better read apart.
+     *
+     * Few matches (under a tenth of the index, see browse()) make the page list them all, as
+     * the count just did: both then cost the filter once each (100k documents, two ranges
+     * and an exclusion, 2,546 matches: 31.6 + 33.4 ms; counted in the same statement 32.3
+     * ms). With more matches the page is a short walk and the count alone is cheaper (500k
+     * documents, 158k matches: 207 against 275 ms), so this applies only while the matches
+     * expected, the conditions taken as independent, stay under that tenth. Not where
+     * countBrowseDocs() has a cheaper count than reading the matches.
+     *
+     * @param  non-empty-list<FacetCondition>   $conditions From orderBySelectivity().
+     * @param  array{0: string, 1: list<mixed>} $match      matchingDocsSql($conditions).
+     * @return array{total: int, ids: list<int>}|null
+     */
+    private function browseCountedPage(
+        array $conditions,
+        array $match,
+        int $totalDocuments,
+        int $offset,
+        int $limit,
+    ): ?array {
+        if (count($conditions) < 2 || $totalDocuments === 0) {
+            return null;
+        }
+        $expected  = (float) $totalDocuments;
+        $driver    = null;
+        $excluded  = 0;
+        foreach ($conditions as $condition) {
+            $rows  = $this->conditionRowCount($condition);
+            $share = min(1.0, $rows / $totalDocuments);
+            if (!$condition['exclude']) {
+                $expected *= $share;
+                $driver  ??= $rows;
+            } else {
+                $excluded += $rows;
+                if (isset($condition['values'])) {
+                    $expected *= 1.0 - $share;
+                }
+            }
+        }
+        // countBrowseDocs() counts by difference there.
+        if ($driver === null || ($excluded > 0 && $excluded < $driver) || $expected * 10 >= $totalDocuments) {
+            return null;
+        }
+        // The matches are held once; the first row is their number (also when the page is
+        // empty), the others the page.
+        $stmt = $this->prepare(
+            "WITH m AS MATERIALIZED ({$match[0]})
+             SELECT 0, COUNT(*) FROM m
+             UNION ALL
+             SELECT 1, doc_id FROM (SELECT doc_id FROM m ORDER BY doc_id DESC LIMIT ? OFFSET ?)"
+        );
+        $stmt->execute([...$match[1], $limit, $offset]);
+        $total = 0;
+        $ids   = [];
+        /** @var list<array{0: int, 1: int}> $rows */
+        $rows = $stmt->fetchAll(PDO::FETCH_NUM);
+        foreach ($rows as [$kind, $value]) {
+            if ((int) $kind === 0) {
+                $total = (int) $value;
+            } else {
+                $ids[] = (int) $value;
+            }
+        }
+        return ['total' => $total, 'ids' => $ids];
     }
 
     /**

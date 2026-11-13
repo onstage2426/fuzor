@@ -2614,6 +2614,85 @@ class IndexTest extends TestCase
     }
 
     /**
+     * A filtered browse with few matches reads its total and its page together: every page
+     * is the matches newest first with the exact total, also a page past the last match and
+     * with a document deleted.
+     *
+     * @param array<string, string|list<string>|FacetRange|FacetExclude>|Filter $filter
+     * @param \Closure(array<string, mixed>): bool                              $passes
+     */
+    #[\PHPUnit\Framework\Attributes\DataProvider('sparseBrowseCases')]
+    public function testSparseFilteredBrowsePagesNewestFirstWithExactTotal(array|Filter $filter, \Closure $passes): void
+    {
+        $schema = new SchemaConfig(filterableAttributes: ['colour', 'sizes', 'price', 'stock', 'id']);
+        $index  = new Index($this->dbPath, schema: $schema);
+        $docs   = [];
+        for ($id = 1; $id <= 400; $id++) {
+            $docs[] = [
+                'id'     => $id,
+                'title'  => "model {$id}",
+                'colour' => ['red', 'blue', 'green', 'grey', 'white'][$id % 5],
+                'sizes'  => $id % 20 === 0 ? ['big', 'wide'] : ['small'],
+                'price'  => $id % 50,
+                'stock'  => $id % 3 === 0 ? 'out' : 'in',
+            ];
+        }
+        $index->insert($docs);
+        $index->delete(350, 385);
+        $expected = array_reverse(array_column(array_filter(
+            $docs,
+            fn(array $d): bool => $d['id'] !== 350 && $d['id'] !== 385 && $passes($d),
+        ), 'id'));
+        $this->assertGreaterThan(12, count($expected));
+        $this->assertLessThan(60, count($expected));
+
+        for ($offset = 0; $offset <= count($expected) + 5; $offset += 5) {
+            $result = $index->search('', new SearchOptions(
+                filter: $filter,
+                limit: 5,
+                offset: $offset,
+                attributesToRetrieve: [],
+            ));
+            $this->assertSame(array_slice($expected, $offset, 5), $result->getIds(), "offset {$offset}");
+            $this->assertSame(count($expected), $result->totalHits, "offset {$offset}");
+        }
+    }
+
+    /**
+     * @return array<string, array{
+     *     0: array<string, string|list<string>|FacetRange|FacetExclude>|Filter,
+     *     1: \Closure(array<string, mixed>): bool,
+     * }>
+     */
+    public static function sparseBrowseCases(): array
+    {
+        $sizes = static fn(array $d): array => is_array($d['sizes']) ? $d['sizes'] : [];
+        // One condition holds far more rows than the smallest, so they are not read into PHP.
+        $recent = FacetRange::min(20.0);
+        return [
+            'two ranges' => [
+                ['price' => FacetRange::between(5.0, 9.0), 'id' => $recent],
+                static fn(array $d): bool => $d['price'] >= 5 && $d['price'] <= 9 && $d['id'] >= 20,
+            ],
+            'two ranges and an exclusion' => [
+                ['price' => FacetRange::between(5.0, 9.0), 'id' => $recent, 'stock' => new FacetExclude('out')],
+                static fn(array $d): bool => $d['price'] >= 5 && $d['price'] <= 9 && $d['id'] >= 20
+                    && $d['stock'] !== 'out',
+            ],
+            // A document holds both listed values: once.
+            'list on a multi-valued key and a range' => [
+                ['sizes' => ['big', 'wide'], 'id' => $recent],
+                static fn(array $d): bool => in_array('big', $sizes($d), true) && $d['id'] >= 20,
+            ],
+            'group and range' => [
+                Filter::all(Filter::any(['sizes' => 'wide'], ['price' => '7']), ['id' => $recent]),
+                static fn(array $d): bool => (in_array('wide', $sizes($d), true) || $d['price'] === 7)
+                    && $d['id'] >= 20,
+            ],
+        ];
+    }
+
+    /**
      * A one-word search whose filter holds far fewer documents than the word ranks the
      * filtered matches themselves: the page is the uncapped ranking's, although none of the
      * word's best documents passes the filter.
