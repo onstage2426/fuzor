@@ -550,6 +550,7 @@ Every exception Fuzor throws for its own reasons extends `Fuzor\Exceptions\Fuzor
 | Exception | Thrown for |
 |---|---|
 | `Fuzor\Exceptions\QueryException` | Domain and state errors: an unsupported language, a missing, duplicate or unknown document ID, a field outside the schema's lists, a disabled document store, a schema passed to an existing index, a file of another schema revision |
+| `Fuzor\Exceptions\FuzorException` | The SQLite library PHP loads is older than `Index::MIN_SQLITE_VERSION` (3.46.0); thrown by `new Index()` before any file is touched |
 | `Fuzor\Exceptions\IOException` | File problems: a missing directory or index file, a write on a `readonly` index, a failed publish, a file that is not a Fuzor index |
 | `\InvalidArgumentException` | A malformed argument: a bad sort spec, an out-of-range size in `Config` or `TypoTolerance`, a stop word of several words, an empty `deleteByFilter()` filter, a malformed `Filter` entry, a filter value no document can hold (a bool, `null`, NaN, infinity), an unknown `checkpoint()` mode |
 | `\LogicException` | A method called on an index after `close()` |

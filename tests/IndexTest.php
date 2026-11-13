@@ -18,6 +18,7 @@ use Fuzor\SearchOptions;
 use Fuzor\SearchResult;
 use Fuzor\Tokenizer;
 use Fuzor\TypoTolerance;
+use Fuzor\Exceptions\FuzorException;
 use Fuzor\Exceptions\IOException;
 use Fuzor\Exceptions\QueryException;
 use PHPUnit\Framework\Attributes\DataProvider;
@@ -11131,6 +11132,31 @@ class IndexTest extends TestCase
         $this->assertSame(['atelier_aimée'], $this->facetValues($index, 'Aimee'));
         // Only word starts: "ova" is inside "Pronovias".
         $this->assertSame([], $this->facetValues($index, 'ova'));
+    }
+
+    public function testSqliteLibraryBelowTheMinimumIsRefused(): void
+    {
+        $check = new \ReflectionMethod(Index::class, 'checkSqliteVersion');
+        foreach ([Index::MIN_SQLITE_VERSION, '3.46.1', '3.100.0', '4.0.0'] as $version) {
+            $check->invoke(null, $version);
+        }
+        foreach (['3.45.3', '3.9.2', '2.8.17'] as $version) {
+            try {
+                $check->invoke(null, $version);
+                $this->fail("SQLite {$version} was accepted");
+            } catch (FuzorException $e) {
+                $this->assertStringContainsString(Index::MIN_SQLITE_VERSION . ' or newer', $e->getMessage());
+                $this->assertStringContainsString("uses {$version}.", $e->getMessage());
+            }
+        }
+    }
+
+    public function testTheSqliteLibraryIsCheckedWhenAnIndexIsConstructed(): void
+    {
+        $checked = new \ReflectionProperty(Index::class, 'sqliteChecked');
+        $checked->setValue(null, false);
+        new Index($this->dbPath)->close();
+        $this->assertTrue($checked->getValue());
     }
 
     public function testFacetMatchKeyAsciiFastPathAgreesWithTheGeneralPath(): void

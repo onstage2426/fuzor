@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Fuzor;
 
 use Fuzor\BooleanParser;
+use Fuzor\Exceptions\FuzorException;
 use Fuzor\Exceptions\IOException;
 use Fuzor\Exceptions\QueryException;
 use Fuzor\FacetExclude;
@@ -88,6 +89,15 @@ final class Index implements \Countable
 
     /** Lowest on-disk revision this version opens; older files are rejected at open. */
     private const int MIN_SCHEMA_VERSION = 4;
+
+    /**
+     * Oldest SQLite library this class runs on (STRICT tables, RETURNING, CTEs in DML, PRAGMA
+     * optimize masks). Checked once per process when the first Index is constructed.
+     */
+    public const string MIN_SQLITE_VERSION = '3.46.0';
+
+    /** Whether this process's SQLite library has passed requireSqlite(). */
+    private static bool $sqliteChecked = false;
 
     /**
      * facet_doc_id_index: leads with doc_id for DELETE-by-doc, and covers key_id, value and
@@ -562,6 +572,7 @@ final class Index implements \Countable
      * @throws QueryException If $schema->language is set but not supported (Language::supports()),
      *                        or if both $readonly and $force are true.
      * @throws \InvalidArgumentException If an entry of $schema->stopWords is not exactly one word.
+     * @throws FuzorException If PHP's SQLite library is older than MIN_SQLITE_VERSION.
      */
     public function __construct(
         string $path,
@@ -573,6 +584,7 @@ final class Index implements \Countable
         $schemaProvided = $schema !== null;
         $schema         = $schema ?? new SchemaConfig();
         $this->config   = $config ?? new Config();
+        self::requireSqlite();
         if ($this->readonly && $force) {
             throw new QueryException("Cannot force-create a readonly index.");
         }
@@ -598,6 +610,38 @@ final class Index implements \Countable
             $this->replaceWithEmptyIndex($schema);
         } else {
             $this->createIndex($schema);
+        }
+    }
+
+    /**
+     * Refuse a SQLite library older than MIN_SQLITE_VERSION before any file is touched: on one,
+     * statements fail later with a syntax error that does not name the cause.
+     *
+     * Asked of an in-memory connection once per process (the library cannot change while it runs).
+     *
+     * @throws FuzorException If the library is too old.
+     */
+    private static function requireSqlite(): void
+    {
+        if (self::$sqliteChecked) {
+            return;
+        }
+        /** @var string $version */
+        $version = new PDO('sqlite::memory:')->getAttribute(PDO::ATTR_CLIENT_VERSION);
+        self::checkSqliteVersion($version);
+        self::$sqliteChecked = true;
+    }
+
+    /**
+     * @throws FuzorException If $version is below MIN_SQLITE_VERSION.
+     */
+    private static function checkSqliteVersion(string $version): void
+    {
+        if (version_compare($version, self::MIN_SQLITE_VERSION, '<')) {
+            throw new FuzorException(
+                "Fuzor needs SQLite " . self::MIN_SQLITE_VERSION . " or newer; PHP's pdo_sqlite uses {$version}."
+                . " Update the SQLite library PHP is linked against."
+            );
         }
     }
 
