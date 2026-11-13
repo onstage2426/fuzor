@@ -4,24 +4,59 @@ on: [push, pull_request]
 
 jobs:
   ci:
+    name: PHP ${{ matrix.php }}, SQLite ${{ matrix.sqlite }}
     runs-on: ubuntu-latest
+    continue-on-error: ${{ matrix.experimental }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The oldest supported SQLite and the current one: a new query planner or a statement
+          # that needs a newer library shows up as a failing test (the golden output included).
+          - { php: '8.5', sqlite: '3.46.0', experimental: false, lint: false }
+          - { php: '8.5', sqlite: 'latest', experimental: false, lint: true }
+          # The next PHP: reported, not required.
+          - { php: 'nightly', sqlite: 'latest', experimental: true, lint: false }
 
     steps:
       - uses: actions/checkout@v6
 
       - uses: shivammathur/setup-php@v2
         with:
-          php-version: '8.5'
-          coverage: xdebug
+          php-version: ${{ matrix.php }}
+          extensions: mbstring, pdo_sqlite
+          coverage: ${{ matrix.lint && 'xdebug' || 'none' }}
+
+      - name: Build SQLite ${{ matrix.sqlite }}
+        run: |
+          .github/scripts/build-sqlite.sh '${{ matrix.sqlite }}' "$RUNNER_TEMP/sqlite"
+          echo "LD_LIBRARY_PATH=$RUNNER_TEMP/sqlite/lib" >> "$GITHUB_ENV"
+
+      - name: Check that PHP runs on the built SQLite
+        run: |
+          loaded=$(php -r 'echo (new PDO("sqlite::memory:"))->query("SELECT sqlite_version()")->fetchColumn();')
+          echo "PHP $(php -r 'echo PHP_VERSION;'), SQLite $loaded"
+          if [ '${{ matrix.sqlite }}' != latest ] && [ "$loaded" != '${{ matrix.sqlite }}' ]; then
+            echo "::error::PHP loaded SQLite $loaded instead of ${{ matrix.sqlite }}"
+            exit 1
+          fi
+          strings "$RUNNER_TEMP/sqlite/lib/libsqlite3.so.0" | grep -q -F "$loaded" \
+            || { echo "::error::PHP did not load the built library"; exit 1; }
 
       - uses: actions/cache@v5
         with:
           path: vendor
-          key: composer-${{ hashFiles('composer.lock') }}
-          restore-keys: composer-
+          key: composer-${{ matrix.php }}-${{ hashFiles('composer.lock') }}
+          restore-keys: composer-${{ matrix.php }}-
 
-      - run: composer install --no-interaction --prefer-dist
+      - run: composer install --no-interaction --prefer-dist ${{ matrix.experimental && '--ignore-platform-req=php' || '' }}
 
-      - run: vendor/bin/phpcs
-      - run: vendor/bin/phpstan analyse --memory-limit=512M
-      - run: vendor/bin/phpunit --coverage-text --colors=never
+      - if: matrix.lint
+        run: vendor/bin/phpcs
+      - if: matrix.lint
+        run: vendor/bin/phpstan analyse --memory-limit=1G
+      - if: matrix.lint
+        run: vendor/bin/phpunit --coverage-text --colors=never
+      - if: ${{ !matrix.lint }}
+        run: vendor/bin/phpunit --colors=never
