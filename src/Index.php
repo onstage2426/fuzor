@@ -3493,17 +3493,36 @@ final class Index implements \Countable
         ];
 
         $total = count($docScores);
+        /** @var list<int>|null $newest  The newest matches, read for the total and the rest. */
+        $newest = null;
         if ($candidatesCapped && $distinct === null) {
             // The candidates hold only part of the matches: count them in SQL, up to one past
             // Limits::$totalHits (the result is capped there).
             // The facet count read the result set whole when its common group was not cut.
             $counted = $classified['total'] ?? $facetCounts['total'] ?? null;
+            $cap     = $this->config->limits->totalHits;
+            // A page that reaches past the candidates lists the newest matches anyway (below):
+            // as many as it can show and one more, or up to the cap when the statement reads
+            // every match before its first row. Fewer rows than asked are all the matches, so
+            // their number is the total and nothing is counted (100k documents, a word with a
+            // group of filters and 32 matches: count 19.6 ms + list 19.1 ms, one read).
+            $shown = $sortSpecs !== [] ? $cap : min($offset + $limit, $cap);
+            if ($counted === null && $limit > 0 && ($sortSpecs !== [] || $shown > $total)) {
+                $asked   = $shown + 1;
+                $newest  = $this->newestMatchIds(
+                    $required,
+                    [...$baseConditions, ...$filterConditions],
+                    $asked,
+                    $cap + 1,
+                );
+                $counted = count($newest) < $asked || $asked > $cap ? count($newest) : null;
+            }
             $total   = $counted !== null
-                ? min($counted, $this->config->limits->totalHits + 1)
+                ? min($counted, $cap + 1)
                 : $this->countSearchMatches(
                     $required,
                     [...$baseConditions, ...$filterConditions],
-                    $this->config->limits->totalHits + 1,
+                    $cap + 1,
                 );
         }
 
@@ -3667,12 +3686,10 @@ final class Index implements \Countable
         $ranked = count($docScores);
         $rest   = [];
         if ($candidatesCapped && $total > $ranked && ($sortSpecs !== [] || $offset + $limit > $ranked)) {
-            $rest = $this->restOfResultSet(
-                $required,
-                [...$baseConditions, ...$filterConditions],
-                $docScores,
-                min($total, $sortSpecs !== [] ? $this->config->limits->totalHits : $offset + $limit) - $ranked,
-            );
+            $count = min($total, $sortSpecs !== [] ? $this->config->limits->totalHits : $offset + $limit) - $ranked;
+            $rest  = $newest !== null
+                ? self::firstOutside($newest, $docScores, $count)
+                : $this->restOfResultSet($required, [...$baseConditions, ...$filterConditions], $docScores, $count);
             // Each holds the groups up to minBucket; its bucket and typos are not known, so it
             // ranks as the last of that bucket: the bucket's typo budget, score 0.
             $restTypos = $maxTypos()[$minBucket] ?? 0;
@@ -8917,21 +8934,55 @@ final class Index implements \Countable
         array $candidates,
         int $count,
     ): array {
-        $match = $count > 0 ? $this->newestMatchesSql($groups, $conditions) : null;
+        if ($count <= 0) {
+            return [];
+        }
+        $limit  = $count + count($candidates);
+        $newest = $this->newestMatchIds($groups, $conditions, $limit);
+        return self::firstOutside($newest, $candidates, $count);
+    }
+
+    /**
+     * The newest $limit documents of the result set (newestMatchesSql() of $groups and
+     * $conditions), document ID descending. With $most, a statement that reads every match
+     * anyway returns up to $most of them; $limit is set to the limit used.
+     *
+     * @param  list<KeywordGroup>   $groups
+     * @param  list<FacetCondition> $conditions
+     * @return list<int>
+     */
+    private function newestMatchIds(array $groups, array $conditions, int &$limit, ?int $most = null): array
+    {
+        $match = $this->newestMatchesSql($groups, $conditions);
         if ($match === null) {
             return [];
         }
+        if ($most !== null && $match[2]) {
+            $limit = max($limit, $most);
+        }
         $stmt = $this->prepare("{$match[0]} LIMIT ?");
-        $stmt->execute([...$match[1], $count + count($candidates)]);
-        $rest = [];
+        $stmt->execute([...$match[1], $limit]);
         /** @var list<int|string> $ids */
-        $ids  = $stmt->fetchAll(PDO::FETCH_COLUMN);
+        $ids = $stmt->fetchAll(PDO::FETCH_COLUMN);
+        return array_map(intval(...), $ids);
+    }
+
+    /**
+     * The first $count of $ids that are not keys of $candidates, in the order given.
+     *
+     * @param  list<int>         $ids
+     * @param  array<int, mixed> $candidates
+     * @return list<int>
+     */
+    private static function firstOutside(array $ids, array $candidates, int $count): array
+    {
+        $rest = [];
         foreach ($ids as $docId) {
-            if (!isset($candidates[(int) $docId])) {
-                $rest[] = (int) $docId;
-                if (count($rest) === $count) {
-                    break;
-                }
+            if (count($rest) >= $count) {
+                break;
+            }
+            if (!isset($candidates[$docId])) {
+                $rest[] = $docId;
             }
         }
         return $rest;
@@ -9249,7 +9300,7 @@ final class Index implements \Countable
      *
      * @param  list<KeywordGroup>   $groups
      * @param  list<FacetCondition> $conditions
-     * @return array{0: string, 1: list<mixed>}|null
+     * @return array{0: string, 1: list<mixed>, 2: bool}|null  As conditionDrivenSql().
      */
     private function newestMatchesSql(array $groups, array $conditions): ?array
     {
@@ -9275,7 +9326,7 @@ final class Index implements \Countable
      *
      * @param  list<KeywordGroup>   $groups     Rarest first.
      * @param  list<FacetCondition> $conditions
-     * @return array{0: string, 1: list<mixed>}|null
+     * @return array{0: string, 1: list<mixed>, 2: bool}|null  As conditionDrivenSql().
      */
     private function newestWordMatchesSql(array $groups, array $conditions): ?array
     {
@@ -9302,6 +9353,7 @@ final class Index implements \Countable
                 'SELECT DISTINCT d.doc_id FROM doclist d WHERE d.term_id IN ('
                     . $this->placeholders(count($terms)) . "){$tail} ORDER BY d.doc_id DESC",
                 [...$terms, ...$bound],
+                true,
             ];
         }
         $arms   = [];
@@ -9310,7 +9362,7 @@ final class Index implements \Countable
             $arms[] = "SELECT d.doc_id FROM doclist d WHERE d.term_id = ?{$tail}";
             array_push($params, $termId, ...$bound);
         }
-        return [implode(' UNION ', $arms) . ' ORDER BY 1 DESC', $params];
+        return [implode(' UNION ', $arms) . ' ORDER BY 1 DESC', $params, false];
     }
 
     /**
@@ -9396,10 +9448,13 @@ final class Index implements \Countable
      * value list or a group of them is read as its values' rows merged backwards
      * (newestRuns()); any other filter's matches are read whole and sorted.
      *
+     * The third element tells whether the statement reads every match before its first row
+     * (a LIMIT then saves nothing).
+     *
      * @param  array{at: int, slot: int|null, rows: int} $listed
      * @param  list<KeywordGroup>                         $groups
      * @param  array<int, FacetCondition>                 $conditions
-     * @return array{0: string, 1: list<mixed>}|null
+     * @return array{0: string, 1: list<mixed>, 2: bool}|null
      */
     private function conditionDrivenSql(
         array $listed,
@@ -9454,15 +9509,22 @@ final class Index implements \Countable
         $sql .= $probes[0];
         array_push($params, ...$probes[1]);
         if ($newest && count($terms) === 1) {
-            return ["SELECT DISTINCT {$doc} FROM positions p WHERE p.term_id = ?{$sql} ORDER BY {$doc} DESC", $params];
+            return [
+                "SELECT DISTINCT {$doc} FROM positions p WHERE p.term_id = ?{$sql} ORDER BY {$doc} DESC",
+                $params,
+                false,
+            ];
         }
         $runs = $newest && $k === null ? $this->newestRuns($driver) : null;
         if ($runs !== null) {
-            return $this->mergedRunsSql($runs, $sql, array_slice($params, count($driver['params'])), $multi);
+            $merged = $this->mergedRunsSql($runs, $sql, array_slice($params, count($driver['params'])), $multi);
+            return [...$merged, false];
         }
         $match = 'SELECT ' . ($multi && !$grouped ? 'DISTINCT ' : '') . $from . $sql
             . ($multi && $grouped ? " GROUP BY +{$doc}" : '');
-        return $newest ? ["SELECT m.doc_id FROM ({$match}) m ORDER BY m.doc_id DESC", $params] : [$match, $params];
+        return $newest
+            ? ["SELECT m.doc_id FROM ({$match}) m ORDER BY m.doc_id DESC", $params, true]
+            : [$match, $params, true];
     }
 
     /**
