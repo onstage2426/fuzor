@@ -7795,7 +7795,7 @@ final class Index implements \Countable
         if ($n === 1) {
             $stmt = $this->stmt(
                 "boolDocIds1{$tag}",
-                "SELECT doc_id FROM doclist WHERE term_id = ?{$live} ORDER BY hit_count DESC LIMIT ?"
+                "SELECT doc_id FROM doclist WHERE term_id = ?{$live} ORDER BY hit_count DESC, doc_id LIMIT ?"
             );
             $stmt->execute([$termIds[0], $limit + 1]);
             /** @var list<int> $rows */
@@ -7807,7 +7807,8 @@ final class Index implements \Countable
         $placeholders = $this->placeholders($n);
         $stmt         = $this->stmt(
             "boolDocIds:{$n}{$tag}",
-            "SELECT doc_id FROM doclist WHERE term_id IN ({$placeholders}){$live} ORDER BY hit_count DESC LIMIT ?"
+            "SELECT doc_id FROM doclist WHERE term_id IN ({$placeholders}){$live}
+              ORDER BY hit_count DESC, term_id, doc_id LIMIT ?"
         );
         $stmt->execute([...$termIds, $limit + 1]);
         /** @var list<int> $rows */
@@ -8810,7 +8811,7 @@ final class Index implements \Countable
             $stmt = $this->stmt(
                 'wordlistPrefix',
                 'SELECT id, term, num_hits, num_docs FROM wordlist'
-                . ' WHERE term LIKE :keyword ORDER BY length(term) ASC, num_hits DESC LIMIT :maxExpansions;'
+                . ' WHERE term LIKE :keyword ORDER BY length(term) ASC, num_hits DESC, term LIMIT :maxExpansions;'
             );
             $stmt->bindValue(':keyword', $keyword . '%');
             $stmt->bindValue(':maxExpansions', $maxExpansions + 1, PDO::PARAM_INT);
@@ -10021,7 +10022,7 @@ final class Index implements \Countable
                   FROM ({$within[0]}) m
                  CROSS JOIN doclist d ON d.doc_id = m.doc_id AND d.term_id IN ({$this->placeholders($n)})
                   JOIN doc_lengths dl ON dl.doc_id = d.doc_id
-                 ORDER BY score DESC, d.doc_id ASC LIMIT ?"
+                 ORDER BY score DESC, d.doc_id ASC, d.term_id ASC LIMIT ?"
             );
             $stmt->execute([$idfK1p1, $k1_1mb, $k1b_avgdl, ...$within[1], ...$ids, $limit]);
             /** @var list<array{0: int, 1: int, 2: float}> $rows */
@@ -10035,7 +10036,7 @@ final class Index implements \Countable
                 'SELECT d.term_id, d.doc_id, ' . self::bm25Sql('d') . " AS score
                   FROM doclist d JOIN doc_lengths dl ON dl.doc_id = d.doc_id
                  WHERE d.term_id IN ({$this->placeholders($n)}){$live}
-                 ORDER BY score DESC, d.doc_id ASC LIMIT ?"
+                 ORDER BY score DESC, d.doc_id ASC, d.term_id ASC LIMIT ?"
             );
             $stmt->execute([$idfK1p1, $k1_1mb, $k1b_avgdl, ...$ids, $limit]);
             /** @var list<array{0: int, 1: int, 2: float}> $rows */
@@ -10053,6 +10054,13 @@ final class Index implements \Countable
         // Non-fuzzy multi-term paths use UNION ALL of per-term SELECTs. With the
         // doclist_term_hitcount index on (term_id, hit_count DESC) each arm is already
         // sorted; SQLite merges streams without a temp B-tree and LIMIT stops early.
+        //
+        // Rows with the same hit count: one term's rows come by doc ID (the index order, named
+        // in the ORDER BY so no other plan can change which rows the LIMIT keeps). Across the
+        // arms SQLite's merge takes the earlier arm first, so the word itself goes before its
+        // prefix expansions. That order cannot be named without a sort over every row of
+        // every term (an arm number in the ORDER BY: 0.29 to 0.53 ms for three terms at 8k
+        // documents); IndexTest::testCandidateRowsWithEqualHitCountsKeepTheirOrder() pins it.
 
         // Single-term non-fuzzy: stable SQL shape — cache by stable key.
         if ($n === 1) {
@@ -10060,7 +10068,7 @@ final class Index implements \Countable
                 "fetchOneTermDocs{$tag}",
                 'SELECT sub.term_id, sub.doc_id, ' . self::bm25Sql('sub') . " AS score
                   FROM (SELECT term_id, doc_id, hit_count FROM doclist
-                        WHERE term_id = ?{$live} ORDER BY hit_count DESC LIMIT ?) sub
+                        WHERE term_id = ?{$live} ORDER BY hit_count DESC, doc_id LIMIT ?) sub
                   JOIN doc_lengths dl ON dl.doc_id = sub.doc_id"
             );
             $stmt->execute([$idfK1p1, $k1_1mb, $k1b_avgdl, $ids[0], $limit]);
@@ -10191,7 +10199,13 @@ final class Index implements \Countable
         }
 
         /** @infection-ignore-all Spaceship: swapping secondary sort (num_hits) DESC→ASC only reorders equally-distant candidates; assertContains tests are order-agnostic */
-        usort($resultSet, fn(array $a, array $b): int => $a['distance'] <=> $b['distance'] ?: $b['num_hits'] <=> $a['num_hits']); // phpcs:ignore Generic.Files.LineLength.TooLong
+        // The term last: equal candidates do not depend on the order SQLite read them in.
+        usort(
+            $resultSet,
+            fn(array $a, array $b): int => $a['distance'] <=> $b['distance']
+                ?: $b['num_hits'] <=> $a['num_hits']
+                ?: $a['term'] <=> $b['term'],
+        );
 
         return array_slice($resultSet, 0, $this->config->fuzzyMaxExpansions);
     }

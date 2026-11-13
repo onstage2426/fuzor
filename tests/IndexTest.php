@@ -11162,6 +11162,46 @@ class IndexTest extends TestCase
         );
     }
 
+    public function testCandidateRowsWithEqualHitCountsKeepTheirOrder(): void
+    {
+        // Every row has hit count 1, so only the tie order decides which rows a limit keeps:
+        // one term's rows by document ID, and of two terms the earlier one's rows first.
+        $index = new Index($this->dbPath);
+        $index->insert([
+            ['id' => 7, 'title' => 'shirt'],
+            ['id' => 3, 'title' => 'shirts'],
+            ['id' => 5, 'title' => 'shirt'],
+            ['id' => 1, 'title' => 'shirts'],
+            ['id' => 2, 'title' => 'shirt'],
+            ['id' => 9, 'title' => 'shirts'],
+        ]);
+        $pdo   = new \PDO('sqlite:' . $this->dbPath);
+        $terms = $pdo->query("SELECT term, id FROM wordlist WHERE term IN ('shirt', 'shirts')");
+        $this->assertNotFalse($terms);
+        /** @var array<string, int> $ids */
+        $ids   = $terms->fetchAll(\PDO::FETCH_KEY_PAIR);
+        $word  = fn(string $term): array => [
+            'id' => (int) $ids[$term], 'term' => $term, 'num_hits' => 3, 'num_docs' => 3,
+        ];
+        $fetch = new \ReflectionMethod(Index::class, 'fetchDocsByTermIds');
+        $docs  = function (array $words, int $limit) use ($fetch, $index): array {
+            /** @var list<array{0: int, 1: int, 2: float}> $rows */
+            $rows = $fetch->invoke($index, $words, $limit, false, 1.0, 1.0, 1.0);
+            return array_map(fn(array $row): int => (int) $row[1], $rows);
+        };
+
+        $this->assertSame([2, 5], $docs([$word('shirt')], 2));
+        $this->assertSame([1, 3, 9, 2], $docs([$word('shirts'), $word('shirt')], 4));
+        $this->assertSame([2, 5, 7, 1], $docs([$word('shirt'), $word('shirts')], 4));
+
+        // searchBoolean()'s candidates: by hit count, then term, then document.
+        $boolean = new \ReflectionMethod(Index::class, 'fetchBooleanDocIds');
+        $this->assertLessThan($ids['shirts'], $ids['shirt']);
+        $this->assertSame([2, 5], $boolean->invoke($index, [$ids['shirt']], 2));
+        $this->assertSame([2, 5, 7, 1], $boolean->invoke($index, [$ids['shirts'], $ids['shirt']], 4));
+        $this->assertSame([2, 5, 7, 1], $boolean->invoke($index, [$ids['shirt'], $ids['shirts']], 4));
+    }
+
     public function testSqliteLibraryBelowTheMinimumIsRefused(): void
     {
         $check = new \ReflectionMethod(Index::class, 'checkSqliteVersion');
