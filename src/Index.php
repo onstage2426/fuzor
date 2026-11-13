@@ -9102,8 +9102,9 @@ final class Index implements \Countable
      * group that Limits::$facetCountDocs may cut (resultSetFacetCounts()). The order is part
      * of the statement in every form, so the rows do not depend on SQLite's plan.
      *
-     * Listed from a filter or phrase with fewer rows than the rarest group (matchDriver():
-     * every match read, then sorted), else from that group's rows (newestWordMatchesSql(),
+     * Listed from a filter or phrase with fewer rows than the rarest group (matchDriver(): a
+     * filter's matches read, then sorted; a phrase word read backwards, conditionDrivenSql()),
+     * else from that group's rows (newestWordMatchesSql(),
      * which stops once the caller has its rows). The keyword walk is weighed whole, not by
      * the part expected for the rows asked: matches are not spread evenly over the document
      * IDs (a range on a key that follows the insertion order puts them in one band), and a
@@ -9124,11 +9125,7 @@ final class Index implements \Countable
         if ($listed === null) {
             return $this->newestWordMatchesSql($groups, $conditions);
         }
-        $match = $this->conditionDrivenSql($listed, $groups, $conditions, false);
-        if ($match === null) {
-            return null;
-        }
-        return ["SELECT m.doc_id FROM ({$match[0]}) m ORDER BY m.doc_id DESC", $match[1]];
+        return $this->conditionDrivenSql($listed, $groups, $conditions, false, newest: true);
     }
 
     /**
@@ -9256,29 +9253,43 @@ final class Index implements \Countable
      * and only the groups the phrase does not imply (no word of it whose terms all belong to
      * the group). The other conditions are probed as usual. null when one can never match.
      *
+     * With $newest the rows come newest document first (newestMatchesSql()). A phrase word is
+     * one exact term whose positions rows are in document order, so it is read backwards and
+     * a LIMIT stops the read: listing every match and sorting it cost 283 ms where the
+     * ordered read takes 2.7 ms (500k documents, a phrase on a word in 349k, first 1,000). A
+     * filter's matches are read whole and sorted.
+     *
      * @param  array{at: int, slot: int|null, rows: int} $listed
      * @param  list<KeywordGroup>                         $groups
      * @param  array<int, FacetCondition>                 $conditions
      * @return array{0: string, 1: list<mixed>}|null
      */
-    private function conditionDrivenSql(array $listed, array $groups, array $conditions, bool $grouped): ?array
-    {
+    private function conditionDrivenSql(
+        array $listed,
+        array $groups,
+        array $conditions,
+        bool $grouped,
+        bool $newest = false,
+    ): ?array {
         $driver = $conditions[$listed['at']];
         $slots  = $driver['slots'] ?? [];
         $k      = $listed['slot'];
         unset($conditions[$listed['at']]);
+        $terms = [];
         if ($k === null) {
             $doc    = 'md.doc_id';
             $multi  = $driver['multiRow'];
-            $sql    = "{$doc} " . sprintf($driver['rows'], 'md') . $this->liveDocsSql($doc);
+            $from   = "{$doc} " . sprintf($driver['rows'], 'md');
             $params = $driver['params'];
+            $sql    = $this->liveDocsSql($doc);
             $slots  = [];
         } else {
             $doc    = 'p.doc_id';
             $multi  = true;
-            $sql    = "{$doc} FROM positions p WHERE p.term_id IN ("
-                . $this->placeholders(count($slots[$k]['termIds'])) . ')' . $this->liveDocsSql($doc);
-            $params = $slots[$k]['termIds'];
+            $terms  = $slots[$k]['termIds'];
+            $from   = "{$doc} FROM positions p WHERE p.term_id IN (" . $this->placeholders(count($terms)) . ')';
+            $params = $terms;
+            $sql    = $this->liveDocsSql($doc);
             foreach ($slots as $j => $slot) {
                 if ($j === $k) {
                     continue;
@@ -9303,11 +9314,14 @@ final class Index implements \Countable
         if ($probes === null) {
             return null;
         }
-        return [
-            'SELECT ' . ($multi && !$grouped ? 'DISTINCT ' : '') . $sql . $probes[0]
-                . ($multi && $grouped ? " GROUP BY +{$doc}" : ''),
-            [...$params, ...$probes[1]],
-        ];
+        $sql .= $probes[0];
+        array_push($params, ...$probes[1]);
+        if ($newest && count($terms) === 1) {
+            return ["SELECT DISTINCT {$doc} FROM positions p WHERE p.term_id = ?{$sql} ORDER BY {$doc} DESC", $params];
+        }
+        $match = 'SELECT ' . ($multi && !$grouped ? 'DISTINCT ' : '') . $from . $sql
+            . ($multi && $grouped ? " GROUP BY +{$doc}" : '');
+        return $newest ? ["SELECT m.doc_id FROM ({$match}) m ORDER BY m.doc_id DESC", $params] : [$match, $params];
     }
 
     /**
