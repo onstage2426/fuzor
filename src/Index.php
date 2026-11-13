@@ -283,6 +283,13 @@ final class Index implements \Countable
     private const int KEY_SET_SCAN_ROWS = 3;
 
     /**
+     * loadFacetKeySets(): candidates from which a range's rows are counted to see whether
+     * reading them all costs less than a probe per candidate (~0.8 µs each; the count itself
+     * took 0.2 to 0.6 ms next to up to 1,300 candidates).
+     */
+    private const int KEY_SET_RANGE_MIN_DOCS = 5_000;
+
+    /**
      * Positions per field: field n's positions start at n × this (tokenizeDocumentFields()).
      * 2^20 keeps the stored position small (3-byte varints for the second field) while no
      * realistic field reaches a million tokens.
@@ -11646,6 +11653,7 @@ final class Index implements \Countable
     {
         $sets          = [];
         $excluded      = [];
+        $candidateSet  = null;
         $candidateJson = json_encode($candidateDocIds, JSON_THROW_ON_ERROR);
         foreach ($conditions as $position => $condition) {
             if ($condition['impossible'] || $candidateDocIds === []) {
@@ -11654,12 +11662,15 @@ final class Index implements \Countable
                 continue;
             }
             // A value list is read from the candidates' doc_facets rows, one per candidate, or, when
-            // its values have few rows, by reading those rows in sequence (+doc_id: not probed per
-            // candidate). Probing every candidate × value in the primary key cost more than either
-            // (ecom, 4,593 candidates: gender Women|Men 7.7 → 4.0 ms, articleType Tshirts 5.4 → 3.4 ms).
-            // A negated word's rows are read in sequence the same way when they are few ("casual
-            // shirt -formal", 4,834 candidates, 3,472 rows: 7.6 → 2.7 ms); other conditions (ranges,
-            // negated phrases) are probed per candidate.
+            // its values have few rows, by reading those rows in sequence and keeping the
+            // candidates among them in PHP. Probing every candidate × value in the primary key cost
+            // more than either (ecom, 4,593 candidates: gender Women|Men 7.7 → 4.0 ms, articleType
+            // Tshirts 5.4 → 3.4 ms). A negated word's rows and a range's are read the same way
+            // when they are few ("casual shirt -formal", 4,834 candidates, 3,472 rows: 7.6 → 2.7
+            // ms); a wider range and a negated phrase are probed per candidate. The rows are
+            // tested in PHP, not against the candidates as an SQL list: that list is built per
+            // statement (100k documents, 50k candidates, a value with 2.3k rows and a range
+            // with 1k: 17 + 39 ms).
             if (isset($condition['probe'])) {
                 // A group is checked on each candidate, not listed: its rows are a whole subquery.
                 $stmt = $this->prepare(
@@ -11675,15 +11686,30 @@ final class Index implements \Countable
                 }
                 continue;
             }
-            $rows = $condition['rowCount']
-                ?? (isset($condition['values']) ? $this->conditionRowCount($condition) : null);
-            $scan = $rows !== null && $rows <= count($candidateDocIds) * self::KEY_SET_SCAN_ROWS;
-            if (isset($condition['values']) && !$scan) {
+            // A range's rows have to be counted first, up to a row per candidate (a wider
+            // range is probed), and only for many candidates: with few, probing them costs
+            // less than the count.
+            $most = count($candidateDocIds) * (isset($condition['range']) ? 1 : self::KEY_SET_SCAN_ROWS);
+            $rows = $condition['rowCount'] ?? match (true) {
+                isset($condition['values']) => $this->conditionRowCount($condition),
+                isset($condition['range']) && count($candidateDocIds) >= self::KEY_SET_RANGE_MIN_DOCS
+                    => $this->conditionRowCount($condition, $most),
+                default => null,
+            };
+            if ($rows !== null && $rows <= $most) {
+                // Few rows: all of them read, the candidates among them kept here.
+                $candidateSet ??= array_fill_keys($candidateDocIds, true);
+                $stmt = $this->prepare('SELECT ff.doc_id ' . sprintf($condition['rows'], 'ff'));
+                $stmt->execute($condition['params']);
+                /** @var list<int> $listed */
+                $listed = $stmt->fetchAll(PDO::FETCH_COLUMN);
+                $ids    = array_keys(array_intersect_key(array_fill_keys($listed, true), $candidateSet));
+            } elseif (isset($condition['values'])) {
                 $ids = $this->candidatesHoldingValues($condition['values'], $candidateJson);
             } else {
                 $stmt = $this->prepare(
                     'SELECT ff.doc_id ' . sprintf($condition['rows'], 'ff')
-                    . ' AND ' . ($scan ? '+' : '') . 'ff.doc_id IN (SELECT value FROM json_each(?))'
+                    . ' AND ff.doc_id IN (SELECT value FROM json_each(?))'
                 );
                 $stmt->execute([...$condition['params'], $candidateJson]);
                 /** @var list<int> $ids */
