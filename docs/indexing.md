@@ -47,6 +47,8 @@ The facet index is always enabled. Declare at creation time which fields can be 
 
 By default every field except `id` and the filterable and sortable fields is tokenised for full-text. Pass `searchableAttributes` to restrict FTS to an explicit list of fields — any field not in either list is stored but not indexed.
 
+A searchable field may hold a string, a number, a bool (indexed as `true` / `false`) or an array: each element is indexed in order, nested arrays and objects included, with a gap between elements so a quoted phrase never joins the end of one element to the start of the next. `null` and empty strings add nothing.
+
 ```php
 use Fuzor\SchemaConfig;
 

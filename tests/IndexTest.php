@@ -4378,6 +4378,55 @@ class IndexTest extends TestCase
         $this->assertSame([1], $index->search('"fast sedan"')->getIds());
     }
 
+    public function testArrayFieldValuesAreSearchableElementByElement(): void
+    {
+        $index = new Index($this->dbPath);
+        set_error_handler(static fn(int $no, string $message): never => throw new \ErrorException($message, 0, $no));
+        try {
+            $index->insert([
+                ['id' => 1, 'title' => 'sedan', 'tags' => ['city car', 'fast', [], null, ['electric', ['blue']]]],
+                ['id' => 2, 'title' => 'van', 'specs' => ['doors' => 5, 'seats' => ['front' => 2]]],
+                ['id' => 3, 'title' => 'bike', 'notes' => (object) ['colour' => 'green']],
+            ]);
+        } finally {
+            restore_error_handler();
+        }
+
+        $this->assertSame([1], $index->search('electric', new SearchOptions(asYouType: false))->getIds());
+        $this->assertSame([1], $index->search('blue', new SearchOptions(asYouType: false))->getIds());
+        $this->assertSame([2], $index->search('5')->getIds());
+        $this->assertSame([3], $index->search('green')->getIds());
+        $this->assertSame([], $index->search('array', new SearchOptions(asYouType: false))->getIds());
+        // Elements are apart: a phrase does not join two of them.
+        $this->assertSame([1], $index->search('"city car"')->getIds());
+        $this->assertSame([], $index->search('"car fast"')->getIds());
+    }
+
+    public function testBoolFieldValuesIndexTheirName(): void
+    {
+        $index = new Index($this->dbPath);
+        $index->insert([
+            ['id' => 1, 'title' => 'sedan', 'used' => true],
+            ['id' => 2, 'title' => 'van', 'used' => false],
+            ['id' => 3, 'title' => 'bike', 'used' => [true]],
+        ]);
+
+        $exact = new SearchOptions(asYouType: false);
+        $this->assertEqualsCanonicalizing([1, 3], $index->search('true', $exact)->getIds());
+        $this->assertSame([2], $index->search('false', $exact)->getIds());
+    }
+
+    public function testUpdatingAnArrayFieldReplacesItsWords(): void
+    {
+        $index = new Index($this->dbPath);
+        $index->insert([['id' => 1, 'title' => 'sedan', 'tags' => ['red', 'fast']]]);
+        $index->update([['id' => 1, 'title' => 'sedan', 'tags' => ['red', 'electric']]]);
+
+        $this->assertSame([], $index->search('fast', new SearchOptions(asYouType: false))->getIds());
+        $this->assertSame([1], $index->search('electric', new SearchOptions(asYouType: false))->getIds());
+        $this->assertSame([1], $index->search('red', new SearchOptions(asYouType: false))->getIds());
+    }
+
     public function testQuotedPhraseWordsAreExactEvenAsTheLastWord(): void
     {
         $index = new Index($this->dbPath, schema: new SchemaConfig(filterableAttributes: ['brand']));

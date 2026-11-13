@@ -313,6 +313,13 @@ final class Index implements \Countable
     private const int CROSS_FIELD_SPAN = 8;
 
     /**
+     * Positions left free between two elements of an array field value (indexFieldColumn()):
+     * a phrase never joins the end of one element to the start of the next, and proximity counts
+     * the words of different elements this far apart.
+     */
+    private const int ELEMENT_POSITION_GAP = 8;
+
+    /**
      * fetchSortValues() scans all rows of the key instead of seeking each document's when the
      * documents number at least this share of the key's rows. Measured crossover on the 45k
      * ecom set: ~0.4 (11k of 44k: seek 8.4 vs scan 12.6 ms; 22k: 17.5 vs 12.7 ms).
@@ -6682,8 +6689,11 @@ final class Index implements \Countable
     /**
      * Tokenise one document field value and accumulate into the shared term/position maps.
      *
-     * Null and empty/whitespace-only values are silently skipped. Both branches of
-     * tokenizeDocumentFields() delegate here so the tokenisation pipeline is defined once.
+     * Null and empty/whitespace-only values are silently skipped. An array (also nested, or an
+     * object, read as it is stored in JSON) indexes the text of each of its values in order, with
+     * ELEMENT_POSITION_GAP free positions between two elements; a bool indexes `true` / `false`.
+     * Both branches of tokenizeDocumentFields() delegate here so the tokenisation pipeline is
+     * defined once.
      *
      * @param array<string, int>                 $termCounts      mutated in-place
      * @param array<string, array<string, int>>  $fieldTermCounts mutated in-place
@@ -6701,8 +6711,68 @@ final class Index implements \Countable
         if ($col === null) {
             return;
         }
+        if (is_array($col) || (is_object($col) && !$col instanceof \Stringable)) {
+            $gap = 0;
+            foreach (self::fieldTexts($col) as $text) {
+                $at   = $position + $gap;
+                $next = $at;
+                $this->indexFieldText($text, $fieldName, $termCounts, $fieldTermCounts, $termPositions, $length, $next);
+                if ($next !== $at) { // an element without words takes no positions
+                    $position = $next;
+                    $gap      = self::ELEMENT_POSITION_GAP;
+                }
+            }
+            return;
+        }
+        $text = is_bool($col) ? ($col ? 'true' : 'false') : strval($col); // @phpstan-ignore argument.type
+        $this->indexFieldText($text, $fieldName, $termCounts, $fieldTermCounts, $termPositions, $length, $position);
+    }
+
+    /**
+     * The texts of an array (or object) field value, depth first in order: scalars as
+     * indexFieldColumn() reads them, nulls left out. An object is read as json_encode() stores it.
+     *
+     * @return list<string>
+     */
+    private static function fieldTexts(mixed $value): array
+    {
+        if (is_object($value) && !$value instanceof \Stringable) {
+            $value = json_decode(json_encode($value, JSON_THROW_ON_ERROR), true, 512, JSON_THROW_ON_ERROR);
+        }
+        if (!is_array($value)) {
+            return match (true) {
+                $value === null => [],
+                is_bool($value) => [$value ? 'true' : 'false'],
+                default         => [strval($value)], // @phpstan-ignore argument.type
+            };
+        }
+        $texts = [];
+        foreach ($value as $element) {
+            array_push($texts, ...self::fieldTexts($element));
+        }
+        return $texts;
+    }
+
+    /**
+     * Tokenise one text of a field (a scalar value or one element of an array value) into the
+     * shared term/position maps; indexFieldColumn()'s pipeline. Empty text adds nothing and
+     * leaves $position as it was.
+     *
+     * @param array<string, int>                 $termCounts      mutated in-place
+     * @param array<string, array<string, int>>  $fieldTermCounts mutated in-place
+     * @param array<string, list<int>>           $termPositions   mutated in-place
+     */
+    private function indexFieldText(
+        string $text,
+        string $fieldName,
+        array &$termCounts,
+        array &$fieldTermCounts,
+        array &$termPositions,
+        int &$length,
+        int &$position,
+    ): void {
         /** @infection-ignore-all UnwrapTrim: leading/trailing whitespace in field values is uncommon in tests; trimming is a defensive clean-up step */
-        $text = trim(strval($col)); // @phpstan-ignore argument.type
+        $text = trim($text);
         if ($text === '') {
             return;
         }

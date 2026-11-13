@@ -319,3 +319,11 @@ A value no document can hold — `true`, `false`, `null`, NaN, an infinite numbe
 nested list — now throws an `\InvalidArgumentException` naming the field, in `search()`,
 `searchBoolean()`, `facetSearch()` and `deleteByFilter()`, instead of returning no documents (and
 deleting none).
+
+## Arrays and bools in searchable fields are indexed
+
+A searchable field whose value is an array (`'tags' => ['red', 'fast']`, also nested arrays or
+objects) is now indexed element by element; it was indexed as the single word "array", with an
+"Array to string conversion" warning. A bool is indexed as `true` or `false` (was `1`, and nothing
+for `false`). Rebuild indexes with such fields, and list them in `searchableAttributes` only if
+their words should be found; fields like image URLs left out of that list stay stored-only.
