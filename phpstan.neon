@@ -4,5 +4,3 @@ parameters:
         - src
         - tests
         - benchmarks
-    excludePaths:
-        - tests/Support/Snowball
