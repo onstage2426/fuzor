@@ -5,6 +5,7 @@ Both take the query text and a `SearchOptions`, whose options all have defaults:
 
 ```php
 use Fuzor\SearchOptions;
+use Fuzor\Sort;
 
 $result = $index->search('city car');
 $result = $index->search('city car', new SearchOptions(limit: 20, offset: 40));
@@ -78,7 +79,7 @@ An empty or whitespace-only query returns every document that passes the filters
 
 ```php
 $index->search('');                                                // all documents, newest first
-$index->search('', new SearchOptions(sort: ['price:asc']));
+$index->search('', new SearchOptions(sort: [Sort::asc('price')]));
 $index->search('', new SearchOptions(filter: ['category' => 'shoes'], facets: ['brand']));
 ```
 
@@ -268,7 +269,7 @@ scores; pass `sort` for a meaningful order.
 $index->searchBoolean('sedan or coupe');
 $index->searchBoolean('suv -electric');
 $index->searchBoolean('(sedan or coupe) -electric');
-$index->searchBoolean('sedan or coupe', new SearchOptions(sort: ['price:asc']));
+$index->searchBoolean('sedan or coupe', new SearchOptions(sort: [Sort::asc('price')]));
 ```
 
 | Syntax | Meaning |

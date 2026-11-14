@@ -93,7 +93,10 @@ API and may change in any release.
 
 ## `SearchOptions`
 
-`final readonly class SearchOptions`, the options of `search()` and `searchBoolean()`.
+`final readonly class SearchOptions`, the options of `search()` and `searchBoolean()`. The
+constructor checks what it can without the index (sort specs, the filter's shape and values, a field
+in both `facets` and `facetStatsOnly`) and throws an `\InvalidArgumentException`; field names are
+checked against the schema when the search runs.
 
 | Property | Default | Description |
 |---|---|---|
@@ -105,7 +108,7 @@ API and may change in any release.
 | `facets` | `[]` | Fields to count values of |
 | `facetStatsOnly` | `[]` | Numeric fields to return only min and max of |
 | `sortFacetValuesBy` | `[]` | `array<string, FacetOrder>`, `'*'` for the rest; unlisted fields `Alpha` |
-| `sort` | `[]` | `list<string>` of `'field:asc'` / `'field:desc'` ([Sorting](sorting.md)) |
+| `sort` | `[]` | `list<Sort\|string>`: `Sort::asc('price')` or `'price:asc'`; read back as `list<Sort>` ([Sorting](sorting.md)) |
 | `distinct` | `null` | Field to keep one hit per value of |
 | `distinctCount` | `1` | Hits kept per value |
 | `attributesToRetrieve` | `null` | Fields of each hit; `null` or `['*']` all, `[]` only the ID ([Performance](performance.md#returning-less-per-hit)) |
@@ -137,6 +140,17 @@ API and may change in any release.
 | `getHit(int $index, array $default = [])` | `array` | Hit at a position in the page |
 | `getIds()` | `list<int>` | IDs of the page's hits |
 | `toArray()` / `toJSON(int $flags = 0)` | `array` / `string` | Everything as an array or JSON |
+
+## `Sort`
+
+`final readonly class Sort implements \Stringable`, one spec of `SearchOptions::$sort` ([Sorting](sorting.md)).
+
+| Member | Description |
+|---|---|
+| `Sort::asc(string $field)` / `Sort::desc(string $field)` | Lowest / highest values first |
+| `Sort::fromString(string $spec)` | From `'field:asc'` / `'field:desc'`; `\InvalidArgumentException` for anything else |
+| `$field`, `$ascending` | The field and the direction |
+| `__toString()` | `'field:asc'` / `'field:desc'` |
 
 ## `FacetSearchQuery` and `FacetSearchResult`
 

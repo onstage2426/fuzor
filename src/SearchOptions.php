@@ -13,6 +13,9 @@ namespace Fuzor;
  */
 final readonly class SearchOptions
 {
+    /** @var list<Sort> Sort specs, left-to-right priority. */
+    public array $sort;
+
     /**
      * @param bool    $asYouType  Match the last keyword as a prefix (as-you-type / autocomplete mode).
      * @param int     $limit      Maximum number of hits to return.
@@ -23,7 +26,8 @@ final readonly class SearchOptions
      *                                              FacetExclude to exclude it; Filter::all() / any() / not()
      *                                              combine conditions freely.
      * @param list<string>  $facets  Facet field names to compute value counts for.
-     * @param list<string>  $sort    Sort specs: 'field:asc' / 'field:desc'; left-to-right priority.
+     * @param list<Sort|string> $sort Sort specs, left-to-right priority: Sort::asc('price') or the
+     *                              string 'price:asc' / 'price:desc'; read back as list<Sort>.
      * @param string|null   $distinct      Facet field to collapse duplicate values on (null = off).
      * @param int           $distinctCount Maximum hits per distinct value when $distinct is set.
      * @param list<string>|null $attributesToHighlight String fields to include in '_formatted' with matched
@@ -62,6 +66,11 @@ final readonly class SearchOptions
      *                              same min/max over the same matches as listing them in $facets
      *                              gives, without a $facetDistribution entry and without counting
      *                              their values. A field may not be in both lists.
+     *
+     * @throws \InvalidArgumentException On a malformed sort spec or filter (shape, or a value no
+     *                                    document can hold), or a field in both $facets and
+     *                                    $facetStatsOnly. Field names are checked against the
+     *                                    schema when the options are used (QueryException).
      */
     public function __construct(
         public readonly bool $asYouType = true,
@@ -69,7 +78,7 @@ final readonly class SearchOptions
         public readonly int $offset = 0,
         public readonly array|Filter $filter = [],
         public readonly array $facets = [],
-        public readonly array $sort = [],
+        array $sort = [],
         public readonly ?string $distinct = null,
         public readonly int $distinctCount = 1,
         public readonly ?array $attributesToHighlight = null,
@@ -85,6 +94,18 @@ final readonly class SearchOptions
         public readonly bool $showRankingScoreDetails = false,
         public readonly array $facetStatsOnly = [],
     ) {
+        Filter::check($filter, 'SearchOptions::$filter');
+        $this->sort = array_map(
+            static fn(Sort|string $spec): Sort => $spec instanceof Sort ? $spec : Sort::fromString($spec),
+            $sort,
+        );
+        $both = array_intersect($facetStatsOnly, $facets);
+        if ($both !== []) {
+            throw new \InvalidArgumentException(
+                "Field '" . reset($both) . "' is listed in both SearchOptions::\$facets and \$facetStatsOnly;"
+                . ' its facetStats come with the facet, list it in one of them.'
+            );
+        }
     }
 
     /**

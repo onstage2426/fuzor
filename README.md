@@ -29,6 +29,7 @@ use Fuzor\FacetRange;
 use Fuzor\Index;
 use Fuzor\SchemaConfig;
 use Fuzor\SearchOptions;
+use Fuzor\Sort;
 
 $index = new Index('products.db', schema: new SchemaConfig(
     filterableAttributes: ['brand', 'price'],
@@ -45,7 +46,7 @@ $index->insert([
 $result = $index->search('boots', new SearchOptions(
     filter: ['price' => FacetRange::max(150)],
     facets: ['brand'],
-    sort:   ['price:asc'],
+    sort:   [Sort::asc('price')],
 ));
 
 $result->hits;              // Lightweight hiking boots (99), Waterproof hiking boots (129)

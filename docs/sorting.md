@@ -11,15 +11,20 @@ $index = new Index('/path/to/products.db', schema: new SchemaConfig(
     sortableAttributes:   ['price', 'brand', 'released'],
 ));
 
-$index->search('watch', new SearchOptions(sort: ['price:asc']));
-$index->search('watch', new SearchOptions(sort: ['brand:asc', 'price:desc']));  // brand, then price
-$index->search('', new SearchOptions(sort: ['released:desc']));                 // newest products
+use Fuzor\Sort;
+
+$index->search('watch', new SearchOptions(sort: [Sort::asc('price')]));
+$index->search('watch', new SearchOptions(sort: [Sort::asc('brand'), Sort::desc('price')]));  // brand, then price
+$index->search('', new SearchOptions(sort: [Sort::desc('released')]));                       // newest products
 ```
 
-Each spec is `'field:asc'` or `'field:desc'` (case-insensitive); the first decides, the next
-breaks its ties. A malformed spec throws an `\InvalidArgumentException`, a field outside
-`sortableAttributes` a `QueryException`. When the sort comes from a request parameter, map it to
-your own list of allowed specs, as in [Getting started](getting-started.md#4-the-search-page).
+The first spec decides, the next breaks its ties. A spec can also be written as a string,
+`'price:asc'` or `'price:desc'` (direction case-insensitive), as it comes in a request parameter;
+`SearchOptions` turns it into a `Sort`, so `$options->sort` is always a list of `Sort` objects. A
+malformed string throws an `\InvalidArgumentException` when the `SearchOptions` is built; a field
+outside `sortableAttributes` throws a `QueryException` when the search runs, since only the index
+knows its schema. When the sort comes from a request parameter, map it to your own list of allowed
+specs, as in [Getting started](getting-started.md#4-the-search-page).
 
 In a search with a query, `sort` orders the documents within each words bucket and typo tier (see
 [Concepts](concepts.md#how-a-search-ranks)): a document matching every word still comes before a
@@ -53,7 +58,7 @@ $index->insert([[
     'title_sort' => Tokenizer::sortKey('Éclair au chocolat'),  // "eclair au chocolat"
 ]]);
 
-$index->search('', new SearchOptions(sort: ['title_sort:asc']));
+$index->search('', new SearchOptions(sort: [Sort::asc('title_sort')]));
 ```
 
 ### Sorting by ID
@@ -63,7 +68,7 @@ declare `id` in `sortableAttributes` like any field; it then stores one value pe
 
 ```php
 $index = new Index('/path/to/products.db', schema: new SchemaConfig(sortableAttributes: ['id', 'price']));
-$index->search('', new SearchOptions(sort: ['id:asc']));  // lowest ID first
+$index->search('', new SearchOptions(sort: [Sort::asc('id')]));  // lowest ID first
 ```
 
 ### Cost
@@ -93,7 +98,7 @@ or with `sort`, the first in sort order:
 
 ```php
 // The cheapest item per brand
-$index->search('shirt', new SearchOptions(sort: ['price:asc'], distinct: 'brand'));
+$index->search('shirt', new SearchOptions(sort: [Sort::asc('price')], distinct: 'brand'));
 ```
 
 Documents without a value for the field are never collapsed. A document with several values is

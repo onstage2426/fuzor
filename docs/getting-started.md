@@ -87,6 +87,7 @@ field throws a `QueryException`:
 ```php
 use Fuzor\FacetRange;
 use Fuzor\SearchOptions;
+use Fuzor\Sort;
 
 $perPage = 24;
 $page    = max(1, (int) ($_GET['page'] ?? 1));
@@ -102,7 +103,7 @@ if (isset($_GET['min'], $_GET['max'])) {
     $filter['price'] = FacetRange::between((float) $_GET['min'], (float) $_GET['max']);
 }
 
-$sorts = ['price-asc' => ['price:asc'], 'price-desc' => ['price:desc']];
+$sorts = ['price-asc' => [Sort::asc('price')], 'price-desc' => [Sort::desc('price')]];
 
 $result = $index->search((string) ($_GET['q'] ?? ''), new SearchOptions(
     filter:                $filter,

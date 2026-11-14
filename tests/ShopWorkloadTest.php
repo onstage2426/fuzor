@@ -10,6 +10,7 @@ use Fuzor\FacetRange;
 use Fuzor\Index;
 use Fuzor\SearchOptions;
 use Fuzor\SearchResult;
+use Fuzor\Sort;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 
@@ -180,16 +181,14 @@ class ShopWorkloadTest extends TestCase
         return $result;
     }
 
-    /** @param list<string> $sort */
+    /** @param list<Sort> $sort */
     private function assertPageFollowsSort(SearchResult $result, array $sort): void
     {
         $previous = null;
         foreach ($result->getIds() as $id) {
             $current = [];
             foreach ($sort as $spec) {
-                [$field, $direction] = explode(':', $spec);
-                $value     = self::$docs[$id][$field];
-                $current[] = [$direction === 'desc' ? -1 : 1, $value];
+                $current[] = [$spec->ascending ? 1 : -1, self::$docs[$id][$spec->field]];
             }
             if ($previous !== null) {
                 $this->assertGreaterThanOrEqual(0, self::compareSortKeys($current, $previous), "document {$id}");

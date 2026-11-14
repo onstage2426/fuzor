@@ -264,7 +264,7 @@ final readonly class Filter
                     get_debug_type($entry),
                 ));
             }
-            self::checkMap($operator, $i, $entry);
+            self::checkMap(sprintf('Filter::%s() entry %d', $operator, $i), $entry);
         }
         if ($depth > self::MAX_DEPTH) {
             throw new \InvalidArgumentException(sprintf('A Filter may nest at most %d levels.', self::MAX_DEPTH));
@@ -274,33 +274,49 @@ final readonly class Filter
     }
 
     /**
+     * Check a filter where it is passed (SearchOptions, FacetSearchQuery, Index::deleteByFilter()),
+     * so a malformed map fails where it is built. A Filter was checked when it was made.
+     *
+     * @param  array<array-key, mixed>|Filter $filter
+     * @throws \InvalidArgumentException
+     *
+     * @internal
+     */
+    public static function check(array|Filter $filter, string $where): void
+    {
+        if (is_array($filter)) {
+            self::checkMap($where, $filter);
+        }
+    }
+
+    /**
+     * @param  string                  $where Names the map in messages ('Filter::all() entry 0').
      * @param  array<array-key, mixed> $map
      * @throws \InvalidArgumentException
      */
-    private static function checkMap(string $operator, int $position, array $map): void
+    private static function checkMap(string $where, array $map): void
     {
         if ($map !== [] && array_is_list($map)) {
             throw new \InvalidArgumentException(sprintf(
-                "Filter::%s() entry %d must map field names to values (['field' => 'value']), not be a list.",
-                $operator,
-                $position,
+                "%s must map field names to values (['field' => 'value']), not be a list.",
+                $where,
             ));
         }
+        $scalar = static fn(mixed $v): bool => is_string($v) || is_int($v) || is_float($v) && is_finite($v);
         foreach ($map as $field => $value) {
             $inner = $value instanceof FacetExclude ? $value->filter : $value;
-            $valid = is_string($inner) || is_int($inner) || is_float($inner) || $inner instanceof FacetRange
+            $valid = $scalar($inner) || $inner instanceof FacetRange
                 || is_array($inner) && array_is_list($inner) && array_filter(
                     $inner,
-                    fn(mixed $v): bool => !is_string($v) && !is_int($v) && !is_float($v),
+                    fn(mixed $v): bool => !$scalar($v),
                 ) === [];
             if (!$valid) {
                 throw new \InvalidArgumentException(sprintf(
-                    'Filter::%s() entry %d: the value of "%s" must be a string, a number, a list of them, a'
-                    . ' FacetRange or a FacetExclude, %s given.',
-                    $operator,
-                    $position,
+                    '%s: the value of "%s" must be a string, a finite number, a list of them, a FacetRange'
+                    . ' or a FacetExclude, %s given.',
+                    $where,
                     $field,
-                    get_debug_type($value),
+                    is_float($inner) ? 'a number that is not finite' : get_debug_type($value),
                 ));
             }
         }

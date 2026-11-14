@@ -2370,14 +2370,15 @@ final class Index implements \Countable
      *
      * @param  array<string, FacetExclude|FacetRange|list<string|int|float>|string|int|float>|Filter $filter
      * @return int The number of documents deleted.
-     * @throws \InvalidArgumentException If $filter is empty or a Filter without a constraint (clear() removes
-     *                                   every document).
+     * @throws \InvalidArgumentException If $filter is empty, a Filter without a constraint (clear() removes
+     *                                   every document) or malformed.
      * @throws QueryException            If a field is not declared in filterableAttributes.
      * @throws IOException               If the index is read-only.
      */
     public function deleteByFilter(array|Filter $filter): int
     {
         $this->assertWritable();
+        Filter::check($filter, 'deleteByFilter()');
         if (!self::hasFilter($filter)) {
             throw new \InvalidArgumentException('deleteByFilter() needs a filter; clear() removes every document.');
         }
@@ -2941,7 +2942,6 @@ final class Index implements \Countable
      *
      * @param  string        $phrase  Raw search phrase; will be tokenised.
      * @param  SearchOptions $options Per-query options (limit, offset, filter, facets, sort, …).
-     * @throws \InvalidArgumentException On a malformed sort spec.
      * @throws QueryException            When a sort field is not sortable, or a filter, facet, or
      *                                   distinct field is not filterable (see SchemaConfig).
      */
@@ -3908,7 +3908,7 @@ final class Index implements \Countable
             return $result;
         }
         return $result->withRankingScoreDetails(
-            $this->rankingScoreDetails($result->getIds(), $this->parseSortSpec($options->sort)),
+            $this->rankingScoreDetails($result->getIds(), self::sortSpecs($options->sort)),
         );
     }
 
@@ -3920,7 +3920,6 @@ final class Index implements \Countable
      *
      * @param  string        $phrase  Boolean query string.
      * @param  SearchOptions $options Per-query options (limit, offset, filter, facets, sort, …).
-     * @throws \InvalidArgumentException On a malformed sort spec.
      * @throws QueryException            When a sort field is not sortable, or a filter, facet, or
      *                                   distinct field is not filterable (see SchemaConfig).
      */
@@ -10943,27 +10942,15 @@ final class Index implements \Countable
     }
 
     /**
-     * Parse a list of 'field:asc' / 'field:desc' sort strings into structured specs.
+     * SearchOptions::$sort (parsed and checked when the options were made) as the specs the sort
+     * paths take.
      *
-     * @param  list<string> $sort
+     * @param  list<Sort> $sort
      * @return list<array{field: string, asc: bool}>
-     * @throws \InvalidArgumentException on malformed input
      */
-    private function parseSortSpec(array $sort): array
+    private static function sortSpecs(array $sort): array
     {
-        if ($sort === []) {
-            return [];
-        }
-        $specs = [];
-        foreach ($sort as $s) {
-            if (!preg_match('/^(.+):(asc|desc)$/i', (string) $s, $m)) {
-                throw new \InvalidArgumentException(
-                    "Invalid sort spec '{$s}': expected 'field:asc' or 'field:desc'."
-                );
-            }
-            $specs[] = ['field' => $m[1], 'asc' => strtolower($m[2]) === 'asc'];
-        }
-        return $specs;
+        return array_map(fn(Sort $s): array => ['field' => $s->field, 'asc' => $s->ascending], $sort);
     }
 
     /**
@@ -10975,14 +10962,12 @@ final class Index implements \Countable
      * is legitimately "no values".
      *
      * @return list<array{field: string, asc: bool}>
-     * @throws \InvalidArgumentException on a malformed sort spec, or a field in both facets and
-     *                                    facetStatsOnly
      * @throws QueryException             on a sort field that is not sortable, or a filter, facet,
      *                                    facet stats or distinct field that is not filterable
      */
     private function checkDeclaredFields(SearchOptions $options): array
     {
-        $specs = $this->parseSortSpec($options->sort);
+        $specs = self::sortSpecs($options->sort);
         foreach ($specs as $spec) {
             if (!isset($this->sortableFieldSet[$spec['field']])) {
                 throw new QueryException(
@@ -10993,13 +10978,6 @@ final class Index implements \Countable
         $this->checkFilterableFields('Filter', self::filterFields($options->filter));
         $this->checkFilterableFields('Facet', $options->facets);
         $this->checkFilterableFields('Facet stats', $options->facetStatsOnly);
-        $both = array_intersect($options->facetStatsOnly, $options->facets);
-        if ($both !== []) {
-            throw new \InvalidArgumentException(
-                "Field '" . reset($both) . "' is listed in both SearchOptions::\$facets and \$facetStatsOnly;"
-                . ' its facetStats come with the facet, list it in one of them.'
-            );
-        }
         if ($options->distinct !== null) {
             $this->checkFilterableFields('Distinct', [$options->distinct]);
         }

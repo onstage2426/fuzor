@@ -78,6 +78,20 @@ that returned the same values are gone:
 
 `getIds()`, `getHit()`, `count()`, `toArray()` and `toJSON()` stay.
 
+## `SearchOptions::$sort` holds `Sort` objects; malformed options throw when built
+
+Sort specs can be written as `Sort::asc('price')` / `Sort::desc('price')`; strings such as
+`'price:asc'` are still accepted. Either way `SearchOptions` stores them as `Sort` objects, so code
+that reads `$options->sort` gets `$spec->field` and `$spec->ascending` instead of strings
+(`(string) $spec` gives the old `'price:asc'` form).
+
+A malformed sort string, a malformed filter (a list instead of a map of fields, or a value no
+document can hold: a bool, `null`, NaN, infinity) and a field in both `facets` and
+`facetStatsOnly` throw the same `\InvalidArgumentException` as before, but from the `SearchOptions`
+or `FacetSearchQuery` constructor instead of from `search()`. Code that built the options outside
+its `try` block has to move the construction inside it. A field outside the schema still throws a
+`QueryException` from the search.
+
 ## `QueryToken::$matchType` is a `MatchType` enum
 
 `inspectQuery()` reports how each token matched as `Fuzor\MatchType` (`Exact`, `Prefix`, `Fuzzy`,

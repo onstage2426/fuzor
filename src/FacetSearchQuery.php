@@ -26,6 +26,8 @@ final readonly class FacetSearchQuery
      * @param int    $limit      Maximum number of facet values to return.
      * @param FacetOrder $sortFacetValuesBy Order of the returned values (applied before $limit); Alpha
      *                           by default, as in Meilisearch.
+     *
+     * @throws \InvalidArgumentException On a malformed filter (shape, or a value no document can hold).
      */
     public function __construct(
         public readonly string $facetName,
@@ -35,5 +37,6 @@ final readonly class FacetSearchQuery
         public readonly int $limit = 100,
         public readonly FacetOrder $sortFacetValuesBy = FacetOrder::Alpha,
     ) {
+        Filter::check($filter, 'FacetSearchQuery::$filter');
     }
 }

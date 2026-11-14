@@ -25,8 +25,12 @@ $index->search('watch', new SearchOptions(filter: ['brand' => 'Casio', 'category
 ```
 
 Values match exactly, case included. A number matches the values stored as that number or as the
-same text: `['stars' => 5]` finds `5`, `5.0` and `'5'`. A value no document can hold (`true` or
-`false`, `null`, NaN, an infinite number) throws an `\InvalidArgumentException`.
+same text: `['stars' => 5]` finds `5`, `5.0` and `'5'`.
+
+A malformed filter throws an `\InvalidArgumentException` where it is passed: in the `SearchOptions`
+or `FacetSearchQuery` constructor, or in `deleteByFilter()`. That covers a list instead of a map of
+fields, and a value no document can hold (`true` or `false`, `null`, NaN, an infinite number). An
+undeclared field is found when the search runs, against the schema.
 
 A document with several values for a field (`'tags' => ['sale', 'new']`) matches a filter on any of
 them.

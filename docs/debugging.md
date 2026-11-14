@@ -62,7 +62,7 @@ compared, in rank order.
 
 ```php
 $result = $index->search('hikng boots', new SearchOptions(
-    sort: ['price:asc'],
+    sort: [Sort::asc('price')],
     showRankingScoreDetails: true,
 ));
 
