@@ -123,17 +123,17 @@ API and may change in any release.
 
 | Member | Type | Description |
 |---|---|---|
-| `$hits` / `getHits()` | `list<array>` | Documents of the page, with `_formatted` and `_rankingScoreDetails` when asked for |
-| `$hitsCount` / `getHitsCount()` | `int` | Hits in the page; also `count($result)` |
-| `$totalHits` / `getTotalHits()` | `?int` | Matches over all pages, up to `Limits::$totalHits` |
-| `$totalHitsCapped` / `isTotalHitsCapped()` | `bool` | More matches than `Limits::$totalHits` |
-| `$facetDistribution` / `getFacetDistribution()` | `array<string, array<string\|int, int>>` | Value => count per field |
-| `$facetStats` / `getFacetStats()` | `array<string, array{min: float, max: float}>` | Lowest and highest number per field |
-| `$exhaustive` / `isExhaustive()` | `bool` | `false` when the page comes from capped candidates ([Searching](searching.md#when-a-result-is-approximate)) |
-| `$approximateFacets` / `getApproximateFacets()` | `list<string>` | Fields whose counts covered part of the matches |
-| `$warnings` / `getWarnings()` | `list<string>` | One line per cap that was hit; wording not stable |
-| `$query` / `getQuery()` | `string` | The query as given |
-| `$limit` / `getLimit()`, `$offset` / `getOffset()` | `?int` | The page asked for |
+| `$hits` | `list<array>` | Documents of the page, with `_formatted` and `_rankingScoreDetails` when asked for |
+| `$hitsCount` | `int` | Hits in the page; also `count($result)` |
+| `$totalHits` | `?int` | Matches over all pages, up to `Limits::$totalHits` |
+| `$totalHitsCapped` | `bool` | More matches than `Limits::$totalHits` |
+| `$facetDistribution` | `array<string, array<string\|int, int>>` | Value => count per field |
+| `$facetStats` | `array<string, array{min: float, max: float}>` | Lowest and highest number per field |
+| `$exhaustive` | `bool` | `false` when the page comes from capped candidates ([Searching](searching.md#when-a-result-is-approximate)) |
+| `$approximateFacets` | `list<string>` | Fields whose counts covered part of the matches |
+| `$warnings` | `list<string>` | One line per cap that was hit; wording not stable |
+| `$query` | `string` | The query as given |
+| `$limit`, `$offset` | `?int` | The page asked for |
 | `getHit(int $index, array $default = [])` | `array` | Hit at a position in the page |
 | `getIds()` | `list<int>` | IDs of the page's hits |
 | `toArray()` / `toJSON(int $flags = 0)` | `array` / `string` | Everything as an array or JSON |
@@ -156,10 +156,10 @@ API and may change in any release.
 
 | Member | Type |
 |---|---|
-| `$facetHits` / `getFacetHits()` | `list<array{value: string, count: int}>` |
-| `$facetQuery` / `getFacetQuery()` | `string` |
-| `$exhaustive` / `isExhaustive()` | `bool` |
-| `$warnings` / `getWarnings()` | `list<string>` |
+| `$facetHits` | `list<array{value: string, count: int}>` |
+| `$facetQuery` | `string` |
+| `$exhaustive` | `bool` |
+| `$warnings` | `list<string>` |
 | `toArray()` / `toJSON(int $flags = 0)` | `array` / `string` |
 
 ## Filters

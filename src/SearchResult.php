@@ -137,43 +137,10 @@ final class SearchResult implements \Countable, \IteratorAggregate
         return new \ArrayIterator($this->hits);
     }
 
-    public function getQuery(): string
-    {
-        return $this->query;
-    }
-
-    public function getLimit(): int|null
-    {
-        return $this->limit;
-    }
-
-    public function getOffset(): int|null
-    {
-        return $this->offset;
-    }
-
-    /** Number of documents in this page. */
-    public function getHitsCount(): int
-    {
-        return $this->hitsCount;
-    }
-
-    /** Total matching documents across all pages. */
-    public function getTotalHits(): int|null
-    {
-        return $this->totalHits;
-    }
-
     /** @return list<int> Document IDs in relevance order (current page). */
     public function getIds(): array
     {
         return $this->ids;
-    }
-
-    /** @return list<array<string, mixed>> */
-    public function getHits(): array
-    {
-        return $this->hits;
     }
 
     /**
@@ -185,40 +152,6 @@ final class SearchResult implements \Countable, \IteratorAggregate
     public function getHit(int $index, array $default = []): array
     {
         return $this->hits[$index] ?? $default;
-    }
-
-    /** @return array<string, array<array-key, int>> */
-    public function getFacetDistribution(): array
-    {
-        return $this->facetDistribution;
-    }
-
-    /** @return array<string, array{min: float, max: float}> */
-    public function getFacetStats(): array
-    {
-        return $this->facetStats;
-    }
-
-    /** @return list<string> */
-    public function getWarnings(): array
-    {
-        return $this->warnings;
-    }
-
-    public function isExhaustive(): bool
-    {
-        return $this->exhaustive;
-    }
-
-    /** @return list<string> */
-    public function getApproximateFacets(): array
-    {
-        return $this->approximateFacets;
-    }
-
-    public function isTotalHitsCapped(): bool
-    {
-        return $this->totalHitsCapped;
     }
 
     /**

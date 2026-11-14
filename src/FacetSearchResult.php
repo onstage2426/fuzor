@@ -7,14 +7,15 @@ namespace Fuzor;
 /**
  * Result returned by Index::facetSearch().
  *
- * Holds the matching facet values and their document counts, ordered by count descending.
+ * Holds the matching facet values and their document counts, in FacetSearchQuery::$sortFacetValuesBy
+ * order (alphabetical by default).
  *
  * @implements \IteratorAggregate<int, array{value: string, count: int}>
  */
 final class FacetSearchResult implements \Countable, \IteratorAggregate
 {
     /**
-     * Matching facet values with hit counts, ordered by count descending.
+     * Matching facet values with their document counts, in FacetSearchQuery::$sortFacetValuesBy order.
      *
      * @var list<array{value: string, count: int}>
      */
@@ -56,28 +57,6 @@ final class FacetSearchResult implements \Countable, \IteratorAggregate
         $this->facetQuery = $facetQuery;
         $this->warnings   = $warnings;
         $this->exhaustive = $exhaustive;
-    }
-
-    /** @return list<array{value: string, count: int}> */
-    public function getFacetHits(): array
-    {
-        return $this->facetHits;
-    }
-
-    public function getFacetQuery(): string
-    {
-        return $this->facetQuery;
-    }
-
-    /** @return list<string> */
-    public function getWarnings(): array
-    {
-        return $this->warnings;
-    }
-
-    public function isExhaustive(): bool
-    {
-        return $this->exhaustive;
     }
 
     /** Enables count($result). */

@@ -63,6 +63,21 @@ new FacetSearchQuery('brand', sortFacetValuesBy: FacetOrder::Count);
 `Index` in your own class instead of subclassing it, and catch `FuzorException` (still open) or the
 specific exceptions.
 
+## Result getters are removed; read the properties
+
+`SearchResult` and `FacetSearchResult` expose their values as readonly properties only. The getters
+that returned the same values are gone:
+
+| 1.x | 2.0 |
+|---|---|
+| `getHits()`, `getHitsCount()`, `getTotalHits()` | `->hits`, `->hitsCount`, `->totalHits` |
+| `getQuery()`, `getLimit()`, `getOffset()` | `->query`, `->limit`, `->offset` |
+| `getFacetDistribution()`, `getFacetStats()` | `->facetDistribution`, `->facetStats` |
+| `getWarnings()`, `isExhaustive()`, `getApproximateFacets()` | `->warnings`, `->exhaustive`, `->approximateFacets` |
+| `FacetSearchResult::getFacetHits()`, `getFacetQuery()`, `getWarnings()`, `isExhaustive()` | `->facetHits`, `->facetQuery`, `->warnings`, `->exhaustive` |
+
+`getIds()`, `getHit()`, `count()`, `toArray()` and `toJSON()` stay.
+
 ## `QueryToken::$matchType` is a `MatchType` enum
 
 `inspectQuery()` reports how each token matched as `Fuzor\MatchType` (`Exact`, `Prefix`, `Fuzzy`,

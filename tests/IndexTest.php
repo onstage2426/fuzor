@@ -9550,7 +9550,7 @@ class IndexTest extends TestCase
         ));
 
         $this->assertSame([], $result->warnings);
-        $this->assertSame([], $result->getWarnings());
+        $this->assertSame([], $result->warnings);
         $this->assertSame([], $result->toArray()['warnings']);
     }
 
@@ -9577,7 +9577,7 @@ class IndexTest extends TestCase
         $result = $index->search('widget', new SearchOptions(facets: ['color']));
 
         $this->assertTrue($result->exhaustive);
-        $this->assertTrue($result->isExhaustive());
+        $this->assertTrue($result->exhaustive);
         $this->assertSame([], $result->approximateFacets);
         $this->assertSame([], $result->warnings);
         $this->assertTrue($result->toArray()['exhaustive']);
@@ -9605,7 +9605,7 @@ class IndexTest extends TestCase
         foreach ([$index->search('widget'), $index->searchBoolean('widget'), $index->search('')] as $result) {
             $this->assertSame(4, $result->totalHits);
             $this->assertTrue($result->totalHitsCapped);
-            $this->assertTrue($result->isTotalHitsCapped());
+            $this->assertTrue($result->totalHitsCapped);
             $this->assertTrue($result->toArray()['totalHitsCapped']);
             $this->assertCount(4, $result->getIds());
             $this->assertStringContainsString('Limits::$totalHits (4)', $result->warnings[0]);
@@ -9848,7 +9848,7 @@ class IndexTest extends TestCase
 
         $this->assertTrue($plain->exhaustive);
         $this->assertSame(['color'], $plain->approximateFacets);
-        $this->assertSame(['color'], $plain->getApproximateFacets());
+        $this->assertSame(['color'], $plain->approximateFacets);
         $this->assertSame(['color'], $disjunctive->approximateFacets);
         $this->assertStringContainsString("Facet counts for 'color' cover only 2", $plain->warnings[0]);
     }
@@ -9905,7 +9905,7 @@ class IndexTest extends TestCase
         $noQuery = $index->facetSearch(new FacetSearchQuery(facetName: 'color'));
 
         $this->assertFalse($capped->exhaustive);
-        $this->assertFalse($capped->isExhaustive());
+        $this->assertFalse($capped->exhaustive);
         $this->assertSame(2, array_sum(array_column($capped->facetHits, 'count')));
         $this->assertStringContainsString('Limits::$facetCountDocs (2)', $capped->warnings[0]);
         $this->assertTrue($noQuery->exhaustive);
@@ -9955,12 +9955,12 @@ class IndexTest extends TestCase
             'label'    => ['y' => 2, 'x' => 1],
             'mixedOut' => [1 => 1, 2 => 1],
             'mixedIn'  => ['small' => 2],
-        ], $result->getFacetDistribution());
+        ], $result->facetDistribution);
         $this->assertSame([
             'price'    => ['min' => 5.0, 'max' => 10.0],
             // The only string value was excluded: what remains is numeric, so it has stats.
             'mixedOut' => ['min' => 1.0, 'max' => 2.0],
-        ], $result->getFacetStats());
+        ], $result->facetStats);
     }
 
     public function testFieldBoostScoreIsTheSameWhateverTheFilterLeaves(): void
@@ -9986,7 +9986,7 @@ class IndexTest extends TestCase
                 limit: 20,
                 filter: $kind === null ? [] : ['kind' => $kind],
                 showRankingScoreDetails: true,
-            ))->getHits();
+            ))->hits;
             return array_column($hits, '_rankingScoreDetails', 'id');
         };
         $all = $details(null);
@@ -10448,7 +10448,7 @@ class IndexTest extends TestCase
 
         $this->assertSame(2, $reader->count());
         $this->assertSame(2, $reader->inspectQuery('sedan')->tokens[0]->numDocs);
-        $this->assertSame(2, $reader->search('sedan')->getTotalHits());
+        $this->assertSame(2, $reader->search('sedan')->totalHits);
     }
 
     public function testReaderSeesExternalSynonymChange(): void
@@ -10511,7 +10511,7 @@ class IndexTest extends TestCase
     {
         $result = $this->retrievalIndex()->search('car', new SearchOptions(attributesToRetrieve: []));
 
-        $this->assertSame(2, $result->getTotalHits());
+        $this->assertSame(2, $result->totalHits);
         foreach ($result as $hit) {
             $this->assertSame(['id'], array_keys($hit));
         }
@@ -10561,7 +10561,7 @@ class IndexTest extends TestCase
         $read   = new Index($this->dbPath, readonly: true);
         $result = $read->search('sedan', new SearchOptions(attributesToRetrieve: []));
 
-        $this->assertSame([['id' => 1]], $result->getHits());
+        $this->assertSame([['id' => 1]], $result->hits);
         $this->assertNotNull($read->get(1));
     }
 
