@@ -139,17 +139,8 @@ class HighlighterTest extends TestCase
 
     public function testCjkHighlightsBigramInsideLongerText(): void
     {
-        // Without language, word-boundary regex prevents matches inside continuous CJK text.
-        // With language: 'zh', the plain-substring regex must match '轿车' within the sentence.
-        $hl   = new Highlighter(language: 'zh');
-        $text = '这是一辆轿车测试';
-        $this->assertStringContainsString('<mark>轿车</mark>', $hl->highlight('轿车', $text));
-    }
-
-    public function testCjkHighlightWorksEvenWithoutLanguage(): void
-    {
-        // The highlighter classifies tokens via isNgramToken() regardless of language,
-        // so CJK substring matching works even without setting language: 'zh'.
+        // A word-boundary regex would prevent matches inside continuous CJK text; the
+        // plain-substring regex must match '轿车' within the sentence.
         $hl   = new Highlighter();
         $text = '这是一辆轿车测试';
         $this->assertStringContainsString('<mark>轿车</mark>', $hl->highlight('轿车', $text));
@@ -157,7 +148,7 @@ class HighlighterTest extends TestCase
 
     public function testCjkHighlightMixedQueryHighlightsBothScripts(): void
     {
-        $hl   = new Highlighter(language: 'zh');
+        $hl   = new Highlighter();
         $text = 'BMW 轿车测试';
         $out  = $hl->highlight('bmw 轿车', $text);
         $this->assertStringContainsString('<mark>BMW</mark>', $out);
@@ -166,7 +157,7 @@ class HighlighterTest extends TestCase
 
     public function testCjkBigramQueryDoesNotHighlightIndividualChars(): void
     {
-        $hl = new Highlighter(language: 'zh');
+        $hl = new Highlighter();
         $this->assertSame('这是一辆<mark>轿车</mark>测试', $hl->highlight('轿车', '这是一辆轿车测试'));
     }
 
@@ -175,13 +166,13 @@ class HighlighterTest extends TestCase
         // With includeUnigrams=true (mutation), '轿' and '车' would each match individually.
         // With the correct false, only the bigram '轿车' is a pattern token, so separated
         // characters produce no match.
-        $hl = new Highlighter(language: 'zh');
+        $hl = new Highlighter();
         $this->assertSame('轿 车', $hl->highlight('轿车', '轿 车'));
     }
 
     public function testCjkHighlightManyDoesNotMatchSeparatedChars(): void
     {
-        $hl     = new Highlighter(language: 'zh');
+        $hl     = new Highlighter();
         $result = $hl->highlightMany('轿车', ['body' => '轿 车']);
         $this->assertSame('轿 车', $result['body']);
     }

@@ -1,23 +1,107 @@
 # Language
 
-Pass a BCP 47 language tag at index creation time to enable Snowball stemming, or n-gram
-tokenisation for Chinese, Japanese, Korean and Thai. With stemming, "running" and "runs" match
-the same entries.
+Fuzor needs no language setting. Every word is indexed and searched as written (lowercased),
+and Chinese, Japanese, Korean and Thai text is split into n-grams automatically. Two optional
+schema settings change how words match: a **stemmer** and **stop words**.
+
+## CJK and Thai
+
+Chinese, Japanese, Korean and Thai don't use spaces between words. Fuzor splits each word written
+in these scripts into overlapping character windows, at index and at query time, so no external
+segmenter is needed:
+
+| Script | N-gram |
+|--------|:------:|
+| Chinese characters, Japanese kana, Korean Hangul | bigrams, plus single characters |
+| Thai | trigrams |
+
+The script of each word decides, so a document that mixes scripts (a Japanese title next to an
+English description, a brand name inside Chinese text) is indexed word by word, and a Latin word
+at the end of the query is still matched as a prefix while it is typed. Chinese and Japanese
+are treated the same, so nothing has to tell them apart.
+
+**Tradeoffs against a real segmenter:**
+- The index grows: a 10-character word becomes about 9 bigrams.
+- Rare character sequences that span word boundaries can give false positives.
+- There is no prefix matching or typo tolerance inside n-grams.
+
+For high-precision Chinese search at scale, pre-segment the text (for example with jieba) and
+index the space-separated output.
+
+## Stemming
+
+A stemmer reduces words to a common stem, so "boots" matches "boot" and "batteries" matches
+"battery". Stemming is off by default and Fuzor ships no stemmers: name a class implementing
+`Fuzor\Stemmer` in the schema.
 
 ```php
 use Fuzor\SchemaConfig;
 
-$index = new Index('/path/to/articles.db', schema: new SchemaConfig(language: 'en'));
+$index = new Index('/path/to/articles.db', schema: new SchemaConfig(stemmer: PluralStemmer::class));
+$index->stemmer; // 'App\Search\PluralStemmer'
 ```
 
-The language is persisted in the index and restored automatically when you reopen it. It cannot be changed without rebuilding.
+The class and its `id()` are stored in the index, and the stemmer is created again whenever the
+index is opened, so readers pass nothing. Change it with `rebuild()`.
 
-## What it does
+**When stemming helps, and when it hurts.** Stemming finds other forms of a word. Without a
+stemmer, prefixes, typo tolerance and synonyms already cover many forms ("shoe" finds "shoes",
+"womens" finds "women"). With a stemmer the index holds stems, so a word that is still being typed
+or is misspelled is compared with stems: with a full English stemmer, which turns "hiking" into
+"hike", "hikin" and "hikng" do not find "hiking". A light stemmer that only removes plural endings,
+like the one below, keeps the start of each word and avoids most of that; a full stemmer finds more
+in articles and other long text.
 
-**Snowball stemming** reduces words to their root form so "running", "runs", and "ran" all match the same index entries. Applied automatically when a stemmer exists for the chosen language.
+### Writing a stemmer
 
-A language does not filter any words. Every word is indexed and searched, as in Meilisearch, so
-product words such as "c" in "usb c cable" or "men" keep counting.
+Implement `Fuzor\Stemmer`, with a constructor that takes no arguments. This one removes English
+plural endings:
+
+```php
+namespace App\Search;
+
+use Fuzor\Stemmer;
+
+final class PluralStemmer implements Stemmer
+{
+    public function id(): string
+    {
+        return 'plural@1';
+    }
+
+    public function stem(string $word): string
+    {
+        return match (true) {
+            // batteries → battery
+            strlen($word) > 4 && str_ends_with($word, 'ies') => substr($word, 0, -3) . 'y',
+            // boxes → box, glasses → glass
+            strlen($word) > 4 && preg_match('/(s|x|z|ch|sh)es$/', $word) === 1 => substr($word, 0, -2),
+            // boots → boot, but class stays class
+            strlen($word) > 3 && str_ends_with($word, 's') && !str_ends_with($word, 'ss') => substr($word, 0, -1),
+            default => $word,
+        };
+    }
+}
+```
+
+`stem()` receives one token at a time, already lowercased: a word, a number, or a CJK / Thai
+n-gram. Return it unchanged when it has no stem, never an empty string, and always the same stem
+for the same token. It runs for every indexed and every query word, so keep it fast; a cache of
+recent words helps a slow algorithm.
+
+To use a stemming library (a Snowball implementation for your language, for example), wrap it the
+same way: create the library's stemmer in the constructor and call it in `stem()`. `id()` names the
+library and its version, such as `'snowball-english@3.2.0'`.
+
+### When the stems change
+
+An index stores stemmed words. If a new version of a stemmer stems some words differently,
+queries are stemmed the new way while the index holds the old stems, and those words stop
+matching until the index is rebuilt. Fuzor notices it from the stored `id()`: the index keeps
+working, `$index->stemmerChanged` is `true`, and every search result carries a warning until
+`rebuild()`. So change `id()` whenever your stemmer's output changes. A stemmer class that cannot be
+loaded (renamed, or its package removed) makes opening the index throw a `QueryException` that
+names the class.
 
 ## Stop words
 
@@ -27,7 +111,6 @@ case-insensitively before stemming:
 
 ```php
 $index = new Index('/path/to/articles.db', schema: new SchemaConfig(
-    language: 'en',
     stopWords: ['the', 'a', 'an', 'of'],
 ));
 $index->stopWords; // ['the', 'a', 'an', 'of']
@@ -38,101 +121,5 @@ schema: change it with `rebuild()`. A query made only of stop words searches its
 A stop word left out still keeps its place between the other words: the phrase `"bank of england"`
 matches "bank of england" and "bank the england" (any one word between), `"bank england"` matches
 only the two words side by side, and proximity ranking counts the stop word as a word between.
-Fuzor ships no word lists: general-purpose lists remove words that matter in many catalogs, so
-choose the words for your own data.
-
-## CJK and Thai
-
-Chinese, Japanese, Korean, and Thai don't use spaces between words. Fuzor handles them with n-gram tokenisation — no external segmenter required.
-
-| Code | Language | N-gram |
-|------|----------|:------:|
-| `zh` | Chinese  | bigram |
-| `ja` | Japanese | bigram |
-| `ko` | Korean   | bigram |
-| `th` | Thai     | trigram |
-
-Fuzor splits each CJK/Thai string into overlapping character windows at both index and query time. ASCII tokens in the same document (e.g. brand names) are indexed normally alongside them.
-
-**Tradeoffs vs. a real segmenter:**
-- Index size grows roughly N× (one 10-character word becomes ~9 bigrams)
-- Rare character sequences that span word boundaries may produce false positives
-- No Snowball stemmer exists for these languages
-
-For high-precision Chinese search at scale, pre-segment with jieba and index the space-separated output without setting a language.
-
-## Changing language
-
-Rebuild the index with a new `SchemaConfig`:
-
-```php
-use Fuzor\SchemaConfig;
-
-Index::rebuild('/path/to/articles.db',
-    fn (Index $new) => $new->insert($docs),
-    schema: new SchemaConfig(language: 'fr'),
-);
-```
-
-Or recreate from scratch:
-
-```php
-$index = new Index('/path/to/articles.db', force: true, schema: new SchemaConfig(language: 'fr'));
-$index->insert($yourDocs);
-```
-
-## Reading the active language
-
-```php
-$index->language; // 'en', 'fr', null, …
-```
-
-## Supported languages
-
-Get the full list at runtime — useful for building a language selector:
-
-```php
-$languages = \Fuzor\Language::all();
-// ['ar' => 'Arabic', 'ca' => 'Catalan', 'en' => 'English', …]
-```
-
-Any other tag throws a `QueryException` at index creation. For a language not listed, leave
-`language` at `null`: words are then split and indexed as they are.
-
-| Code | Language | Applies |
-|------|----------|---------|
-| `ar` | Arabic | Snowball stemmer |
-| `ca` | Catalan | Snowball stemmer |
-| `da` | Danish | Snowball stemmer |
-| `de` | German | Snowball stemmer |
-| `el` | Greek | Snowball stemmer |
-| `en` | English | Snowball stemmer |
-| `eo` | Esperanto | Snowball stemmer |
-| `es` | Spanish | Snowball stemmer |
-| `et` | Estonian | Snowball stemmer |
-| `eu` | Basque | Snowball stemmer |
-| `fi` | Finnish | Snowball stemmer |
-| `fr` | French | Snowball stemmer |
-| `ga` | Irish | Snowball stemmer |
-| `hi` | Hindi | Snowball stemmer |
-| `hu` | Hungarian | Snowball stemmer |
-| `hy` | Armenian | Snowball stemmer |
-| `id` | Indonesian | Snowball stemmer |
-| `it` | Italian | Snowball stemmer |
-| `ja` | Japanese | bigrams |
-| `ko` | Korean | bigrams |
-| `lt` | Lithuanian | Snowball stemmer |
-| `ne` | Nepali | Snowball stemmer |
-| `nl` | Dutch | Snowball stemmer |
-| `no` | Norwegian | Snowball stemmer |
-| `pl` | Polish | Snowball stemmer |
-| `pt` | Portuguese | Snowball stemmer |
-| `ro` | Romanian | Snowball stemmer |
-| `ru` | Russian | Snowball stemmer |
-| `sr` | Serbian | Snowball stemmer |
-| `sv` | Swedish | Snowball stemmer |
-| `ta` | Tamil | Snowball stemmer |
-| `th` | Thai | trigrams |
-| `tr` | Turkish | Snowball stemmer |
-| `yi` | Yiddish | Snowball stemmer |
-| `zh` | Chinese | bigrams |
+Fuzor ships no word lists: general-purpose lists remove words that matter in many catalogs (an
+English list holds "c" as in "usb c cable" and "men"), so choose the words for your own data.

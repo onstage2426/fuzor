@@ -421,8 +421,14 @@ final class Index implements \Countable
     /** Search tuning; immutable after construction. */
     private readonly Config $config;
 
-    /** BCP 47 language tag active on this index (stemming, CJK/Thai n-grams); null for neither. */
-    public private(set) ?string $language = null;
+    /** @var class-string<Stemmer>|null The stemmer class this index was created with (SchemaConfig::$stemmer); null for none. */
+    public private(set) ?string $stemmer = null;
+
+    /**
+     * Whether the stemmer now reports another id() than the one stored when the index was built: its
+     * words were stemmed differently, so some no longer match until rebuild(). Searches warn about it.
+     */
+    public private(set) bool $stemmerChanged = false;
 
     /** Whether the optional document store is active on this index. */
     public private(set) bool $documentStoreEnabled = false;
@@ -500,11 +506,14 @@ final class Index implements \Countable
     /** @var array<string, int>|null Pre-computed isset-lookup set derived from searchableAttributes (array_flip); null means all non-facet fields. */
     private ?array $searchableFieldSet = null;
 
-    /** Active stopword filter; null when no language is set or language has no stopword list. */
+    /** Active stopword filter; null when SchemaConfig::$stopWords is empty. */
     private ?Stopwords $stopwords = null;
 
-    /** Active stemmer; null when no language is set or language has no stemmer. */
-    private ?Stemmer $stemmer = null;
+    /** The stemmer instance of $stemmer; null for none. */
+    private ?Stemmer $stemmerImpl = null;
+
+    /** The id() stored when the index was created; '' without a stemmer. */
+    private string $storedStemmerId = '';
 
     /** @var array<string, list<string>>|null Normalized source → list<target>; null = not loaded. Cleared on connection change. */
     private ?array $synonymCache = null;
@@ -576,8 +585,8 @@ final class Index implements \Countable
      * @param  bool             $readonly Open in read-only mode; all write methods throw IOException.
      * @param  SchemaConfig|null $schema   Schema persisted at creation time; ignored when opening an existing index.
      * @throws IOException    If the parent directory does not exist, or readonly is true and the file does not exist.
-     * @throws QueryException If $schema->language is set but not supported (Language::supports()),
-     *                        or if both $readonly and $force are true.
+     * @throws QueryException If $schema->stemmer is not a class implementing Stemmer, if the index's
+     *                        stemmer class cannot be loaded, or if both $readonly and $force are true.
      * @throws \InvalidArgumentException If an entry of $schema->stopWords is not exactly one word.
      * @throws FuzorException If PHP's SQLite library is older than MIN_SQLITE_VERSION, or PHP is a 32-bit build.
      */
@@ -595,11 +604,11 @@ final class Index implements \Countable
         if ($this->readonly && $force) {
             throw new QueryException("Cannot force-create a readonly index.");
         }
-        if ($schema->language !== null && !Language::supports($schema->language)) {
-            throw new QueryException("Unsupported language: '{$schema->language}'");
-        }
         // Validated before any file exists; createIndex() normalises them again.
-        self::normalizeStopWords($schema->stopWords, $schema->language);
+        if ($schema->stemmer !== null) {
+            self::createStemmer($schema->stemmer, 'SchemaConfig::$stemmer');
+        }
+        self::normalizeStopWords($schema->stopWords);
         $resolved   = self::resolvePath($path);
         $this->path = $resolved;
         if ($this->readonly && !file_exists($resolved)) {
@@ -827,7 +836,7 @@ final class Index implements \Countable
 
         if ($schema === null && $existing !== null) {
             $schema = new SchemaConfig(
-                language:         $existing->language,
+                stemmer:          $existing->stemmer,
                 store:            $existing->documentStoreEnabled,
                 filterableAttributes: $existing->filterableAttributes,
                 sortableAttributes:   $existing->sortableAttributes,
@@ -1342,15 +1351,17 @@ final class Index implements \Countable
      *
      * @param  SchemaConfig $schema Schema options persisted at creation time.
      * @return static
-     * @throws QueryException If schema->language is set but has no stopword list or stemmer.
+     * @throws QueryException If schema->stemmer is not a class implementing Stemmer.
      */
     private function createIndex(SchemaConfig $schema): static
     {
-        $language         = $schema->language;
+        $stemmer          = $schema->stemmer !== null
+            ? self::createStemmer($schema->stemmer, 'SchemaConfig::$stemmer')
+            : null;
         $store            = $schema->store;
         $searchableAttributes = $schema->searchableAttributes;
         $stripHtml        = $schema->stripHtml;
-        $stopWords        = self::normalizeStopWords($schema->stopWords, $language);
+        $stopWords        = self::normalizeStopWords($schema->stopWords);
 
         $pdo = new PDO('sqlite:' . $this->path);
         $this->pdo = $pdo;
@@ -1405,8 +1416,8 @@ final class Index implements \Countable
         /** @infection-ignore-all MethodCallRemoval: skipping this INSERT leaves total_documents/avg_doc_length rows absent; adjustStats UPDATEs hit 0 rows but keep infoCache correct for the current connection, so single-connection tests are unaffected; only a close+reopen would expose stale DB state */
         $pdo->exec("INSERT INTO info (key, value) VALUES ('total_documents', 0), ('avg_doc_length', 0)");
 
-        $stmt = $pdo->prepare("INSERT INTO info (key, value) VALUES ('language', ?)");
-        $stmt->execute([$language ?? '']);
+        $stmt = $pdo->prepare("INSERT INTO info (key, value) VALUES ('stemmer', ?), ('stemmer_id', ?)");
+        $stmt->execute([$schema->stemmer ?? '', $stemmer?->id() ?? '']);
 
         $pdo->exec(
             "CREATE TABLE IF NOT EXISTS positions (
@@ -1551,9 +1562,7 @@ final class Index implements \Countable
         $this->applyStopWords($stopWords);
         $this->schemaVersion      = self::CURRENT_SCHEMA_VERSION;
 
-        if ($language !== null) {
-            $this->applyLanguage($language);
-        }
+        $this->applyStemmer($schema->stemmer, $stemmer, $stemmer?->id() ?? '');
         $this->captureFileIdentity();
 
         return $this;
@@ -1588,7 +1597,7 @@ final class Index implements \Countable
         $pdo   = $this->pdo;
         $stmt  = $pdo->query(
             "SELECT key, value FROM info"
-            . " WHERE key IN ('language', 'has_document_store', 'filterable_fields', 'sortable_fields',"
+            . " WHERE key IN ('stemmer', 'stemmer_id', 'has_document_store', 'filterable_fields', 'sortable_fields',"
             . " 'searchable_fields', 'strip_html', 'stop_words', 'schema_version')"
         );
         $infoRows = [];
@@ -1604,7 +1613,19 @@ final class Index implements \Countable
             throw new QueryException(self::unsupportedRevisionMessage($this->path, $schemaVersion));
         }
         $this->schemaVersion        = $schemaVersion;
-        $this->applyLanguage($infoRows['language'] !== '' ? $infoRows['language'] : null);
+        $stemmerClass = $infoRows['stemmer'] !== '' ? $infoRows['stemmer'] : null;
+        try {
+            $stemmer = $stemmerClass !== null ? self::createStemmer($stemmerClass, 'The index\'s stemmer') : null;
+        } catch (QueryException $e) {
+            $this->pdo = null;
+            throw new QueryException(
+                "{$this->path} was built with the stemmer {$stemmerClass}, which cannot be loaded: install "
+                . 'the package that provides it, or rebuild() the index with another SchemaConfig::$stemmer.',
+                0,
+                $e,
+            );
+        }
+        $this->applyStemmer($stemmer !== null ? $stemmer::class : null, $stemmer, $infoRows['stemmer_id']);
         $this->documentStoreEnabled = $infoRows['has_document_store'] === '1';
         $this->applyFieldLists(
             self::decodeStringList($infoRows['filterable_fields']),
@@ -2484,7 +2505,7 @@ final class Index implements \Countable
     /**
      * Replace the full synonym configuration for this index.
      *
-     * All terms are normalized (lowercased, stemmed if a language is set) before
+     * All terms are normalized (lowercased, stemmed if the index has a stemmer) before
      * storage, so synonyms remain consistent with indexed tokens regardless of how
      * the caller spells them.  Multi-word terms and terms that reduce to an empty
      * string after normalization are skipped and returned to the caller rather than
@@ -2848,7 +2869,7 @@ final class Index implements \Countable
             rawTokens:       $verbose['raw_tokens'],
             filteredTokens:  $filteredTokens,
             stopwordsActive: $this->stopwords instanceof \Fuzor\Stopwords,
-            stemmerActive:   $this->stemmer instanceof \Fuzor\Stemmer,
+            stemmerActive:   $this->stemmerImpl instanceof Stemmer,
             allStripped:     $verbose['all_stripped'],
             totalDocuments:  (int) ($indexInfo['total_documents'] ?? 0),
             avgDocLength:    (float) ($indexInfo['avg_doc_length'] ?? 0),
@@ -2864,7 +2885,7 @@ final class Index implements \Countable
     }
 
     /**
-     * Return a Snippeter pre-configured with the index language.
+     * Return a Snippeter pre-configured with the index's stemmer.
      *
      * @param bool $escape Escape the excerpt for safe inclusion in HTML.
      */
@@ -2878,7 +2899,7 @@ final class Index implements \Countable
             windowSize: $windowSize,
             maxSnippets: $maxSnippets,
             ellipsis: $ellipsis,
-            language: $this->language,
+            stemmer: $this->stemmerImpl,
             escape: $escape,
         );
     }
@@ -2898,7 +2919,7 @@ final class Index implements \Countable
             open: $open,
             close: $close,
             asYouType: $asYouType,
-            language: $this->language,
+            stemmer: $this->stemmerImpl,
             escape: $escape,
         );
     }
@@ -6787,7 +6808,7 @@ final class Index implements \Countable
                 return;
             }
         }
-        $tokens = Tokenizer::tokenize($text, $this->language);
+        $tokens = Tokenizer::tokenize($text);
         // A stop word is left out but keeps its position, so the words around it stay as far
         // apart as typed: a phrase with it matches any word in its place, one without it does not
         // match across it, and proximity counts it.
@@ -6798,8 +6819,8 @@ final class Index implements \Countable
         }
         /** @infection-ignore-all Assignment: changing += to = only matters for multi-field docs where the same term appears in both fields; single-field tests are unaffected */
         $length += count($tokens);
-        if ($this->stemmer instanceof \Fuzor\Stemmer && $tokens !== []) {
-            $tokens = array_combine(array_keys($tokens), $this->stemmer->stemTokens(array_values($tokens)));
+        if ($this->stemmerImpl instanceof Stemmer && $tokens !== []) {
+            $tokens = array_combine(array_keys($tokens), $this->stemTokens(array_values($tokens)));
         }
         foreach ($tokens as $offset => $token) {
             $termCounts[$token]      = ($termCounts[$token] ?? 0) + 1;
@@ -7813,9 +7834,9 @@ final class Index implements \Countable
         int &$df = 0,
     ): array {
         $df = 0;
-        $tokens = Tokenizer::tokenize($keyword, $this->language);
-        if ($this->stemmer instanceof \Fuzor\Stemmer) {
-            $tokens = $this->stemmer->stemTokens($tokens);
+        $tokens = Tokenizer::tokenize($keyword);
+        if ($this->stemmerImpl instanceof Stemmer) {
+            $tokens = $this->stemTokens($tokens);
         }
         $ids  = [];
         $last = count($tokens) - 1;
@@ -8494,18 +8515,18 @@ final class Index implements \Countable
         $phrase = self::closeOpenQuote($phrase);
         ['free' => $freePhrase, 'groups' => $rawPhraseGroups] = $this->extractQuotedPhrases($phrase);
 
-        $survivingRaw = Tokenizer::tokenize($phrase, $this->language);
+        $survivingRaw = Tokenizer::tokenize($phrase);
         $allStripped  = false;
 
-        /** @infection-ignore-all GreaterThan,GreaterThanNegotiation,Ternary: mutations only affect stopword-enabled indexes or multi-token results; tests without a language set are unaffected */
+        /** @infection-ignore-all GreaterThan,GreaterThanNegotiation,Ternary: mutations only affect stopword-enabled indexes or multi-token results; tests without stop words are unaffected */
         if ($this->stopwords instanceof \Fuzor\Stopwords && count($survivingRaw) > 1) {
             $afterStop    = $this->stopwords->filter($survivingRaw);
             $allStripped  = $afterStop === [];
             $survivingRaw = $allStripped ? $survivingRaw : $afterStop;
         }
 
-        $filtered = $this->stemmer instanceof \Fuzor\Stemmer
-            ? $this->stemmer->stemTokens($survivingRaw)
+        $filtered = $this->stemmerImpl instanceof Stemmer
+            ? $this->stemTokens($survivingRaw)
             : $survivingRaw;
 
         // Build phrase groups: tokenise each quoted substring, apply stopwords + stemming.
@@ -8796,7 +8817,7 @@ final class Index implements \Countable
      */
     private function normalizePhraseTokens(string $text): array
     {
-        $tokens = Tokenizer::tokenize($text, $this->language);
+        $tokens = Tokenizer::tokenize($text);
         $stopwords = $this->stopwords;
         if ($stopwords instanceof \Fuzor\Stopwords && count($tokens) > 1) {
             $tokens = array_filter($tokens, fn(string $token): bool => !$stopwords->contains($token));
@@ -8808,8 +8829,8 @@ final class Index implements \Countable
                 );
             }
         }
-        if ($tokens !== [] && $this->stemmer instanceof \Fuzor\Stemmer) {
-            $tokens = array_combine(array_keys($tokens), $this->stemmer->stemTokens(array_values($tokens)));
+        if ($tokens !== [] && $this->stemmerImpl instanceof Stemmer) {
+            $tokens = array_combine(array_keys($tokens), $this->stemTokens(array_values($tokens)));
         }
         return $tokens;
     }
@@ -8887,7 +8908,7 @@ final class Index implements \Countable
         }
 
         $maxExpansions = $this->config->fuzzyMaxExpansions;
-        $isPrefix      = $isLastWord && Tokenizer::ngramSize($this->language) === 0;
+        $isPrefix      = $isLastWord && !Tokenizer::isNgramToken($keyword);
         if ($isPrefix) {
             // One row past the cap tells an exactly-full expansion from a truncated one.
             $stmt = $this->stmt(
@@ -10225,8 +10246,8 @@ final class Index implements \Countable
         if ($this->typoExactWords === null) {
             $set = [];
             foreach ($this->config->typoTolerance->disableOnWords as $word) {
-                $tokens = Tokenizer::tokenize($word, $this->language);
-                $stems  = $this->stemmer instanceof \Fuzor\Stemmer ? $this->stemmer->stemTokens($tokens) : [];
+                $tokens = Tokenizer::tokenize($word);
+                $stems  = $this->stemmerImpl instanceof Stemmer ? $this->stemTokens($tokens) : [];
                 foreach ([...$tokens, ...$stems] as $token) {
                     $set[$token] = true;
                 }
@@ -12092,7 +12113,7 @@ final class Index implements \Countable
     }
 
     /**
-     * Warnings naming the caps that made a result approximate.
+     * Warnings naming the caps that made a result approximate, and a changed stemmer (stemmerWarning()).
      *
      * @param  'candidatesPerWord'|'facetCountDocs'|null $candidateCap Limit that capped the keyword candidates.
      * @param  list<string>                                $approximateFacets
@@ -12117,6 +12138,10 @@ final class Index implements \Countable
             $fields     = implode(', ', array_map(fn(string $f): string => "'{$f}'", $approximateFacets));
             $warnings[] = "Facet counts for {$fields} cover only {$cap} of the matching documents "
                 . '(Limits::$facetCountDocs).';
+        }
+        $stemmerWarning = $this->stemmerWarning();
+        if ($stemmerWarning !== null) {
+            $warnings[] = $stemmerWarning;
         }
         return $warnings;
     }
@@ -13354,20 +13379,66 @@ final class Index implements \Countable
     }
 
     /**
-     * Instantiate the Stemmer for the given BCP 47 tag on this connection.
+     * Set the stemmer of this index: its class, instance and the id() stored at creation. A stored
+     * id that differs from the instance's sets $stemmerChanged (see stemmerWarning()).
      *
-     * Called internally by createIndex() and selectIndex(). Passing null clears it.
+     * Called by createIndex() and selectIndex().
      *
-     * @throws QueryException If $language is set but not supported (Language::supports()).
+     * @param class-string<Stemmer>|null $class
      */
-    private function applyLanguage(?string $language): void
+    private function applyStemmer(?string $class, ?Stemmer $stemmer, string $storedId): void
     {
-        if ($language !== null && !Language::supports($language)) {
-            throw new QueryException("Unsupported language: '{$language}'");
+        $this->stemmer         = $class;
+        $this->stemmerImpl     = $stemmer;
+        $this->storedStemmerId = $storedId;
+        $this->stemmerChanged  = $stemmer !== null && $stemmer->id() !== $storedId;
+        $this->typoExactWords  = null;
+    }
+
+    /**
+     * An instance of the Stemmer class $class, created with no arguments.
+     *
+     * @param  string $what Names the setting in the exception message.
+     * @return Stemmer
+     * @throws QueryException If $class does not exist, does not implement Stemmer, or cannot be created.
+     */
+    private static function createStemmer(string $class, string $what): Stemmer
+    {
+        if (!class_exists($class) || !is_subclass_of($class, Stemmer::class)) {
+            throw new QueryException("{$what} must name a class implementing " . Stemmer::class . "; got '{$class}'.");
         }
-        $this->language  = $language;
-        $this->stemmer   = $language !== null && Language::hasStemmer($language) ? new Stemmer($language) : null;
-        $this->typoExactWords = null;
+        try {
+            return new $class();
+        } catch (\ArgumentCountError $e) {
+            throw new QueryException("{$what} {$class} must have a constructor without required arguments.", 0, $e);
+        }
+    }
+
+    /**
+     * $tokens through the index's stemmer, keys kept; unchanged without one.
+     *
+     * @template K of array-key
+     * @param  array<K, string> $tokens
+     * @return ($tokens is list<string> ? list<string> : array<K, string>)
+     */
+    private function stemTokens(array $tokens): array
+    {
+        $stemmer = $this->stemmerImpl;
+        return $stemmer === null ? $tokens : array_map($stemmer->stem(...), $tokens);
+    }
+
+    /**
+     * The search warning of an index whose stemmer changed its stems since the index was built;
+     * null while the stems are the same.
+     */
+    private function stemmerWarning(): ?string
+    {
+        if (!$this->stemmerChanged) {
+            return null;
+        }
+        $now = $this->stemmerImpl?->id() ?? '';
+        return "The index was built with the stemmer {$this->storedStemmerId}; {$this->stemmer} is now {$now} and "
+            . 'stems some words differently, which then do not match. rebuild() the index.';
     }
 
     /** @param list<string> $words From normalizeStopWords() or the info table. */
@@ -13384,11 +13455,11 @@ final class Index implements \Countable
      * @return list<string>
      * @throws \InvalidArgumentException If an entry is not exactly one word.
      */
-    private static function normalizeStopWords(array $words, ?string $language): array
+    private static function normalizeStopWords(array $words): array
     {
         $normalized = [];
         foreach ($words as $word) {
-            $tokens = Tokenizer::tokenize($word, $language);
+            $tokens = Tokenizer::tokenize($word);
             if (count($tokens) !== 1) {
                 throw new \InvalidArgumentException("Stop words must be single words; got '{$word}'.");
             }
@@ -13477,8 +13548,8 @@ final class Index implements \Countable
         if (count($tokens) !== 1) {
             return '';
         }
-        if ($this->stemmer instanceof Stemmer) {
-            $tokens = $this->stemmer->stemTokens($tokens);
+        if ($this->stemmerImpl instanceof Stemmer) {
+            $tokens = $this->stemTokens($tokens);
         }
         return $tokens[0] ?? '';
     }
@@ -13530,7 +13601,7 @@ final class Index implements \Countable
      * file's sidecars; see publishVersion().
      *
      * @throws IOException    If the existing file is not a Fuzor index, or the new one cannot be published.
-     * @throws QueryException If schema->language is set but has no stopword list or stemmer.
+     * @throws QueryException If schema->stemmer is not a class implementing Stemmer.
      */
     private function replaceWithEmptyIndex(SchemaConfig $schema): void
     {

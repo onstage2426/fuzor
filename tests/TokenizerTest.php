@@ -224,14 +224,24 @@ class TokenizerTest extends TestCase
         }
     }
 
-    public function testNgramSizeReturnsCorrectSizes(): void
+    public function testNgramSizeFollowsTheTokensScript(): void
     {
-        $this->assertSame(2, Tokenizer::ngramSize('zh'));
-        $this->assertSame(2, Tokenizer::ngramSize('ja'));
-        $this->assertSame(2, Tokenizer::ngramSize('ko'));
-        $this->assertSame(3, Tokenizer::ngramSize('th'));
-        $this->assertSame(0, Tokenizer::ngramSize('en'));
-        $this->assertSame(0, Tokenizer::ngramSize('fr'));
+        $this->assertSame(2, Tokenizer::ngramSize('轿车'));
+        $this->assertSame(2, Tokenizer::ngramSize('とうきょう'));
+        $this->assertSame(2, Tokenizer::ngramSize('서울'));
+        $this->assertSame(3, Tokenizer::ngramSize('กรุงเทพ'));
+        $this->assertSame(3, Tokenizer::ngramSize('iphoneราคา'), 'Thai with Latin: trigrams');
+        $this->assertSame(2, Tokenizer::ngramSize('กรุง東京'), 'Thai with CJK: bigrams');
+        $this->assertSame(0, Tokenizer::ngramSize('sedan'));
+        $this->assertSame(0, Tokenizer::ngramSize('café'));
+    }
+
+    public function testHasNgramScript(): void
+    {
+        $this->assertFalse(Tokenizer::hasNgramScript('plain ascii text'));
+        $this->assertFalse(Tokenizer::hasNgramScript('café crème'));
+        $this->assertTrue(Tokenizer::hasNgramScript('BMW 轿车'));
+        $this->assertTrue(Tokenizer::hasNgramScript('ราคา'));
     }
 
     public function testIsNgramTokenReturnsTrueForCjk(): void
@@ -254,26 +264,40 @@ class TokenizerTest extends TestCase
 
     // --- tokenize ---
 
-    public function testTokenizeNonNgramLanguageReturnsSplitTokens(): void
+    public function testTokenizeLeavesTextWithoutCjkOrThaiAsSplit(): void
     {
-        // 'de' is not in NGRAM_SCRIPTS so ?? 0 kicks in; CJK text must be returned
-        // as a single split token, not broken into n-grams.
-        $this->assertSame(['轿车'], Tokenizer::tokenize('轿车', 'de'));
+        $this->assertSame(['café', 'crème', 'ελληνικά'], Tokenizer::tokenize('Café crème ελληνικά'));
+    }
+
+    public function testTokenizeExpandsEachTokenByItsScript(): void
+    {
+        $this->assertSame(
+            ['bmw', '轿车', '轿', '车', 'กรุ', 'รุง', 'sedan'],
+            Tokenizer::tokenize('BMW 轿车 กรุง sedan'),
+        );
     }
 
     public function testTokenizeIncludeUnigramsFalseOmitsUnigrams(): void
     {
         // With includeUnigrams=false the condition is (false && n===2) = false.
         // The || mutation turns this into (false || true) = true, adding unigrams.
-        $this->assertSame(['轿车', '车测', '测试'], Tokenizer::tokenize('轿车测试', 'zh', false));
+        $this->assertSame(['轿车', '车测', '测试'], Tokenizer::tokenize('轿车测试', false));
     }
 
     // --- tokenizeWithOffsets ---
 
-    public function testTokenizeWithOffsetsNonNgramLanguageReturnsSplitOffsets(): void
+    public function testTokenizeWithOffsetsWithoutCjkOrThaiReturnsSplitOffsets(): void
     {
-        // Non-ngram language must fall back to splitWithOffsets, not ngramWithOffsets.
-        $this->assertSame([['hello', 0], ['world', 6]], Tokenizer::tokenizeWithOffsets('hello world', 'de'));
+        $this->assertSame([['hello', 0], ['world', 6]], Tokenizer::tokenizeWithOffsets('hello world'));
+    }
+
+    public function testTokenizeWithOffsetsPointsEachNgramIntoTheText(): void
+    {
+        $text = 'BMW 轿车测试';
+        $this->assertSame(
+            [['bmw', 0], ['轿车', 4], ['车测', 7], ['测试', 10]],
+            Tokenizer::tokenizeWithOffsets($text),
+        );
     }
 
     // --- splitWithOffsets uppercase Unicode ---

@@ -16,7 +16,7 @@ use Fuzor\Tokenizer;
  * Index::inspectQuery(); document frequencies, lengths, BM25, words buckets, typos, sort,
  * filters, negations and quoted phrases are computed here from the documents themselves.
  *
- * Covers what SearchInvariantTest uses: no language, no stop words, no synonyms, no field
+ * Covers what SearchInvariantTest uses: no stemmer, no stop words, no synonyms, no field
  * boosts, proximity off (Config::$proximityBoost = 0.0), string filters and FacetExclude of
  * strings, numeric sort fields that every document has, distinct on a single-valued field.
  */
@@ -56,7 +56,7 @@ final class ReferenceRanker
             $this->fields[$id] = [];
             $this->hits[$id]   = [];
             foreach ($searchable as $field) {
-                $tokens              = Tokenizer::tokenize(self::str($doc[$field] ?? ''), null);
+                $tokens              = Tokenizer::tokenize(self::str($doc[$field] ?? ''));
                 $this->fields[$id][] = $tokens;
                 foreach ($tokens as $t) {
                     $this->hits[$id][$t] = ($this->hits[$id][$t] ?? 0) + 1;
@@ -87,14 +87,14 @@ final class ReferenceRanker
         $positive  = preg_replace_callback(
             '/(?<=^|\s)-("[^"]*"|\S+)/',
             function (array $m) use (&$negations): string {
-                $negations[] = Tokenizer::tokenize(trim($m[1], '"'), null);
+                $negations[] = Tokenizer::tokenize(trim($m[1], '"'));
                 return ' ';
             },
             $query,
         ) ?? $query;
         preg_match_all('/"([^"]*)"/', $positive, $m);
         $phrases = array_values(array_filter(
-            array_map(fn(string $p): array => Tokenizer::tokenize($p, null), $m[1]),
+            array_map(fn(string $p): array => Tokenizer::tokenize($p), $m[1]),
             fn(array $p): bool => $p !== [],
         ));
 

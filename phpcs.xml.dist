@@ -5,7 +5,7 @@
     <file>src</file>
     <file>tests</file>
     <exclude-pattern>vendor/*</exclude-pattern>
-    <exclude-pattern>src/Stemmers/*</exclude-pattern>
+    <exclude-pattern>tests/Support/Snowball/*</exclude-pattern>
 
     <!-- tests/IndexTest.php alone goes over the default 128M -->
     <ini name="memory_limit" value="512M"/>

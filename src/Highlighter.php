@@ -22,26 +22,22 @@ final readonly class Highlighter
     /** A word as the patterns bound it; combining marks belong to the letter before them. */
     private const string WORD_CHARS = '[\p{L}\p{N}\p{Pc}\p{M}]';
 
-    /** N-gram window size for the configured language. */
-    private int $ngramSize;
-
     /**
      * @param string  $open      Opening tag placed before each match.
      * @param string  $close     Closing tag placed after each match.
      * @param bool    $asYouType When true, the last query token is matched as a word prefix.
-     * @param ?string $language  BCP 47 tag; drives n-gram tokenisation. Null for whitespace-delimited languages.
+     * @param ?Stemmer $stemmer   The index's stemmer: index terms passed to highlightMany() are stems then.
      * @param bool    $escape    Treat the input as plain text and return safe HTML (see class docblock).
      *
-     * @internal Use Index::highlighter(), which passes the index language.
+     * @internal Use Index::highlighter(), which passes the index's stemmer.
      */
     public function __construct(
         private string $open = '<mark>',
         private string $close = '</mark>',
         private bool $asYouType = true,
-        private ?string $language = null,
+        private ?Stemmer $stemmer = null,
         private bool $escape = false,
     ) {
-        $this->ngramSize = Tokenizer::ngramSize($language);
     }
 
     /**
@@ -53,7 +49,7 @@ final readonly class Highlighter
      */
     public function highlight(string $phrase, string $text): string
     {
-        $pattern = $this->buildPattern(Tokenizer::tokenize($phrase, $this->language, false));
+        $pattern = $this->buildPattern(Tokenizer::tokenize($phrase, false));
         if ($pattern === null) {
             return $this->escape ? HtmlText::escape($text) : $text;
         }
@@ -70,17 +66,18 @@ final readonly class Highlighter
      * @param  array<string, string> $fields Field name → text pairs.
      * @param  list<string>          $terms  @internal Index terms that also matched the query (typo
      *                                       derivations, synonyms): marked like the query's words, on
-     *                                       a stemmed index by their stem. Not for n-gram languages,
-     *                                       whose words have no boundaries to test.
+     *                                       a stemmed index by their stem. CJK and Thai terms are
+     *                                       left out: their n-grams have no word boundaries to test.
      * @return array<string, string>         Same keys, with highlights applied.
      */
     public function highlightMany(string $phrase, array $fields, array $terms = []): array
     {
-        $tokens = Tokenizer::tokenize($phrase, $this->language, false);
+        $tokens = Tokenizer::tokenize($phrase, false);
         $isTerm = null;
-        if ($terms !== [] && $this->ngramSize === 0) {
-            if ($this->language !== null && Stemmer::supports($this->language)) {
-                $isTerm = self::stemTest($terms, new Stemmer($this->language));
+        $terms  = array_values(array_filter($terms, fn(string $term): bool => !Tokenizer::isNgramToken($term)));
+        if ($terms !== []) {
+            if ($this->stemmer !== null) {
+                $isTerm = self::stemTest($terms, $this->stemmer);
             } else {
                 // Unstemmed terms are the words themselves. The query's own stay last: the
                 // last one is the word being typed.
@@ -104,7 +101,7 @@ final readonly class Highlighter
     private static function stemTest(array $terms, Stemmer $stemmer): \Closure
     {
         $set = array_fill_keys($terms, true);
-        return fn(string $word): bool => isset($set[$stemmer->stemTokens([mb_strtolower($word, 'UTF-8')])[0]]);
+        return fn(string $word): bool => isset($set[$stemmer->stem(mb_strtolower($word, 'UTF-8'))]);
     }
 
     /**
@@ -139,8 +136,8 @@ final readonly class Highlighter
             }
         }
 
-        // For non-ngram queries, apply asYouType prefix extension to the last token.
-        if ($this->ngramSize === 0 && $this->asYouType && $asciiAlts !== []) {
+        // The last word is typed as a prefix, unless it is CJK or Thai (n-grams have no word end).
+        if ($this->asYouType && $asciiAlts !== [] && !Tokenizer::isNgramToken($tokens[count($tokens) - 1])) {
             $lastIdx = count($asciiAlts) - 1;
             $asciiAlts[$lastIdx] .= self::WORD_CHARS . '*';
             /** @infection-ignore-all word-boundary lookahead makes alternation order irrelevant; moving prefix first is style only */

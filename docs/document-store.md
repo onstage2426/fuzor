@@ -97,7 +97,6 @@ As long as the store is enabled, you can rebuild the index without keeping a sep
 ```php
 // Re-index with a new schema — Fuzor streams from the store automatically
 Index::rebuild('/path/to/articles.db', schema: new SchemaConfig(
-    language:         'en',
     filterableAttributes: ['category', 'price'],
     sortableAttributes:   ['price'],
 ));

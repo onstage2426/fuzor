@@ -84,22 +84,33 @@ bucket documents that match with fewer typos rank first, before `sort` fields. T
 exact, list them in `TypoTolerance::$disableOnWords`, set `disableOnNumbers` for codes, or raise
 `minWordSizeForOneTypo`.
 
-## A language no longer filters stop words
+## `SchemaConfig::$language` is removed; stemming is your own class
 
-In 1.x, `SchemaConfig::$language` also switched on a bundled stop word list (1,298 English
-words, including product words such as `c`, `men`, `tv`, `case` and every two-letter code).
-Those words were left out of the index and of queries. 2.0 ships no lists: every word is indexed
-and searched unless you list it in the new `SchemaConfig::$stopWords`, which is empty by
-default.
+In 1.x, `SchemaConfig::$language` switched on a Snowball stemmer (31 languages), n-grams for
+Chinese, Japanese, Korean and Thai, and a bundled stop word list. In 2.0 each of these works on
+its own:
 
-- To keep filtering words, pass them: `new SchemaConfig(language: 'en', stopWords: ['the', 'a', 'of'])`.
-  Each entry must be a single word; matching ignores case.
-- `Language::hasStopwords()` is removed. `QueryInspection::$stopwordsActive` is true when the
-  index has stop words.
-- Language tags that only had a stop word list (no stemmer, no n-grams) are no longer accepted:
-  `af`, `bg`, `bn`, `br`, `cs`, `fa`, `gl`, `gu`, `ha`, `he`, `hr`, `ku`, `la`, `lv`, `mr`, `ms`, `sk`,
-  `sl`, `so`, `st`, `sw`, `tl`, `uk`, `ur`, `vi`, `yo`, `zu`. Create those indexes with
-  `language: null`; indexing and search are the same apart from the stop words.
+- **N-grams need no setting.** Chinese, Japanese, Korean and Thai words are split into n-grams
+  by their script, in every index. Remove `language: 'zh'` (or `ja`, `ko`, `th`).
+- **Stemming is opt-in, and Fuzor ships no stemmers.** Without a stemmer, words match as written;
+  prefixes, typo tolerance and synonyms cover many word forms ("shoe" finds "shoes"). On a shop
+  catalogue that is often the better choice: with a full stemmer, a word being typed ("hikin")
+  or misspelled ("hikng") is compared with the stems in the index ("hike") and can miss. To keep
+  stemming, implement `Fuzor\Stemmer` (`id()`, `stem()`), for example around a stemming library,
+  and name the class in the schema; see "Writing a stemmer" in `docs/language.md`:
+
+  ```php
+  new SchemaConfig(stemmer: \App\Search\MyStemmer::class);
+  ```
+
+- **Stop words are a list you pass.** 1.x left out a bundled list (1,298 English words,
+  including product words such as `c`, `men`, `tv`, `case` and every two-letter code). 2.0 ships
+  no lists: list the words in `SchemaConfig::$stopWords`, which is empty by default.
+  `QueryInspection::$stopwordsActive` is true when the index has stop words.
+- `Index::$language` is replaced by `Index::$stemmer` (the class name, or `null`), and the
+  `Language` class is removed (`all()`, `supports()`, `hasStemmer()`, `hasStopwords()`).
+- `Index::highlighter()` and `Index::snippeter()` pass the index's stemmer; code that constructed
+  `Highlighter` or `Snippeter` with `language:` passes nothing (or `stemmer:`) instead.
 
 ## `facetFields` is split into `filterableAttributes` and `sortableAttributes`; `searchableFields` is `searchableAttributes`
 
@@ -254,8 +265,8 @@ Below the cap, `search()` now counts `$totalHits` exactly also when a word match
 `Limits::$candidatesPerWord` documents (`exhaustive: false`); 1.x reported the number of candidates it had
 scored, often a quarter of the real number or less. Facet counts of such a search are taken over
 every match too (up to `Limits::$facetCountDocs`), not over the scored candidates; on the 44k
-catalog they were off by 76% at the median. `searchBoolean()` and `distinct` totals stay estimates
-in that case.
+catalog they were off by 76% at the median. `searchBoolean()` and `distinct` totals are exact
+in that case too.
 
 ## `SearchOptions::$limit` defaults to 20
 
@@ -267,7 +278,7 @@ Facet counts over a filter or query are taken over at most `facetCountDocs` matc
 documents. The default is 50,000 instead of 10,000, so pages with 10,001 to 50,000 matches now
 get exact counts (and no longer list their fields in `$approximateFacets`). Counting is cheaper
 in 2.0 (one row per document for all facet fields), so such a page is still faster than a
-capped one in 1.x. `facetSearch()` with a `query` also considers up to 50,000 candidates. Pass
+capped one in 1.x. `facetSearch()` with `q` also considers up to 50,000 candidates. Pass
 `limits: new Limits(facetCountDocs: 10_000)` to keep the old cap.
 
 ## `facetSearch()` matches any word, ignoring accents

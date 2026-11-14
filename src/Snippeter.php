@@ -10,37 +10,29 @@ namespace Fuzor;
  * Finds the window of text where query terms are most densely clustered and returns
  * it as a short excerpt with ellipsis decoration. Stopword filtering is intentionally
  * not applied to the query — stopwords score zero and the fallback handles all-stopword
- * queries gracefully. Languages without a Snowball stemmer silently skip stemming.
+ * queries gracefully. With the index's stemmer, a word also matches through its stem.
  *
  * Output is plain text by default. With $escape it is escaped for HTML — including the
  * ellipsis, which is treated as text like the excerpt around it.
  */
 final readonly class Snippeter
 {
-    /** Stemmer for the configured language; null if none is available for that language. */
-    private ?Stemmer $stemmer;
-
-    /** N-gram window size for the configured language. */
-    private int $ngramSize;
-
     /**
      * @param int     $windowSize  Maximum display characters per excerpt window.
      * @param int     $maxSnippets Maximum number of non-overlapping windows to return.
      * @param string  $ellipsis    Separator placed between windows and at truncation boundaries.
-     * @param ?string $language    BCP 47 tag; drives stemming and n-gram tokenisation. Null disables both.
+     * @param ?Stemmer $stemmer     The index's stemmer; null matches words as written.
      * @param bool    $escape      Escape the returned excerpt for safe inclusion in HTML.
      *
-     * @internal Use Index::snippeter(), which passes the index language.
+     * @internal Use Index::snippeter(), which passes the index's stemmer.
      */
     public function __construct(
         private int $windowSize = 200,
         private int $maxSnippets = 1,
         private string $ellipsis = '…',
-        private ?string $language = null,
+        private ?Stemmer $stemmer = null,
         private bool $escape = false,
     ) {
-        $this->stemmer   = $language !== null && Stemmer::supports($language) ? new Stemmer($language) : null;
-        $this->ngramSize = Tokenizer::ngramSize($language);
     }
 
     /**
@@ -112,7 +104,7 @@ final readonly class Snippeter
             return $this->fallback($text);
         }
 
-        $bodyTokens = Tokenizer::tokenizeWithOffsets($text, $this->language);
+        $bodyTokens = Tokenizer::tokenizeWithOffsets($text);
 
         if ($bodyTokens === []) {
             /** @infection-ignore-all fall-through: scores=[] → wins=[] → fallback called anyway */
@@ -120,7 +112,8 @@ final readonly class Snippeter
         }
 
         $scores = $this->scoreTokens($bodyTokens, $querySet);
-        $wins   = $this->findWindows($scores, $bodyTokens);
+        $ngrams = Tokenizer::hasNgramScript($text);
+        $wins   = $this->findWindows($scores, $bodyTokens, $ngrams);
 
         if ($wins === []) {
             return $this->fallback($text);
@@ -128,7 +121,7 @@ final readonly class Snippeter
 
         $slices = [];
         foreach ($wins as [$startIdx, $endIdx]) {
-            $slices[] = $this->extractSlice($text, $bodyTokens, $startIdx, $endIdx);
+            $slices[] = $this->extractSlice($text, $bodyTokens, $startIdx, $endIdx, $ngrams);
         }
 
         return implode(' ' . $this->ellipsis . ' ', $slices);
@@ -158,7 +151,7 @@ final readonly class Snippeter
      */
     private function buildQuerySet(string $query): array
     {
-        $tokens = Tokenizer::tokenize($query, $this->language);
+        $tokens = Tokenizer::tokenize($query);
         if ($tokens === []) {
             /** @infection-ignore-all fall-through: array_fill_keys([],true)=[] + empty foreach → return [] */
             return [];
@@ -166,7 +159,8 @@ final readonly class Snippeter
 
         $set = array_fill_keys($tokens, true);
 
-        $stems = $this->stemmer instanceof \Fuzor\Stemmer ? $this->stemmer->stemTokens($tokens) : $tokens;
+        $stemmer = $this->stemmer;
+        $stems   = $stemmer !== null ? array_map($stemmer->stem(...), $tokens) : $tokens;
         foreach ($stems as $stem) {
             /** @infection-ignore-all TrueValue: isset() treats false the same as true (both non-null) */
             $set[$stem] = true;
@@ -186,7 +180,7 @@ final readonly class Snippeter
     {
         $scores = [];
         foreach ($bodyTokens as [$token]) {
-            $stem     = $this->stemmer instanceof \Fuzor\Stemmer ? $this->stemmer->stemToken($token) : $token;
+            $stem     = $this->stemmer !== null ? $this->stemmer->stem($token) : $token;
             $scores[] = (isset($querySet[$token]) || isset($querySet[$stem])) ? 1.0 : 0.0;
         }
         return $scores;
@@ -203,9 +197,10 @@ final readonly class Snippeter
      *
      * @param  list<float>                    $scores
      * @param  list<array{0: string, 1: int}> $bodyTokens
+     * @param  bool                           $ngrams     The text holds CJK or Thai n-grams.
      * @return list<array{0: int, 1: int}>    Each entry is [startTokenIdx, endTokenIdx].
      */
-    private function findWindows(array $scores, array $bodyTokens): array
+    private function findWindows(array $scores, array $bodyTokens, bool $ngrams): array
     {
         $n = count($scores);
 
@@ -247,7 +242,7 @@ final readonly class Snippeter
             }
 
             // N-grams overlap and a window of them is not a run of text, so they stay as found.
-            if ($this->ngramSize === 0) {
+            if (!$ngrams) {
                 $bestStart = $this->centredStart($s, $bestStart, $winTokens, $n);
             }
             /** @infection-ignore-all DecrementInteger/Minus on $n-1: first arg ($bestStart+$winTokens-1) is always ≤$n-1 since winTokens is clamped to $n; changing $n-1 to $n or $n+1 never affects the min result */
@@ -311,18 +306,18 @@ final readonly class Snippeter
      * enforce $windowSize in characters, and add ellipsis decoration.
      *
      * @param list<array{0: string, 1: int}> $bodyTokens
+     * @param bool                           $ngrams     The text holds CJK or Thai n-grams.
      */
-    private function extractSlice(string $text, array $bodyTokens, int $startIdx, int $endIdx): string
+    private function extractSlice(string $text, array $bodyTokens, int $startIdx, int $endIdx, bool $ngrams): string
     {
         $textLen   = strlen($text);
         $lastTok   = $bodyTokens[$endIdx];
         $startByte = $bodyTokens[$startIdx][1];
         $endByte   = $lastTok[1] + strlen($lastTok[0]);
 
-        // For ngram languages the text contains no spaces between characters, so whitespace
-        // snapping is skipped. The token byte offsets from ngramWithOffsets are already
-        // aligned to valid UTF-8 codepoint boundaries.
-        if ($this->ngramSize === 0) {
+        // CJK and Thai text has no spaces between words, so whitespace snapping is skipped. The
+        // token byte offsets from ngramWithOffsets are aligned to UTF-8 codepoint boundaries.
+        if (!$ngrams) {
             // Snap left boundary backward to preceding whitespace.
             while ($startByte > 0 && !$this->isWhitespace($text[$startByte - 1])) {
                 $startByte--;

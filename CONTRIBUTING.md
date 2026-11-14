@@ -23,7 +23,7 @@ All of `composer check` must pass before submitting a pull request.
 - Match the existing code style (PSR-12, 120-char soft limit).
 - Add tests for any new behaviour. The test suite lives in `tests/`.
 - Do not add production dependencies (`require` in `composer.json`). Fuzor is intentionally dependency-free.
-- Generated files in `src/Stemmers/` are not hand-edited — leave them as-is.
+- Generated files in `tests/Support/Snowball/` (a copy of one Snowball stemmer for the tests) are not hand-edited.
 
 ## Reporting bugs
 

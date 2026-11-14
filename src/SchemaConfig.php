@@ -8,8 +8,14 @@ namespace Fuzor;
 final readonly class SchemaConfig
 {
     public function __construct(
-        /** BCP 47 language tag (e.g. 'en'): Snowball stemming and CJK/Thai n-grams; null for neither. */
-        public ?string $language = null,
+        /**
+         * Class of the Stemmer every indexed and query word goes through (a class implementing
+         * Stemmer, with a constructor that takes no arguments); null (default) for no stemming.
+         * Stored in the index with the stemmer's id(). CJK and Thai n-grams need no setting.
+         *
+         * @var class-string<Stemmer>|null
+         */
+        public ?string $stemmer = null,
         /** Enable the document store so raw documents can be retrieved by ID. */
         public bool $store = true,
         /**

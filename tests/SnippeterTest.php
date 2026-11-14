@@ -3,6 +3,7 @@
 namespace Fuzor\Tests;
 
 use Fuzor\Snippeter;
+use Fuzor\Tests\Support\EnglishStemmer;
 use PHPUnit\Framework\TestCase;
 
 class SnippeterTest extends TestCase
@@ -120,7 +121,7 @@ class SnippeterTest extends TestCase
 
     public function testStemmedQueryMatchesSurfaceFormInBody(): void
     {
-        $snip   = new Snippeter(windowSize: 200, language: 'en');
+        $snip   = new Snippeter(windowSize: 200, stemmer: new EnglishStemmer());
         $prefix = str_repeat('unrelated words here ', 5);
         $text   = $prefix . 'running and jumping every single day keeps you healthy';
         $result = $snip->snippet('running', $text);
@@ -130,7 +131,7 @@ class SnippeterTest extends TestCase
     public function testStemmerConnectsStemVariantsInBody(): void
     {
         // Query "connections" stems to "connect"; body has "connected"
-        $snip   = new Snippeter(windowSize: 200, language: 'en');
+        $snip   = new Snippeter(windowSize: 200, stemmer: new EnglishStemmer());
         $prefix = str_repeat('something else entirely ', 4);
         $text   = $prefix . 'connected to the server via the network';
         $result = $snip->snippet('connections', $text);
@@ -239,7 +240,7 @@ class SnippeterTest extends TestCase
 
     public function testCjkSnippetFindsWindowAroundBigram(): void
     {
-        $snip = new Snippeter(windowSize: 8, language: 'zh');
+        $snip = new Snippeter(windowSize: 8);
         // windowSize=8 chars → ~2 bigrams; target is isolated so the window finds it.
         $text   = '无关文字无关文字' . '轿车' . '无关文字无关文字';
         $result = $snip->snippet('轿车', $text);
@@ -248,7 +249,7 @@ class SnippeterTest extends TestCase
 
     public function testCjkSnippetReturnsValidUtf8(): void
     {
-        $snip   = new Snippeter(windowSize: 10, language: 'zh');
+        $snip   = new Snippeter(windowSize: 10);
         $text   = str_repeat('无关文字', 10) . '轿车测试';
         $result = $snip->snippet('轿车', $text);
         $this->assertTrue(mb_check_encoding($result, 'UTF-8'));
@@ -256,7 +257,7 @@ class SnippeterTest extends TestCase
 
     public function testThaiSnippetFindsTrigram(): void
     {
-        $snip = new Snippeter(windowSize: 10, language: 'th');
+        $snip = new Snippeter(windowSize: 10);
         // Use short padding so the window is large enough to reach the target.
         $text   = 'คำอื่นคำ' . 'กรุงเทพ' . 'คำอื่นคำ';
         $result = $snip->snippet('กรุงเท', $text);
@@ -402,7 +403,7 @@ class SnippeterTest extends TestCase
         // 'connections' → stem 'connect'; body has 'connecting' → stem 'connect'.
         // The match is far from start so fallback (which returns start) would NOT contain it.
         // Without stem additions in buildQuerySet the window falls back to start.
-        $snip   = new Snippeter(windowSize: 50, language: 'en');
+        $snip   = new Snippeter(windowSize: 50, stemmer: new EnglishStemmer());
         $prefix = str_repeat('other stuff completely ', 8); // 184 chars — beyond windowSize
         $text   = $prefix . 'connecting network today';
         $result = $snip->snippet('connections', $text);

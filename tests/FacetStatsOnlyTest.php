@@ -13,6 +13,7 @@ use Fuzor\Limits;
 use Fuzor\SchemaConfig;
 use Fuzor\SearchOptions;
 use Fuzor\SearchResult;
+use Fuzor\Tests\Support\EnglishStemmer;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 use Random\Engine\Mt19937;
@@ -126,7 +127,7 @@ class FacetStatsOnlyTest extends TestCase
             $docs[] = $doc;
         }
         $index = new Index($this->path, force: true, schema: new SchemaConfig(
-            language: 'en',
+            stemmer: EnglishStemmer::class,
             filterableAttributes: ['group', 'color', 'score', 'sizes', 'weight', 'mixed'],
             searchableAttributes: ['title'],
         ));

@@ -9,6 +9,7 @@ use Fuzor\Index;
 use Fuzor\SchemaConfig;
 use Fuzor\SearchOptions;
 use Fuzor\Tests\ShopCatalog;
+use Fuzor\Tests\Support\EnglishStemmer;
 use PhpBench\Attributes\AfterMethods;
 use PhpBench\Attributes\BeforeMethods;
 use PhpBench\Attributes\Groups;
@@ -102,7 +103,7 @@ class FuzorBench
             return;
         }
         self::loadDocs();
-        $idx = new Index(self::SEARCH_DB, force: true, schema: new SchemaConfig(language: 'en'));
+        $idx = new Index(self::SEARCH_DB, force: true, schema: new SchemaConfig(stemmer: EnglishStemmer::class));
         $idx->insert(self::$docs);
         $idx->close();
     }
@@ -115,7 +116,7 @@ class FuzorBench
         self::loadDocs();
         $genres = ['Action', 'Drama', 'Comedy', 'Thriller', 'Horror', 'Romance', 'Science Fiction', 'Documentary'];
         $idx    = new Index(self::FACET_DB, force: true, schema: new SchemaConfig(
-            language:    'en',
+            stemmer:     EnglishStemmer::class,
             filterableAttributes: ['genre', 'year'],
             sortableAttributes: ['year'],
         ));
@@ -182,7 +183,7 @@ class FuzorBench
     {
         $path = sys_get_temp_dir() . '/fuzor_bench_im_' . getmypid() . '.db';
         @unlink($path);
-        $idx = new Index($path, force: true, schema: new SchemaConfig(language: 'en'));
+        $idx = new Index($path, force: true, schema: new SchemaConfig(stemmer: EnglishStemmer::class));
         $idx->insert(self::$docs);
         $idx->close();
         @unlink($path);
@@ -197,7 +198,7 @@ class FuzorBench
     {
         $path = sys_get_temp_dir() . '/fuzor_bench_is_' . getmypid() . '.db';
         @unlink($path);
-        $idx = new Index($path, force: true, schema: new SchemaConfig(language: 'en'));
+        $idx = new Index($path, force: true, schema: new SchemaConfig(stemmer: EnglishStemmer::class));
         foreach (array_slice(self::$docs, 0, 1000) as $doc) {
             $idx->insert([$doc]);
         }

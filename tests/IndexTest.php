@@ -21,6 +21,7 @@ use Fuzor\TypoTolerance;
 use Fuzor\Exceptions\FuzorException;
 use Fuzor\Exceptions\IOException;
 use Fuzor\Exceptions\QueryException;
+use Fuzor\Tests\Support\EnglishStemmer;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 
@@ -100,13 +101,14 @@ class IndexTest extends TestCase
         new Index('/nonexistent/dir/index.db');
     }
 
-    public function testConstructorWithUnsupportedLanguageThrowsBeforePathResolution(): void
+    public function testConstructorWithUnknownStemmerThrowsBeforePathResolution(): void
     {
-        // Language guard must fire before resolvePath(); using a non-existent directory
+        // Stemmer guard must fire before resolvePath(); using a non-existent directory
         // proves it: without the early throw the code would reach resolvePath() and produce
         // an IOException instead of QueryException.
         $this->expectException(QueryException::class);
-        new Index('/nonexistent/dir/index.db', schema: new SchemaConfig(language: 'xx'));
+        // @phpstan-ignore argument.type (the point of the test)
+        new Index('/nonexistent/dir/index.db', schema: new SchemaConfig(stemmer: 'Fuzor\\Tests\\NoSuchStemmer'));
     }
 
     public function testSchemaOnExistingIndexThrowsQueryException(): void
@@ -114,7 +116,7 @@ class IndexTest extends TestCase
         (new Index($this->dbPath))->close();
 
         $this->expectException(QueryException::class);
-        new Index($this->dbPath, schema: new SchemaConfig(language: 'en'));
+        new Index($this->dbPath, schema: new SchemaConfig(stemmer: EnglishStemmer::class));
     }
 
     public function testSchemaWithForceDoesNotThrow(): void
@@ -122,8 +124,8 @@ class IndexTest extends TestCase
         (new Index($this->dbPath))->close();
 
         // force: true means "recreate", so schema is applied to the new index — no throw.
-        $index = new Index($this->dbPath, force: true, schema: new SchemaConfig(language: 'en'));
-        $this->assertSame('en', $index->language);
+        $index = new Index($this->dbPath, force: true, schema: new SchemaConfig(stemmer: EnglishStemmer::class));
+        $this->assertSame(EnglishStemmer::class, $index->stemmer);
     }
 
     public function testCreateWithForceOverwritesExistingFile(): void
@@ -2198,7 +2200,7 @@ class IndexTest extends TestCase
     public function testTypoToleranceDisableOnWordsIsStemmed(): void
     {
         $config = new Config(typoTolerance: new TypoTolerance(disableOnWords: ['Shirtz']));
-        $index  = new Index($this->dbPath, config: $config, schema: new SchemaConfig(language: 'en'));
+        $index  = new Index($this->dbPath, config: $config, schema: new SchemaConfig(stemmer: EnglishStemmer::class));
         $index->insert([['id' => 1, 'title' => 'shirts']]);
 
         // 'shirtzs' stems to the listed 'shirtz', so it gets no typo either.
@@ -3289,7 +3291,10 @@ class IndexTest extends TestCase
 
     public function testInspectQueryReportsNegationsApartFromTheSearchedWords(): void
     {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(language: 'en', stopWords: ['t', 'long', 'the']));
+        $index = new Index($this->dbPath, schema: new SchemaConfig(
+            stemmer: EnglishStemmer::class,
+            stopWords: ['t', 'long', 'the'],
+        ));
         $index->insert([
             ['id' => 1, 'title' => 'casual cotton shirt'],
             ['id' => 2, 'title' => 'formal shirt with long sleeves'],
@@ -3343,20 +3348,20 @@ class IndexTest extends TestCase
 
     public function testInspectQueryStopwordsInactiveWithALanguageOnly(): void
     {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(language: 'en'));
+        $index = new Index($this->dbPath, schema: new SchemaConfig(stemmer: EnglishStemmer::class));
         $this->assertFalse($index->inspectQuery('hello world')->stopwordsActive);
     }
 
     public function testInspectQueryStemmerActiveWhenLanguageSet(): void
     {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(language: 'en'));
+        $index = new Index($this->dbPath, schema: new SchemaConfig(stemmer: EnglishStemmer::class));
         $result = $index->inspectQuery('hello world');
         $this->assertTrue($result->stemmerActive);
     }
 
     public function testInspectQueryFilteredTokensDropsStopwords(): void
     {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(language: 'en', stopWords: ['the']));
+        $index = new Index($this->dbPath, schema: new SchemaConfig(stemmer: EnglishStemmer::class, stopWords: ['the']));
         $result = $index->inspectQuery('the quick');
         $this->assertNotContains('the', $result->filteredTokens);
         $this->assertContains('the', $result->rawTokens);
@@ -3621,7 +3626,7 @@ class IndexTest extends TestCase
 
     public function testInspectQueryStemmerApplied(): void
     {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(language: 'en'));
+        $index = new Index($this->dbPath, schema: new SchemaConfig(stemmer: EnglishStemmer::class));
         $result = $index->inspectQuery('running');
         // 'running' stems to 'run' in English Snowball
         $this->assertSame('run', $result->filteredTokens[0]);
@@ -3629,7 +3634,7 @@ class IndexTest extends TestCase
 
     public function testInspectQueryRawToProcessedMapping(): void
     {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(language: 'en'));
+        $index = new Index($this->dbPath, schema: new SchemaConfig(stemmer: EnglishStemmer::class));
         $result = $index->inspectQuery('running');
         $this->assertSame('running', $result->tokens[0]->raw);
         $this->assertSame('run', $result->tokens[0]->processed);
@@ -3912,13 +3917,13 @@ class IndexTest extends TestCase
 
     public function testRebuildPreservesLanguageFromExistingIndex(): void
     {
-        new Index($this->dbPath, schema: new SchemaConfig(language: 'en'))->close();
+        new Index($this->dbPath, schema: new SchemaConfig(stemmer: EnglishStemmer::class))->close();
 
         $rebuilt = Index::rebuild($this->dbPath, function (Index $new): void {
             $new->insert([['id' => 1, 'title' => 'running']]);
         });
 
-        $this->assertSame('en', $rebuilt->language);
+        $this->assertSame(EnglishStemmer::class, $rebuilt->stemmer);
     }
 
     public function testRebuildWorksWhenFileDoesNotExistYet(): void
@@ -4113,10 +4118,10 @@ class IndexTest extends TestCase
         $plain->insert([['id' => 1, 'title' => 'sedan']]);
         $plain->close();
 
-        $forced = new Index($this->dbPath, force: true, schema: new SchemaConfig(language: 'en'));
+        $forced = new Index($this->dbPath, force: true, schema: new SchemaConfig(stemmer: EnglishStemmer::class));
         $this->assertTrue(is_link($this->dbPath));
         $this->assertSame(0, $forced->count());
-        $this->assertSame('en', $forced->language);
+        $this->assertSame(EnglishStemmer::class, $forced->stemmer);
         $forced->insert([['id' => 2, 'title' => 'coupe']]);
         $forced->close();
 
@@ -4163,20 +4168,36 @@ class IndexTest extends TestCase
         $this->assertSame(1, $rebuilt->count());
     }
 
-    // --- CJK / ngram languages ---
+    // --- CJK / Thai n-grams (by script, no setting) ---
 
     public function testZhInsertAndSearchBigram(): void
     {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(language: 'zh'));
+        $index = new Index($this->dbPath, schema: new SchemaConfig());
         $index->insert([['id' => 1, 'body' => '轿车测试']]);
 
         $this->assertContains(1, $index->search('轿车')->getIds());
     }
 
+    public function testMixedScriptsNeedNoSettingAndKeepLatinPrefixes(): void
+    {
+        // A Japanese title next to an English description: each word is tokenised by its own
+        // script, and the last Latin word is still typed as a prefix.
+        $index = new Index($this->dbPath);
+        $index->insert([
+            ['id' => 1, 'title' => '東京タワー', 'body' => 'Observation tower in Tokyo'],
+            ['id' => 2, 'title' => 'Eiffel', 'body' => 'Iron tower in Paris'],
+        ]);
+
+        $this->assertSame([1], $index->search('東京')->getIds());
+        $this->assertSame([1], $index->search('tokyo obser')->getIds());
+        $this->assertSame([1], $index->search('東京 tow')->getIds());
+        $this->assertSame([2, 1], $index->search('tow')->getIds());
+    }
+
     public function testZhSingleCharSearch(): void
     {
         // Unigrams are emitted at index time for zh so single-character searches work.
-        $index = new Index($this->dbPath, schema: new SchemaConfig(language: 'zh'));
+        $index = new Index($this->dbPath, schema: new SchemaConfig());
         $index->insert([['id' => 1, 'body' => '轿车测试']]);
 
         $this->assertContains(1, $index->search('车')->getIds());
@@ -4184,7 +4205,7 @@ class IndexTest extends TestCase
 
     public function testZhDoesNotMatchUnrelatedDocument(): void
     {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(language: 'zh'));
+        $index = new Index($this->dbPath, schema: new SchemaConfig());
         $index->insert([
             ['id' => 1, 'body' => '轿车测试'],
             ['id' => 2, 'body' => '飞机起飞'],
@@ -4195,7 +4216,7 @@ class IndexTest extends TestCase
 
     public function testJaInsertAndSearchBigram(): void
     {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(language: 'ja'));
+        $index = new Index($this->dbPath, schema: new SchemaConfig());
         $index->insert([['id' => 1, 'body' => '東京タワー']]);
 
         $this->assertContains(1, $index->search('東京')->getIds());
@@ -4203,7 +4224,7 @@ class IndexTest extends TestCase
 
     public function testKoInsertAndSearchBigram(): void
     {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(language: 'ko'));
+        $index = new Index($this->dbPath, schema: new SchemaConfig());
         $index->insert([['id' => 1, 'body' => '서울특별시']]);
 
         $this->assertContains(1, $index->search('서울')->getIds());
@@ -4211,7 +4232,7 @@ class IndexTest extends TestCase
 
     public function testThInsertAndSearchTrigram(): void
     {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(language: 'th'));
+        $index = new Index($this->dbPath, schema: new SchemaConfig());
         $index->insert([['id' => 1, 'body' => 'กรุงเทพมหานคร']]);
 
         // 'กรุงเท' is a trigram within the indexed text
@@ -4220,7 +4241,7 @@ class IndexTest extends TestCase
 
     public function testZhBooleanSearch(): void
     {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(language: 'zh'));
+        $index = new Index($this->dbPath, schema: new SchemaConfig());
         $index->insert([
             ['id' => 1, 'body' => '轿车测试'],
             ['id' => 2, 'body' => '飞机起飞'],
@@ -4234,7 +4255,7 @@ class IndexTest extends TestCase
     public function testZhQueryTokensAreNgrammed(): void
     {
         // inspectQuery must show bigrams in filtered_tokens, not the raw full string.
-        $index  = new Index($this->dbPath, schema: new SchemaConfig(language: 'zh'));
+        $index  = new Index($this->dbPath, schema: new SchemaConfig());
         $result = $index->inspectQuery('轿车');
 
         $this->assertContains('轿车', $result->filteredTokens);
@@ -4245,7 +4266,7 @@ class IndexTest extends TestCase
     public function testZhMixedQueryAsciiTokenPassthrough(): void
     {
         // ASCII tokens in a mixed query must not be ngrammed.
-        $index = new Index($this->dbPath, schema: new SchemaConfig(language: 'zh'));
+        $index = new Index($this->dbPath, schema: new SchemaConfig());
         $index->insert([
             ['id' => 1, 'body' => 'BMW 轿车'],
             ['id' => 2, 'body' => '轿车'],
@@ -5783,12 +5804,12 @@ class IndexTest extends TestCase
     {
         $readPath = sys_get_temp_dir() . '/fuzor_snap_' . uniqid() . '.db';
         try {
-            $write = new Index($this->dbPath, schema: new SchemaConfig(language: 'en'));
+            $write = new Index($this->dbPath, schema: new SchemaConfig(stemmer: EnglishStemmer::class));
             $write->insert([['id' => 1, 'title' => 'running fast']]);
             $write->snapshotTo($readPath);
 
             $read = new Index($readPath);
-            $this->assertSame('en', $read->language);
+            $this->assertSame(EnglishStemmer::class, $read->stemmer);
             $read->close();
         } finally {
             self::removeIndexFiles($readPath);
@@ -10307,7 +10328,7 @@ class IndexTest extends TestCase
 
     public function testSetSynonymsNormalizesWithStemmer(): void
     {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(language: 'en'));
+        $index = new Index($this->dbPath, schema: new SchemaConfig(stemmer: EnglishStemmer::class));
         $index->insert([['id' => 1, 'title' => 'sedan']]);
         // 'cars' stems to 'car'; synonym target 'sedan' is unchanged.
         // Searching 'car' should find the sedan doc via synonym.
@@ -11827,7 +11848,7 @@ class IndexTest extends TestCase
     private function negationIndex(): Index
     {
         $index = new Index($this->dbPath, schema: new SchemaConfig(
-            language: 'en',
+            stemmer: EnglishStemmer::class,
             filterableAttributes: ['color'],
             sortableAttributes: ['price'],
         ));
@@ -12657,7 +12678,7 @@ class IndexTest extends TestCase
 
     public function testFormattingMarksATypoMatchOnAStemmedIndex(): void
     {
-        $index = new Index($this->dbPath, force: true, schema: new SchemaConfig(language: 'en'));
+        $index = new Index($this->dbPath, force: true, schema: new SchemaConfig(stemmer: EnglishStemmer::class));
         $index->insert([['id' => 1, 'text' => 'Fresh strawberries here']]);
 
         $hit = $index->search('strawbery', new SearchOptions(

@@ -1,10 +1,10 @@
 <?php
 
-namespace Fuzor\Stemmers;
+namespace Fuzor\Tests\Support\Snowball;
 
 // Generated from english.sbl by Snowball 3.0.0 - https://snowballstem.org/
 
-/** @internal Generated Snowball stemmer; Fuzor picks it from SchemaConfig::$language. */
+/** Generated Snowball English stemmer (a copy for the tests). */
 final class SnowballEnglish extends SnowballStemmer
 {
     private const array A_0 = [

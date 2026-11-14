@@ -4,54 +4,32 @@ declare(strict_types=1);
 
 namespace Fuzor;
 
-use Fuzor\Stemmers\SnowballStemmer;
-
 /**
- * Snowball stemmer wrapper for a single language.
+ * Reduces words to a common stem, so "running" and "runs" match "run".
  *
- * Maps BCP 47 language tags to generated Snowball stemmer classes.
- * Instantiated by Index when $language is set and a stemmer exists.
+ * An index uses a stemmer when SchemaConfig::$stemmer names a class implementing this interface
+ * (with a constructor that takes no arguments). Every indexed word and every query word goes
+ * through stem(); the index stores the class and id() and creates the stemmer again whenever it
+ * is opened. Fuzor ships no stemmers; docs/language.md shows how to write one or wrap a stemming
+ * library.
  *
- * @internal
+ * This interface stays the same for all of Fuzor 2.x.
  */
-final readonly class Stemmer
+interface Stemmer
 {
-    /** Active Snowball stemmer implementation for the configured language. */
-    private SnowballStemmer $impl;
-
     /**
-     * @param string $lang BCP 47 language tag.
-     * @throws \InvalidArgumentException If no stemmer exists for the given language.
-     */
-    public function __construct(string $lang)
-    {
-        $class = Language::stemmerClass($lang);
-        if ($class === null) {
-            throw new \InvalidArgumentException("No stemmer for language: '{$lang}'");
-        }
-        $this->impl = new $class();
-    }
-
-    /** Whether a stemmer is available for the given BCP 47 language tag. */
-    public static function supports(string $lang): bool
-    {
-        return Language::hasStemmer($lang);
-    }
-
-    /** Stem a single token. */
-    public function stemToken(string $token): string
-    {
-        return $this->impl->stemWord($token);
-    }
-
-    /**
-     * Stem every token in a list.
+     * Name and version of this stemmer's output, such as 'plural@1' or 'snowball-english@3.2.0'.
      *
-     * @param  list<string> $tokens
-     * @return list<string>
+     * Stored in the index when it is created. Change it whenever stem() returns a different stem
+     * for some word: an index whose stored id differs reports in its search warnings that it was
+     * built with other stems and needs rebuild().
      */
-    public function stemTokens(array $tokens): array
-    {
-        return array_map($this->impl->stemWord(...), $tokens);
-    }
+    public function id(): string;
+
+    /**
+     * The stem of one token: a lowercased word, number or CJK / Thai n-gram, as the tokenizer
+     * splits text. Return the token unchanged when it has no stem; never an empty string. The same
+     * token must always give the same stem.
+     */
+    public function stem(string $word): string;
 }

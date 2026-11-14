@@ -1,8 +1,8 @@
 <?php
 
-namespace Fuzor\Stemmers;
+namespace Fuzor\Tests\Support\Snowball;
 
-/** @internal Base of the generated Snowball stemmers; Fuzor picks one from SchemaConfig::$language. */
+/** Base of the generated Snowball stemmers (a copy for the tests; Fuzor ships no stemmers). */
 abstract class SnowballStemmer
 {
     protected string $current = '';

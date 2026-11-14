@@ -1,8 +1,8 @@
 {
     "name": "onstage2426/fuzor",
     "type": "library",
-    "description": "Dependency-free full-text search for PHP. BM25 ranking, fuzzy and boolean modes, search-as-you-type prefix matching, stopword filtering and Snowball stemming for 62 languages, snippet extraction and result highlighting — one SQLite file, zero infrastructure.",
-    "keywords": ["full-text-search", "search", "sqlite", "bm25", "inverted-index", "fuzzy-search", "boolean-search", "stemming", "stopwords", "snippet", "highlighting", "multilingual", "search-as-you-type", "tokenizer"],
+    "description": "Full-text search for PHP in a single SQLite file: BM25 ranking with typo tolerance and search-as-you-type, filters, facets, sorting, highlighting, and CJK and Thai n-grams. No search server and no package dependencies.",
+    "keywords": ["full-text-search", "search", "sqlite", "bm25", "inverted-index", "fuzzy-search", "boolean-search", "stemming", "facets", "faceted-search", "filters", "snippet", "highlighting", "multilingual", "search-as-you-type", "tokenizer"],
     "homepage": "https://github.com/onstage2426/fuzor",
     "license": "MIT",
     "authors": [

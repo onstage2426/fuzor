@@ -20,12 +20,13 @@ $index = new Index('/path/to/articles.db', force: true);
 
 The empty index is published the same way as a rebuild, so processes that still have the old file open are not affected: see [Index files after a rebuild or snapshot](#index-files-after-a-rebuild-or-snapshot).
 
-Pass a BCP 47 `language` tag to enable stemming at creation time (see [Language](language.md); stop words are a separate, empty-by-default list):
+Name a stemmer class to enable stemming at creation time (see [Language](language.md) for writing one; stop words are a separate, empty-by-default list):
 
 ```php
+use App\Search\PluralStemmer;
 use Fuzor\SchemaConfig;
 
-$index = new Index('/path/to/articles.db', schema: new SchemaConfig(language: 'en'));
+$index = new Index('/path/to/articles.db', schema: new SchemaConfig(stemmer: PluralStemmer::class));
 ```
 
 Pass `readonly: true` to open an existing index in read-only mode. All write methods throw `IOException`; searches work normally:
@@ -95,7 +96,7 @@ Passing `schema:` when opening an existing file throws `QueryException`. Use `In
 
 | `SchemaConfig` property | Default | Effect |
 |-------------------------|---------|--------|
-| `language` | `null` | BCP 47 language tag: stemming, CJK/Thai n-grams; `null` for neither |
+| `stemmer` | `null` | Class implementing `Fuzor\Stemmer` that every word goes through; `null` matches words as written. CJK and Thai n-grams need no setting |
 | `store` | `true` | Enable the document store |
 | `filterableAttributes` | `[]` | Fields usable in `filter`, `facets`, `distinct`, and `facetSearch()` |
 | `sortableAttributes` | `[]` | Fields usable in `sort` |
@@ -421,7 +422,6 @@ Index::rebuild('/path/to/articles.db');
 use Fuzor\SchemaConfig;
 
 Index::rebuild('/path/to/articles.db', schema: new SchemaConfig(
-    language:         'en',
     filterableAttributes: ['brand', 'price', 'category'],
     sortableAttributes:   ['price'],
     searchableAttributes: ['title', 'body'],
@@ -511,7 +511,7 @@ Index::rebuild('/path/to/articles.db', function (Index $new) use ($docs) {
 });
 ```
 
-If you rebuild with a different language, the copied synonyms are stored as stems from the old language and will no longer match anything. Clear and reconfigure them inside the callback:
+If you rebuild with a different stemmer, the copied synonyms are stored as stems from the old one and may no longer match. Clear and reconfigure them inside the callback:
 
 ```php
 Index::rebuild('/path/to/articles.db',
@@ -520,7 +520,7 @@ Index::rebuild('/path/to/articles.db',
         $new->setSynonyms(equivalences: [['auto', 'automobil', 'fahrzeug']]);
         $new->insert($docs);
     },
-    schema: new SchemaConfig(language: 'de'),
+    schema: new SchemaConfig(stemmer: \App\Search\GermanStemmer::class),
 );
 ```
 
@@ -531,10 +531,10 @@ Index::rebuild('/path/to/articles.db',
 ```php
 use Fuzor\SchemaConfig;
 
-// Switch to German
+// Turn on stemming with your own stemmer class
 Index::rebuild('/path/to/articles.db',
     fn (Index $new) => $new->insert($docs),
-    schema: new SchemaConfig(language: 'de'),
+    schema: new SchemaConfig(stemmer: \App\Search\PluralStemmer::class),
 );
 
 // Change searchable fields; turn the store off to shrink the rebuilt file
@@ -553,7 +553,7 @@ Every exception Fuzor throws for its own reasons extends `Fuzor\Exceptions\Fuzor
 
 | Exception | Thrown for |
 |---|---|
-| `Fuzor\Exceptions\QueryException` | Domain and state errors: an unsupported language, a missing, duplicate or unknown document ID, a field outside the schema's lists, a disabled document store, a schema passed to an existing index, a file of another schema revision |
+| `Fuzor\Exceptions\QueryException` | Domain and state errors: a stemmer class that is missing or does not implement `Stemmer`, a missing, duplicate or unknown document ID, a field outside the schema's lists, a disabled document store, a schema passed to an existing index, a file of another schema revision |
 | `Fuzor\Exceptions\FuzorException` | The SQLite library PHP loads is older than `Index::MIN_SQLITE_VERSION` (3.46.0), or PHP is a 32-bit build; thrown by `new Index()` before any file is touched |
 | `Fuzor\Exceptions\IOException` | File problems: a missing directory or index file, a write on a `readonly` index, a failed publish, a file that is not a Fuzor index |
 | `\InvalidArgumentException` | A malformed argument: a bad sort spec, an out-of-range size in `Config` or `TypoTolerance`, a stop word of several words, an empty `deleteByFilter()` filter, a malformed `Filter` entry, a filter value no document can hold (a bool, `null`, NaN, infinity), an unknown `checkpoint()` mode |

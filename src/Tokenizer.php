@@ -7,14 +7,14 @@ namespace Fuzor;
 /**
  * Splits raw text into lowercase tokens.
  *
- * All methods are static. Pass a BCP 47 language tag to tokenize() or
- * tokenizeWithOffsets() to get language-aware tokenisation — CJK and Thai text
- * is automatically split into n-grams so searches work without a word segmenter.
- * ASCII tokens inside mixed-language text pass through unchanged.
+ * All methods are static. tokenize() and tokenizeWithOffsets() split CJK and Thai words into
+ * n-grams so they can be searched without a word segmenter: the script of each token decides
+ * (CJK ideographs, kana and Hangul: bigrams plus single characters; Thai: trigrams), so text
+ * mixing scripts is handled per word and nothing has to be configured. Other tokens pass through
+ * unchanged.
  *
- * split() and splitWithOffsets() perform base tokenisation only (whitespace /
- * punctuation splitting, no n-gram expansion) and are suitable for callers that
- * need the raw token list before any language processing.
+ * split() and splitWithOffsets() perform base tokenisation only (whitespace / punctuation
+ * splitting, no n-gram expansion).
  */
 final class Tokenizer
 {
@@ -62,58 +62,93 @@ final class Tokenizer
      */
     private const string WORD_PATTERN = '/[\p{L}\p{N}\p{Pc}@][\p{L}\p{N}\p{Pc}\p{M}@]*/u';
 
-    /** Languages that use contiguous scripts with no whitespace word delimiters. */
-    private const array NGRAM_SCRIPTS = [
-        'zh' => 2, 'ja' => 2, 'ko' => 2, 'th' => 3,
-    ];
+    /** Scripts written without spaces between words: CJK ideographs, kana, Hangul, Thai. */
+    private const string NGRAM_SCRIPT = '/[\x{4E00}-\x{9FFF}\x{3040}-\x{30FF}\x{AC00}-\x{D7AF}\x{0E00}-\x{0E7F}]/u';
+
+    /** NGRAM_SCRIPT with the bigram characters as group 1, for ngramSize(). */
+    private const string NGRAM_SIZE
+        = '/([\x{4E00}-\x{9FFF}\x{3040}-\x{30FF}\x{AC00}-\x{D7AF}])|[\x{0E00}-\x{0E7F}]/u';
+
+    /** The bigram part of NGRAM_SCRIPT (CJK ideographs, kana, Hangul); a token with only Thai gets trigrams. */
+    private const string BIGRAM_SCRIPT = '/[\x{4E00}-\x{9FFF}\x{3040}-\x{30FF}\x{AC00}-\x{D7AF}]/u';
 
     /**
-     * Tokenise $text using the given BCP 47 language tag.
+     * Tokenise $text: split() with every CJK or Thai token expanded into its n-grams.
      *
-     * For CJK/Thai languages each token is expanded into overlapping n-grams.
-     * Bigram languages (zh/ja/ko) also emit individual character unigrams so
-     * single-character searches are supported. ASCII tokens pass through unchanged.
+     * Bigram tokens (CJK, kana, Hangul) also emit their single characters when $includeUnigrams
+     * is true, so single-character searches work. Other tokens pass through unchanged.
      *
      * @return list<string>
      *
      * @internal Fuzor's own tokenisation; only sortKey() is public API.
      */
-    public static function tokenize(
-        string $text,
-        ?string $language = null,
-        bool $includeUnigrams = true,
-    ): array {
-        $tokens = self::split($text);
-        $n      = $language !== null ? (self::NGRAM_SCRIPTS[$language] ?? 0) : 0;
-        if ($n === 0) {
+    public static function tokenize(string $text, bool $includeUnigrams = true): array
+    {
+        if (!preg_match('/[^\x00-\x7F]/', $text)) {
+            /** @infection-ignore-all both paths produce identical output for ASCII; fast-path exists for performance only */
+            return preg_split('/[^\w@]+/', strtolower($text), -1, PREG_SPLIT_NO_EMPTY) ?: [];
+        }
+        preg_match_all(self::WORD_PATTERN, mb_strtolower($text, 'UTF-8'), $m);
+        $tokens = $m[0];
+        if (preg_match(self::NGRAM_SCRIPT, $text) !== 1) {
             return $tokens;
         }
-        return self::expandNgrams($tokens, $n, $includeUnigrams && $n === 2);
+        $expanded = [];
+        foreach ($tokens as $token) {
+            $n = self::ngramSize($token);
+            if ($n === 0) {
+                $expanded[] = $token;
+                continue;
+            }
+            foreach (self::ngram($token, $n, $includeUnigrams && $n === 2) as $gram) {
+                $expanded[] = $gram;
+            }
+        }
+        return $expanded;
     }
 
     /**
-     * Tokenise $text and return each token's byte offset within the original string.
+     * Tokenise $text and return each token's byte offset within the lowercased text.
      *
-     * $includeUnigrams defaults to false — body scanning for snippet windows benefits
-     * from higher bigram/trigram density. Pass true when single-character lookups matter.
+     * Same tokens as tokenize(); $includeUnigrams defaults to false here, since body scanning
+     * for snippet windows benefits from the denser bigrams and trigrams.
      *
      * @return list<array{0: string, 1: int<0, max>}>
      *
      * @internal Fuzor's own tokenisation; only sortKey() is public API.
      */
-    public static function tokenizeWithOffsets(
-        string $text,
-        ?string $language = null,
-        bool $includeUnigrams = false,
-    ): array {
-        $n = $language !== null ? (self::NGRAM_SCRIPTS[$language] ?? 0) : 0;
-        if ($n === 0) {
-            return self::splitWithOffsets($text);
+    public static function tokenizeWithOffsets(string $text, bool $includeUnigrams = false): array
+    {
+        $tokens = self::splitWithOffsets($text);
+        if (!self::hasNgramScript($text)) {
+            return $tokens;
         }
-        return self::ngramWithOffsets($text, $n, $includeUnigrams);
+        $expanded = [];
+        foreach ($tokens as [$token, $offset]) {
+            $n = self::ngramSize($token);
+            if ($n === 0) {
+                $expanded[] = [$token, $offset];
+                continue;
+            }
+            foreach (self::ngramWithOffsets($token, $n, $includeUnigrams && $n === 2) as [$gram, $at]) {
+                $expanded[] = [$gram, $offset + $at];
+            }
+        }
+        return $expanded;
     }
 
-    // --- Base tokenisation (language-unaware) ---------------------------------
+    /**
+     * Whether $text holds any CJK or Thai character, i.e. whether tokenize() can differ from split().
+     *
+     * @internal Fuzor's own tokenisation; only sortKey() is public API.
+     */
+    public static function hasNgramScript(string $text): bool
+    {
+        // ASCII text cannot hold one; most text is caught here without a Unicode scan.
+        return preg_match('/[^\x00-\x7F]/', $text) === 1 && preg_match(self::NGRAM_SCRIPT, $text) === 1;
+    }
+
+    // --- Base tokenisation (no n-grams) -----------------------------------------
 
     /**
      * Split $text into lowercase tokens by whitespace and punctuation.
@@ -227,14 +262,18 @@ final class Tokenizer
     }
 
     /**
-     * Returns the n-gram window size for the given BCP 47 language tag,
-     * or 0 if standard whitespace tokenisation should be used.
+     * The n-gram size tokenize() uses for $token: 2 when it holds CJK ideographs, kana or Hangul,
+     * 3 when it holds Thai (and none of those), 0 for a token it leaves whole.
      *
      * @internal Fuzor's own tokenisation; only sortKey() is public API.
      */
-    public static function ngramSize(?string $language): int
+    public static function ngramSize(string $token): int
     {
-        return $language !== null ? (self::NGRAM_SCRIPTS[$language] ?? 0) : 0;
+        // One scan: a bigram character anywhere wins, else a Thai one gives trigrams.
+        if (preg_match(self::NGRAM_SIZE, $token, $m) !== 1) {
+            return 0;
+        }
+        return isset($m[1]) || preg_match(self::BIGRAM_SCRIPT, $token) === 1 ? 2 : 3;
     }
 
     /**
@@ -245,11 +284,7 @@ final class Tokenizer
      */
     public static function isNgramToken(string $token): bool
     {
-        /** @infection-ignore-all PHP coerces int return from preg_match to bool on declared bool return type */
-        return (bool) preg_match(
-            '/[\x{4E00}-\x{9FFF}\x{3040}-\x{30FF}\x{AC00}-\x{D7AF}\x{0E00}-\x{0E7F}]/u',
-            $token,
-        );
+        return preg_match(self::NGRAM_SCRIPT, $token) === 1;
     }
 
     /**
@@ -271,29 +306,5 @@ final class Tokenizer
         // Decomposed input ("e" + U+0301) carries its accents as combining marks: drop them too.
         $key = preg_replace('/[\x{0300}-\x{036F}]+/u', '', $key) ?? $key;
         return trim(preg_replace('/\s+/u', ' ', $key) ?? $key);
-    }
-
-    // --- Private helpers ------------------------------------------------------
-
-    /**
-     * Expand a list of base tokens: CJK/Thai tokens are replaced by their n-grams;
-     * ASCII tokens pass through unchanged.
-     *
-     * @param  list<string> $tokens
-     * @return list<string>
-     */
-    private static function expandNgrams(array $tokens, int $n, bool $includeUnigrams): array
-    {
-        $expanded = [];
-        foreach ($tokens as $token) {
-            if (self::isNgramToken($token)) {
-                foreach (self::ngram($token, $n, $includeUnigrams) as $t) {
-                    $expanded[] = $t;
-                }
-            } else {
-                $expanded[] = $token;
-            }
-        }
-        return $expanded;
     }
 }

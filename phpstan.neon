@@ -5,4 +5,4 @@ parameters:
         - tests
         - benchmarks
     excludePaths:
-        - src/Stemmers
+        - tests/Support/Snowball

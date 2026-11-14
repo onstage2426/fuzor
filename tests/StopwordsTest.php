@@ -9,6 +9,7 @@ use Fuzor\SchemaConfig;
 use Fuzor\SearchOptions;
 use Fuzor\Exceptions\QueryException;
 use Fuzor\Stopwords;
+use Fuzor\Tests\Support\EnglishStemmer;
 use PHPUnit\Framework\TestCase;
 
 class StopwordsTest extends TestCase
@@ -50,38 +51,11 @@ class StopwordsTest extends TestCase
 
     // --- Index integration ---
 
-    public function testDefaultLanguageIsNull(): void
-    {
-        $index = new Index($this->dbPath);
-        $this->assertNull($index->language);
-    }
-
-    public function testLanguageAtCreationIsReadBack(): void
-    {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(language: 'en'));
-        $this->assertSame('en', $index->language);
-    }
-
-    public function testLanguageIsRestoredOnOpen(): void
-    {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(language: 'en'));
-        $index->close();
-
-        $reopened = new Index($this->dbPath);
-        $this->assertSame('en', $reopened->language);
-    }
-
-    public function testUnknownLanguageAtCreationThrows(): void
-    {
-        $this->expectException(QueryException::class);
-        new Index($this->dbPath, schema: new SchemaConfig(language: 'xx'));
-    }
-
-    public function testLanguageAloneFiltersNoWords(): void
+    public function testStemmerAloneFiltersNoWords(): void
     {
         // Like Meilisearch: no stop words unless the schema lists them. "c" and "men" are
         // product words ("usb c cable", "men shirt").
-        $index = new Index($this->dbPath, schema: new SchemaConfig(language: 'en'));
+        $index = new Index($this->dbPath, schema: new SchemaConfig(stemmer: EnglishStemmer::class));
         $index->insert([['id' => 1, 'body' => 'the usb c cable for men']]);
 
         $this->assertSame([], $index->stopWords);
@@ -92,7 +66,10 @@ class StopwordsTest extends TestCase
 
     public function testListedStopWordsAreLeftOutOfIndexAndQueries(): void
     {
-        $index = new Index($this->dbPath, schema: new SchemaConfig(language: 'en', stopWords: ['The', 'of']));
+        $index = new Index($this->dbPath, schema: new SchemaConfig(
+            stemmer: EnglishStemmer::class,
+            stopWords: ['The', 'of'],
+        ));
         $index->insert([['id' => 1, 'body' => 'the quick brown fox'], ['id' => 2, 'body' => 'a bag of the fox']]);
 
         $this->assertSame(['the', 'of'], $index->stopWords);

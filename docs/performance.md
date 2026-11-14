@@ -16,7 +16,7 @@ insert/update/delete  (periodic)       search only
 use Fuzor\Index;
 use Fuzor\SchemaConfig;
 
-$write = new Index('/var/db/products.db', schema: new SchemaConfig(language: 'en'));
+$write = new Index('/var/db/products.db', schema: new SchemaConfig(filterableAttributes: ['brand']));
 
 $write->upsert($updatedProducts);
 $write->delete($removedId);
