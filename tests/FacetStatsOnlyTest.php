@@ -236,8 +236,8 @@ class FacetStatsOnlyTest extends TestCase
         ));
         $docs = [];
         for ($id = 1; $id <= 200; $id++) {
-            $docs[] = ['id' => $id, 'title' => 'item ' . ($id % 2 ? 'odd' : 'even'),
-                'color' => $id % 2 ? 'red' : 'blue', 'mixed' => $id === 7 ? 'n/a' : $id * 1.5];
+            $docs[] = ['id' => $id, 'title' => 'item ' . ($id % 2 !== 0 ? 'odd' : 'even'),
+                'color' => $id % 2 !== 0 ? 'red' : 'blue', 'mixed' => $id === 7 ? 'n/a' : $id * 1.5];
         }
         $index->insert($docs);
         $reader = new Index($this->path, readonly: true);

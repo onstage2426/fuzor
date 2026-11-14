@@ -9,7 +9,7 @@ use Fuzor\Stemmer;
 /** A stemmer Fuzor cannot create: its constructor needs an argument. */
 final class StemmerWithArgument implements Stemmer
 {
-    public function __construct(private string $suffix)
+    public function __construct(private readonly string $suffix)
     {
     }
 

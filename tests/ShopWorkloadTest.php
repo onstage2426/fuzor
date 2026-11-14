@@ -241,11 +241,11 @@ class ShopWorkloadTest extends TestCase
     private static function holdsAny(array $values, mixed $wanted): bool
     {
         if ($wanted instanceof FacetRange) {
-            return array_any($values, fn($v): bool => $v >= $wanted->gte && $v <= $wanted->lte);
+            return array_any($values, fn(float|int|string $v): bool => $v >= $wanted->gte && $v <= $wanted->lte);
         }
         /** @var list<string> $listed */
         $listed = is_array($wanted) ? $wanted : [$wanted];
-        return array_intersect(array_map(fn($v): string => (string) $v, $values), $listed) !== [];
+        return array_intersect(array_map(fn(float|int|string $v): string => (string) $v, $values), $listed) !== [];
     }
 
     /**

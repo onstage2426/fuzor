@@ -374,7 +374,7 @@ class SearchInvariantTest extends TestCase
             $distribution = $index->search($q, $options)->facetDistribution;
             $actual       = [];
             foreach ($distribution as $field => $counts) {
-                $counts = array_combine(array_map('strval', array_keys($counts)), $counts);
+                $counts = array_combine(array_map(strval(...), array_keys($counts)), $counts);
                 ksort($counts);
                 $actual[$field] = $counts;
             }
@@ -537,6 +537,6 @@ class SearchInvariantTest extends TestCase
         while (count($queries) < self::QUERIES) {
             $queries[$words(2, 3)] = true;
         }
-        return [$capped, $reference, array_map('strval', array_keys($queries)), $docs];
+        return [$capped, $reference, array_map(strval(...), array_keys($queries)), $docs];
     }
 }

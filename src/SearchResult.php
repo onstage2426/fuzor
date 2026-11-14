@@ -80,12 +80,8 @@ final class SearchResult implements \Countable, \IteratorAggregate
 
     /**
      * @param list<int>                                    $ids
-     * @param int|null                                     $totalHits
      * @param array<int, array<string, mixed>>|null        $documents
      * @param array<string, array<array-key, int>>         $facetCounts
-     * @param string                                       $query
-     * @param int|null                                     $limit
-     * @param int|null                                     $offset
      * @param array<string, array{min: float, max: float}> $facetStats
      * @param list<string>                                 $warnings
      * @param list<string>                                 $approximateFacets

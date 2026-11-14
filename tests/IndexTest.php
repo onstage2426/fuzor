@@ -113,7 +113,7 @@ class IndexTest extends TestCase
 
     public function testSchemaOnExistingIndexThrowsQueryException(): void
     {
-        (new Index($this->dbPath))->close();
+        new Index($this->dbPath)->close();
 
         $this->expectException(QueryException::class);
         new Index($this->dbPath, schema: new SchemaConfig(stemmer: EnglishStemmer::class));
@@ -121,7 +121,7 @@ class IndexTest extends TestCase
 
     public function testSchemaWithForceDoesNotThrow(): void
     {
-        (new Index($this->dbPath))->close();
+        new Index($this->dbPath)->close();
 
         // force: true means "recreate", so schema is applied to the new index — no throw.
         $index = new Index($this->dbPath, force: true, schema: new SchemaConfig(stemmer: EnglishStemmer::class));
@@ -343,7 +343,7 @@ class IndexTest extends TestCase
     {
         // Insert 21 docs so the parameterless call must cap at exactly 20 — not 19 or 21.
         $index = new Index($this->dbPath);
-        $index->insert(array_map(fn($i): array => ['id' => $i, 'title' => 'sedan'], range(1, 21)));
+        $index->insert(array_map(fn(int $i): array => ['id' => $i, 'title' => 'sedan'], range(1, 21)));
 
         $result = $index->search('sedan');
         $this->assertCount(20, $result->getIds());
@@ -5261,7 +5261,7 @@ class IndexTest extends TestCase
 
     public function testRemoveDeletesA1xIndex(): void
     {
-        (new Index($this->dbPath))->close();
+        new Index($this->dbPath)->close();
         $this->setSchemaVersion($this->dbPath, 3);
 
         Index::remove($this->dbPath);
@@ -5321,9 +5321,9 @@ class IndexTest extends TestCase
     public function testRemoveLeavesOtherIndexesAndALiveBuildAlone(): void
     {
         $sibling = $this->dbPath . '2';   // shares the prefix, is another index
-        (new Index($sibling))->close();
+        new Index($sibling)->close();
         Index::rebuild($sibling)->close();
-        (new Index($this->dbPath))->close();
+        new Index($this->dbPath)->close();
         // A build still running in another process: its temp lock is held.
         [$tmp] = $this->makeTempFiles(['.tmp-0123abcd'], 7200);
         $lock  = fopen($tmp . '.lock', 'c');
@@ -5426,7 +5426,7 @@ class IndexTest extends TestCase
                 fn(string $f) => unlink($f) && new \PDO('sqlite:' . $f)->exec('CREATE TABLE t (x)') !== false,
                 QueryException::class,
             ],
-            'truncated'    => [fn(string $f) => self::truncateToHalf($f), QueryException::class],
+            'truncated'    => [self::truncateToHalf(...), QueryException::class],
             'missing'      => [fn(string $f) => @unlink($f), IOException::class],
             '1.x revision' => [
                 fn(string $f) => new \PDO('sqlite:' . $f)
@@ -7474,7 +7474,7 @@ class IndexTest extends TestCase
         );
         $docs = [];
         for ($i = 1; $i <= 7; $i++) {
-            $docs[] = ['id' => $i, 'title' => 'doc', 'genre' => $i % 2 ? 'Action' : 'Drama', 'color' => 'red'];
+            $docs[] = ['id' => $i, 'title' => 'doc', 'genre' => $i % 2 !== 0 ? 'Action' : 'Drama', 'color' => 'red'];
         }
         $index->insert($docs);
 
@@ -7630,10 +7630,10 @@ class IndexTest extends TestCase
 
     public function testFacetFieldsPersistedAcrossReopen(): void
     {
-        (new Index($this->dbPath, schema: new SchemaConfig(
+        new Index($this->dbPath, schema: new SchemaConfig(
             filterableAttributes: ['color', 'brand'],
             sortableAttributes: ['color', 'brand'],
-        )))->close();
+        ))->close();
 
         $index = new Index($this->dbPath);
         $this->assertSame(['color', 'brand'], $index->filterableAttributes);
@@ -7641,7 +7641,7 @@ class IndexTest extends TestCase
 
     public function testSearchableFieldsPersistedAcrossReopen(): void
     {
-        (new Index($this->dbPath, schema: new SchemaConfig(searchableAttributes: ['title', 'description'])))->close();
+        new Index($this->dbPath, schema: new SchemaConfig(searchableAttributes: ['title', 'description']))->close();
 
         $index = new Index($this->dbPath);
         $this->assertSame(['title', 'description'], $index->searchableAttributes);
@@ -7649,7 +7649,7 @@ class IndexTest extends TestCase
 
     public function testNullSearchableFieldsRoundTrips(): void
     {
-        (new Index($this->dbPath))->close();
+        new Index($this->dbPath)->close();
 
         $index = new Index($this->dbPath);
         $this->assertNull($index->searchableAttributes);
@@ -7703,11 +7703,11 @@ class IndexTest extends TestCase
 
     public function testRebuildInheritsFacetAndSearchableFields(): void
     {
-        (new Index($this->dbPath, schema: new SchemaConfig(
+        new Index($this->dbPath, schema: new SchemaConfig(
             filterableAttributes: ['color'],
             sortableAttributes: ['color'],
             searchableAttributes: ['title'],
-        )))->close(); // phpcs:ignore
+        ))->close(); // phpcs:ignore
 
         Index::rebuild($this->dbPath, function (Index $idx): void {
             $idx->insert([['id' => 1, 'title' => 'car', 'color' => 'red']]);
@@ -7733,10 +7733,10 @@ class IndexTest extends TestCase
 
     public function testRebuildPreservesFacets(): void
     {
-        (new Index($this->dbPath, schema: new SchemaConfig(
+        new Index($this->dbPath, schema: new SchemaConfig(
             filterableAttributes: ['color'],
             sortableAttributes: ['color'],
-        )))->close();
+        ))->close();
 
         Index::rebuild($this->dbPath, function (Index $idx): void {
             $idx->insert([['id' => 1, 'title' => 'car', 'color' => 'red']]);
@@ -8942,7 +8942,7 @@ class IndexTest extends TestCase
                 'id'    => $id,
                 'title' => 'x',
                 'color' => $id <= 5 ? 'red' : 'blue',
-                'brand' => $id % 2 ? 'A' : 'B',
+                'brand' => $id % 2 !== 0 ? 'A' : 'B',
             ];
         }
         // A document without a color keeps the color filter a capped positive one (complementSelections()).
@@ -9202,7 +9202,7 @@ class IndexTest extends TestCase
                 'title' => 'product',
                 'price' => $i,
                 'color' => $i <= 6 ? 'red' : ($i <= 8 ? 'blue' : 'green'),
-                'brand' => $i % 2 ? 'A' : 'B',
+                'brand' => $i % 2 !== 0 ? 'A' : 'B',
                 'tags'  => $i === 1 ? ['new', 'old'] : ['new'],
             ];
         }
@@ -9561,7 +9561,7 @@ class IndexTest extends TestCase
     {
         $docs = [];
         for ($i = 1; $i <= $n; $i++) {
-            $docs[] = ['id' => $i, 'title' => 'widget', 'color' => $i % 2 ? 'red' : 'blue'];
+            $docs[] = ['id' => $i, 'title' => 'widget', 'color' => $i % 2 !== 0 ? 'red' : 'blue'];
         }
         return $docs;
     }
@@ -10484,7 +10484,6 @@ class IndexTest extends TestCase
 
     // --- attributesToRetrieve ---
 
-    /** @return Index */
     private function retrievalIndex(): Index
     {
         $index = new Index($this->dbPath);
@@ -10662,7 +10661,7 @@ class IndexTest extends TestCase
     #[DataProvider('oneXRevisions')]
     public function testOpeningA1xIndexThrowsWithRecreateHint(?int $revision): void
     {
-        (new Index($this->dbPath))->close();
+        new Index($this->dbPath)->close();
         $this->setSchemaVersion($this->dbPath, $revision);
 
         $this->expectException(QueryException::class);
@@ -10673,7 +10672,7 @@ class IndexTest extends TestCase
 
     public function testOpeningA1xIndexReadonlyThrows(): void
     {
-        (new Index($this->dbPath))->close();
+        new Index($this->dbPath)->close();
         $this->setSchemaVersion($this->dbPath, 3);
 
         $this->expectException(QueryException::class);
@@ -10682,7 +10681,7 @@ class IndexTest extends TestCase
 
     public function testOpeningAnIndexFromANewerVersionThrows(): void
     {
-        (new Index($this->dbPath))->close();
+        new Index($this->dbPath)->close();
         $this->setSchemaVersion($this->dbPath, Index::CURRENT_SCHEMA_VERSION + 1);
 
         $this->expectException(QueryException::class);
@@ -10719,7 +10718,7 @@ class IndexTest extends TestCase
 
     public function testRebuildOfAnotherRevisionNeedsASchema(): void
     {
-        (new Index($this->dbPath))->close();
+        new Index($this->dbPath)->close();
         $this->setSchemaVersion($this->dbPath, 3);
 
         try {
@@ -10759,7 +10758,7 @@ class IndexTest extends TestCase
 
     public function testForceRecreatesA1xIndex(): void
     {
-        (new Index($this->dbPath))->close();
+        new Index($this->dbPath)->close();
         $this->setSchemaVersion($this->dbPath, 3);
 
         $index = new Index($this->dbPath, force: true, schema: new SchemaConfig(
@@ -10774,7 +10773,7 @@ class IndexTest extends TestCase
 
     public function testDocumentStoreFlagIsWrittenEitherWay(): void
     {
-        (new Index($this->dbPath, schema: new SchemaConfig(store: false)))->close();
+        new Index($this->dbPath, schema: new SchemaConfig(store: false))->close();
         $stmt = new \PDO('sqlite:' . $this->dbPath)->query("SELECT value FROM info WHERE key = 'has_document_store'");
 
         $this->assertNotFalse($stmt);
@@ -13055,7 +13054,7 @@ class IndexTest extends TestCase
             sortFacetValuesBy: ['price' => FacetOrder::Count],
             limit: 1,
         ));
-        $this->assertSame(max($counts), array_values($byCount->facetDistribution['price'])[0]);
+        $this->assertSame(max($counts), array_first($byCount->facetDistribution['price']));
         $this->assertSame($stats, $byCount->facetStats['price']);
 
         // One string among the numbers: no stats, the string after the numbers.

@@ -616,7 +616,7 @@ final class Index implements \Countable
         ?SchemaConfig $schema = null,
     ) {
         $schemaProvided = $schema !== null;
-        $schema         = $schema ?? new SchemaConfig();
+        $schema ??= new SchemaConfig();
         $this->config   = $config ?? new Config();
         self::requirePlatform();
         if ($this->readonly && $force) {
@@ -1371,7 +1371,6 @@ final class Index implements \Countable
      * over an existing one.
      *
      * @param  SchemaConfig $schema Schema options persisted at creation time.
-     * @return static
      * @throws QueryException If schema->stemmer is not a class implementing Stemmer.
      */
     private function createIndex(SchemaConfig $schema): static
@@ -1979,7 +1978,7 @@ final class Index implements \Countable
      */
     private function insertMany(iterable $documents, ?callable $progress = null): void
     {
-        $total  = is_array($documents) || $documents instanceof \Countable ? count($documents) : 0;
+        $total  = is_countable($documents) ? count($documents) : 0;
         $chunks = self::chunked($documents, $this->config->insertChunkSize);
         /** @infection-ignore-all ReturnRemoval: empty batch produces no SQL writes; adjustStats(0,0) is a no-op when no tokens are processed */
         if (!$chunks->valid()) {
@@ -2700,7 +2699,7 @@ final class Index implements \Countable
             foreach (array_chunk($dedup, self::CHUNK_2P) as $chunk) {
                 $placeholders = implode(',', array_fill(0, count($chunk), '(?,?)'));
                 $stmt = $this->prepare("INSERT INTO synonyms (source, target) VALUES {$placeholders}");
-                $stmt->execute(array_merge(...array_map(fn($p) => [$p[0], $p[1]], $chunk)));
+                $stmt->execute(array_merge(...array_map(fn(array $p) => [$p[0], $p[1]], $chunk)));
             }
         });
 
@@ -2945,7 +2944,7 @@ final class Index implements \Countable
                     'term'     => $r['term'],
                     'numHits'  => (int) $r['num_hits'],
                     'numDocs'  => (int) $r['num_docs'],
-                    'distance' => isset($r['distance']) ? (int) $r['distance'] : null,
+                    'distance' => $r['distance'] ?? null,
                 ],
                 $rows
             );
@@ -2957,10 +2956,8 @@ final class Index implements \Countable
                 found:        $rows !== [],
                 matchType:    $matchType,
                 wordlistRows: $wordlistRows,
-                /** @infection-ignore-all CastInt: array_sum() on numeric strings returns int in PHP 8; the cast is defensive documentation, not a type change */
-                numHits:      (int) array_sum(array_column($rows, 'num_hits')),
-                /** @infection-ignore-all CastInt: same as numHits — array_sum already returns int here */
-                numDocs:      (int) array_sum(array_column($rows, 'num_docs')),
+                numHits:      array_sum(array_column($rows, 'num_hits')),
+                numDocs:      array_sum(array_column($rows, 'num_docs')),
             );
         }
 
@@ -3151,8 +3148,8 @@ final class Index implements \Countable
                     array_push($word, ...$synRows);
                 }
             }
-            /** @infection-ignore-all IncrementInteger,Ternary,CastInt: numDocs feeds BM25 scoring only; for single-term prefix results array_sum equals word[0]['num_docs']; CastInt: array_sum returns int */
-            $df = count($word) === 1 ? $word[0]['num_docs'] : (int) array_sum(array_column($word, 'num_docs'));
+            /** @infection-ignore-all IncrementInteger,Ternary: numDocs feeds BM25 scoring only; for single-term prefix results array_sum equals word[0]['num_docs'] */
+            $df = count($word) === 1 ? $word[0]['num_docs'] : array_sum(array_column($word, 'num_docs'));
             // Smoothed BM25 IDF, log((N + 1) / (df + 0.5)): positive only while df <= N, so df is
             // capped at N. It can exceed N when prefix expansions are summed (a document counted
             // once per matching term) and while deleted documents are not purged (see delete()).
@@ -5385,14 +5382,8 @@ final class Index implements \Countable
             }
             $children[] = ['require' => $require, 'forbid' => $forbid, 'keys' => [], 'tests' => $nested];
         }
-        $any = static function (int $mask) use ($children): bool {
-            foreach ($children as $child) {
-                if (self::isClassInGroup($mask, $child)) {
-                    return true;
-                }
-            }
-            return false;
-        };
+        $any = static fn(int $mask): bool
+            => array_any($children, fn(array $child): bool => self::isClassInGroup($mask, $child));
         return $condition['exclude'] ? static fn(int $mask): bool => !$any($mask) : $any;
     }
 
@@ -6052,7 +6043,7 @@ final class Index implements \Countable
             $documents = $this->applyFormatting($documents, $phrase, $options);
         }
         if ($documents !== null && $retrieve !== null && $retrieve !== ['*']) {
-            $documents = $this->filterRetrievedAttributes($documents, $retrieve);
+            return $this->filterRetrievedAttributes($documents, $retrieve);
         }
         return $documents;
     }
@@ -8898,12 +8889,7 @@ final class Index implements \Countable
      */
     private static function thinsMatches(array $conditions): bool
     {
-        foreach ($conditions as $condition) {
-            if (!$condition['exclude']) {
-                return true;
-            }
-        }
-        return false;
+        return array_any($conditions, fn(array $condition) => !$condition['exclude']);
     }
 
     /**
@@ -8956,7 +8942,7 @@ final class Index implements \Countable
             }
         }
         if ($tokens !== [] && $this->stemmerImpl instanceof Stemmer) {
-            $tokens = array_combine(array_keys($tokens), $this->stemTokens(array_values($tokens)));
+            return array_combine(array_keys($tokens), $this->stemTokens(array_values($tokens)));
         }
         return $tokens;
     }
@@ -9241,7 +9227,7 @@ final class Index implements \Countable
                 'impossible' => $group['termIds'] === [],
                 'multiRow'   => true,
                 'exclude'    => false,
-                'rowCount'   => (int) array_sum(array_column($group['words'], 'num_docs')),
+                'rowCount'   => array_sum(array_column($group['words'], 'num_docs')),
             ];
         }
         return $conditions;
@@ -9772,7 +9758,7 @@ final class Index implements \Countable
      */
     private static function termCount(array $groups): int
     {
-        return (int) array_sum(array_map(fn(array $group): int => count($group['termIds']), $groups));
+        return array_sum(array_map(fn(array $group): int => count($group['termIds']), $groups));
     }
 
     /**
@@ -10167,7 +10153,7 @@ final class Index implements \Countable
         }
         $rows = $this->groupRowsOfDocs($group, $cut, $unseen, $k1_1mb, $k1b_avgdl);
         if ($heldIds !== []) {
-            $rows = [
+            return [
                 ...$rows,
                 ...array_filter(
                     $this->groupRowsOfDocs($group, $lacking, $heldIds, $k1_1mb, $k1b_avgdl),
@@ -10621,7 +10607,6 @@ final class Index implements \Countable
     /**
      * Write facet rows for a single document (single-insert path).
      *
-     * @param int   $documentId
      * @param mixed $facets     Raw value of $doc['_facets'].
      */
     private function saveFacets(int $documentId, mixed $facets): void
@@ -11409,16 +11394,22 @@ final class Index implements \Countable
         $primary = $rankColumns[0];
         $rest    = [SORT_ASC, SORT_NUMERIC];
         foreach (array_slice($rankColumns, 1) as $column) {
-            array_push($rest, $column, SORT_ASC, SORT_NUMERIC);
+            $rest[] = $column;
+            $rest[] = SORT_ASC;
+            $rest[] = SORT_NUMERIC;
         }
         if ($scores !== []) {
             $column = [];
             foreach ($docIds as $id) {
                 $column[] = $scores[$id] ?? 0.0;
             }
-            array_push($rest, $column, SORT_DESC, SORT_NUMERIC);
+            $rest[] = $column;
+            $rest[] = SORT_DESC;
+            $rest[] = SORT_NUMERIC;
         }
-        array_push($rest, $docIds, SORT_ASC, SORT_NUMERIC);
+        $rest[] = $docIds;
+        $rest[] = SORT_ASC;
+        $rest[] = SORT_NUMERIC;
         // Unpacking passes each column by reference, so $rest holds the sorted columns afterwards.
         array_multisort($primary, ...$rest);
 
@@ -11532,8 +11523,6 @@ final class Index implements \Countable
      * @param  list<int>                             $docIds
      * @param  list<array{field: string, asc: bool}> $specs
      * @param  array<int, float>                     $scores  BM25 scores; empty array for boolean path
-     * @param  int                                   $offset
-     * @param  int                                   $limit
      * @return list<int>
      */
     private function applySortedPagination(
@@ -12082,12 +12071,7 @@ final class Index implements \Countable
      */
     private static function isExclusionOnly(array $conditions): bool
     {
-        foreach ($conditions as $condition) {
-            if (!$condition['exclude'] || $condition['impossible']) {
-                return false;
-            }
-        }
-        return true;
+        return array_all($conditions, fn(array $condition) => $condition['exclude'] && !$condition['impossible']);
     }
 
     /**
@@ -13080,7 +13064,7 @@ final class Index implements \Countable
      */
     private static function countOrder(array $counts): array
     {
-        $values = array_map('strval', array_keys($counts));
+        $values = array_map(strval(...), array_keys($counts));
         $nums   = array_values($counts);
         array_multisort($nums, SORT_DESC, SORT_NUMERIC, $values, SORT_ASC, SORT_STRING);
         $ordered = [];
@@ -13429,8 +13413,8 @@ final class Index implements \Countable
             return ['distribution' => [], 'stats' => null];
         }
 
-        $totalCount = (int) array_sum(array_column($rows, 'n'));
-        $numCount   = (int) array_sum(array_column($rows, 'num_count'));
+        $totalCount = array_sum(array_column($rows, 'n'));
+        $numCount   = array_sum(array_column($rows, 'num_count'));
 
         $distribution = [];
         foreach ($rows as $row) {
@@ -13444,8 +13428,8 @@ final class Index implements \Countable
             return [
                 'distribution' => $distribution,
                 'stats' => [
-                    'min' => $minNums !== [] ? (float) min($minNums) : 0.0,
-                    'max' => $maxNums !== [] ? (float) max($maxNums) : 0.0,
+                    'min' => $minNums !== [] ? min($minNums) : 0.0,
+                    'max' => $maxNums !== [] ? max($maxNums) : 0.0,
                 ],
             ];
         }
@@ -13616,7 +13600,6 @@ final class Index implements \Countable
      * An instance of the Stemmer class $class, created with no arguments.
      *
      * @param  string $what Names the setting in the exception message.
-     * @return Stemmer
      * @throws QueryException If $class does not exist, does not implement Stemmer, or cannot be created.
      */
     private static function createStemmer(string $class, string $what): Stemmer

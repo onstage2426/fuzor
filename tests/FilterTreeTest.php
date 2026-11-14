@@ -328,8 +328,8 @@ class FilterTreeTest extends TestCase
             return true;
         }
         return match ($entry->operator) {
-            Filter::ALL => array_filter($entry->entries, fn($e): bool => !self::holdsEntry($doc, $e)) === [],
-            Filter::ANY => array_filter($entry->entries, fn($e): bool => self::holdsEntry($doc, $e)) !== [],
+            Filter::ALL => array_all($entry->entries, fn(array|Filter $e): bool => self::holdsEntry($doc, $e)),
+            Filter::ANY => array_any($entry->entries, fn(array|Filter $e): bool => self::holdsEntry($doc, $e)),
             default     => !self::holdsEntry($doc, $entry->entries[0]),
         };
     }

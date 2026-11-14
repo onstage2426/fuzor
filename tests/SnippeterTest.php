@@ -517,7 +517,7 @@ class SnippeterTest extends TestCase
     {
         $text = str_repeat('filler ', 80) . 'terracotta ' . str_repeat('filler ', 80);
 
-        $excerpt = (new Snippeter(windowSize: 60))->snippet('terracotta', $text);
+        $excerpt = new Snippeter(windowSize: 60)->snippet('terracotta', $text);
 
         $this->assertStringContainsString('terracotta', $excerpt);
         // In the middle: the words on both sides of it take about the same room.

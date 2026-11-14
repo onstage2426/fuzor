@@ -176,7 +176,7 @@ final readonly class Filter
             self::NOT => $node->entries[0],
             self::ANY => self::simplify(new self(
                 self::ALL,
-                array_map(fn($entry) => self::wrap(self::negate($entry)), $node->entries),
+                array_map(fn(array|self $entry) => self::wrap(self::negate($entry)), $node->entries),
                 0,
             )),
             default   => new self(self::NOT, [$node], 0),

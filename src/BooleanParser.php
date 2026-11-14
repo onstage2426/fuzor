@@ -36,7 +36,7 @@ final class BooleanParser
         $lastTerm = null;
 
         foreach (self::lexExpression($expression) as $token) {
-            if ($token !== '|' && $token !== '&' && $token !== '~' && $token !== '(' && $token !== ')') {
+            if (!in_array($token, ['|', '&', '~', '(', ')'], true)) {
                 $postfix[] = $token;
                 $lastTerm  = $token;
             } elseif ($token === '(') {
@@ -133,7 +133,7 @@ final class BooleanParser
         foreach ($matches as $match) {
             // A '-' glued to '(' negates the group, as '~(' does.
             $lexeme = ($match[3] ?? '') !== '' ? '~' : $match[0];
-            if ($lexeme === '|' || $lexeme === '&' || $lexeme === 'or') {
+            if (in_array($lexeme, ['|', '&', 'or'], true)) {
                 if (!$expectOperand || $tokens === []) {
                     $tokens[]      = $lexeme === '&' ? '&' : '|';
                     $expectOperand = true;
@@ -147,8 +147,7 @@ final class BooleanParser
                         array_pop($tokens); // "()" — an empty group contributes nothing
                         $depth--;
                         $last          = end($tokens);
-                        $expectOperand = $last === false || $last === '|' || $last === '&'
-                            || $last === '~' || $last === '(';
+                        $expectOperand = in_array($last, [false, '|', '&', '~', '('], true);
                     }
                     continue;
                 }
@@ -203,7 +202,7 @@ final class BooleanParser
     {
         while (isset($tokens[1])) {
             $last = end($tokens);
-            if ($last !== '|' && $last !== '&' && $last !== '~') {
+            if (!in_array($last, ['|', '&', '~'], true)) {
                 break;
             }
             array_pop($tokens);

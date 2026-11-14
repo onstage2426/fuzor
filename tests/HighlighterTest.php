@@ -227,6 +227,6 @@ class HighlighterTest extends TestCase
 
     public function testEscapeDefaultIsOff(): void
     {
-        $this->assertSame('<b><mark>fast</mark></b>', (new Highlighter())->highlight('fast', '<b>fast</b>'));
+        $this->assertSame('<b><mark>fast</mark></b>', new Highlighter()->highlight('fast', '<b>fast</b>'));
     }
 }

@@ -34,7 +34,7 @@ final class ReferenceRanker
     /** @var array<string, int> term → documents */
     private array $df = [];
 
-    private float $avgdl;
+    private readonly float $avgdl;
 
     /** @var array<int, array<string, mixed>> */
     private array $docs = [];
@@ -62,7 +62,7 @@ final class ReferenceRanker
                     $this->hits[$id][$t] = ($this->hits[$id][$t] ?? 0) + 1;
                 }
             }
-            $this->length[$id] = array_sum(array_map('count', $this->fields[$id]));
+            $this->length[$id] = array_sum(array_map(count(...), $this->fields[$id]));
             foreach (array_keys($this->hits[$id]) as $t) {
                 $this->df[(string) $t] = ($this->df[(string) $t] ?? 0) + 1;
             }
@@ -117,7 +117,7 @@ final class ReferenceRanker
         $order = array_keys($groups);
         // A word's document frequency: its terms' summed (as Index does for expansions).
         $gdf = array_map(
-            fn(array $g): int => array_sum(array_map(fn($t) => $this->df[$t] ?? 0, array_keys($g))),
+            fn(array $g): int => array_sum(array_map(fn(string $t) => $this->df[$t] ?? 0, array_keys($g))),
             $groups,
         );
         if ($o->matchingStrategy === MatchingStrategy::Frequency) {
@@ -126,14 +126,10 @@ final class ReferenceRanker
         $minBucket = $o->matchingStrategy === MatchingStrategy::All ? count($order) : 1;
         // A phrase whose words are all indexed is required; documents below its last word's
         // bucket are not returned (Index's documented rule).
-        $phrases = array_values(array_filter($phrases, function (array $p): bool {
-            foreach ($p as $t) {
-                if (!isset($this->df[$t])) {
-                    return false;
-                }
-            }
-            return true;
-        }));
+        $phrases = array_values(array_filter(
+            $phrases,
+            fn(array $p): bool => array_all($p, fn(string $t): bool => isset($this->df[$t])),
+        ));
         foreach ($phrases as $p) {
             foreach ($order as $pos => $g) {
                 if (in_array($words[$g], $p, true)) {
@@ -250,12 +246,7 @@ final class ReferenceRanker
                 return false;
             }
         }
-        foreach ($phrases as $tokens) {
-            if (!$this->containsPhrase($id, $tokens)) {
-                return false;
-            }
-        }
-        return true;
+        return array_all($phrases, fn(array $tokens) => $this->containsPhrase($id, $tokens));
     }
 
     /** @param list<string> $tokens Consecutive inside one field. */
