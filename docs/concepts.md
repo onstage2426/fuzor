@@ -27,9 +27,10 @@ hit, so a search page needs no second query to your database.
 Two objects configure an index:
 
 - **`SchemaConfig`** decides what is written to the file: the field roles, `stripHtml`, the
-  stemmer, stop words and the document store. It is passed once, when the file is created, and
-  stored in the file; every later open reads it back. To change it, `Index::rebuild()` the index
-  with a new schema.
+  stemmer, stop words and the document store. It is stored in the file when the file is created,
+  and every later open reads it back. Passing the same schema on later opens is fine, so one line
+  can create and open the index; a different one throws a `QueryException` that names the
+  difference. To change it, `Index::rebuild()` the index with the new schema.
 - **`Config`** decides how this connection searches: the limits, BM25 and typo settings, field
   boosts, SQLite cache sizes. It is passed on every open and may differ between processes.
 

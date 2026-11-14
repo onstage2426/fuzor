@@ -29,8 +29,10 @@ $index = new Index(__DIR__ . '/var/products.db', schema: new SchemaConfig(
 ));
 ```
 
-The first `new Index()` creates the file; later ones open it and read the schema from it, so they
-pass no `schema:`. Fields in none of the lists (an image URL, a product URL) are only stored and
+The first `new Index()` creates the file; later ones open it. Keep the same line everywhere: a
+schema equal to the stored one just opens the file, and one that differs (say, a filter field added
+in the code but not yet in the file) throws a `QueryException` naming the difference, until you
+`rebuild()` the index with it. Fields in none of the lists (an image URL, a product URL) are only stored and
 come back with each hit. [Concepts](concepts.md) explains the field roles, [Indexing](indexing.md)
 every schema setting.
 

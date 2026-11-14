@@ -92,6 +92,13 @@ or `FacetSearchQuery` constructor instead of from `search()`. Code that built th
 its `try` block has to move the construction inside it. A field outside the schema still throws a
 `QueryException` from the search.
 
+## A schema on an existing index is checked, not refused
+
+`new Index($path, schema: $schema)` on an existing file threw a `QueryException` for any schema. It
+now opens the file when `$schema` is the schema the index was created with, and throws only when it
+differs, naming each differing setting. Code that left out `schema:` for existing files keeps
+working; code that caught the exception to tell "create" from "open" can pass the schema always.
+
 ## `QueryToken::$matchType` is a `MatchType` enum
 
 `inspectQuery()` reports how each token matched as `Fuzor\MatchType` (`Exact`, `Prefix`, `Fuzzy`,

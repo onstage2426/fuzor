@@ -12,7 +12,7 @@ API and may change in any release.
 
 | Method | Returns | Description |
 |---|---|---|
-| `new Index(string $path, bool $force = false, ?Config $config = null, bool $readonly = false, ?SchemaConfig $schema = null)` | | Open the index at `$path`, or create it with `$schema`. `force` replaces an existing index with an empty one; `readonly` makes every write throw an `IOException` ([Indexing](indexing.md#creating-and-opening-an-index)) |
+| `new Index(string $path, bool $force = false, ?Config $config = null, bool $readonly = false, ?SchemaConfig $schema = null)` | | Open the index at `$path`, or create it with `$schema`; an existing index must have that schema. `force` replaces an existing index with an empty one; `readonly` makes every write throw an `IOException` ([Indexing](indexing.md#creating-and-opening-an-index)) |
 | `Index::exists(string $path)` | `bool` | Whether a Fuzor index is at `$path` |
 | `Index::lastModified(string $path)` | `int` | Modification time of the file, `0` when there is none |
 | `reopenIfChanged()` | `bool` | Reopen when a new version was published at the path ([Operations](operations.md#long-lived-workers)) |
@@ -268,7 +268,7 @@ Every exception Fuzor throws for its own reasons extends `Fuzor\Exceptions\Fuzor
 
 | Exception | Thrown for |
 |---|---|
-| `Exceptions\QueryException` | Domain and state errors: a stemmer class that is missing or not a `Stemmer`, a missing, repeated or unknown document ID, a field outside the schema's lists, a disabled document store, a schema passed to an existing index, a file of another format |
+| `Exceptions\QueryException` | Domain and state errors: a stemmer class that is missing or not a `Stemmer`, a missing, repeated or unknown document ID, a field outside the schema's lists, a disabled document store, a schema that differs from an existing index's, a file of another format |
 | `Exceptions\IOException` | File problems: a missing directory or file, a write on a `readonly` index, a failed publish, a file that is not a Fuzor index |
 | `Exceptions\FuzorException` | An SQLite library older than 3.46.0, or a 32-bit PHP; thrown by `new Index()` before any file is touched |
 

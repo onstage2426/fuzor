@@ -576,17 +576,19 @@ final class Index implements \Countable
      * Open an existing index or create a new one.
      *
      * If the file at $path already exists and $force is false, the index is opened with the
-     * schema stored in it (passing $schema then throws). If the file does not exist, or $force
+     * schema stored in it; a $schema passed then must be that schema (schemaDifferences()), so
+     * the same call creates the index and opens it later. If the file does not exist, or $force
      * is true, a new index is created with $schema.
      *
      * @param  string           $path     Absolute or relative path to the SQLite index file.
      * @param  bool             $force    Overwrite any existing file at $path.
      * @param  Config|null      $config   Search tuning; null uses all defaults.
      * @param  bool             $readonly Open in read-only mode; all write methods throw IOException.
-     * @param  SchemaConfig|null $schema   Schema persisted at creation time; ignored when opening an existing index.
+     * @param  SchemaConfig|null $schema   Schema of a new index; checked against an existing one's.
      * @throws IOException    If the parent directory does not exist, or readonly is true and the file does not exist.
      * @throws QueryException If $schema->stemmer is not a class implementing Stemmer, if the index's
-     *                        stemmer class cannot be loaded, or if both $readonly and $force are true.
+     *                        stemmer class cannot be loaded, if $schema differs from an existing
+     *                        index's schema, or if both $readonly and $force are true.
      * @throws \InvalidArgumentException If an entry of $schema->stopWords is not exactly one word.
      * @throws FuzorException If PHP's SQLite library is older than MIN_SQLITE_VERSION, or PHP is a 32-bit build.
      */
@@ -605,23 +607,26 @@ final class Index implements \Countable
             throw new QueryException("Cannot force-create a readonly index.");
         }
         // Validated before any file exists; createIndex() normalises them again.
-        if ($schema->stemmer !== null) {
-            self::createStemmer($schema->stemmer, 'SchemaConfig::$stemmer');
-        }
-        self::normalizeStopWords($schema->stopWords);
+        $stemmerClass = $schema->stemmer !== null
+            ? self::createStemmer($schema->stemmer, 'SchemaConfig::$stemmer')::class
+            : null;
+        $stopWords    = self::normalizeStopWords($schema->stopWords);
         $resolved   = self::resolvePath($path);
         $this->path = $resolved;
         if ($this->readonly && !file_exists($resolved)) {
             throw new IOException("Index does not exist: {$resolved}");
         }
         if (file_exists($resolved) && !$force) {
-            if ($schemaProvided) {
+            $this->selectIndex();
+            $differences = $schemaProvided ? $this->schemaDifferences($schema, $stemmerClass, $stopWords) : [];
+            if ($differences !== []) {
+                $this->pdo = null;
                 throw new QueryException(
-                    "Cannot apply SchemaConfig to an existing index. "
-                    . "Use rebuild() to change the schema, or force: true to overwrite."
+                    "{$resolved} was created with another schema: " . implode('; ', $differences) . '. Use'
+                    . ' Index::rebuild() with the new SchemaConfig to change it, or force: true to replace the'
+                    . ' index with an empty one.'
                 );
             }
-            $this->selectIndex();
         } elseif (file_exists($resolved)) {
             $this->replaceWithEmptyIndex($schema);
         } else {
@@ -1639,6 +1644,80 @@ final class Index implements \Countable
             : null;
         $this->stripHtml            = $infoRows['strip_html'] === '1';
         $this->applyStopWords(self::decodeStringList($infoRows['stop_words']));
+    }
+
+    /**
+     * The settings in which $schema differs from the open index's, each as "name (index: …, given:
+     * …)"; [] when it is the same schema. Lets the constructor open an existing file with the
+     * schema it was created with, so one `new Index($path, schema: …)` serves creation and every
+     * later open. The filterable and sortable fields and the stop words compare as sets (their order
+     * is not used); the searchable fields in order, since each field's positions follow its place
+     * in the list.
+     *
+     * @param  ?string      $stemmerClass The given stemmer's class as created (case and leading
+     *                                    backslash as the index stores it).
+     * @param  list<string> $stopWords    The given stop words, normalised like the stored ones.
+     * @return list<string>
+     */
+    private function schemaDifferences(SchemaConfig $schema, ?string $stemmerClass, array $stopWords): array
+    {
+        $checks = [
+            'filterableAttributes' => [
+                self::asSet($this->filterableAttributes),
+                self::asSet($schema->filterableAttributes),
+            ],
+            'sortableAttributes'   => [
+                self::asSet($this->sortableAttributes),
+                self::asSet($schema->sortableAttributes),
+            ],
+            'searchableAttributes' => [
+                $this->searchableAttributes,
+                $schema->searchableAttributes !== null
+                    ? array_values(array_unique($schema->searchableAttributes))
+                    : null,
+            ],
+            'stemmer'              => [$this->stemmer, $stemmerClass],
+            'store'                => [$this->documentStoreEnabled, $schema->store],
+            'stripHtml'            => [$this->stripHtml, $schema->stripHtml],
+            'stopWords'            => [self::asSet($this->stopWords), self::asSet($stopWords)],
+        ];
+        $differences = [];
+        foreach ($checks as $name => [$stored, $given]) {
+            if ($stored !== $given) {
+                $differences[] = sprintf(
+                    '%s (index: %s, given: %s)',
+                    $name,
+                    self::schemaValueText($stored),
+                    self::schemaValueText($given),
+                );
+            }
+        }
+        return $differences;
+    }
+
+    /**
+     * $list without duplicates, sorted: a field or stop word list compared as a set.
+     *
+     * @param  list<string> $list
+     * @return list<string>
+     */
+    private static function asSet(array $list): array
+    {
+        $list = array_values(array_unique($list));
+        sort($list);
+        return $list;
+    }
+
+    /** A schema setting as schemaDifferences() names it in a message. */
+    private static function schemaValueText(mixed $value): string
+    {
+        return match (true) {
+            $value === null   => 'none',
+            is_bool($value)   => $value ? 'true' : 'false',
+            is_array($value)  => '[' . implode(', ', array_filter($value, is_string(...))) . ']',
+            is_string($value) => $value,
+            default           => get_debug_type($value),
+        };
     }
 
     /**

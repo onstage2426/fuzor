@@ -16,7 +16,7 @@ $index = new Index('/path/to/products.db', schema: new SchemaConfig(
 
 | Argument | Effect |
 |---|---|
-| `schema:` | The schema of a new index (below). Passing it for an existing file throws a `QueryException`: change a schema with [`rebuild()`](operations.md#rebuilding) |
+| `schema:` | The schema of a new index (below). For an existing file it must be the stored schema, or a `QueryException` names what differs; change a schema with [`rebuild()`](operations.md#rebuilding). Lists of fields and stop words compare in any order, `searchableAttributes` in its order |
 | `config:` | Search settings for this connection: limits, typo tolerance, BM25, cache sizes ([Performance](performance.md#settings)) |
 | `readonly: true` | Open an existing index read-only; every write method throws an `IOException` |
 | `force: true` | Replace an existing index with an empty one. Processes that have the old file open keep reading it ([Operations](operations.md#index-files-and-versions)) |
