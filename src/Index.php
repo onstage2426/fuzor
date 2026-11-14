@@ -6724,8 +6724,17 @@ final class Index implements \Countable
             }
             return;
         }
-        $text = is_bool($col) ? ($col ? 'true' : 'false') : strval($col); // @phpstan-ignore argument.type
+        $text = self::scalarText($col);
         $this->indexFieldText($text, $fieldName, $termCounts, $fieldTermCounts, $termPositions, $length, $position);
+    }
+
+    /**
+     * The text a scalar (or Stringable) field value is indexed as: a bool as `true` / `false`,
+     * anything else as strval() gives it. Shared by indexFieldColumn() and fieldTexts().
+     */
+    private static function scalarText(mixed $value): string
+    {
+        return is_bool($value) ? ($value ? 'true' : 'false') : strval($value); // @phpstan-ignore argument.type
     }
 
     /**
@@ -6740,11 +6749,7 @@ final class Index implements \Countable
             $value = json_decode(json_encode($value, JSON_THROW_ON_ERROR), true, 512, JSON_THROW_ON_ERROR);
         }
         if (!is_array($value)) {
-            return match (true) {
-                $value === null => [],
-                is_bool($value) => [$value ? 'true' : 'false'],
-                default         => [strval($value)], // @phpstan-ignore argument.type
-            };
+            return $value === null ? [] : [self::scalarText($value)];
         }
         $texts = [];
         foreach ($value as $element) {

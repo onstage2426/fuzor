@@ -4427,6 +4427,46 @@ class IndexTest extends TestCase
         $this->assertSame([1], $index->search('red', new SearchOptions(asYouType: false))->getIds());
     }
 
+    public function testArrayElementsAreFartherApartForProximityThanWordsOfOneElement(): void
+    {
+        $index = new Index($this->dbPath);
+        $index->insert([
+            ['id' => 1, 'tags' => ['red', 'car']],
+            ['id' => 2, 'tags' => ['red car']],
+        ]);
+
+        // Same words and length: without proximity the doc ID would order them 1, 2.
+        $this->assertSame([2, 1], $index->search('red car', new SearchOptions(asYouType: false))->getIds());
+    }
+
+    public function testArrayElementsGoThroughStripHtmlOneByOne(): void
+    {
+        $index = new Index($this->dbPath, schema: new SchemaConfig(stripHtml: true));
+        $index->insert([
+            ['id' => 1, 'tags' => ['<p>red <b>car</b></p>', '<script>hidden</script>', '<i>fast</i>']],
+        ]);
+
+        $exact = new SearchOptions(asYouType: false);
+        $this->assertSame([1], $index->search('"red car"', $exact)->getIds());
+        $this->assertSame([1], $index->search('fast', $exact)->getIds());
+        $this->assertSame([], $index->search('hidden', $exact)->getIds());
+        $this->assertSame([], $index->search('"car fast"', $exact)->getIds());
+    }
+
+    public function testStringableArrayElementsIndexTheirString(): void
+    {
+        $element = new class () implements \Stringable {
+            public function __toString(): string
+            {
+                return 'electric';
+            }
+        };
+        $index = new Index($this->dbPath);
+        $index->insert([['id' => 1, 'title' => 'sedan', 'tags' => ['red', $element]]]);
+
+        $this->assertSame([1], $index->search('electric', new SearchOptions(asYouType: false))->getIds());
+    }
+
     public function testQuotedPhraseWordsAreExactEvenAsTheLastWord(): void
     {
         $index = new Index($this->dbPath, schema: new SchemaConfig(filterableAttributes: ['brand']));
