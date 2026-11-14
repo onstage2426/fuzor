@@ -13,6 +13,9 @@ return RectorConfig::configure()
         \Rector\CodeQuality\Rector\Identical\FlipTypeControlToUseExclusiveTypeRector::class,
         \Rector\DeadCode\Rector\Node\RemoveNonExistingVarAnnotationRector::class,
     ])
+    // src/Index.php and tests/IndexTest.php are over 13,000 lines each: one of them alone takes a
+    // worker past the default 120 s, so each worker gets one file and more time.
+    ->withParallel(timeoutSeconds: 900, jobSize: 1)
     ->withPhpSets(php85: true)
     ->withSets([
         SetList::CODE_QUALITY,
