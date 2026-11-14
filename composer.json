@@ -45,17 +45,12 @@
         "test":   "./vendor/bin/phpunit",
         "cs":     "./vendor/bin/phpcs",
         "cs-fix": "./vendor/bin/phpcbf",
-        "stan":   "./vendor/bin/phpstan analyse --memory-limit=512M",
+        "stan":   "./vendor/bin/phpstan analyse --memory-limit=1G",
         "bench":  "./vendor/bin/phpbench run benchmarks/FuzorBench.php --report=default",
         "infect":  "./vendor/bin/infection --threads=16",
         "rector":  "./vendor/bin/rector",
         "rector-dry": "./vendor/bin/rector --dry-run",
         "check":  ["@cs", "@stan", "@test"]
-    },
-    "extra": {
-        "branch-alias": {
-            "2.x-dev": "2.0.x-dev"
-        }
     },
     "config": {
         "allow-plugins": {

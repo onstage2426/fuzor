@@ -17,4 +17,4 @@ jobs:
       - uses: softprops/action-gh-release@v3
         with:
           generate_release_notes: false
-          body: "See [CHANGELOG.md](https://github.com/onstage2426/fuzor/blob/main/CHANGELOG.md) for release notes."
+          body: "See [CHANGELOG.md](https://github.com/onstage2426/fuzor/blob/${{ github.ref_name }}/CHANGELOG.md) for release notes."
