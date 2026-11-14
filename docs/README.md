@@ -16,7 +16,7 @@
 - [Language](language.md): CJK and Thai, stemming and writing a stemmer, stop words.
 - [Indexing](indexing.md): the schema, field values, HTML, insert, update, delete, reading documents.
 - [Operations](operations.md): readers and writers, rebuilds, snapshots, installing an index, files on disk.
-- [Performance](performance.md): measurements, what requests cost, limits and settings.
+- [Performance](performance.md): orders of magnitude, what requests cost, limits and settings.
 - [Debugging](debugging.md): `inspectQuery()`, ranking details, result flags.
 
 **Reference**

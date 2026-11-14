@@ -136,8 +136,9 @@ not one per call: a bulk insert is far faster.
 
 The documents are processed in chunks of `Config::$insertChunkSize` (2,000): each chunk is
 tokenized and written before the next is read, so with a generator memory follows the chunk, not
-the input. On a 44k-product catalog with HTML descriptions an `insert()` from a generator peaks at
-about 170 MB. Lower the chunk size under a tight `memory_limit`; larger chunks did not load faster.
+the input: an `insert()` of HTML-rich documents from a generator stays at about 200 MB however
+many there are. Lower the chunk size under a tight `memory_limit`; larger chunks did not load
+faster.
 
 A `progress` callback is called after each document with the number done and the total, which is
 `0` for a generator, since it is not read ahead:
@@ -176,8 +177,8 @@ work in chunks like `insert()`.
 
 Only what changed is rewritten. With the document store, a document whose searchable fields are
 unchanged (the same values, of the same type, in the same order) keeps its word index entries, and
-only its stored copy and filterable and sortable values are written: a price update of 200 products
-on a 44k-product catalog takes 33 ms. When the text changes, only the words that changed are
+only its stored copy and filterable and sortable values are written, which makes a price update
+several times cheaper than a text change. When the text changes, only the words that changed are
 written.
 
 ## Deleting
@@ -188,8 +189,7 @@ $index->delete(1, 2, 3);  // several
 ```
 
 IDs that do not exist are ignored. A deleted document is gone from every search, browse, facet
-count, `get()` and `count()` once `delete()` returns: 50 documents take about 11 ms on a
-44k-product catalog.
+count, `get()` and `count()` once `delete()` returns.
 
 Its entries in the word index are only marked as deleted, and removed later in bulk, since
 rewriting them is the expensive part of a delete. Until then the word statistics that relevance

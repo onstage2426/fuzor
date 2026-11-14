@@ -2,30 +2,27 @@
 
 What requests cost, what makes them expensive, and the settings that trade speed for exactness.
 
-## Measurements
+## Orders of magnitude
 
-A 44k-product catalog with HTML descriptions, default settings, one PHP process (i5-9600K, PHP 8.5,
-SQLite 3.46.1, measured on 2026-11-14; reads are medians):
+On a catalog of tens of thousands of products with HTML descriptions, default settings, in one PHP
+process:
 
-| Request | Time |
+| Request | Takes |
 |---|---|
-| Shop page: browse with 5 facets, one value excluded | 3.5 ms |
-| Facet counts of the whole catalog / price bounds only | 0.5 / 0.9 ms |
-| Listing: two values of one field, 6 facets, sorted | 4.1 ms |
-| Price range sorted by price | 0.4 ms |
-| Sorted page at offset 20,000 | 0.01 ms |
-| Two-word search / with a typo | 15 / 19 ms |
-| Three-word search | 37 ms |
-| Search with a filter, sort and 6 facets | 38 ms |
-| `distinct` browse / with a filter and sort | 18 / 35 ms |
-| `update()` of 200 documents, price only / title changed | 33 / 136 ms |
-| `delete()` of 50 documents | 11 ms |
-| `insert()` of the catalog, from a generator | 24 s, 172 MB peak |
-| `rebuild()` | 23 s, 208 MB peak |
-| `snapshotTo()` (360 MB file) | about 2 s |
+| Browse, sorted listing or category page with facets | a few ms or less |
+| Search of two or three words, with or without a typo | tens of ms |
+| Search with filters, sort and facets | tens of ms |
+| `distinct` | tens of ms, growing with the matches |
+| `update()` or `delete()` of a few hundred documents | tens to hundreds of ms |
+| `insert()` or `rebuild()` of the whole catalog | under a minute, about 200 MB of memory |
+| `snapshotTo()` | seconds |
 
-On 1.43M products (a 3 GB index), searches take 6–45 ms, and filtered category pages with facets up
-to about 35 ms.
+On over a million products searches and filtered category pages with facets stay within tens of
+milliseconds. Release notes in `CHANGELOG.md` give measured before and after numbers.
+
+Your data and server decide what your requests cost: time the ones that matter to you. To compare
+two Fuzor versions, or the effect of a setting, the repository has a benchmark suite with a
+generated shop (`composer bench -- --group=shop`, see `CONTRIBUTING.md`).
 
 ## What costs what
 
@@ -125,7 +122,7 @@ presets, so typing `s` does not expand to every word starting with s.
 | `fuzzyMaxExpansions` | `50` | Most indexed words a typo or a prefix expands to (a typo: closest first, then most frequent; a prefix: shortest first) |
 | `proxWindowSize` | `0` | Most documents the proximity boost is computed for; `0` computes it for as many as the page needs |
 | `maxValuesPerFacet` | `100` | Most values per field in `facetDistribution`; `0` returns all |
-| `insertChunkSize` | `2000` | Documents per step of a bulk write; memory follows it (about 170 MB at 2,000 on HTML-rich documents). Lower it under a tight `memory_limit` |
+| `insertChunkSize` | `2000` | Documents per step of a bulk write; memory follows it (about 200 MB at 2,000 on HTML-rich documents). Lower it under a tight `memory_limit` |
 | `bulkSynchronousOff` | `true` | Skip the sync to disk during bulk writes ([Durability](indexing.md#durability-during-bulk-loads)) |
 | `cacheSizeKb` | `65536` | SQLite page cache per connection, in KB; lower it on many workers ([Operations](operations.md#memory-with-many-workers)) |
 | `mmapSizeBytes` | `536870912` | Memory-mapped window, shared between processes; `0` turns it off |

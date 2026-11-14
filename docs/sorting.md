@@ -74,8 +74,8 @@ $index->search('', new SearchOptions(sort: [Sort::asc('id')]));  // lowest ID fi
 ### Cost
 
 A sorted browse walks the sort field's index in order and stops when the page is full, so its cost
-follows the page, not the catalog: on a 44k-product catalog a page at offset 20,000 by price takes
-0.01 ms, and a price range sorted by price 0.4 ms. A sorted search sorts its matches, which is part
+follows the page, not the catalog: a deep page, or a price range sorted by price, takes about a
+millisecond or less. A sorted search sorts its matches, which is part
 of the search's own cost.
 
 **Compared with Meilisearch:** the same value order (numbers first, case-insensitive strings
@@ -112,5 +112,4 @@ $groups = $index->search('shirt', new SearchOptions(limit: 0, distinct: 'brand')
 ```
 
 Counting the groups means looking at every match, so a `distinct` request costs time in proportion
-to the number of matches: on a 44k-product catalog a `distinct` browse of everything takes 18 ms,
-with a filter and sort 35 ms. Facet counts are not collapsed: they count documents.
+to the number of matches: on tens of thousands of documents tens of milliseconds. Facet counts are not collapsed: they count documents.

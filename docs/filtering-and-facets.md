@@ -195,8 +195,7 @@ isset($result->facetDistribution['price']);  // false
 
 The stats are those `facets: ['price']` would give, over the same matches and without the field's
 own filter, but much cheaper: instead of counting a value per document, the field's numbers are
-read from both ends until the first matching document. On a 7.7k-product shop the price bounds of
-the whole catalog add 0.3 ms instead of 3.9 ms, on 1.43M products 0.6 ms instead of 15 ms. They are
+read from both ends until the first matching document, often ten times faster or more. They are
 exact even when the facet counts would be approximate. A field may not be in both lists.
 
 ### Exact and approximate counts

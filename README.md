@@ -65,12 +65,12 @@ $index->search('waterprof boots'); // a typo still finds "Waterproof hiking boot
   so (`exhaustive`, `approximateFacets`, `warnings`) instead of quietly showing a smaller number. The
   ranking is tested against a brute-force reference implementation, and CI runs the tests on the oldest
   supported SQLite (3.46.0) and the latest release.
-- **Fast where a shop spends its time.** On a 44k-product catalog, a shop page with five facets takes
-  3.5 ms, a sorted listing with six facets 4.1 ms, and a two-word search about 15 ms. Updating 200
-  products takes 33 ms and deleting 50 takes 11 ms. Measurements and what each option costs are in
+- **Fast where a shop spends its time.** On a catalog of tens of thousands of products, shop pages
+  with facets and sorted listings take a few milliseconds and searches tens of milliseconds, and an
+  update or delete of a few hundred products well under a second. What each option costs is in
   [Performance](docs/performance.md).
-- **Grows with you.** On 1.43M products (a 3 GB index), searches take 6–45 ms and filtered category
-  pages with facets up to about 35 ms, in one PHP process.
+- **Grows with you.** On over a million products, searches and filtered category pages with facets
+  stay within tens of milliseconds, in one PHP process.
 - **Nothing to operate.** One file per index, read by any number of PHP workers. Rebuilds, snapshots and
   installing an index built on another server publish the new file atomically, so readers never see a
   half-written index.

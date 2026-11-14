@@ -85,7 +85,7 @@ $index->search('', new SearchOptions(filter: ['category' => 'shoes'], facets: ['
 
 A browse is answered over the whole index, so its total, page and order are exact at any size. A
 sorted browse walks the sort field's index and stops once the page is full, so its cost follows the
-page, not the index: on a 44k-product catalog a sorted or filtered page takes well under 5 ms.
+page, not the index: a sorted or filtered page takes a few milliseconds or less.
 `searchBoolean('')` is the same browse.
 
 ## Search as you type
