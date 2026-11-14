@@ -1,87 +1,126 @@
-<p align="center"><a href="https://github.com/onstage2426/fuzor" target="_blank"><img src="https://raw.githubusercontent.com/onstage2426/fuzor/refs/heads/assets/logos//logo.svg" width="400" alt="Fuzor Logo"></a></p>
+<p align="center"><a href="https://github.com/onstage2426/fuzor" target="_blank"><img src="https://raw.githubusercontent.com/onstage2426/fuzor/refs/heads/assets/logos/logo.svg" width="400" alt="Fuzor"></a></p>
 
-<p align="center"><img alt="PHP 8.5+" src="https://img.shields.io/badge/PHP-8.5%2B-777BB4?logo=php&amp;logoColor=white"> <img alt="License" src="https://img.shields.io/badge/license-MIT-green"> <img alt="Packagist Version" src="https://img.shields.io/packagist/v/onstage2426/fuzor"> <img alt="CI" src="https://github.com/onstage2426/fuzor/actions/workflows/ci.yml/badge.svg"></p>
+<p align="center">
+<img alt="PHP 8.5+" src="https://img.shields.io/badge/PHP-8.5%2B-777BB4?logo=php&amp;logoColor=white">
+<a href="https://packagist.org/packages/onstage2426/fuzor"><img alt="Packagist Version" src="https://img.shields.io/packagist/v/onstage2426/fuzor"></a>
+<a href="https://packagist.org/packages/onstage2426/fuzor"><img alt="Downloads" src="https://img.shields.io/packagist/dt/onstage2426/fuzor"></a>
+<a href="https://github.com/onstage2426/fuzor/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/onstage2426/fuzor/actions/workflows/ci.yml/badge.svg"></a>
+<img alt="PHPStan level max" src="https://img.shields.io/badge/PHPStan-level%20max-brightgreen">
+<a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-green"></a>
+</p>
 
-## About
+<p align="center"><b>Full-text search for PHP in a single SQLite file.</b><br>
+Typo-tolerant ranking, filters, facets and sorting, with no search server to run.</p>
 
-Fuzor is a dependency-free full-text search library for PHP. It tokenises your documents, stores an inverted index in a single SQLite file, and scores results with Okapi BM25 — no external services required.
+Fuzor indexes your documents into one SQLite file and searches them from PHP: BM25 ranking with typo
+tolerance and search-as-you-type, filters and facet counts for shop pages, sorting, highlighting and
+excerpts. It needs no service, no daemon and no package dependencies, only PHP's SQLite and mbstring
+extensions. Its options use the names and behaviour of Meilisearch (`filterableAttributes`,
+`matchingStrategy`, `typoTolerance`, `facetDistribution`, `_formatted`, …), so the concepts carry over.
 
-- BM25 ranked search with automatic typo tolerance, ranked by how many query words match
-- Boolean search with AND / OR / NOT operators; `-word` and `-"phrase"` exclusions in plain search
-- Faceted filtering (including exclusions), per-value counts, and facet value search
-- Search-as-you-type prefix matching and phrase search
-- Snowball stemming for 31 languages, n-grams for Chinese, Japanese, Korean and Thai, optional stop words
-- Result highlighting and snippet extraction
-- One SQLite file per index — zero infrastructure; atomic rebuilds, snapshots, and installs
-
-## Installation
+## Quick start
 
 ```bash
 composer require onstage2426/fuzor
 ```
 
-**Requirements:** PHP 8.5+ with the `pdo_sqlite` and `mbstring` extensions, SQLite 3.46.0+ (the library PHP's `pdo_sqlite` loads; an older one, or a 32-bit PHP, is refused with a `FuzorException` when an index is opened)
-
-## Usage
-
 ```php
+use Fuzor\FacetRange;
 use Fuzor\Index;
 use Fuzor\SchemaConfig;
 use Fuzor\SearchOptions;
-use Fuzor\FacetRange;
-use Fuzor\FacetSearchQuery;
 
-// Create an index — declare filterable and sortable fields at creation time
-$index = new Index('/path/to/products.db', schema: new SchemaConfig(
-    language:         'en',
-    filterableAttributes: ['type', 'price'],
-    sortableAttributes:   ['price'],
+$index = new Index('products.db', schema: new SchemaConfig(
+    filterableAttributes: ['brand', 'price'],
+    sortableAttributes: ['price'],
 ));
 
 $index->insert([
-    ['id' => 1, 'title' => 'Fast sedan',     'body' => 'City car with great fuel economy.',    'type' => 'sedan', 'price' => 24900],
-    ['id' => 2, 'title' => 'Off-road SUV',   'body' => 'Built for adventure and any terrain.', 'type' => 'suv',   'price' => 41500],
-    ['id' => 3, 'title' => 'Electric coupe', 'body' => 'Zero emissions and instant torque.',   'type' => 'coupe', 'price' => 58000],
+    ['id' => 1, 'title' => 'Waterproof hiking boots',  'brand' => 'Northpeak', 'price' => 129],
+    ['id' => 2, 'title' => 'Trail running shoes',      'brand' => 'Fellwalk',  'price' => 89],
+    ['id' => 3, 'title' => 'Leather hiking boots',     'brand' => 'Northpeak', 'price' => 159],
+    ['id' => 4, 'title' => 'Lightweight hiking boots', 'brand' => 'Fellwalk',  'price' => 99],
 ]);
 
-// BM25 ranked search — typo tolerance fires automatically on words ≥ 5 chars
-$result = $index->search('economi');
-
-// Boolean search
-$result = $index->searchBoolean('sedan or coupe -electric');
-
-// Faceted search — filter by attribute, count values
-$result = $index->search('car', new SearchOptions(
-    filter: ['type' => ['sedan', 'suv'], 'price' => FacetRange::max(45000)],
-    facets: ['type'],
+$result = $index->search('boots', new SearchOptions(
+    filter: ['price' => FacetRange::max(150)],
+    facets: ['brand'],
+    sort:   ['price:asc'],
 ));
 
-$result->hits;               // documents in relevance order
-$result->facetDistribution;  // ['type' => ['sedan' => 1, 'suv' => 1]]
+$result->hits;              // Lightweight hiking boots (99), Waterproof hiking boots (129)
+$result->totalHits;         // 2
+$result->facetDistribution; // ['brand' => ['Fellwalk' => 1, 'Northpeak' => 1]]
 
-// Facet value search — autocomplete a filter dropdown
-$facetResult = $index->facetSearch(new FacetSearchQuery(
-    facetName:  'type',
-    facetQuery: 'se',      // matches the start of any word of a value: 'sedan', 'Sport Sedan'
-    q:      'car',     // restrict to docs matching this FTS query
-));
-
-foreach ($facetResult as $hit) {
-    echo $hit['value'] . ': ' . $hit['count'] . "\n";  // "sedan: 1"
-}
+$index->search('waterprof boots'); // a typo still finds "Waterproof hiking boots"
 ```
+
+[Getting started](docs/getting-started.md) walks through a complete search page from here.
+
+## Why Fuzor
+
+- **Results you can trust.** Totals are exact up to `totalHits` (1,000 by default), and facet counts are
+  exact over up to 50,000 matching documents. Where a limit makes a result approximate, the result says
+  so (`exhaustive`, `approximateFacets`, `warnings`) instead of quietly showing a smaller number. The
+  ranking is tested against a brute-force reference implementation, and CI runs the tests on the oldest
+  supported SQLite (3.46.0) and the latest release.
+- **Fast where a shop spends its time.** On a 44k-product catalog, a shop page with five facets takes
+  3.5 ms, a sorted listing with six facets 4.1 ms, and a two-word search about 15 ms. Updating 200
+  products takes 33 ms and deleting 50 takes 11 ms. Measurements and what each option costs are in
+  [Performance](docs/performance.md).
+- **Grows with you.** On 1.43M products (a 3 GB index), searches take 6–45 ms and filtered category
+  pages with facets up to about 35 ms, in one PHP process.
+- **Nothing to operate.** One file per index, read by any number of PHP workers. Rebuilds, snapshots and
+  installing an index built on another server publish the new file atomically, so readers never see a
+  half-written index.
+
+## Features
+
+- **Search:** BM25 ranking with proximity, typo tolerance, search-as-you-type prefixes, quoted phrases,
+  `-word` and `-"phrase"` exclusions, matching strategies, synonyms, boolean queries with AND / OR / NOT
+  ([Searching](docs/searching.md))
+- **Filters and facets:** value, list and range filters, exclusions, nested `Filter::all()` / `any()` /
+  `not()`, facet counts and stats, counts that stay visible while a value is selected, facet value search
+  ([Filtering and facets](docs/filtering-and-facets.md))
+- **Sorting** on any number of fields, and `distinct` to show one hit per product group
+  ([Sorting](docs/sorting.md))
+- **Highlighting and excerpts**, with HTML-safe output when you ask for it ([Formatting](docs/formatting.md))
+- **Languages:** Chinese, Japanese, Korean and Thai split into n-grams automatically; optional
+  stemming with a stemmer class of your own, and stop words ([Language](docs/language.md))
+- **Indexing:** insert, update, upsert, delete and delete by filter; HTML stripped at index time; bulk
+  loads in bounded memory; an optional document store ([Indexing](docs/indexing.md))
+- **Operations:** atomic rebuilds, snapshots, installing a prebuilt file, reader/writer setups
+  ([Operations](docs/operations.md))
+- **Debugging:** `inspectQuery()` and per-hit ranking details show why a document matched and where it
+  ranked ([Debugging](docs/debugging.md))
+
+## When to use something else
+
+Fuzor runs inside your PHP process on one machine. Pick a search server instead when you need search
+spread over several machines, vector or semantic search, or the lowest latency on catalogs of millions
+of products with heavy traffic. Up to that point, a single file you can copy, snapshot and ship with
+your application is usually the simpler choice.
+
+## Requirements
+
+- PHP 8.5+ (64-bit) with the `pdo_sqlite` and `mbstring` extensions
+- SQLite 3.46.0+, the library PHP's `pdo_sqlite` is linked against. An older library or a 32-bit PHP
+  is refused with a `FuzorException` when an index is opened.
 
 ## Documentation
 
-- [Indexing](docs/indexing.md) — creating indexes, inserting, updating, deleting (also by filter), rebuild, snapshots, installing a file
-- [Search](docs/search.md) — BM25, boolean, phrases, typo tolerance, synonyms, facets, sorting, distinct
-- [Language](docs/language.md) — stemming, stop words, CJK/Thai n-grams
-- [Formatting](docs/formatting.md) — result highlighting and snippet extraction
-- [Document store](docs/document-store.md) — storing and retrieving raw documents
-- [Tuning](docs/tuning.md) — BM25 parameters, typo tolerance, facets, field boosting, bulk loads
-- [Performance](docs/performance.md) — read/write index split, snapshots
-- [Inspect query](docs/inspect-query.md) — debug the query pipeline
+Start with [Getting started](docs/getting-started.md) and [Concepts](docs/concepts.md); every page is
+listed in the [documentation index](docs/README.md). The [API reference](docs/reference.md) lists every
+class and option.
+
+Upgrading from 1.x: see [UPGRADE-2.0.md](UPGRADE-2.0.md) and the [changelog](CHANGELOG.md). Indexes
+written by 1.x have to be rebuilt.
+
+## Contributing
+
+Bug reports and pull requests are welcome; see [CONTRIBUTING.md](CONTRIBUTING.md). Report security
+issues as described in [SECURITY.md](SECURITY.md).
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT, see [LICENSE](LICENSE).

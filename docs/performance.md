@@ -1,216 +1,132 @@
 # Performance
 
-## Read/write index split
+What requests cost, what makes them expensive, and the settings that trade speed for exactness.
 
-The most impactful production pattern is separating the write index from the read index. Search endpoints open the read index in `readonly` mode and never block on writes.
+## Measurements
 
-```
-write index          snapshotTo()         read index
-products.db  ──────────────────────►  products-read.db
-insert/update/delete  (periodic)       search only
-```
+A 44k-product catalog with HTML descriptions, default settings, one PHP process (i5-9600K, PHP 8.5,
+SQLite 3.46.1, measured on 2026-11-14; reads are medians):
 
-**Write side** — mutate normally, push snapshots on your staleness budget:
+| Request | Time |
+|---|---|
+| Shop page: browse with 5 facets, one value excluded | 3.5 ms |
+| Facet counts of the whole catalog / price bounds only | 0.5 / 0.9 ms |
+| Listing: two values of one field, 6 facets, sorted | 4.1 ms |
+| Price range sorted by price | 0.4 ms |
+| Sorted page at offset 20,000 | 0.01 ms |
+| Two-word search / with a typo | 15 / 19 ms |
+| Three-word search | 37 ms |
+| Search with a filter, sort and 6 facets | 38 ms |
+| `distinct` browse / with a filter and sort | 18 / 35 ms |
+| `update()` of 200 documents, price only / title changed | 33 / 136 ms |
+| `delete()` of 50 documents | 11 ms |
+| `insert()` of the catalog, from a generator | 24 s, 172 MB peak |
+| `rebuild()` | 23 s, 208 MB peak |
+| `snapshotTo()` (360 MB file) | about 2 s |
 
-```php
-use Fuzor\Index;
-use Fuzor\SchemaConfig;
+On 1.43M products (a 3 GB index), searches take 6–45 ms, and filtered category pages with facets up
+to about 35 ms.
 
-$write = new Index('/var/db/products.db', schema: new SchemaConfig(filterableAttributes: ['brand']));
+## What costs what
 
-$write->upsert($updatedProducts);
-$write->delete($removedId);
+**Browsing** (an empty query, a category page) is the cheapest request. A sorted page walks the sort
+field's index and stops when the page is full; facet counts without a filter come from counts kept
+up to date on every write, and with a filter from one packed row per matching document, about
+0.6–1 µs per document whatever the number of facet fields.
 
-// Push whenever your staleness allows — every minute, every N writes, on a cron, etc.
-$write->snapshotTo('/var/db/products-read.db');
-```
+**A search** first reads each word's best `Limits::$candidatesPerWord` documents, then ranks the
+documents of the page's words bucket exactly when there are at most 2,000 of them. Its total and
+facet counts are counted over every match, which adds about 1 µs per match: a word that matches a
+third of the catalog costs more than a rare one. Typos and the as-you-type prefix add the documents
+of every word they expand to.
 
-`snapshotTo()` uses SQLite's `VACUUM INTO` under a read transaction. WAL mode means writes are never blocked while the snapshot runs.
+**Some requests grow with the index, not the page.** Keep them off hot paths on large indexes, or
+cache their results:
 
-**Read side** — open the snapshot `readonly`:
+- `distinct`, which looks at every match to count the groups;
+- facet counts of a filtered request over more matches than `facetCountDocs`, which stop at the
+  cap (and are then approximate);
+- facet counts of a browse whose only filters are exclusions, at about 1 µs per excluded document;
+- `facetSearch()` with a filter and no query.
 
-```php
-$read = new Index('/var/db/products-read.db', readonly: true);
-$results = $read->search('electric bike');
-```
-
-`readonly: true`:
-- Uses a read-only file descriptor — no lock acquisition per query
-- Lets the OS share memory-mapped pages across all PHP-FPM workers for that file
-- Skips WAL and checkpoint overhead entirely (snapshot files have no WAL)
-
-**Long-lived readers (Swoole, FrankenPHP worker mode)** — a per-request `new Index(...)`
-picks up each new snapshot automatically, but a worker that holds one instance across
-requests keeps reading the *old* file forever: the rename swaps the inode at the path,
-not the file the connection has open. Call `reopenIfChanged()` once per request:
-
-```php
-// Worker startup:
-$read = new Index('/var/db/products-read.db', readonly: true);
-
-// Per request:
-$read->reopenIfChanged();   // one stat(); reopens only after a snapshot rotation
-$results = $read->search($query);
-```
-
-When nothing changed it costs a single `stat()` and every cache stays warm; after a
-rotation it reopens the connection and releases the old snapshot's disk space.
-
-## Memory profile for many-worker fleets
-
-SQLite's page cache is **private to each connection**. The default 64 MB is sized for a
-single writer process; a fleet of 32 PHP-FPM workers holding the read index open can
-allocate 2 GB of duplicated cache for one file. Memory-mapped pages have the opposite
-property — the OS shares them across every process mapping the same file — so read
-fleets should shrink the private cache and lean on `mmap_size`:
-
-```php
-$read = new Index('/var/db/products-read.db', readonly: true, config: new Config(
-    cacheSizeKb:   8_192,          // 8 MB private per worker (default 64 MB)
-    mmapSizeBytes: 2_147_483_648,  // 2 GB shared mapping (default 512 MB)
-));
-```
-
-Size `mmapSizeBytes` at or above the index file so the whole thing can stay resident;
-it costs address space, not committed memory, and pages are only faulted in on access.
-Keep the default `cacheSizeKb` on the write side, where the private cache absorbs
-B-tree splits during indexing. Bulk loads temporarily raise `cache_size` to 512 MB
-regardless, then restore the configured value.
-
-## Rebuild as publisher (no write tracking)
-
-When tracking individual writes is impractical — a CMS like WordPress, where content
-changes come from too many code paths to hook — skip the write index entirely.
-Rebuild the live index on a cron and let the rebuilt file *be* the read index:
-
-```php
-// Cron job, e.g. every 15 minutes:
-Index::rebuild('/var/db/site-search.db', function (Index $new): void {
-    foreach (loadAllPosts() as $batch) {
-        $new->insert($batch);
-    }
-});
-
-// Request handlers:
-$read = new Index('/var/db/site-search.db', readonly: true);
-```
-
-The swap is atomic: requests in flight keep reading the old file, new requests
-get the new one. A failed rebuild leaves the live index untouched. See
-[Index files after a rebuild or snapshot](indexing.md#index-files-after-a-rebuild-or-snapshot)
-for the file layout this creates.
-
-## At larger sizes
-
-Measured on a 533k-product catalog (the 44k test catalog copied twelve times with varied titles,
-prices, years and brands; 3.8 GB index), Fuzor 2.0, one PHP process:
-
-| Operation | 44k products | 533k products* |
-|---|---|---|
-| Bulk `insert()` | 39 s | ~150 s, 136 MB peak (generator) |
-| Search, one to three words (incl. typos) | 10–22 ms | 1–13 ms* |
-| Search + filter + sort + 6 facets | 50 ms | 8.6 ms* |
-| Browse page, sorted or filtered | 0.01–1.1 ms | 0.2–15 ms |
-| Listing: 2 genders + 6 facets + sort | 4.4 ms (exact counts) | 23 ms |
-| Facets of the whole index | 0.6 ms | 1.9 ms |
-| Shop page: 5 facets, excluding 9% of products | 4.5 ms | 170 ms |
-| `facetSearch()` with a filter only | 8.8 ms | 120 ms |
-| `distinct` browse | 21–44 ms | 0.3–0.7 s |
-
-\* The 44k column was measured on 2026-10-26; the 533k column before the search changes of that
-day (exact ranking of the page's words bucket, totals and facet counts over every match), so its
-search rows are lower than a search costs now.
-
-Each word reads its `Limits::$candidatesPerWord` best matches first. The page's words bucket is then read
-and ranked exactly while it holds at most 4 × `candidatesPerWord` documents (with a quoted phrase, counting only
-the documents that contain the phrase); of a larger one those candidates
-and the 4 × `candidatesPerWord` documents in which its rarest word weighs most (its BM25 term frequency)
-are ranked and the rest follows unscored
-(`exhaustive: false`), the same way on every page. The total and the facet counts are counted in SQL over every
-match, the total up to `Limits::$totalHits` (1000), so a broad search costs about 1 µs per
-match on top of the ranking. Facet counts over a filter
-that matches more than `Limits::$facetCountDocs` (50,000) documents are approximate
-(`approximateFacets`). Counting costs about 0.6–1 µs per counted document, whatever the number
-of facet fields: each document's facet values are stored together as one packed row. Some
-shapes grow with the index rather than the page: facet counts on a page whose only filter
-excludes documents (`FacetExclude`, `-word`) cost about that much per excluded document,
-`facetSearch()` with a filter but no query, and `distinct`. Keep them off hot paths on large
-indexes, or cache their results.
-
-A value filter that selects most documents of a field every document has exactly once (such as
-`gender: [Women, Men]`) is counted through the remaining values when those hold at most
-`facetCountDocs` documents: its page then gets exact facet counts at the cost of the excluded
-documents. On the 533k catalog the remaining 43k documents are above the cap, so the listing's
-counts stay approximate there.
-
-## Index files from another version
-
-The on-disk format has a revision (`Index::CURRENT_SCHEMA_VERSION`, stored in each file and
-exposed as `$index->schemaVersion`). Fuzor 2.0 writes revision 4 and does not open files
-written by 1.x (revisions 1–3) or by a newer version: opening one throws a `QueryException`.
-Recreate such an index from your source data with `new Index($path, schema: ..., force: true)`
-and insert the documents again, or with `Index::rebuild($path, $callback, schema: ...)`, which
-replaces it without opening it. `snapshotTo()` copies the file as it is, so a snapshot keeps
-its source's revision.
+**Writes.** Insert documents in bulk: one `insert()` of many documents is far faster than many of
+one. An `update()` that changes no searchable field rewrites only the stored document and its facet
+values; a `delete()` marks the word index entries and removes them later in bulk
+([Indexing](indexing.md#deleting)).
 
 ## Returning less per hit
 
-Every hit is fetched from the `documents` table and JSON-decoded. When the endpoint does
-not need the stored bodies — an autocomplete that only renders titles, or a search that
-hands IDs to another system — `attributesToRetrieve` skips that work:
+Every hit is read from the document store and decoded from JSON. An endpoint that needs only IDs,
+for example to look products up elsewhere, skips that with `attributesToRetrieve: []`:
 
 ```php
-// IDs only: no documents SELECT, no json_decode. ~7% faster on a faceted request.
-$ids = $read->search($query, new SearchOptions(attributesToRetrieve: []))->getIds();
+$ids = $index->search($query, new SearchOptions(attributesToRetrieve: []))->getIds();
 
-// Or trim each hit to the fields the UI actually renders:
-$results = $read->search($query, new SearchOptions(attributesToRetrieve: ['title', 'price']));
+// Or only the fields the page shows:
+$index->search($query, new SearchOptions(attributesToRetrieve: ['title', 'price']));
 ```
 
-Trimming to a field list still hydrates and decodes each document, so it saves response
-size rather than server time. The empty list is the one that removes work.
-
-Filtering happens after highlighting and cropping, so a field can drive `_formatted`
-without being returned itself:
+A field list still loads and decodes each document, so it makes the response smaller rather than
+the request faster; the empty list removes the work (about 7% of a faceted request). Formatting
+uses the full document either way, so a field can be highlighted without being returned:
 
 ```php
-$results = $read->search($query, new SearchOptions(
-    attributesToHighlight: ['body'],   // highlight computed from the full body
-    attributesToRetrieve:  ['title'],  // but body is not in the response
+$index->search($query, new SearchOptions(
+    attributesToHighlight: ['body'],
+    attributesToRetrieve:  ['title'],  // body is highlighted in _formatted, not returned
 ));
 ```
 
-## Writer maintenance: keeping the WAL bounded
+## Settings
 
-In WAL mode every commit appends to a `-wal` sidecar, which SQLite folds back into the
-database at an automatic checkpoint. That checkpoint can only reclaim space up to the
-oldest *active reader* — so on an index that is being read continuously, automatic
-checkpointing can be starved indefinitely and the `-wal` file grows without bound until
-it dwarfs the index itself.
-
-A long-running writer process should checkpoint on its own schedule:
+Settings are passed as a `Config` when the index is opened, and apply to that connection:
 
 ```php
-$stats = $write->checkpoint();          // TRUNCATE: empties the -wal file
+use Fuzor\Config;
+use Fuzor\Limits;
 
-// Or observe pressure without blocking on readers:
-$stats = $write->checkpoint('PASSIVE');
-if ($stats['checkpointed'] < $stats['log']) {
-    // Readers are holding the checkpointer back — the WAL is still growing.
-}
+$index = new Index('/path/to/products.db', config: new Config(
+    limits: new Limits(candidatesPerWord: 1_000),
+));
 ```
 
-This is not a concern for the read/write split above: the read side never writes, and
-snapshot files carry no WAL at all. It matters when one live file serves both reads and
-writes, which is also where `busyTimeoutMs` and cross-process cache invalidation apply.
+Ranking settings (`fieldBoosts`, `k1`, `b`, `proximityBoost`) are on
+[Searching](searching.md#relevance-settings), typo settings under
+[Typo tolerance](searching.md#typo-tolerance); the [reference](reference.md#config) lists all.
 
-## Restoring from a snapshot
+### Limits
 
-The snapshot is a plain SQLite file behind a symlink. To promote it to a write index — after data loss or a botched migration — stop every process that writes the old index, then install it at the write path and open normally:
+`Config::$limits` decides how much of a large result a search reads. The default, `Limits::fast()`,
+keeps broad searches on large indexes fast and reports what its caps cut out (`exhaustive`,
+`approximateFacets`, `warnings`). `Limits::exact()` lifts the candidate and facet caps: rankings and
+facet counts cover every match, at a cost that grows with the matches, which is fine for tens of
+thousands of documents and slow for broad queries on millions.
 
 ```php
-Index::install('/var/db/products-read.db', '/var/db/products.db', check: true);
-$write = new Index('/var/db/products.db');
+new Config(limits: Limits::exact());                       // every result exact
+new Config(limits: Limits::exact(totalHits: 10_000));      // and 10,000 reachable hits
+new Config(limits: new Limits(candidatesPerWord: 1_000));  // fast, with more candidates
 ```
 
-`install()` copies the file (following the symlink), checks it, and publishes it like a rebuild, so it never pairs the copy with the old file's `-wal`; see [Installing an index file](indexing.md#installing-an-index-file). Writers still have to be stopped first: one that keeps the old file open goes on writing to the old version. The `readonly` flag is a connection-mode choice, not a property of the file.
+| `Limits` | Default | Effect |
+|---|---|---|
+| `candidatesPerWord` | `500` | Documents read per query word before ranking, its best by term frequency. The documents of the page's words bucket are ranked exactly while there are at most 4 × this (2,000); of a larger bucket the candidates and the 2,000 documents in which its rarest word weighs most are ranked, the rest follow, and `exhaustive` is `false`. A first word in at most 2,000 documents is read whole; a larger one also contributes its 500 best by relevance. Higher values give more pages identical to a full ranking, at more cost per search. On the 44k catalog 97% of first pages equal the full ranking at the default (94% with a typo in the query; measured 2026-11-07) |
+| `facetCountDocs` | `50000` | Most matching documents counted for facets (filtered browse, search, `searchBoolean()`, `facetSearch()` with `q`). Above it, counts cover the newest matches and the field is in `approximateFacets`. Counts without a filter and query, or with only exclusions, are always exact |
+| `totalHits` | `1000` | Most documents a search reaches: `totalHits` stops here (`totalHitsCapped`), and `offset` / `limit` are clamped to it. Searches with many matches count up to it, so a larger value costs more on broad queries |
+
+A last word whose prefix matches more than `Config::$fuzzyMaxExpansions` (50) words is cut in both
+presets, so typing `s` does not expand to every word starting with s.
+
+### Other settings
+
+| `Config` | Default | Effect |
+|---|---|---|
+| `fuzzyPrefixLength` | `3` | Characters at the start of a word that a typo may not change; lower values find more typos and cost more |
+| `fuzzyMaxExpansions` | `50` | Most indexed words a typo or a prefix expands to (a typo: closest first, then most frequent; a prefix: shortest first) |
+| `proxWindowSize` | `0` | Most documents the proximity boost is computed for; `0` computes it for as many as the page needs |
+| `maxValuesPerFacet` | `100` | Most values per field in `facetDistribution`; `0` returns all |
+| `insertChunkSize` | `2000` | Documents per step of a bulk write; memory follows it (about 170 MB at 2,000 on HTML-rich documents). Lower it under a tight `memory_limit` |
+| `bulkSynchronousOff` | `true` | Skip the sync to disk during bulk writes ([Durability](indexing.md#durability-during-bulk-loads)) |
+| `cacheSizeKb` | `65536` | SQLite page cache per connection, in KB; lower it on many workers ([Operations](operations.md#memory-with-many-workers)) |
+| `mmapSizeBytes` | `536870912` | Memory-mapped window, shared between processes; `0` turns it off |
+| `busyTimeoutMs` | `5000` | How long a write waits for another process's write before throwing |

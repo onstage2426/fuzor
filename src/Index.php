@@ -28,7 +28,7 @@ use PDO;
  *
  * Requires SQLite 3.46.0+ (for STRICT tables, RETURNING, CTEs in DML, and PRAGMA optimize enhancements).
  *
- * Errors (docs/indexing.md#errors): QueryException and IOException (both FuzorException) for
+ * Errors (docs/reference.md#exceptions): QueryException and IOException (both FuzorException) for
  * domain and file problems, \InvalidArgumentException for malformed arguments, \LogicException
  * after close(), and \PDOException / \JsonException from SQLite (busy past busyTimeoutMs, disk
  * full) and from documents that cannot be stored as JSON.
@@ -772,7 +772,7 @@ final class Index implements \Countable
      *
      * Writes made to the index at $path while the rebuild runs are lost when the new file
      * replaces it — including with no callback, which streams the store in batches. See
-     * "Writes during a rebuild" in docs/indexing.md for patterns that combine live writes with
+     * "Writes during a rebuild" in docs/operations.md for patterns that combine live writes with
      * periodic rebuilds.
      *
      * The new file is published as {path}.v-{8 hex} and $path becomes a symlink to it, so it
@@ -1076,7 +1076,7 @@ final class Index implements \Countable
         }
 
         // No symlinks on this filesystem: replace the file itself. Not safe against a writer
-        // in another process that still has the old file open (see docs/indexing.md).
+        // in another process that still has the old file open (see docs/operations.md).
         /** @infection-ignore-all MethodCallRemoval,Throw_: only reached where symlink() fails (Windows, some network mounts); not reproducible in the Linux test suite */
         @unlink($link);
         /** @infection-ignore-all Throw_: see above */

@@ -107,6 +107,8 @@ The original fields in each hit are always the raw stored values; only `_formatt
 
 - Neither `attributesToHighlight` nor `attributesToCrop` is set (the default).
 - The document store is disabled — hits contain only `['id' => n]` and there is no text to process.
+- `attributesToRetrieve` is `[]`, which skips loading the documents. A list of fields does not
+  stop formatting: a field can be highlighted or cropped without being returned itself.
 
 Non-string fields and fields not in the requested list are excluded from `_formatted`.
 
@@ -156,7 +158,7 @@ echo $hl->highlight('fast', 'Fast & <Furious>');
 // '<mark>Fast</mark> &amp; &lt;Furious&gt;'
 ```
 
-Stemming is intentionally not applied — raw query terms are highlighted, not their stems. In the `_formatted` of a search, words that matched through a typo or a synonym are marked too, and a crop centres on them.
+The highlighter marks the query's words as typed (the last one as a prefix). In the `_formatted` of a search, words that matched through a typo, a synonym or the index's stemmer are marked too, and a crop centres on them.
 
 ### Snippeter
 
