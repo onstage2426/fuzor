@@ -129,10 +129,8 @@ its own:
 - **N-grams need no setting.** Chinese, Japanese, Korean and Thai words are split into n-grams
   by their script, in every index. Remove `language: 'zh'` (or `ja`, `ko`, `th`).
 - **Stemming is opt-in, and Fuzor ships no stemmers.** Without a stemmer, words match as written;
-  prefixes, typo tolerance and synonyms cover many word forms ("shoe" finds "shoes"). On a shop
-  catalogue that is often the better choice: with a full stemmer, a word being typed ("hikin")
-  or misspelled ("hikng") is compared with the stems in the index ("hike") and can miss. To keep
-  stemming, implement `Fuzor\Stemmer` (`id()`, `stem()`), for example around a stemming library,
+  prefixes, typo tolerance and synonyms cover many word forms ("shoe" finds "shoes"), which on a
+  shop catalogue is often enough. To keep stemming, implement `Fuzor\Stemmer` (`id()`, `stem()`), for example around a stemming library,
   and name the class in the schema; see "Writing a stemmer" in `docs/language.md`:
 
   ```php

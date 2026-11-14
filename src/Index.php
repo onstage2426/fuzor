@@ -405,6 +405,22 @@ final class Index implements \Countable
     private array $termIdCache = [];
 
     /**
+     * Words as written that this connection knows to be in surface_words (stemmed indexes only), so
+     * indexFieldText() queues each new word once. Cleared with the other data caches.
+     *
+     * @var array<string, true>
+     */
+    private array $surfaceWordCache = [];
+
+    /**
+     * Words as written → their stem, queued by indexFieldText() and written by
+     * writeSurfaceWords() before the transaction commits.
+     *
+     * @var array<string, string>
+     */
+    private array $pendingSurfaceWords = [];
+
+    /**
      * Session-level cache for getWordlistByKeyword() results.
      *
      * Keyed by "$keyword:$isLastWord" (e.g. "war:0", "anarch:1"). Holds the full
@@ -1550,6 +1566,15 @@ final class Index implements \Countable
             ) WITHOUT ROWID, STRICT"
         );
 
+        // Every word as written → its stem, on stemmed indexes only (empty otherwise): the word being
+        // typed and typos are matched against the words of the documents, not against stems.
+        $pdo->exec(
+            "CREATE TABLE IF NOT EXISTS surface_words (
+                word TEXT NOT NULL PRIMARY KEY,
+                term TEXT NOT NULL
+            ) WITHOUT ROWID, STRICT"
+        );
+
         $schemaStmt = $pdo->prepare("INSERT INTO info (key, value) VALUES (?, ?)");
         $schemaStmt->execute(['schema_version',    (string) self::CURRENT_SCHEMA_VERSION]);
         $schemaStmt->execute(['filterable_fields', json_encode($schema->filterableAttributes)]);
@@ -1855,6 +1880,8 @@ final class Index implements \Countable
         $this->bulkStmtCache  = [];
         $this->infoCache      = null;
         $this->termIdCache    = [];
+        $this->surfaceWordCache    = [];
+        $this->pendingSurfaceWords = [];
         $this->wordlistCache  = [];
         $this->facetKeyCache   = [];
         $this->multiValuedKeys = [];
@@ -1912,6 +1939,8 @@ final class Index implements \Countable
         $this->infoCache       = null;
         $this->wordlistCache   = [];
         $this->termIdCache     = [];
+        $this->surfaceWordCache    = [];
+        $this->pendingSurfaceWords = [];
         $this->facetKeyCache   = [];
         $this->multiValuedKeys = [];
         $this->keyMultiValued  = [];
@@ -2547,6 +2576,7 @@ final class Index implements \Countable
             $pdo->exec('DELETE FROM positions');
             $pdo->exec('DELETE FROM doc_lengths');
             $pdo->exec('DELETE FROM wordlist');
+            $pdo->exec('DELETE FROM surface_words');
             if ($this->documentStoreEnabled) {
                 $pdo->exec('DELETE FROM documents');
             }
@@ -2571,6 +2601,7 @@ final class Index implements \Countable
 
         $this->infoCache      = ['total_documents' => '0', 'avg_doc_length' => '0'];
         $this->termIdCache    = [];
+        $this->surfaceWordCache = [];
         $this->wordlistCache  = [];
         $this->facetKeyCache   = [];
         $this->multiValuedKeys = [];
@@ -2899,7 +2930,7 @@ final class Index implements \Countable
 
         foreach ($filteredTokens as $i => $processed) {
             $isLast = $asYouType && ($i === $lastIndex);
-            $rows   = $this->getWordlistByKeyword($processed, $isLast);
+            $rows   = $this->getWordlistByKeyword($processed, $isLast, surface: $survivingRaw[$i] ?? null);
 
             $matchType = match (true) {
                 $rows === []                                                     => MatchType::None,
@@ -3069,6 +3100,8 @@ final class Index implements \Countable
         $asYouType     = $asYouType && !self::endsInQuotedPhrase($positive);
         /** @var list<string> $keywords */
         $keywords     = $parsed['filtered'];
+        /** @var list<string> $surfaces the same words as typed (before stemming) */
+        $surfaces     = $parsed['surface'];
         /** @var list<list<string>> $phraseGroups */
         $phraseGroups = $parsed['phrase_groups'];
 
@@ -3111,7 +3144,7 @@ final class Index implements \Countable
         // Phase 1: resolve every keyword group's terms and document frequency (wordlist only).
         foreach ($keywords as $idx => $term) {
             $isLastKeyword = $asYouType && ($lastIndex === $idx);
-            $word = $this->getWordlistByKeyword($term, $isLastKeyword, true, $prefixCapped);
+            $word = $this->getWordlistByKeyword($term, $isLastKeyword, true, $prefixCapped, $surfaces[$idx] ?? null);
             foreach ($this->synonymsFor($term) as $synTerm) {
                 $synRows = $this->getWordlistByKeyword($synTerm, false, false);
                 if ($synRows !== []) {
@@ -4323,7 +4356,9 @@ final class Index implements \Countable
             $last         = self::endsInQuotedPhrase($positive) ? -1 : count($keywords) - 1;
             foreach ($keywords as $i => $kw) {
                 $df            = 0;
-                $termIds       = $this->resolveWordlistIds($kw, $i === $last, $prefixCapped, $df);
+                // The word as typed: resolveWordlistIds() stems it and matches its prefix and typos by it.
+                $surface       = $parsed['surface'][$i] ?? $kw;
+                $termIds       = $this->resolveWordlistIds($surface, $i === $last, $prefixCapped, $df);
                 $kwIds         = $this->fetchBooleanDocIds($termIds, $maxDocs, $candidatesCapped, $df);
                 $kwDocs        = array_fill_keys($kwIds, true);
                 $ftsCandidates = $ftsCandidates === null ? $kwDocs : array_intersect_key($ftsCandidates, $kwDocs);
@@ -6183,7 +6218,12 @@ final class Index implements \Countable
         $terms        = [];
         foreach ($keywords as $i => $keyword) {
             if (!in_array($keyword, $quoted, true)) {
-                foreach ($this->getWordlistByKeyword($keyword, $asYouType && $i === $last) as $row) {
+                $rows = $this->getWordlistByKeyword(
+                    $keyword,
+                    $asYouType && $i === $last,
+                    surface: $parsed['surface'][$i] ?? null,
+                );
+                foreach ($rows as $row) {
                     if (($row['distance'] ?? 0) > 0) {
                         $terms[] = $row['term'];
                     }
@@ -6898,7 +6938,14 @@ final class Index implements \Countable
         /** @infection-ignore-all Assignment: changing += to = only matters for multi-field docs where the same term appears in both fields; single-field tests are unaffected */
         $length += count($tokens);
         if ($this->stemmerImpl instanceof Stemmer && $tokens !== []) {
-            $tokens = array_combine(array_keys($tokens), $this->stemTokens(array_values($tokens)));
+            $stems = array_combine(array_keys($tokens), $this->stemTokens(array_values($tokens)));
+            foreach ($tokens as $offset => $word) {
+                if (!isset($this->surfaceWordCache[$word]) && !Tokenizer::isNgramToken($word)) {
+                    $this->surfaceWordCache[$word]    = true;
+                    $this->pendingSurfaceWords[$word] = $stems[$offset];
+                }
+            }
+            $tokens = $stems;
         }
         foreach ($tokens as $offset => $token) {
             $termCounts[$token]      = ($termCounts[$token] ?? 0) + 1;
@@ -7912,14 +7959,13 @@ final class Index implements \Countable
         int &$df = 0,
     ): array {
         $df = 0;
-        $tokens = Tokenizer::tokenize($keyword);
-        if ($this->stemmerImpl instanceof Stemmer) {
-            $tokens = $this->stemTokens($tokens);
-        }
+        $words  = Tokenizer::tokenize($keyword);
+        $tokens = $this->stemmerImpl instanceof Stemmer ? $this->stemTokens($words) : $words;
         $ids  = [];
         $last = count($tokens) - 1;
         foreach ($tokens as $i => $token) {
-            foreach ($this->getWordlistByKeyword($token, $isLastKeyword && $i === $last, true, $truncated) as $row) {
+            $rows = $this->getWordlistByKeyword($token, $isLastKeyword && $i === $last, true, $truncated, $words[$i]);
+            foreach ($rows as $row) {
                 $ids[] = $row['id'];
                 $df   += $row['num_docs'];
             }
@@ -8582,10 +8628,11 @@ final class Index implements \Countable
      * stopword filtering.
      *
      * When $verbose is false (the search hot path), raw_tokens and surviving_raw are
-     * not computed — Tokenizer::split() is skipped entirely.
+     * not computed — Tokenizer::split() is skipped entirely. surface is always set: the
+     * words of filtered before stemming, at the same keys (getWordlistByKeyword()'s $surface).
      *
      * @infection-ignore-all FalseValue: default false→true only computes raw_tokens eagerly; correctness unaffected
-     * @return array{raw_tokens: list<string>, filtered: list<string>, all_stripped: bool,
+     * @return array{raw_tokens: list<string>, filtered: list<string>, surface: list<string>, all_stripped: bool,
      *               surviving_raw: list<string>, phrase_groups: list<array<int, string>>, free_phrase: string}
      */
     private function filterQueryTokens(string $phrase, bool $verbose = false): array
@@ -8621,6 +8668,7 @@ final class Index implements \Countable
         return [
             'raw_tokens'    => $verbose ? Tokenizer::split($phrase) : [],
             'filtered'      => $filtered,
+            'surface'       => $survivingRaw,
             'all_stripped'  => $allStripped,
             'surviving_raw' => $verbose ? $survivingRaw : [],
             'phrase_groups' => $phraseGroups,
@@ -8964,6 +9012,10 @@ final class Index implements \Countable
      *                            for phrase matching where words must be exact user intent.
      * @param  bool   $truncated  Set to true when a prefix lookup matched more than
      *                            Config::$fuzzyMaxExpansions terms, so only the shortest were returned.
+     * @param  ?string $surface   The word as typed, before stemming ($keyword is its stem). On a stemmed
+     *                            index the prefix and the typos are matched against the words of the
+     *                            documents (surface_words) and give their stems' rows; the exact
+     *                            match stays the stem. Null, or no stemmer: everything on $keyword.
      * @return list<array{id: int, term: string, num_hits: int, num_docs: int, distance?: int}>
      * @infection-ignore-all FalseValue: default parameter values are never exercised; callers always pass
      *   all booleans explicitly
@@ -8973,11 +9025,16 @@ final class Index implements \Countable
         bool $isLastWord = false,
         bool $allowFuzzy = true,
         bool &$truncated = false,
+        ?string $surface = null,
     ): array {
-        // Cached by "keyword:isLastWord:allowFuzzy"; the config (and so the typo budget) is fixed
-        // per instance, and every write clears the cache.
+        if (!$this->stemmerImpl instanceof Stemmer || !$isLastWord && !$allowFuzzy) {
+            $surface = null;
+        }
+        // Cached by "keyword:isLastWord:allowFuzzy[:surface]"; the config (and so the typo budget) is
+        // fixed per instance, and every write clears the cache.
         /** @infection-ignore-all CastInt,Concat,ConcatOperandRemoval: cache key format mutations only affect cache hit/miss rates, not correctness */
-        $cacheKey = "{$keyword}:" . (int) $isLastWord . ':' . (int) $allowFuzzy;
+        $cacheKey = "{$keyword}:" . (int) $isLastWord . ':' . (int) $allowFuzzy
+            . ($surface !== null ? ":{$surface}" : '');
         /** @infection-ignore-all ReturnRemoval: skipping a cache hit only causes a redundant DB query; the same result is returned */
         if (isset($this->wordlistCache[$cacheKey])) {
             [$cachedRows, $cachedTruncated] = $this->wordlistCache[$cacheKey];
@@ -8987,7 +9044,24 @@ final class Index implements \Countable
 
         $maxExpansions = $this->config->fuzzyMaxExpansions;
         $isPrefix      = $isLastWord && !Tokenizer::isNgramToken($keyword);
-        if ($isPrefix) {
+        if ($isPrefix && $surface !== null) {
+            // The typed word's own stem, then every word of the documents that starts with the
+            // typed word, as its stem's row (one per stem, ordered by its shortest word).
+            $stmt = $this->stmt(
+                'surfacePrefix',
+                'SELECT w.id, w.term, w.num_hits, w.num_docs FROM surface_words s'
+                . ' JOIN wordlist w ON w.term = s.term'
+                . ' WHERE s.word LIKE :keyword AND w.term <> :stem'
+                . ' GROUP BY w.id ORDER BY min(length(s.word)) ASC, w.num_hits DESC, w.term LIMIT :maxExpansions;'
+            );
+            $stmt->bindValue(':keyword', $surface . '%');
+            $stmt->bindValue(':stem', $keyword);
+            $stmt->bindValue(':maxExpansions', $maxExpansions + 1, PDO::PARAM_INT);
+            $stmt->execute();
+            /** @var list<array{id: int, term: string, num_hits: int, num_docs: int}> $prefixRows */
+            $prefixRows   = $stmt->fetchAll(PDO::FETCH_ASSOC);
+            $wordlistRows = [...$this->exactWordlistRows($keyword), ...$prefixRows];
+        } elseif ($isPrefix) {
             // One row past the cap tells an exactly-full expansion from a truncated one.
             $stmt = $this->stmt(
                 'wordlistPrefix',
@@ -8996,18 +9070,12 @@ final class Index implements \Countable
             );
             $stmt->bindValue(':keyword', $keyword . '%');
             $stmt->bindValue(':maxExpansions', $maxExpansions + 1, PDO::PARAM_INT);
+            $stmt->execute();
+            /** @var list<array{id: int, term: string, num_hits: int, num_docs: int}> $wordlistRows */
+            $wordlistRows = $stmt->fetchAll(PDO::FETCH_ASSOC);
         } else {
-            $stmt = $this->stmt(
-                'wordlistExact',
-                'SELECT id, term, num_hits, num_docs FROM wordlist WHERE term = :keyword LIMIT 1;'
-            );
-            $stmt->bindValue(':keyword', $keyword);
+            $wordlistRows = $this->exactWordlistRows($keyword);
         }
-
-        $stmt->execute();
-
-        /** @var list<array{id: int, term: string, num_hits: int, num_docs: int}> $wordlistRows */
-        $wordlistRows    = $stmt->fetchAll(PDO::FETCH_ASSOC);
         $prefixTruncated = $isPrefix && count($wordlistRows) > $maxExpansions;
         if ($prefixTruncated) {
             $wordlistRows = array_slice($wordlistRows, 0, $maxExpansions);
@@ -9017,13 +9085,10 @@ final class Index implements \Countable
         // many typos away, whether or not it exists itself ("bluetoth" also finds "bluetooth").
         // Those rows carry their distance; search() ranks fewer typos first within a bucket.
         if ($allowFuzzy) {
-            $maxTypos = $this->typoBudget($keyword);
-            if ($maxTypos > 0) {
-                $seen = array_fill_keys(array_column($wordlistRows, 'id'), true);
-                foreach ($this->fuzzySearch($keyword, $maxTypos) as $row) {
-                    if ($row['distance'] > 0 && !isset($seen[$row['id']])) {
-                        $wordlistRows[] = $row;
-                    }
+            $seen = array_fill_keys(array_column($wordlistRows, 'id'), true);
+            foreach ($this->typoRows($keyword, $surface) as $row) {
+                if ($row['distance'] > 0 && !isset($seen[$row['id']])) {
+                    $wordlistRows[] = $row;
                 }
             }
         }
@@ -9032,6 +9097,57 @@ final class Index implements \Countable
         $truncated = $truncated || $prefixTruncated;
 
         return $wordlistRows;
+    }
+
+    /**
+     * The typo matches of a query word (getWordlistByKeyword()): fuzzySearch() over the terms, and on a
+     * stemmed index also over the words of the documents, compared with the word as typed ($surface).
+     * A term found both ways keeps the smaller distance, so a stemmed index finds what the terms alone
+     * find (`strawbery` is one edit from the stem of "strawberries", three from the word) plus the
+     * words whose stem is further off (`hikng`: "hiking", stem `hike`). A word whose stem is in
+     * TypoTolerance::$disableOnWords gets no typos either.
+     *
+     * @return list<array{id: int, term: string, num_hits: int, num_docs: int, distance: int}>
+     */
+    private function typoRows(string $keyword, ?string $surface): array
+    {
+        $termTypos = $this->typoBudget($keyword);
+        if ($surface === null) {
+            return $termTypos > 0 ? $this->fuzzySearch($keyword, $termTypos) : [];
+        }
+        $wordTypos = isset($this->typoExactWords()[$keyword]) ? 0 : $this->typoBudget($surface);
+        $rows      = [
+            ...($wordTypos > 0 ? $this->fuzzySearch($surface, $wordTypos, true) : []),
+            ...($termTypos > 0 ? $this->fuzzySearch($keyword, $termTypos) : []),
+        ];
+        usort(
+            $rows,
+            fn(array $a, array $b): int => $a['distance'] <=> $b['distance']
+                ?: $b['num_hits'] <=> $a['num_hits']
+                ?: $a['term'] <=> $b['term'],
+        );
+        $closest = [];
+        foreach ($rows as $row) {
+            $closest[$row['id']] ??= $row;
+        }
+        return array_slice(array_values($closest), 0, $this->config->fuzzyMaxExpansions);
+    }
+
+    /**
+     * The wordlist row of one term, or none; getWordlistByKeyword()'s exact lookup.
+     *
+     * @return list<array{id: int, term: string, num_hits: int, num_docs: int}>
+     */
+    private function exactWordlistRows(string $term): array
+    {
+        $stmt = $this->stmt(
+            'wordlistExact',
+            'SELECT id, term, num_hits, num_docs FROM wordlist WHERE term = :keyword LIMIT 1;'
+        );
+        $stmt->bindValue(':keyword', $term);
+        $stmt->execute();
+        /** @var list<array{id: int, term: string, num_hits: int, num_docs: int}> */
+        return $stmt->fetchAll(PDO::FETCH_ASSOC);
     }
 
     /**
@@ -10345,22 +10461,34 @@ final class Index implements \Countable
      * cap on the candidates (the earlier shape) let frequent but distant terms crowd out the
      * match on a common prefix.
      *
-     * @param  string $keyword  Search term to find fuzzy matches for (must already be lowercased).
-     * @param  int    $maxTypos 1 or 2, from typoBudget().
+     * With $surfaceWords (stemmed indexes) the words of the documents are compared instead of the
+     * terms, and each stem comes back once, with its closest word's distance.
+     *
+     * @param  string $keyword      Search term to find fuzzy matches for (must already be lowercased).
+     * @param  int    $maxTypos     1 or 2, from typoBudget().
+     * @param  bool   $surfaceWords Compare $keyword (the word as typed) with surface_words.
      * @return list<array{id: int, term: string, num_hits: int, num_docs: int, distance: int}>
      */
-    private function fuzzySearch(string $keyword, int $maxTypos): array
+    private function fuzzySearch(string $keyword, int $maxTypos, bool $surfaceWords = false): array
     {
         /** @infection-ignore-all MBString,CastInt: ASCII fuzzy tests are unaffected by mb_ vs byte strlen; CastInt: mb_strlen returns int already */
         $keywordLength     = mb_strlen($keyword);
         $effectiveDistance = $maxTypos;
 
-        $stmt = $this->stmt(
-            'fuzzyWordlistLookup',
-            "SELECT id, term, num_hits, num_docs FROM wordlist
-             WHERE term LIKE :keyword
-               AND length(term) BETWEEN :min AND :max"
-        );
+        $stmt = $surfaceWords
+            ? $this->stmt(
+                'fuzzySurfaceLookup',
+                "SELECT w.id, w.term, w.num_hits, w.num_docs, s.word FROM surface_words s
+                 JOIN wordlist w ON w.term = s.term
+                 WHERE s.word LIKE :keyword
+                   AND length(s.word) BETWEEN :min AND :max"
+            )
+            : $this->stmt(
+                'fuzzyWordlistLookup',
+                "SELECT id, term, num_hits, num_docs FROM wordlist
+                 WHERE term LIKE :keyword
+                   AND length(term) BETWEEN :min AND :max"
+            );
         /** @infection-ignore-all MBString,ConcatOperandRemoval: ASCII fuzzy tests are unaffected by mb_ vs byte substr; removing the prefix still produces correct candidates after Levenshtein filtering (just with more candidates) */
         $stmt->bindValue(':keyword', mb_substr($keyword, 0, $this->config->fuzzyPrefixLength) . '%');
         /** @infection-ignore-all DecrementInteger,IncrementInteger: adjusting the min length boundary by 1 only broadens or narrows the candidate set; Levenshtein filtering corrects the result */
@@ -10368,16 +10496,20 @@ final class Index implements \Countable
         $stmt->bindValue(':max', $keywordLength + $effectiveDistance, PDO::PARAM_INT);
         $stmt->execute();
 
-        /** @var list<array{id: int, term: string, num_hits: int, num_docs: int, distance: int}> $resultSet */
+        /** @var array<int, array{id: int, term: string, num_hits: int, num_docs: int, distance: int}> $resultSet */
         $resultSet = [];
-        /** @var list<array{id: int, term: string, num_hits: int, num_docs: int}> $candidates */
+        /** @var list<array{id: int, term: string, num_hits: int, num_docs: int, word?: string}> $candidates */
         $candidates = $stmt->fetchAll(PDO::FETCH_ASSOC);
         foreach ($candidates as $match) {
-            $distance = Levenshtein::distance($match['term'], $keyword, $effectiveDistance);
-            if ($distance <= $effectiveDistance) {
-                $resultSet[] = [...$match, 'distance' => $distance];
+            $word = $match['word'] ?? $match['term'];
+            unset($match['word']);
+            $distance = Levenshtein::distance($word, $keyword, $effectiveDistance);
+            // A stem reached through several words of the documents keeps the closest one.
+            if ($distance <= $effectiveDistance && $distance < ($resultSet[$match['id']]['distance'] ?? PHP_INT_MAX)) {
+                $resultSet[$match['id']] = [...$match, 'distance' => $distance];
             }
         }
+        $resultSet = array_values($resultSet);
 
         /** @infection-ignore-all Spaceship: swapping secondary sort (num_hits) DESC→ASC only reorders equally-distant candidates; assertContains tests are order-agnostic */
         // The term last: equal candidates do not depend on the order SQLite read them in.
@@ -13358,6 +13490,33 @@ final class Index implements \Countable
     }
 
     /**
+     * Write the words queued by indexFieldText() to surface_words, in batches, just before a write
+     * transaction commits (wrapInTransaction()). A word already there keeps its row, unless its
+     * stem changed (another stemmer version). Nothing to do on an index without a stemmer.
+     */
+    private function writeSurfaceWords(): void
+    {
+        if ($this->pendingSurfaceWords === []) {
+            return;
+        }
+        $pdo = $this->pdo;
+        assert($pdo instanceof \PDO);
+        foreach (array_chunk($this->pendingSurfaceWords, self::CHUNK_2P, true) as $batch) {
+            $params = [];
+            foreach ($batch as $word => $stem) {
+                $params[] = (string) $word;
+                $params[] = $stem;
+            }
+            $pdo->prepare(
+                'INSERT INTO surface_words (word, term) VALUES '
+                . implode(',', array_fill(0, count($batch), '(?, ?)'))
+                . ' ON CONFLICT (word) DO UPDATE SET term = excluded.term WHERE term <> excluded.term'
+            )->execute($params);
+        }
+        $this->pendingSurfaceWords = [];
+    }
+
+    /**
      * Run $fn inside a transaction, committing on success and rolling back on exception.
      *
      * When already inside a transaction (e.g. replaceMany() calling replaceOne()),
@@ -13392,6 +13551,7 @@ final class Index implements \Countable
             // the wordlist upsert paths below.
             $this->checkDataVersion();
             $fn();
+            $this->writeSurfaceWords();
             $pdo->exec('COMMIT');
         } catch (\Throwable $e) {
             $pdo->exec('ROLLBACK');

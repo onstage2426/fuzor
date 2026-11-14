@@ -44,13 +44,13 @@ $index->stemmer; // 'App\Search\PluralStemmer'
 The class and its `id()` are stored in the index, and the stemmer is created again whenever the
 index is opened, so readers pass nothing. Change it with `rebuild()`.
 
-**When stemming helps, and when it hurts.** Stemming finds other forms of a word. Without a
-stemmer, prefixes, typo tolerance and synonyms already cover many forms ("shoe" finds "shoes",
-"womens" finds "women"). With a stemmer the index holds stems, so a word that is still being typed
-or is misspelled is compared with stems: with a full English stemmer, which turns "hiking" into
-"hike", "hikin" and "hikng" do not find "hiking". A light stemmer that only removes plural endings,
-like the one below, keeps the start of each word and avoids most of that; a full stemmer finds more
-in articles and other long text.
+**When stemming helps.** Stemming finds other forms of a word. Without a stemmer, prefixes, typo
+tolerance and synonyms already cover many forms ("shoe" finds "shoes", "womens" finds "women"),
+which is often enough for a shop catalog; a full stemmer finds more in articles and other long
+text. A word that is still being typed, or misspelled, is compared with the words of the
+documents as they are written, and then searched by its stem: with a full English stemmer, which
+turns "hiking" into "hike", `hikin` and `hikng` find "hiking", and with it "hikes" and "hike".
+`inspectQuery()` shows the stems a word matched.
 
 ### Writing a stemmer
 
