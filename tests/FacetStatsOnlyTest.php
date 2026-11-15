@@ -271,7 +271,11 @@ class FacetStatsOnlyTest extends TestCase
         $index->close();
     }
 
-    /** @return array<mixed> facet key name → facet_keys.has_strings */
+    /**
+     * @return array<mixed> facet key name → facet_keys.has_strings
+     *
+     * @phpstan-impure Reads the index file.
+     */
     private function stringFlags(string $path): array
     {
         $stmt = new \PDO('sqlite:' . $path)->query('SELECT name, has_strings FROM facet_keys ORDER BY name');

@@ -180,7 +180,7 @@ final readonly class Snippeter
     {
         $scores = [];
         foreach ($bodyTokens as [$token]) {
-            $stem     = $this->stemmer !== null ? $this->stemmer->stem($token) : $token;
+            $stem     = $this->stemmer?->stem($token) ?? $token;
             $scores[] = (isset($querySet[$token]) || isset($querySet[$stem])) ? 1.0 : 0.0;
         }
         return $scores;

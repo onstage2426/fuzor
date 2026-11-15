@@ -2735,6 +2735,7 @@ final class Index implements \Countable
 
     /**
      * Check whether a document exists in the index.
+     * @phpstan-impure Reads the index, which any process may change between calls.
      */
     public function has(int $id): bool
     {
@@ -2755,6 +2756,7 @@ final class Index implements \Countable
      *
      * @param  int             ...$ids Document IDs to check.
      * @return array<int, bool>
+     * @phpstan-impure Reads the index, which any process may change between calls.
      */
     public function hasMany(int ...$ids): array
     {
@@ -2786,6 +2788,7 @@ final class Index implements \Countable
      *
      * @return array<string, mixed>|null Document array, or null if not found.
      * @throws QueryException If the document store is not enabled on this index.
+     * @phpstan-impure Reads the index, which any process may change between calls.
      */
     public function get(int $id): ?array
     {
@@ -2807,6 +2810,7 @@ final class Index implements \Countable
      * @param  int ...$ids Document IDs to fetch.
      * @return array<int, array<string, mixed>>
      * @throws QueryException If the document store is not enabled on this index.
+     * @phpstan-impure Reads the index, which any process may change between calls.
      */
     public function getMany(int ...$ids): array
     {
@@ -2892,6 +2896,7 @@ final class Index implements \Countable
 
     /**
      * Return the total number of documents in the index (also count($index)).
+     * @phpstan-impure Reads the index, which any process may change between calls.
      */
     public function count(): int
     {
@@ -2912,6 +2917,7 @@ final class Index implements \Countable
      * benefits from warm cache entries.
      *
      * @param  string $phrase Raw query string; processed identically to search().
+     * @phpstan-impure Reads the index, which any process may change between calls.
      */
     public function inspectQuery(string $phrase, bool $asYouType = true): QueryInspection
     {
@@ -3051,6 +3057,7 @@ final class Index implements \Countable
      * @param  SearchOptions $options Per-query options (limit, offset, filter, facets, sort, …).
      * @throws QueryException            When a sort field is not sortable, or a filter, facet, or
      *                                   distinct field is not filterable (see SchemaConfig).
+     * @phpstan-impure Reads the index, which any process may change between calls.
      */
     public function search(
         string $phrase,
@@ -4031,6 +4038,7 @@ final class Index implements \Countable
      * @param  SearchOptions $options Per-query options (limit, offset, filter, facets, sort, …).
      * @throws QueryException            When a sort field is not sortable, or a filter, facet, or
      *                                   distinct field is not filterable (see SchemaConfig).
+     * @phpstan-impure Reads the index, which any process may change between calls.
      */
     public function searchBoolean(
         string $phrase,
@@ -4327,6 +4335,7 @@ final class Index implements \Countable
      * @param FacetSearchQuery $query  Query parameters; only $facetName is required.
      * @return FacetSearchResult       Matching values with counts, ordered by count descending.
      * @throws QueryException          When $facetName or a filter field is not filterable.
+     * @phpstan-impure Reads the index, which any process may change between calls.
      */
     public function facetSearch(FacetSearchQuery $query): FacetSearchResult
     {
@@ -9952,10 +9961,14 @@ final class Index implements \Countable
                     $probed[] = $c;
                 }
             }
-            // A group that may be cut counts its newest documents: listed newest first.
-            $match = $whole
-                ? $this->searchMatchesSql($groups, [...$base, ...$probed], true, true)
-                : $this->newestMatchesSql($groups, [...$base, ...$probed]);
+            // A group that may be cut counts its newest documents: listed newest first, read up to
+            // one past the cap.
+            if ($whole) {
+                $match = $this->searchMatchesSql($groups, [...$base, ...$probed], true, true);
+            } else {
+                $match = $this->newestMatchesSql($groups, [...$base, ...$probed]);
+                $match = $match === null ? null : ["{$match[0]} LIMIT ?", [...$match[1], $maxDocs + 1]];
+            }
             if ($match === null) {
                 continue;
             }
@@ -9967,8 +9980,8 @@ final class Index implements \Countable
             $subsetDocs   = 0;
             $results      = $this->facetCountsOfDocsSql(
                 $nameToId,
-                $whole ? $match[0] : "{$match[0]} LIMIT ?",
-                $whole ? $match[1] : [...$match[1], $maxDocs + 1],
+                $match[0],
+                $match[1],
                 $maxDocs,
                 $truncated,
                 $own === $carrier ? $subset : null,
@@ -10676,9 +10689,7 @@ final class Index implements \Countable
         foreach ($rows as [$keyId, $value, $num]) {
             $value = (string) $value;
             $key   = $keyId . "\0" . $value;
-            if (!isset($deltas[$key])) {
-                $deltas[$key] = [$keyId, $value, 0, 0, null];
-            }
+            $deltas[$key] ??= [$keyId, $value, 0, 0, null];
             $deltas[$key][2] += $sign;
             if ($num !== null) {
                 $deltas[$key][3] += $sign;

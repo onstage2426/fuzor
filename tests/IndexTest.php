@@ -9550,7 +9550,6 @@ class IndexTest extends TestCase
         ));
 
         $this->assertSame([], $result->warnings);
-        $this->assertSame([], $result->warnings);
         $this->assertSame([], $result->toArray()['warnings']);
     }
 
@@ -9847,7 +9846,6 @@ class IndexTest extends TestCase
         ));
 
         $this->assertTrue($plain->exhaustive);
-        $this->assertSame(['color'], $plain->approximateFacets);
         $this->assertSame(['color'], $plain->approximateFacets);
         $this->assertSame(['color'], $disjunctive->approximateFacets);
         $this->assertStringContainsString("Facet counts for 'color' cover only 2", $plain->warnings[0]);
