@@ -4,7 +4,10 @@ declare(strict_types=1);
 
 namespace Fuzor;
 
-/** Result returned by Index::inspectQuery(). */
+/**
+ * Result returned by Index::inspectQuery(): a debugging aid. The properties are stable; their
+ * contents follow Fuzor's query processing and may change in any release.
+ */
 final readonly class QueryInspection
 {
     /**

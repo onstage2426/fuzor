@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 namespace Fuzor;
 
-/** Per-token breakdown returned by Index::inspectQuery(). */
+/** Per-token breakdown returned by Index::inspectQuery(); see QueryInspection on stability. */
 final readonly class QueryToken
 {
     /**

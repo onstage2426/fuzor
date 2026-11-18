@@ -229,6 +229,8 @@ All three are string-backed.
 ## `QueryInspection` and `QueryToken`
 
 Returned by `inspectQuery()`; their properties are listed in [Debugging](debugging.md#how-the-query-was-read).
+The classes and their properties are stable; what they contain (the tokens, the index terms a word
+matched, the postfix form) follows Fuzor's query processing and may change in any release.
 
 ## `Stemmer`
 

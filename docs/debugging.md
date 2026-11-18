@@ -7,7 +7,9 @@ limit cut off.
 ## How the query was read
 
 `inspectQuery()` runs the first steps of `search()` (splitting, stop words, stemming, the lookup of
-each word in the index) and returns what each step produced. It writes nothing.
+each word in the index) and returns what each step produced. It writes nothing. It is meant for
+reading, not for code that depends on it: the properties stay, but their contents follow how Fuzor
+reads a query and may change in any release.
 
 ```php
 $inspection = $index->inspectQuery('hikng boo');  // asYouType: true by default
