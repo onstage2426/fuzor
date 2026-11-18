@@ -9721,7 +9721,7 @@ class IndexTest extends TestCase
             ['id' => 10, 'title' => 'red', 'color' => 'blue'],
             ['id' => 11, 'title' => 'red', 'color' => 'blue'],
         ]);
-        $count = fn(string $q, ?string $color = null): ?int => $index->search($q, new SearchOptions(
+        $count = fn(string $q, ?string $color = null): int => $index->search($q, new SearchOptions(
             asYouType: false,
             filter: $color === null ? [] : ['color' => $color],
         ))->totalHits;
@@ -12667,7 +12667,7 @@ class IndexTest extends TestCase
         $total = 0;
         for ($offset = 0; $offset < 1000; $offset += 24) {
             $page  = $index->search($query, new SearchOptions(asYouType: false, limit: 24, offset: $offset));
-            $total = $page->totalHits ?? 0;
+            $total = $page->totalHits;
             array_push($seen, ...$page->getIds());
         }
 

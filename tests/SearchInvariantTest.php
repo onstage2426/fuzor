@@ -215,7 +215,6 @@ class SearchInvariantTest extends TestCase
         foreach (self::variants() as $name => $options) {
             foreach ($queries as $q) {
                 $total = $capped->search($q, $options)->totalHits;
-                $this->assertNotNull($total);
                 $end   = $capped->search($q, self::page($options, $total, 10));
                 $this->assertSame(
                     0,

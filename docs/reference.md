@@ -128,7 +128,7 @@ checked against the schema when the search runs.
 |---|---|---|
 | `$hits` | `list<array>` | Documents of the page, with `_formatted` and `_rankingScoreDetails` when asked for |
 | `$hitsCount` | `int` | Hits in the page; also `count($result)` |
-| `$totalHits` | `?int` | Matches over all pages, up to `Limits::$totalHits` |
+| `$totalHits` | `int` | Matches over all pages, up to `Limits::$totalHits` |
 | `$totalHitsCapped` | `bool` | More matches than `Limits::$totalHits` |
 | `$facetDistribution` | `array<string, array<string\|int, int>>` | Value => count per field |
 | `$facetStats` | `array<string, array{min: float, max: float}>` | Lowest and highest number per field |
@@ -136,7 +136,7 @@ checked against the schema when the search runs.
 | `$approximateFacets` | `list<string>` | Fields whose counts covered part of the matches |
 | `$warnings` | `list<string>` | One line per cap that was hit; wording not stable |
 | `$query` | `string` | The query as given |
-| `$limit`, `$offset` | `?int` | The page asked for |
+| `$limit`, `$offset` | `int` | The page asked for |
 | `getHit(int $index, array $default = [])` | `array` | Hit at a position in the page |
 | `getIds()` | `list<int>` | IDs of the page's hits |
 | `toArray()` / `toJSON(int $flags = 0)` | `array` / `string` | Everything as an array or JSON |

@@ -14,16 +14,16 @@ final class SearchResult implements \Countable, \IteratorAggregate
     public readonly int $hitsCount;
 
     /** Total matching documents across all pages. */
-    public readonly int|null $totalHits;
+    public readonly int $totalHits;
 
     /** Original query string. */
     public readonly string $query;
 
     /** Page limit. */
-    public readonly int|null $limit;
+    public readonly int $limit;
 
     /** Page offset. */
-    public readonly int|null $offset;
+    public readonly int $offset;
 
     /**
      * Facet value counts keyed by facet field name.
@@ -90,12 +90,12 @@ final class SearchResult implements \Countable, \IteratorAggregate
      */
     public function __construct(
         array $ids,
-        int|null $totalHits,
+        int $totalHits,
         ?array $documents = null,
         array $facetCounts = [],
         string $query = '',
-        int|null $limit = null,
-        int|null $offset = null,
+        int $limit = 20,
+        int $offset = 0,
         array $facetStats = [],
         array $warnings = [],
         bool $exhaustive = true,
@@ -157,7 +157,7 @@ final class SearchResult implements \Countable, \IteratorAggregate
      */
     public function withTotalHitsCap(int $maxTotalHits): self
     {
-        if ($this->totalHits === null || $this->totalHits <= $maxTotalHits) {
+        if ($this->totalHits <= $maxTotalHits) {
             return $this;
         }
         return clone($this, [
