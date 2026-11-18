@@ -89,6 +89,7 @@ class FilterTest extends TestCase
             'a bool in a list'         => ['all', [['color' => ['red', false]]]],
             'an object as value'       => ['all', [['color' => new \stdClass()]]],
             'named entries'            => ['all', ['first' => ['color' => 'red']]],
+            'a list after a Filter'    => ['all', [Filter::any(['color' => 'red']), ['color', 'red']]],
         ];
     }
 
@@ -100,6 +101,14 @@ class FilterTest extends TestCase
         $this->assertTrue(is_callable($build));
         $this->expectException(\InvalidArgumentException::class);
         call_user_func_array($build, $arguments);
+    }
+
+    public function testValueListsMergedInAnyHoldEachValueOnce(): void
+    {
+        $normal = Filter::any(['color' => ['red', 'blue']], ['color' => ['blue', 'green']], ['color' => 'red'])
+            ->normalized();
+        $this->assertInstanceOf(Filter::class, $normal);
+        $this->assertSame([['color' => ['red', 'blue', 'green']]], $normal->entries);
     }
 
     public function testNestingIsLimited(): void

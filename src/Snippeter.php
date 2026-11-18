@@ -101,6 +101,7 @@ final readonly class Snippeter
 
         // No query (a browse page): there is no window to look for, so nothing to tokenise.
         if ($querySet === []) {
+            /** @infection-ignore-all ReturnRemoval: shortcut; no token scores without a query, so fallback() runs below anyway */
             return $this->fallback($text);
         }
 

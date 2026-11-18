@@ -3,6 +3,7 @@
 namespace Fuzor\Tests;
 
 use Fuzor\Highlighter;
+use Fuzor\Tests\Support\PluralStemmer;
 use PHPUnit\Framework\TestCase;
 
 class HighlighterTest extends TestCase
@@ -200,6 +201,33 @@ class HighlighterTest extends TestCase
     {
         $hl = new Highlighter(open: '<em class="hit">', close: '</em>', escape: true);
         $this->assertSame('<em class="hit">Fast</em> &amp; slow', $hl->highlight('fast', 'Fast & slow'));
+    }
+
+    public function testEscapeKeepsTheTextBetweenMatches(): void
+    {
+        $hl = new Highlighter(asYouType: false, escape: true);
+        $this->assertSame(
+            'a &lt;<mark>red</mark>&gt; &amp; <mark>red</mark> hat',
+            $hl->highlight('red', 'a <red> & red hat'),
+        );
+    }
+
+    public function testIndexTermsAddToTheQueryWords(): void
+    {
+        $hl = new Highlighter(asYouType: false);
+        $this->assertSame(
+            ['t' => '<mark>red</mark> shirt, <mark>blue</mark> hat'],
+            $hl->highlightMany('red', ['t' => 'red shirt, blue hat'], ['blue']),
+        );
+    }
+
+    public function testIndexTermsMatchUppercaseAccentedWordsByTheirStem(): void
+    {
+        $hl = new Highlighter(stemmer: new PluralStemmer());
+        $this->assertSame(
+            ['t' => '<mark>ÉCLAIRS</mark> au chocolat'],
+            $hl->highlightMany('zzz', ['t' => 'ÉCLAIRS au chocolat'], ['éclair']),
+        );
     }
 
     public function testEscapeWithoutMatchesStillEscapes(): void

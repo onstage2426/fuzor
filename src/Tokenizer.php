@@ -91,6 +91,7 @@ final class Tokenizer
         preg_match_all(self::WORD_PATTERN, mb_strtolower($text, 'UTF-8'), $m);
         $tokens = $m[0];
         if (preg_match(self::NGRAM_SCRIPT, $text) !== 1) {
+            /** @infection-ignore-all ReturnRemoval: fast path; the loop below keeps every token whole when none has an n-gram script */
             return $tokens;
         }
         $expanded = [];
@@ -273,6 +274,7 @@ final class Tokenizer
         if (preg_match(self::NGRAM_SIZE, $token, $m) !== 1) {
             return 0;
         }
+        /** @infection-ignore-all IncrementInteger: group 1 is a shortcut; BIGRAM_SCRIPT decides the same without it */
         return isset($m[1]) || preg_match(self::BIGRAM_SCRIPT, $token) === 1 ? 2 : 3;
     }
 

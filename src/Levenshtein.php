@@ -60,6 +60,7 @@ final class Levenshtein
         $lenA = strlen($a);
         $lenB = strlen($b);
         if (abs($lenA - $lenB) > $max) {
+            /** @infection-ignore-all ReturnRemoval: early exit only; the final min(…, $max + 1) gives the same value */
             return $max + 1;
         }
         $prev2 = [];
@@ -79,6 +80,7 @@ final class Levenshtein
                 $rowMin  = min($rowMin, $d);
             }
             if ($rowMin > $max) {
+                /** @infection-ignore-all ReturnRemoval: early exit only; no later row can drop below $rowMin */
                 return $max + 1;
             }
             $prev2 = $prev;

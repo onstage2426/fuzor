@@ -291,6 +291,14 @@ class TokenizerTest extends TestCase
         $this->assertSame([['hello', 0], ['world', 6]], Tokenizer::tokenizeWithOffsets('hello world'));
     }
 
+    public function testTokenizeWithOffsetsAddsUnigramsToBigramsOnly(): void
+    {
+        $this->assertSame(
+            [['東京', 0], ['東', 0], ['京', 3], ['ภาษ', 7], ['าษา', 10]],
+            Tokenizer::tokenizeWithOffsets('東京 ภาษา', includeUnigrams: true),
+        );
+    }
+
     public function testTokenizeWithOffsetsPointsEachNgramIntoTheText(): void
     {
         $text = 'BMW 轿车测试';

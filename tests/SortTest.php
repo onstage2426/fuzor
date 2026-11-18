@@ -111,7 +111,10 @@ final class SortTest extends TestCase
     public function testFieldInFacetsAndFacetStatsOnlyThrowsWhenTheOptionsAreBuilt(): void
     {
         $this->expectException(\InvalidArgumentException::class);
-        $this->expectExceptionMessage("Field 'price' is listed in both");
+        $this->expectExceptionMessage(
+            "Field 'price' is listed in both SearchOptions::\$facets and \$facetStatsOnly;"
+            . ' its facetStats come with the facet, list it in one of them.'
+        );
         new SearchOptions(facets: ['price'], facetStatsOnly: ['price']);
     }
 

@@ -168,10 +168,15 @@ final readonly class Filter
             return !$node;
         }
         if (is_array($node)) {
+            /** @infection-ignore-all CastString: a numeric field name is an int key either way; it indexes and rebuilds the map alike */
             $field = (string) array_key_first($node);
             $value = $node[$field];
             return [$field => $value instanceof FacetExclude ? $value->filter : new FacetExclude($value)];
         }
+        /**
+         * @infection-ignore-all DecrementInteger|IncrementInteger: the depth of a normalized node is never read
+         * (only create() checks it, for the public factories)
+         */
         return match ($node->operator) {
             self::NOT => $node->entries[0],
             self::ANY => self::simplify(new self(
@@ -191,6 +196,11 @@ final readonly class Filter
      */
     private static function wrap(array|self|bool $node): array|self
     {
+        /**
+         * @infection-ignore-all Ternary|DecrementInteger|IncrementInteger: simplify() absorbs every bool before
+         * negate() sees the entries, so no bool reaches here from negate(); the depth of a normalized node is
+         * never read
+         */
         return is_bool($node) ? new self($node ? self::ALL : self::ANY, [], 0) : $node;
     }
 
