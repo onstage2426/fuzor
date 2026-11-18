@@ -10,6 +10,7 @@ Breaking:
 
 - `new Index()` throws a `FuzorException` naming both versions when PHP's SQLite library is older than `Index::MIN_SQLITE_VERSION` (3.46.0), and refuses a 32-bit PHP. `composer.json` requires `ext-pdo_sqlite` and `ext-mbstring`.
 - Index files written by 1.x (schema revisions 1 to 3) are not opened: `new Index()` throws a `QueryException` saying how to recreate the index. A file written by a newer version is rejected the same way. `Index::rebuild()` with a callback and a schema replaces such a file without opening it. 2.0 writes schema revision 4.
+- Every 2.x release opens the index files of earlier 2.x releases with the same results; a change to the file format or to how text is indexed keeps reading the older revision or waits for 3.0 (`docs/operations.md`). A test opens an index file written by 2.0 and compares it with an index built by the current code.
 
 **Schema and configuration**
 
