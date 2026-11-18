@@ -1976,6 +1976,38 @@ class IndexTest extends TestCase
         $this->assertGreaterThan($before, Index::lastModified($this->dbPath));
     }
 
+    public function testLastModifiedAdvancesOnACommitBeforeAnyCheckpoint(): void
+    {
+        $index = new Index($this->dbPath);
+        $index->close();
+        touch($this->dbPath, time() - 100);
+        $before = Index::lastModified($this->dbPath);
+
+        // The commit lands in the -wal; the database file keeps its old mtime until a checkpoint.
+        $index = new Index($this->dbPath);
+        $index->insert([['id' => 1, 'title' => 'sedan']]);
+        clearstatcache();
+        $this->assertSame($before, (int) filemtime($this->dbPath));
+        $this->assertGreaterThan($before, Index::lastModified($this->dbPath));
+        $index->close();
+    }
+
+    public function testLastModifiedFollowsThePublishedVersion(): void
+    {
+        new Index($this->dbPath)->insert([['id' => 1, 'title' => 'sedan']]);
+        Index::rebuild($this->dbPath);
+        $this->assertTrue(is_link($this->dbPath));
+        $target = (string) realpath($this->dbPath);
+        $then = time() - 100;
+        touch($target, $then);
+        $this->assertSame($then, Index::lastModified($this->dbPath));
+
+        $index = new Index($this->dbPath);
+        $index->insert([['id' => 2, 'title' => 'coupe']]);
+        $this->assertGreaterThanOrEqual(time() - 1, Index::lastModified($this->dbPath));
+        $index->close();
+    }
+
     // --- has ---
 
     public function testHasReturnsTrueForExistingDocument(): void

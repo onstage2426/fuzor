@@ -241,8 +241,10 @@ What this means for your tooling:
 - On a filesystem without symlinks (Windows without the privilege, some network mounts), the new
   file is renamed over `{path}`, which is only safe when no other process writes the old one.
 
-`Index::lastModified($path)` returns the file's modification time, which changes at each
-checkpoint and publish, without opening a connection.
+`Index::lastModified($path)` returns the time of the last change to the index without opening a
+connection: the later modification time of the file and its `-wal`, so it moves with every commit,
+checkpoint and publish. It can also move without a change to the documents (a checkpoint, a new
+`-wal`), never the other way round, so it suits cache invalidation.
 
 ### Temporary files
 

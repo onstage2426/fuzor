@@ -365,6 +365,13 @@ nested list — now throws an `\InvalidArgumentException` naming the field, in `
 `searchBoolean()`, `facetSearch()` and `deleteByFilter()`, instead of returning no documents (and
 deleting none).
 
+## `Index::lastModified()` includes the `-wal`
+
+`lastModified()` returned the database file's modification time, which only changes at a checkpoint,
+so a cache keyed on it missed every commit until then. It now returns the later of the file's and
+its `-wal`'s time (of the version the path links to). Nothing changes for callers that only compare
+it with an earlier value; the time can be newer than before.
+
 ## Arrays and bools in searchable fields are indexed
 
 A searchable field whose value is an array (`'tags' => ['red', 'fast']`, also nested arrays or

@@ -14,7 +14,7 @@ API and may change in any release.
 |---|---|---|
 | `new Index(string $path, bool $force = false, ?Config $config = null, bool $readonly = false, ?SchemaConfig $schema = null)` | | Open the index at `$path`, or create it with `$schema`; an existing index must have that schema. `force` replaces an existing index with an empty one; `readonly` makes every write throw an `IOException` ([Indexing](indexing.md#creating-and-opening-an-index)) |
 | `Index::exists(string $path)` | `bool` | Whether a Fuzor index is at `$path` |
-| `Index::lastModified(string $path)` | `int` | Modification time of the file, `0` when there is none |
+| `Index::lastModified(string $path)` | `int` | Time of the last commit, checkpoint or publish (file and `-wal`), `0` when there is none ([Operations](operations.md#index-files-and-versions)) |
 | `reopenIfChanged()` | `bool` | Reopen when a new version was published at the path ([Operations](operations.md#long-lived-workers)) |
 | `close()` | `void` | Close the connection; any later call throws a `\LogicException` |
 | `Index::MIN_SQLITE_VERSION` | `string` | `'3.46.0'` |

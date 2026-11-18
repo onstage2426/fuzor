@@ -766,14 +766,22 @@ final class Index implements \Countable
     /**
      * Return the Unix timestamp of the most recent write to the index at $path.
      *
-     * Reads the main database file's mtime — updated on each WAL checkpoint — no
-     * database connection required. Returns 0 if the file does not exist.
+     * The later modification time of the database file and its -wal file (both of the version
+     * the path links to): a commit changes the -wal at once, a checkpoint or publish the file.
+     * No database connection is opened. Returns 0 if the file does not exist.
      *
      * @param string $path Absolute or relative path to the index file.
      */
     public static function lastModified(string $path): int
     {
-        return (int) @filemtime($path);
+        clearstatcache(true, $path);
+        $file = realpath($path);
+        if ($file === false) {
+            return 0;
+        }
+        clearstatcache(true, $file);
+        clearstatcache(true, $file . '-wal');
+        return max((int) @filemtime($file), (int) @filemtime($file . '-wal'));
     }
 
     /**
