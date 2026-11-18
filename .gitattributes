@@ -19,3 +19,6 @@
 # Benchmarks and data
 /benchmarks/        export-ignore
 /phpbench.json      export-ignore
+
+# Binary test fixtures
+/tests/fixtures/*.db binary

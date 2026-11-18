@@ -5,3 +5,4 @@ infection.log
 infection-summary.log
 *.db
 *.db.v-*
+!/tests/fixtures/index-rev4.db

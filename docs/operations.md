@@ -261,8 +261,15 @@ default).
 
 ### Files from another version
 
-The file format has a revision, stored in the file (`$index->schemaVersion`, 4 in Fuzor 2.x).
-Fuzor 2 does not open files written by 1.x or by a newer version; opening one throws a
+The file format has a revision, stored in the file (`$index->schemaVersion`; Fuzor 2.0 writes
+revision 4). Fuzor 2 does not open files written by 1.x or by a newer version; opening one throws a
 `QueryException`. Recreate it from your data with `rebuild()` with a callback and a schema (above),
 or with `new Index($path, schema: …, force: true)` and an `insert()`. A snapshot keeps its source's
 revision.
+
+Every 2.x release opens every file an earlier 2.x release wrote, and searches it with the same
+results as an index built from the same documents. A 2.x release that changes the file format, or
+how text is indexed, writes a new revision for new indexes and keeps reading and writing the older
+ones; a change that cannot keep them waits for 3.0. Updating Fuzor within 2.x never needs a
+rebuild. Going back to an older 2.x release works as long as no newer release has created the file;
+an index created by a newer release is refused by an older one.
