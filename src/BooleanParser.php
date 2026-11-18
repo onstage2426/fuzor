@@ -141,14 +141,15 @@ final class BooleanParser
                 continue;
             }
             if ($lexeme === ')') {
+                if ($depth === 0) {
+                    continue; // a ')' that closes nothing is dropped; the operator before it stays
+                }
                 self::dropDangling($tokens);
-                if ($depth === 0 || end($tokens) === '(') {
-                    if ($depth > 0) {
-                        array_pop($tokens); // "()" — an empty group contributes nothing
-                        $depth--;
-                        $last          = end($tokens);
-                        $expectOperand = in_array($last, [false, '|', '&', '~', '('], true);
-                    }
+                if (end($tokens) === '(') {
+                    array_pop($tokens); // "()" — an empty group contributes nothing
+                    $depth--;
+                    $last          = end($tokens);
+                    $expectOperand = in_array($last, [false, '|', '&', '~', '('], true);
                     continue;
                 }
                 $tokens[]      = ')';

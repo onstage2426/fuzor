@@ -96,6 +96,22 @@ class BooleanParserTest extends TestCase
         $this->assertSame(['|'], $this->postfix('( )'));
     }
 
+    public function testEmptyGroupsContributeNothing(): void
+    {
+        $this->assertSame(['a', '|'], $this->postfix('() a'));
+        $this->assertSame(['a', 'b', '&', '|'], $this->postfix('a () b'));
+        $this->assertSame(['a', '|'], $this->postfix('(()) a'));
+        // Without the caller's leading '|', an empty group at the start leaves no operator behind.
+        $this->assertSame(['a'], BooleanParser::toPostfix('() a')[0]);
+    }
+
+    public function testAClosingParenthesisWithoutAGroupKeepsTheOperatorBeforeIt(): void
+    {
+        $this->assertSame(['x', '|', 'y', '|'], $this->postfix('x | ) y'));
+        $this->assertSame(['x', '|', 'y', '|'], $this->postfix('x | (()) ) y'));
+        $this->assertSame(['x', 'y', '&', '|'], $this->postfix('x ) ) y'));
+    }
+
     public function testRunsWithoutSearchableCharactersAreDropped(): void
     {
         $this->assertSame($this->postfix('shirt jeans'), $this->postfix('shirt - jeans'));
