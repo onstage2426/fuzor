@@ -1875,6 +1875,29 @@ class IndexTest extends TestCase
         $this->assertSame(1, $index->count());
     }
 
+    public function testClearEmptiesTheWordList(): void
+    {
+        $index = new Index($this->dbPath);
+        $index->insert([['id' => 1, 'title' => 'sedan'], ['id' => 2, 'title' => 'coupe']]);
+        $index->clear();
+
+        $token = $index->inspectQuery('sedan', false)->tokens[0];
+        $this->assertFalse($token->found);
+        $this->assertSame([], $token->wordlistRows);
+    }
+
+    public function testClearResetsTheStoredStatistics(): void
+    {
+        $index = new Index($this->dbPath);
+        $index->insert([['id' => 1, 'title' => 'alpha beta gamma'], ['id' => 2, 'title' => 'delta']]);
+        $index->clear();
+        $index->close();
+
+        $reopened = new Index($this->dbPath);
+        $this->assertSame(0, $reopened->count());
+        $this->assertEqualsWithDelta(0.0, $reopened->inspectQuery('alpha')->avgDocLength, 0.001);
+    }
+
     public function testClearOnEmptyIndexIsNoop(): void
     {
         $index = new Index($this->dbPath);
@@ -5240,6 +5263,13 @@ class IndexTest extends TestCase
         new Index($this->dbPath)->close();
         $this->expectException(IOException::class);
         new Index($this->dbPath, readonly: true)->clear();
+    }
+
+    public function testReadonlySetSynonymsThrows(): void
+    {
+        new Index($this->dbPath)->close();
+        $this->expectException(IOException::class);
+        new Index($this->dbPath, readonly: true)->setSynonyms([['car', 'auto']]);
     }
 
     // --- remove ---
@@ -11465,6 +11495,27 @@ class IndexTest extends TestCase
         $this->assertSame(['alpha' => 1, 'Beta' => 1], $result->facetDistribution['brand']);
     }
 
+    public function testTheFirstNumbersOfAKeySkipTheValuesAnExclusionEmptied(): void
+    {
+        $index = new Index($this->dbPath, config: new Config(maxValuesPerFacet: 1), schema: new SchemaConfig(
+            filterableAttributes: ['price', 'tags'],
+        ));
+        $docs = [];
+        for ($n = 1; $n <= 45; $n++) {
+            $docs[] = ['id' => $n, 'title' => 'item', 'price' => $n, 'tags' => $n <= 21 ? 'gone' : 'kept'];
+        }
+        $index->insert($docs);
+
+        // The 21 smallest prices belong to excluded documents only: more than the values read
+        // in number order for the first value, so the whole key is read.
+        $result = $index->search('', new SearchOptions(
+            filter: ['tags' => new FacetExclude('gone')],
+            facets: ['price'],
+        ));
+        $this->assertSame(['22' => 1], $result->facetDistribution['price']);
+        $this->assertEqualsWithDelta(['min' => 22.0, 'max' => 45.0], $result->facetStats['price'], 0.0);
+    }
+
     // --- facet_counts ---
 
     /**
@@ -12244,6 +12295,17 @@ class IndexTest extends TestCase
         );
         $this->assertSame(-4096, $this->pragmaOf($read, 'cache_size'));
         $this->assertSame(0, $this->pragmaOf($read, 'mmap_size'));
+    }
+
+    public function testBulkUpsertRestoresConfiguredCacheSize(): void
+    {
+        $index = new Index($this->dbPath, config: new Config(cacheSizeKb: 8_192));
+        $index->upsert([['id' => 1, 'title' => 'sedan'], ['id' => 2, 'title' => 'coupe']]);
+        $this->assertSame(-8192, $this->pragmaOf($index, 'cache_size'));
+
+        $index->update([['id' => 1, 'title' => 'sedan blue'], ['id' => 2, 'title' => 'coupe red']]);
+        $this->assertSame(-8192, $this->pragmaOf($index, 'cache_size'));
+        $this->assertSame([1], $index->search('blue')->getIds());
     }
 
     public function testBulkLoadRestoresConfiguredCacheSize(): void

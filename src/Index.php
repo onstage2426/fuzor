@@ -672,6 +672,7 @@ final class Index implements \Countable
         }
         /** @var string $version */
         $version = new PDO('sqlite::memory:')->getAttribute(PDO::ATTR_CLIENT_VERSION);
+        /** @infection-ignore-all MethodCallRemoval: checkSqliteVersion() is tested on its own; on a supported SQLite the call changes nothing */
         self::checkSqliteVersion($version);
         self::$platformChecked = true;
     }
@@ -1743,6 +1744,7 @@ final class Index implements \Countable
     /** A schema setting as schemaDifferences() names it in a message. */
     private static function schemaValueText(mixed $value): string
     {
+        /** @infection-ignore-all MatchArmRemoval: the default arm is unreachable, schema settings are null, bool, array or string */
         return match (true) {
             $value === null   => 'none',
             is_bool($value)   => $value ? 'true' : 'false',
@@ -2024,6 +2026,7 @@ final class Index implements \Countable
         // collide with its old term-index rows.
         $this->wrapInTransaction(function (): void {
             if ($this->hasDeleted()) {
+                /** @infection-ignore-all MethodCallRemoval: every chunk purges its own IDs again (purgeDeletedAmong()); this purge only runs while the doc_id indexes still exist */
                 $this->purgeDeleted();
             }
         });
@@ -2324,6 +2327,7 @@ final class Index implements \Countable
         // Single document: use the lightweight single-doc path to avoid bulk pragma overhead.
         if (!$more && count($first) === 1) {
             $this->replaceOne($first[0], $strict);
+            /** @infection-ignore-all ReturnRemoval: the bulk path writes a single document the same way; the single-document path only skips the bulk pragmas */
             return;
         }
 
@@ -2334,6 +2338,7 @@ final class Index implements \Countable
 
         $this->bulkStmtCache = [];
 
+        /** @infection-ignore-all MethodCallRemoval: bulk-load pragma overrides are performance tuning only; correctness is unaffected */
         $this->applyBulkPragmas();
 
         try {
@@ -4396,6 +4401,7 @@ final class Index implements \Countable
         // With FTS candidates the filters are intersected in PHP against that (bounded) set;
         // without them the matching documents come straight from SQL (matchingDocsSql()).
         if ($ftsCandidates === []) {
+            /** @infection-ignore-all ReturnRemoval: with no candidate left the steps below count no document either; the return skips them */
             return new FacetSearchResult([], $query->facetQuery, $warnings, $exhaustive);
         }
         $match       = null;
@@ -4544,6 +4550,7 @@ final class Index implements \Countable
             $stmt->execute([$limit, $offset]);
             /** @var list<int> $pagedIds */
             $pagedIds = $stmt->fetchAll(PDO::FETCH_COLUMN);
+            /** @infection-ignore-all ReturnRemoval: the general browse path returns the same page and total; this is its fast path */
             return new SearchResult(
                 ids: $pagedIds,
                 totalHits: $totalDocuments,
@@ -5510,6 +5517,7 @@ final class Index implements \Countable
                     $inverse[$id] = true;
                 }
             }
+            /** @infection-ignore-all ReturnRemoval: class 0 is weighed with its size, above facetCountDocs here, so the weighing below inverts the same groups */
             return $inverse;
         }
         // Per group, the classes either way as bit sets over the classes.
@@ -5769,6 +5777,7 @@ final class Index implements \Countable
             if (!$truncated) {
                 $subsetCounts = $kept;
                 $this->mergeFacetCounts($results, $distribution, $stats);
+                /** @infection-ignore-all ReturnRemoval: falling through counts the same group again, and mergeFacetCounts() replaces rather than adds */
                 return false;
             }
         }
@@ -6050,6 +6059,7 @@ final class Index implements \Countable
     {
         $retrieve = $options->attributesToRetrieve;
         if ($retrieve === []) {
+            /** @infection-ignore-all ReturnRemoval: hydrating and then keeping no field gives the same id-only hits; the return skips the read */
             return null;
         }
         $documents = $this->hydrateIds($ids);
@@ -6349,6 +6359,7 @@ final class Index implements \Countable
     private function rewritePostings(array $documents): array
     {
         $ids = array_keys($documents);
+        /** @infection-ignore-all FunctionCallRemoval: the order of the IDs in the JSON list only changes the read order of keyed rows */
         sort($ids);
         $idsJson = json_encode($ids);
 
@@ -6795,6 +6806,7 @@ final class Index implements \Countable
                     $input[$key] = $document[$key];
                 }
             }
+            /** @infection-ignore-all ReturnRemoval: the loop below adds fields outside the searchable set, which can only make an unchanged document look changed (a rewrite with the same rows) */
             return $input;
         }
         foreach ($document as $key => $value) {
@@ -6856,6 +6868,7 @@ final class Index implements \Countable
         int &$position,
     ): void {
         if ($col === null) {
+            /** @infection-ignore-all ReturnRemoval: a null value gives no tokens below either */
             return;
         }
         if (is_array($col) || (is_object($col) && !$col instanceof \Stringable)) {
@@ -6931,6 +6944,7 @@ final class Index implements \Countable
         if ($this->stripHtml) {
             $text = HtmlText::toText($text);
             if ($text === '') {
+                /** @infection-ignore-all ReturnRemoval: empty text gives no tokens below either */
                 return;
             }
         }
@@ -7041,6 +7055,7 @@ final class Index implements \Countable
     private function upsertWordlist(array $termCounts): array
     {
         if ($termCounts === []) {
+            /** @infection-ignore-all ReturnRemoval: no terms, no rows below either */
             return [];
         }
 
@@ -7554,6 +7569,7 @@ final class Index implements \Countable
     private function batchUpsertWordlist(array $wordHits, array $wordDocs): array
     {
         if ($wordHits === []) {
+            /** @infection-ignore-all ReturnRemoval: no terms, no rows below either */
             return [];
         }
 
@@ -7648,6 +7664,7 @@ final class Index implements \Countable
     private function saveDoclist(int $documentId, array $termIds, array $termFields): void
     {
         if ($termIds === []) {
+            /** @infection-ignore-all ReturnRemoval: no terms, no rows below either */
             return;
         }
 
@@ -7725,11 +7742,13 @@ final class Index implements \Countable
     private function lookupFieldNameId(string $name): ?int
     {
         if (isset($this->fieldNameCache[$name])) {
+            /** @infection-ignore-all ReturnRemoval: a cache hit; the lookup below returns the same ID */
             return $this->fieldNameCache[$name];
         }
         $stmt = $this->stmt('lookupFieldNameId', 'SELECT id FROM field_names WHERE name = ?');
         $stmt->execute([$name]);
         $id = $stmt->fetchColumn();
+        /** @infection-ignore-all MethodCallRemoval: closing the cursor only frees the statement early */
         $stmt->closeCursor();
         if ($id === false) {
             return null;
@@ -7772,6 +7791,7 @@ final class Index implements \Countable
         }
         if (array_sum(array_intersect_key($termDocs, $terms)) <= $pairCount * self::FIELD_HITS_SCAN_ROWS_PER_PAIR) {
             $termIds = array_keys($terms);
+            /** @infection-ignore-all FunctionCallRemoval: sorted only so the seeks land on neighbouring pages; the rows are keyed */
             sort($termIds);
             $stmt = $this->stmt('fieldHitsOfTerms', $select . ' CROSS JOIN doclist d ON d.term_id = p.value');
             $stmt->execute([json_encode($termIds)]);
@@ -7816,12 +7836,14 @@ final class Index implements \Countable
         }
         if ($packed !== null) {
             // Sorted, so consecutive seeks land on neighbouring primary-key pages.
+            /** @infection-ignore-all FunctionCallRemoval: sorted only so the seeks land on neighbouring pages; the rows are keyed */
             sort($packed);
             $stmt = $this->stmt(
                 'fieldHitsForPackedPairs',
                 $select . ' CROSS JOIN doclist d ON d.term_id = p.value >> 32 AND d.doc_id = p.value & 4294967295'
             );
             $stmt->execute([json_encode($packed)]);
+            /** @infection-ignore-all ReturnRemoval: falling through seeks the same pairs unpacked */
             return $stmt;
         }
         sort($pairs);
@@ -10545,6 +10567,7 @@ final class Index implements \Countable
     private function normalizeFacets(mixed $facets): array
     {
         if (!is_array($facets) || $facets === []) {
+            /** @infection-ignore-all ReturnRemoval: no facets, no rows below either */
             return [];
         }
         $rows = [];
@@ -10571,6 +10594,7 @@ final class Index implements \Countable
     private function resolveFacetKeyId(string $name): int
     {
         if (isset($this->facetKeyCache[$name])) {
+            /** @infection-ignore-all ReturnRemoval: a cache hit; the upsert below returns the same ID */
             return $this->facetKeyCache[$name];
         }
         // INSERT OR IGNORE would not return the ID on conflict; DO UPDATE is the only
@@ -10586,6 +10610,7 @@ final class Index implements \Countable
         $stmt->closeCursor();
         assert($row !== false);
         /** @var array{0: int, 1: int, 2: int} $row */
+        /** @infection-ignore-all MethodCallRemoval: without the cache the ID and flags are read again where needed */
         $this->rememberKeyFlags($name, ...$row);
         return $row[0];
     }
@@ -10634,6 +10659,7 @@ final class Index implements \Countable
     {
         $rows = $this->normalizeFacets($facets);
         if ($rows === []) {
+            /** @infection-ignore-all ReturnRemoval: no rows, nothing written below either */
             return;
         }
         $stmt = $this->stmt(
@@ -10724,6 +10750,7 @@ final class Index implements \Countable
             }
         }
         if ($missing === []) {
+            /** @infection-ignore-all ReturnRemoval: no missing values, nothing read below either */
             return;
         }
         // Values written before (by any connection) keep their ID.
@@ -11106,6 +11133,7 @@ final class Index implements \Countable
         foreach ($keyMap as $keyId => $keys) {
             ksort($keys, SORT_STRING);
             foreach ($keys as $sortKey => $docs) {
+                /** @infection-ignore-all FunctionCallRemoval: sorted insertion is a write-speed measure; the rows are the same */
                 ksort($docs);
                 foreach (array_keys($docs) as $docId) {
                     $params[] = $keyId;
@@ -11690,6 +11718,7 @@ final class Index implements \Countable
                     $children[] = $part;
                 }
             }
+            /** @infection-ignore-all MatchArmRemoval: a group without children matches no document, the same as false */
             return match (count($children)) {
                 0       => false,
                 1       => $children[0],
@@ -11963,6 +11992,7 @@ final class Index implements \Countable
             return $condition['rowCount'];
         }
         if (isset($condition['estimate'])) {
+            /** @infection-ignore-all ReturnRemoval: the exact count below only replaces an estimate used to choose a driver */
             return $condition['estimate'];
         }
         $memo = $condition['rows'] . "\0" . json_encode($condition['params'], JSON_THROW_ON_ERROR);
@@ -12045,6 +12075,7 @@ final class Index implements \Countable
             $stmt->execute([$range['keyId'], ...$range['params']]);
         }
         $count = (int) $stmt->fetchColumn();
+        /** @infection-ignore-all MethodCallRemoval: closing the cursor only frees the statement early */
         $stmt->closeCursor();
         return $count;
     }

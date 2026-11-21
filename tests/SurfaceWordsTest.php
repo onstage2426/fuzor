@@ -12,6 +12,7 @@ use Fuzor\MatchType;
 use Fuzor\SchemaConfig;
 use Fuzor\SearchOptions;
 use Fuzor\Tests\Support\EnglishStemmer;
+use Fuzor\Tests\Support\PluralStemmer;
 use PHPUnit\Framework\TestCase;
 
 /**
@@ -73,6 +74,24 @@ final class SurfaceWordsTest extends TestCase
         $this->assertSame([1], $index->search('hikng', new SearchOptions(asYouType: false))->getIds());
         $this->assertSame([1], $index->search('hikng boots')->getIds());
         $this->assertSame([2], $index->search('conection cable')->getIds());
+    }
+
+    public function testTheClosestTypoMatchesAreKeptWhenTheExpansionsAreCapped(): void
+    {
+        $index = new Index($this->path, config: new Config(fuzzyMaxExpansions: 1), schema: new SchemaConfig(
+            stemmer: PluralStemmer::class,
+        ));
+        $index->insert([
+            ['id' => 1, 'title' => 'battery'],
+            ['id' => 2, 'title' => 'batteryaz batteryaz batteryaz'],
+        ]);
+
+        // "batteryes": two edits from the words battery and batteryaz, one from the term battery
+        // through its stem "batterye". The one-edit term is kept, not the word with more hits.
+        $this->assertSame([1], $index->search('batteryes', new SearchOptions(asYouType: false))->getIds());
+        $token = $index->inspectQuery('batteryes', false)->tokens[0];
+        $this->assertSame(['battery'], array_column($token->wordlistRows, 'term'));
+        $this->assertSame([1], array_column($token->wordlistRows, 'distance'));
     }
 
     public function testAFullWordStillMatchesThroughItsStem(): void
