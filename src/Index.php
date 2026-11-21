@@ -2291,6 +2291,7 @@ final class Index implements \Countable
                 return;
             }
             // As in replaceChunk(): keep the term-index rows, rewriting only those that change.
+            /** @infection-ignore-all ArrayItemRemoval: without the unchanged check the same rows are rewritten (rewritePostings()) */
             $kept      = $this->documentStoreEnabled
                 ? $this->unchangedSearchableLengths([$document], $oldLengths)
                 : [];
@@ -2611,6 +2612,7 @@ final class Index implements \Countable
             )->execute([':n' => '0', ':avg' => '0']);
         });
 
+        /** @infection-ignore-all ArrayItemRemoval: a total missing from the cache reads as 0, which it is after clear() */
         $this->infoCache      = ['total_documents' => '0', 'avg_doc_length' => '0'];
         $this->termIdCache    = [];
         $this->surfaceWordCache = [];
@@ -11773,6 +11775,7 @@ final class Index implements \Countable
      */
     private function groupCondition(array $children, bool $exclude): array
     {
+        /** @infection-ignore-all ArrayItemRemoval: the total only bounds the estimate a driver is chosen by */
         $total    = (int) ($this->getInfoValues(['total_documents'])['total_documents'] ?? 0);
         $matches  = [];
         $params   = [];
@@ -11785,6 +11788,7 @@ final class Index implements \Countable
                 ?? ['SELECT doc_id FROM doc_lengths WHERE 0', []];
             $matches[] = $match[0];
             array_push($params, ...$match[1]);
+            /** @infection-ignore-all ArrayItemRemoval: unreachable, a child of a group is never a condition that cannot match */
             [$probe, $childParams] = $this->renderFacetProbes($ordered, '%1$s') ?? [' AND 0', []];
             $probes[] = '(1' . $probe . ')';
             array_push($probeParams, ...$childParams);
@@ -12058,6 +12062,7 @@ final class Index implements \Countable
         }
         // Rows the index count reads at most, against the values facet_counts would read
         // (the documents over the sampled rows per value).
+        /** @infection-ignore-all ArrayItemRemoval: the total only chooses between two exact ways to count the range */
         $documents = (int) ($this->getInfoValues(['total_documents'])['total_documents'] ?? 0);
         $indexRows = $upTo === null ? $documents : min($upTo + 1, $documents);
         if ($indexRows * $rows <= $documents * $values * self::RANGE_COUNT_ROWS_PER_VALUE) {

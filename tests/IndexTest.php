@@ -1780,6 +1780,16 @@ class IndexTest extends TestCase
         $this->assertSame(0, $this->scalarQuery('SELECT COUNT(*) FROM doclist'));
     }
 
+    public function testDeleteByFilterWithAnExclusionOnAnEmptyFieldDeletesEverything(): void
+    {
+        // No document has a size: the exclusion keeps every document and leaves no condition.
+        $index = new Index($this->dbPath, schema: new SchemaConfig(filterableAttributes: ['color', 'size']));
+        $index->insert([['id' => 1, 'title' => 'a', 'color' => 'red'], ['id' => 2, 'title' => 'b', 'color' => 'blue']]);
+
+        $this->assertSame(2, $index->deleteByFilter(['size' => new FacetExclude('xl')]));
+        $this->assertSame(0, $index->count());
+    }
+
     public function testDeleteByFilterPurgesOnceTheRatioIsReached(): void
     {
         $index = $this->productIndex();
@@ -5032,7 +5042,10 @@ class IndexTest extends TestCase
         $index->insert([['id' => 9, 'title' => 'first']]);
 
         $this->expectException(QueryException::class);
-        $this->expectExceptionMessageMatches('/already exist.*9/');
+        $this->expectExceptionMessageMatches(
+            '/^Documents already exist with ids: (\d+, )*9(, \d+)* \(in the index or earlier in this insert\)\.'
+            . ' Use update\(\) to replace them\.$/',
+        );
         $index->insert(self::generate(array_slice(self::chunkDocs(), 0, 9)));
     }
 
@@ -10082,6 +10095,27 @@ class IndexTest extends TestCase
         ))->getIds());
     }
 
+    public function testFieldBoostSeeksTheCandidatePairsAboveTwoToTheThirtyTwo(): void
+    {
+        // 30 documents hold "lamp" once, only the second in its title. With two candidates the
+        // field hits are sought per (term, document) pair, and IDs above 2^32 send the pairs
+        // as JSON pairs instead of packed integers.
+        $index = new Index($this->dbPath, config: new Config(
+            fieldBoosts: ['title' => 10.0],
+            limits: new Limits(candidatesPerWord: 2),
+        ));
+        $base = 5_000_000_000;
+        $docs = [];
+        for ($n = 0; $n < 30; $n++) {
+            $title  = $n === 1;
+            $docs[] = ['id' => $base + $n, 'title' => $title ? 'lamp' : 'plain', 'body' => $title ? 'plain' : 'lamp'];
+        }
+        $index->insert($docs);
+
+        $ids = $index->search('lamp', new SearchOptions(asYouType: false, limit: 2))->getIds();
+        $this->assertSame([$base + 1, $base], $ids);
+    }
+
     public function testFieldBoostEmptyArrayUsesNormalBM25(): void
     {
         // Empty fieldBoosts = uniform path; search should still return results normally.
@@ -10204,6 +10238,21 @@ class IndexTest extends TestCase
         $synonyms = $index->getSynonyms();
         $this->assertArrayNotHasKey('car', $synonyms);
         $this->assertArrayHasKey('sedan', $synonyms);
+    }
+
+    public function testSetSynonymsKeepsPairsThatShareATargetOrTheirLetters(): void
+    {
+        $index = new Index($this->dbPath);
+        $index->setSynonyms(oneWay: [
+            'car' => ['auto', 'auto'],
+            'bus' => ['auto'],
+            'xy'  => ['z'],
+            'x'   => ['yz'],
+        ]);
+
+        $synonyms = $index->getSynonyms();
+        ksort($synonyms);
+        $this->assertSame(['bus' => ['auto'], 'car' => ['auto'], 'x' => ['yz'], 'xy' => ['z']], $synonyms);
     }
 
     public function testClearSynonymsEmptiesAll(): void

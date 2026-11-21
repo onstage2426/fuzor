@@ -115,7 +115,9 @@ class StemmerTest extends TestCase
     public function testClassNotImplementingStemmerThrows(): void
     {
         $this->expectException(QueryException::class);
-        $this->expectExceptionMessage(Stemmer::class);
+        $this->expectExceptionMessage(
+            'SchemaConfig::$stemmer must name a class implementing ' . Stemmer::class . "; got 'stdClass'.",
+        );
         // @phpstan-ignore argument.type (the point of the test)
         new Index($this->dbPath, schema: new SchemaConfig(stemmer: \stdClass::class));
     }
@@ -160,6 +162,7 @@ class StemmerTest extends TestCase
             $this->assertCount(1, $result->warnings);
             $this->assertStringContainsString('switchable@1', $result->warnings[0]);
             $this->assertStringContainsString('switchable@2', $result->warnings[0]);
+            $this->assertStringEndsWith('which then do not match. rebuild() the index.', $result->warnings[0]);
             $this->assertNotSame([], $index->searchBoolean('boots')->warnings);
             $index->close();
 
