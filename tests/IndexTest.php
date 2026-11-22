@@ -10095,16 +10095,16 @@ class IndexTest extends TestCase
         ))->getIds());
     }
 
-    public function testFieldBoostSeeksTheCandidatePairsAboveTwoToTheThirtyTwo(): void
+    #[DataProvider('boostIdOffsetProvider')]
+    public function testFieldBoostSeeksTheCandidatePairsAtAnyDocumentId(int $base): void
     {
         // 30 documents hold "lamp" once, only the second in its title. With two candidates the
-        // field hits are sought per (term, document) pair, and IDs above 2^32 send the pairs
-        // as JSON pairs instead of packed integers.
+        // field hits are sought per (term, document) pair: packed into one integer, or as JSON
+        // pairs for IDs that do not fit (above 2^32, negative).
         $index = new Index($this->dbPath, config: new Config(
             fieldBoosts: ['title' => 10.0],
             limits: new Limits(candidatesPerWord: 2),
         ));
-        $base = 5_000_000_000;
         $docs = [];
         for ($n = 0; $n < 30; $n++) {
             $title  = $n === 1;

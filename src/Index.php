@@ -3597,10 +3597,12 @@ final class Index implements \Countable
                     $newScore = 0.0;
                     foreach ($docContribTermIds[$docId] ?? [] as $termId => $_) {
                         $weighted = $weightedHits[$termId][$docId] ?? 0.0;
-                        if ($weighted > 0.0) {
-                            $idfK1p1val = $termIdfMap[$termId] ?? 0.0;
-                            $newScore += $idfK1p1val * $weighted / ($k1_1mb + $k1b_avgdl * $docLen + $weighted);
+                        /** @infection-ignore-all GreaterThan: a weight of 0 adds 0 to the score */
+                        if ($weighted <= 0.0) {
+                            continue;
                         }
+                        $idfK1p1val = $termIdfMap[$termId] ?? 0.0;
+                        $newScore += $idfK1p1val * $weighted / ($k1_1mb + $k1b_avgdl * $docLen + $weighted);
                     }
                     $newScores[$docId] = $newScore;
                 }
@@ -4768,7 +4770,9 @@ final class Index implements \Countable
             $stmt->execute([$keyId, json_encode($values['values'])]);
             /** @var list<string> $others */
             $others = $stmt->fetchAll(PDO::FETCH_COLUMN);
-            if (count($others) > 1000) {
+            /** @infection-ignore-all GreaterThan: at exactly 1,000 other values the condition is kept as given, which matches the same documents */
+            $tooMany = count($others) > 1000;
+            if ($tooMany) {
                 $result[] = $condition;
             } elseif ($others !== []) {
                 $result[] = [
@@ -7791,7 +7795,10 @@ final class Index implements \Countable
         if ($pairCount === 0) {
             return [];
         }
-        if (array_sum(array_intersect_key($termDocs, $terms)) <= $pairCount * self::FIELD_HITS_SCAN_ROWS_PER_PAIR) {
+        /** @infection-ignore-all LessThanOrEqualTo,LessThanOrEqualToNegotiation: both reads give the same rows; this picks the cheaper one */
+        $scanTerms = array_sum(array_intersect_key($termDocs, $terms))
+            <= $pairCount * self::FIELD_HITS_SCAN_ROWS_PER_PAIR;
+        if ($scanTerms) {
             $termIds = array_keys($terms);
             /** @infection-ignore-all FunctionCallRemoval: sorted only so the seeks land on neighbouring pages; the rows are keyed */
             sort($termIds);
@@ -7829,7 +7836,14 @@ final class Index implements \Countable
         foreach ($docTerms as $docId => $terms) {
             foreach ($terms as $termId => $_) {
                 $pairs[] = [$termId, $docId];
-                if ($packed !== null && $docId >= 0 && $docId <= 0xFFFFFFFF && $termId >= 0 && $termId <= 0x7FFFFFFF) {
+                /**
+                 * @infection-ignore-all NotIdentical|GreaterThanOrEqualTo|LessThanOrEqualTo (and negotiations): a pair
+                 * that is not packed goes as a JSON pair, which seeks the same rows; packing one that does not fit
+                 * is caught by testFieldBoostSeeksTheCandidatePairsAtAnyDocumentId (negative IDs, IDs above 2^32)
+                 */
+                $fits = $packed !== null && $docId >= 0 && $docId <= 0xFFFFFFFF
+                    && $termId >= 0 && $termId <= 0x7FFFFFFF;
+                if ($fits) {
                     $packed[] = ($termId << 32) | $docId;
                 } else {
                     $packed = null;
@@ -8975,7 +8989,9 @@ final class Index implements \Countable
         if ($stopwords instanceof \Fuzor\Stopwords && count($tokens) > 1) {
             $tokens = array_filter($tokens, fn(string $token): bool => !$stopwords->contains($token));
             $first  = array_key_first($tokens);
-            if ($first !== null && $first > 0) {
+            /** @infection-ignore-all GreaterThan,NotIdentical: shifting by 0, or no tokens, leaves the keys as they are */
+            $shift  = $first !== null && $first > 0;
+            if ($shift) {
                 $tokens = array_combine(
                     array_map(fn(int $offset): int => $offset - $first, array_keys($tokens)),
                     $tokens,
@@ -9143,9 +9159,13 @@ final class Index implements \Countable
             return $termTypos > 0 ? $this->fuzzySearch($keyword, $termTypos) : [];
         }
         $wordTypos = isset($this->typoExactWords()[$keyword]) ? 0 : $this->typoBudget($surface);
+        /** @infection-ignore-all GreaterThan: with no typos allowed the scan finds only the word itself, which the exact lookup has */
+        $wordScan  = $wordTypos > 0;
+        /** @infection-ignore-all GreaterThan: with no typos allowed the scan finds only the word itself, which the exact lookup has */
+        $termScan  = $termTypos > 0;
         $rows      = [
-            ...($wordTypos > 0 ? $this->fuzzySearch($surface, $wordTypos, true) : []),
-            ...($termTypos > 0 ? $this->fuzzySearch($keyword, $termTypos) : []),
+            ...($wordScan ? $this->fuzzySearch($surface, $wordTypos, true) : []),
+            ...($termScan ? $this->fuzzySearch($keyword, $termTypos) : []),
         ];
         usort(
             $rows,
