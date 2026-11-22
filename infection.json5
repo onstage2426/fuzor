@@ -1,6 +1,12 @@
+// Mutants that cannot change a result, matched by their whole original line (an exact,
+// escaped copy). Each was checked by hand: a comparison whose sides always have the same
+// type, a flag only read with isset(), an estimate or a cheaper equivalent read. The
+// ones in a statement of their own are marked in the source instead.
 {
     "source": {
-        "directories": ["src"]
+        "directories": [
+            "src"
+        ]
     },
     "testFramework": "phpunit",
     "logs": {
@@ -8,6 +14,77 @@
         "summary": "infection-summary.log"
     },
     "mutators": {
-        "@default": true
+        "@default": true,
+        "FalseValue": {
+            "ignoreSourceCodeByRegex": [
+                "\\$this\\-\\>hasDeleted      \\= false;",
+                "\\$truncated \\= false;",
+                "if \\(\\$this\\-\\>getWordlistByKeyword\\(\\$synonym, false, false\\) \\!\\=\\= \\[\\]\\) \\{",
+                "'multiRow'   \\=\\> false,"
+            ]
+        },
+        "LogicalAnd": {
+            "ignoreSourceCodeByRegex": [
+                "if \\(isset\\(\\$oldLengths\\[\\$id\\]\\) && \\!isset\\(\\$kept\\[\\$id\\]\\)\\) \\{",
+                "if \\(\\$key \\!\\=\\= 'id' && \\$value \\!\\=\\= null && \\!isset\\(\\$this\\-\\>facetFieldSet\\[\\$key\\]\\)\\) \\{",
+                "if \\(\\!isset\\(\\$this\\-\\>surfaceWordCache\\[\\$word\\]\\) && \\!Tokenizer\\:\\:isNgramToken\\(\\$word\\)\\) \\{",
+                "if \\(is_int\\(\\$value\\) \\|\\| is_float\\(\\$value\\) && is_finite\\(\\$value\\)\\) \\{"
+            ]
+        },
+        "LogicalOrAllSubExprNegation": {
+            "ignoreSourceCodeByRegex": [
+                "if \\(\\!\\$this\\-\\>documentStoreEnabled \\|\\| \\$oldLengths \\=\\=\\= \\[\\]\\) \\{",
+                "if \\(is_int\\(\\$value\\) \\|\\| is_float\\(\\$value\\) && is_finite\\(\\$value\\)\\) \\{"
+            ]
+        },
+        "NotIdenticalNotEqual": {
+            "ignoreSourceCodeByRegex": [
+                "if \\(\\$existing \\!\\=\\= \\[\\]\\) \\{",
+                "if \\(\\$newLength \\!\\=\\= \\$oldLengths\\[\\$id\\]\\) \\{",
+                "if \\(\\$existingIds \\!\\=\\= \\[\\]\\) \\{",
+                "found\\:        \\$rows \\!\\=\\= \\[\\],",
+                "\\$applied        \\= \\$negationTokens \\!\\=\\= \\[\\];",
+                "\\$applied \\= \\$applied && \\$this\\-\\>lookupTermId\\(\\$token\\) \\!\\=\\= null;",
+                "if \\(\\$synRows \\!\\=\\= \\[\\]\\) \\{",
+                "if \\(\\$fid \\!\\=\\= null\\) \\{",
+                "if \\(\\$fieldIdBoostMap \\!\\=\\= \\[\\]\\) \\{",
+                "\\} elseif \\(\\$others \\!\\=\\= \\[\\]\\) \\{",
+                "if \\(\\$this\\-\\>getWordlistByKeyword\\(\\$synonym, false, false\\) \\!\\=\\= \\[\\]\\) \\{",
+                "if \\(\\$affectedTermIds \\!\\=\\= \\[\\]\\) \\{",
+                "if \\(\\$newTerms \\!\\=\\= \\[\\]\\) \\{",
+                "if \\(\\$diffed \\!\\=\\= \\[\\]\\) \\{",
+                "if \\(\\$rewrite \\!\\=\\= \\[\\]\\) \\{",
+                "if \\(\\$doclistInsert \\!\\=\\= \\[\\]\\) \\{",
+                "if \\(\\$positionInsert \\!\\=\\= \\[\\]\\) \\{",
+                "if \\(\\$hits \\!\\=\\= 0 \\|\\| \\$docs \\!\\=\\= 0\\) \\{",
+                "if \\(\\$shrunk \\!\\=\\= \\[\\]\\) \\{",
+                "if \\(\\$rows \\!\\=\\= \\[\\]\\) \\{",
+                "if \\(\\$ids \\!\\=\\= \\[\\]\\) \\{",
+                "if \\(\\$key \\!\\=\\= 'id' && \\$value \\!\\=\\= null && \\!isset\\(\\$this\\-\\>facetFieldSet\\[\\$key\\]\\)\\) \\{",
+                "if \\(\\$part \\!\\=\\= ''\\) \\{",
+                "if \\(\\$packed \\!\\=\\= null\\) \\{",
+                "if \\(\\$filterable \\!\\=\\= \\[\\]\\) \\{",
+                "if \\(\\$part \\!\\=\\= false\\) \\{",
+                "if \\(\\$missing \\!\\=\\= \\[\\]\\) \\{",
+                "if \\(\\$unknown \\!\\=\\= \\[\\]\\) \\{",
+                "if \\(\\$fieldId \\!\\=\\= null\\) \\{",
+                "\\} elseif \\(is_string\\(\\$v\\) && \\$v \\!\\=\\= ''\\) \\{",
+                "if \\(count\\(\\$tokens\\) \\!\\=\\= 1\\) \\{"
+            ]
+        },
+        "TrueValue": {
+            "ignoreSourceCodeByRegex": [
+                "\\$seen\\[\\$key\\] \\= true;",
+                "\\$docContribTermIds\\[\\$docId\\]\\[\\$termId\\]  \\= true;",
+                "'selection'  \\=\\> true,",
+                "\\$insertedIds\\[\\$termIds\\[\\(string\\) \\$term\\]\\] \\= true;",
+                "\\$this\\-\\>surfaceWordCache\\[\\$word\\]    \\= true;",
+                "\\$valuesPerKey\\[\\$keyId\\]\\[\\$row\\['value'\\]\\] \\= true;",
+                "\\$keyMap\\[\\$keyId\\]\\[self\\:\\:sortKey\\(\\(string\\) \\$value\\)\\]\\[\\$docId\\] \\= true;",
+                "'compound'   \\=\\> true,",
+                "\\$inverse\\[\\$id\\] \\= true;",
+                "\\$withStrings\\[\\$keyId\\] \\= true;"
+            ]
+        }
     }
 }

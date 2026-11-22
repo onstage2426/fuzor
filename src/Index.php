@@ -6806,8 +6806,10 @@ final class Index implements \Countable
     private function searchableInput(array $document): array
     {
         $input = [];
-        if ($this->searchableFieldSet !== null) {
-            foreach ($this->searchableFieldSet as $key => $_) {
+        /** @infection-ignore-all NotIdenticalNotEqual: an empty set read as no set adds fields, which can only make an unchanged document look changed */
+        $declared = $this->searchableFieldSet !== null;
+        if ($declared) {
+            foreach ($this->searchableFieldSet ?? [] as $key => $_) {
                 if (isset($document[$key])) {
                     $input[$key] = $document[$key];
                 }
@@ -11814,7 +11816,9 @@ final class Index implements \Countable
             array_push($probeParams, ...$childParams);
             $bound = $total;
             foreach ($ordered as $condition) {
-                if (!$condition['exclude']) {
+                /** @infection-ignore-all LogicalNot: the bound only sets the estimate a driver is chosen by */
+                $positive = !$condition['exclude'];
+                if ($positive) {
                     $bound = min($bound, $this->conditionRowCount($condition));
                 }
             }

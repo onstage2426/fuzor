@@ -1780,6 +1780,37 @@ class IndexTest extends TestCase
         $this->assertSame(0, $this->scalarQuery('SELECT COUNT(*) FROM doclist'));
     }
 
+    public function testAnAllGroupOfExclusionsOnEmptyFieldsKeepsEveryDocument(): void
+    {
+        // No document has a size or a fit: the all() group holds for every document, so the
+        // any() around it does too.
+        $index = new Index($this->dbPath, schema: new SchemaConfig(filterableAttributes: ['color', 'size', 'fit']));
+        $index->insert([['id' => 1, 'title' => 'x', 'color' => 'red'], ['id' => 2, 'title' => 'x', 'color' => 'blue']]);
+        $filter = Filter::any(
+            Filter::all(['size' => new FacetExclude('xl')], ['fit' => new FacetExclude('slim')]),
+            ['color' => 'red'],
+        );
+
+        $this->assertSame([2, 1], $index->search('', new SearchOptions(filter: $filter))->getIds());
+        $this->assertEqualsCanonicalizing([1, 2], $index->search('x', new SearchOptions(filter: $filter))->getIds());
+    }
+
+    public function testNullAndBoolFacetValuesAreLeftOutOnEveryWritePath(): void
+    {
+        $index = new Index($this->dbPath, schema: new SchemaConfig(filterableAttributes: ['color']));
+        $index->insert([['id' => 1, 'title' => 'x', 'color' => null]]);
+        $index->insert([
+            ['id' => 2, 'title' => 'x', 'color' => true],
+            ['id' => 3, 'title' => 'x', 'color' => [null, 'red']],
+        ]);
+        $index->upsert([['id' => 4, 'title' => 'x', 'color' => [false, 'blue']]]);
+        $index->update([['id' => 1, 'title' => 'y', 'color' => [null]]]);
+
+        $result = $index->search('', new SearchOptions(facets: ['color']));
+        $this->assertSame(4, $result->totalHits);
+        $this->assertSame(['blue' => 1, 'red' => 1], $result->facetDistribution['color']);
+    }
+
     public function testDeleteByFilterWithAnExclusionOnAnEmptyFieldDeletesEverything(): void
     {
         // No document has a size: the exclusion keeps every document and leaves no condition.
@@ -10238,6 +10269,25 @@ class IndexTest extends TestCase
         $synonyms = $index->getSynonyms();
         $this->assertArrayNotHasKey('car', $synonyms);
         $this->assertArrayHasKey('sedan', $synonyms);
+    }
+
+    public function testASynonymTargetMatchesOnlyItsWholeWord(): void
+    {
+        // "automobile" starts with the target auto, "sedam" is a typo of the target sedan:
+        // neither is a synonym match, in search() or searchBoolean().
+        $index = new Index($this->dbPath);
+        $index->insert([
+            ['id' => 1, 'title' => 'automobile'],
+            ['id' => 2, 'title' => 'sedam'],
+            ['id' => 3, 'title' => 'auto'],
+        ]);
+        $index->setSynonyms(oneWay: ['car' => ['auto'], 'vehicle' => ['sedan']]);
+        $exact = new SearchOptions(asYouType: false);
+
+        $this->assertSame([3], $index->search('car', $exact)->getIds());
+        $this->assertSame([], $index->search('vehicle', $exact)->getIds());
+        $this->assertSame([3], $index->searchBoolean('car', $exact)->getIds());
+        $this->assertSame([], $index->searchBoolean('vehicle', $exact)->getIds());
     }
 
     public function testSetSynonymsKeepsPairsThatShareATargetOrTheirLetters(): void

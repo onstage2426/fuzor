@@ -117,6 +117,10 @@ class FilterTreeTest extends TestCase
                     sort: $sort,
                 ));
                 $checked += $this->assertResult($result, $filter, $words, "search '{$q}' {$label}", $sort !== []);
+                if ($facetCountDocs >= self::DOCS) {
+                    // No count can reach the cap, so none may be reported as approximate.
+                    $this->assertSame([], $result->approximateFacets, "approximate facets of '{$q}' {$label}");
+                }
                 if ($q !== 'sh') {
                     $boolean = $index->searchBoolean((string) $q, new SearchOptions(
                         asYouType: false,
