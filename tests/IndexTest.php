@@ -3707,6 +3707,25 @@ class IndexTest extends TestCase
         );
     }
 
+    public function testBooleanStopWordsLeaveWholeGroupsAround(): void
+    {
+        // Removing a stop word rebuilds the expression around it: a negated group and the
+        // two sides of an operator must keep every word they hold.
+        $index = new Index($this->dbPath, schema: new SchemaConfig(stopWords: ['the']));
+        $index->insert([
+            ['id' => 1, 'title' => 'apple berry'],
+            ['id' => 2, 'title' => 'apple cherry'],
+            ['id' => 3, 'title' => 'apple date'],
+            ['id' => 4, 'title' => 'berry date'],
+        ]);
+        $ids = fn(string $q): array => $index->searchBoolean($q, new SearchOptions(asYouType: false))->getIds();
+
+        $this->assertEqualsCanonicalizing([3], $ids('apple & ~(berry | cherry) & the'));
+        $this->assertEqualsCanonicalizing([1, 2, 3], $ids('apple & ~(the | berry cherry)'));
+        $this->assertEqualsCanonicalizing([2, 3], $ids('(apple | the) & (date | cherry)'));
+        $this->assertEqualsCanonicalizing([1, 2], $ids('apple & (berry | cherry) & the'));
+    }
+
     /** @return iterable<string, array{string, list<int>, list<string>}> */
     public static function booleanStopWordQueries(): iterable
     {
@@ -10779,6 +10798,15 @@ class IndexTest extends TestCase
         $this->assertSame(['id' => 1, 'title' => 'electric sedan'], $hit);
     }
 
+    public function testAttributesToRetrieveKeepsEveryListedField(): void
+    {
+        $index = new Index($this->dbPath);
+        $index->insert([['id' => 1, 'title' => 'a', 'body' => 'b', 'extra' => 'c']]);
+
+        $hit = $index->search('a', new SearchOptions(attributesToRetrieve: ['title', 'body']))->getHit(0);
+        $this->assertSame(['id' => 1, 'title' => 'a', 'body' => 'b'], $hit);
+    }
+
     public function testAttributesToRetrieveWildcardReturnsWholeDocument(): void
     {
         $hit = $this->retrievalIndex()
@@ -12266,6 +12294,16 @@ class IndexTest extends TestCase
             filterableAttributes: ['tags', 'color'],
             sortableAttributes: ['price'],
         ));
+    }
+
+    public function testAKeyFlaggedBeforeDoesNotStopTheNextOneBeingFlagged(): void
+    {
+        $index = $this->multiValuedIndex();
+        $index->insert([['id' => 1, 'title' => 'a', 'tags' => ['x', 'y']]]);
+        $index->insert([['id' => 2, 'title' => 'b', 'tags' => ['x', 'y'], 'color' => ['red', 'blue']]]);
+        $index->close();
+
+        $this->assertSame(['color' => 1, 'tags' => 1], $this->multiValuedFlags());
     }
 
     public function testSingleInsertFlagsOnlyKeysWithTwoValues(): void

@@ -141,7 +141,11 @@ class StemmerTest extends TestCase
             $this->fail('Expected a QueryException');
         } catch (QueryException $e) {
             $this->assertStringContainsString('Vendor\\Gone\\Stemmer', $e->getMessage());
-            $this->assertStringContainsString('rebuild()', $e->getMessage());
+            $this->assertStringEndsWith(
+                'which cannot be loaded: install the package that provides it, or rebuild() the index with'
+                . ' another SchemaConfig::$stemmer.',
+                $e->getMessage(),
+            );
         }
     }
 

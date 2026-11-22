@@ -76,6 +76,24 @@ final class SurfaceWordsTest extends TestCase
         $this->assertSame([2], $index->search('conection cable')->getIds());
     }
 
+    public function testATermFoundAsAWordAndAsAStemKeepsTheSmallerDistance(): void
+    {
+        $index = new Index($this->path, schema: new SchemaConfig(stemmer: PluralStemmer::class));
+        $index->insert([
+            ['id' => 1, 'title' => 'battery'],
+            ['id' => 2, 'title' => 'batteryaz batteryaz batteryaz'],
+        ]);
+
+        // "batteryes" is two edits from the word battery, one from its stem through "batterye".
+        $rows = $index->inspectQuery('batteryes', false)->tokens[0]->wordlistRows;
+        $this->assertSame(['battery' => 1, 'batteryaz' => 2], array_column($rows, 'distance', 'term'));
+        $hits = $index->search('batteryes', new SearchOptions(asYouType: false, showRankingScoreDetails: true))->hits;
+        $this->assertSame([1, 2], array_column($hits, 'id'));
+        /** @var array{typo: array{typoCount: int}} $details */
+        $details = $hits[0]['_rankingScoreDetails'];
+        $this->assertSame(1, $details['typo']['typoCount']);
+    }
+
     public function testTheClosestTypoMatchesAreKeptWhenTheExpansionsAreCapped(): void
     {
         $index = new Index($this->path, config: new Config(fuzzyMaxExpansions: 1), schema: new SchemaConfig(

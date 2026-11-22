@@ -23,6 +23,43 @@
                 "\\$estimate \\+\\= \\$bound;"
             ]
         },
+        "CastFloat": {
+            "ignoreSourceCodeByRegex": [
+                "\\$fieldIdBoostMap\\[\\$fid\\] \\= \\(float\\) \\$boost;",
+                "\\$docLen   \\= \\(float\\) max\\(1, \\$docLengths\\[\\$docId\\] \\?\\? 1\\);",
+                "\\$facetBuffer\\[\\$name\\]\\[\\$strVal\\]\\[\\$documentId\\] \\= \\(float\\) \\$v;",
+                "\\$rows\\[\\] \\= \\['name' \\=\\> \\$name, 'value' \\=\\> \\(string\\) \\$v, 'numValue' \\=\\> \\(float\\) \\$v\\];"
+            ]
+        },
+        "CastInt": {
+            "ignoreSourceCodeByRegex": [
+                "\\$lastId \\= \\(int\\) \\$docId;",
+                "yield \\(int\\) \\$docId \\=\\> \\$doc;",
+                "\\$fields\\[\\(int\\) \\$id\\] \\= \\(int\\) \\$n;",
+                "\\$this\\-\\>fieldNameCache\\[\\$name\\] \\= \\(int\\) \\$id;",
+                "return \\(int\\) \\$id;"
+            ]
+        },
+        "CastString": {
+            "ignoreSourceCodeByRegex": [
+                "\\$insertedIds\\[\\$termIds\\[\\(string\\) \\$term\\]\\] \\= true;",
+                "\\$rows\\[\\] \\= \\['name' \\=\\> \\$name, 'value' \\=\\> \\(string\\) \\$v, 'numValue' \\=\\> \\(float\\) \\$v\\];",
+                "\\$this\\-\\>facetValueIdCache\\[\\$keyId\\]\\[\\$isNum\\]\\[\\(string\\) \\$value\\] \\= \\$vid;",
+                "\\$params\\[\\] \\= \\(string\\) \\$word;"
+            ]
+        },
+        "Coalesce": {
+            "ignoreSourceCodeByRegex": [
+                "\\$newLength \\= \\$kept\\[\\$id\\] \\?\\? \\$this\\-\\>rewritePostings\\(\\[\\$id \\=\\> \\$document\\]\\)\\[\\$id\\];",
+                "\\$total    \\= \\(int\\) \\(\\$this\\-\\>getInfoValues\\(\\['total_documents'\\]\\)\\['total_documents'\\] \\?\\? 0\\);"
+            ]
+        },
+        "Concat": {
+            "ignoreSourceCodeByRegex": [
+                "\\$probes\\[\\] \\= '\\(1' \\. \\$probe \\. '\\)';",
+                "\\. sprintf\\(\\$range\\['sql'\\], 'fv'\\) \\. \\$limit \\. '\\)'"
+            ]
+        },
         "DecrementInteger": {
             "ignoreSourceCodeByRegex": [
                 "\\$purged \\= 0;",
@@ -140,6 +177,11 @@
                 "if \\(count\\(\\$tokens\\) \\!\\=\\= 1\\) \\{"
             ]
         },
+        "NullSafeMethodCall": {
+            "ignoreSourceCodeByRegex": [
+                "\\$now \\= \\$this\\-\\>stemmerImpl\\?\\-\\>id\\(\\) \\?\\? '';"
+            ]
+        },
         "OneZeroFloat": {
             "ignoreSourceCodeByRegex": [
                 "\\$weighted \\= \\$weightedHits\\[\\$termId\\]\\[\\$docId\\] \\?\\? 0\\.0;",
@@ -157,6 +199,11 @@
                 "\\$removed \\+\\= isset\\(\\$c\\['values'\\]\\) && \\$c\\['exclude'\\] \\? \\$this\\-\\>conditionRowCount\\(\\$c\\) \\: 0;",
                 "\\$pairCount \\+\\= count\\(\\$docTermIds\\);",
                 "\\$estimate \\+\\= \\$bound;"
+            ]
+        },
+        "Ternary": {
+            "ignoreSourceCodeByRegex": [
+                "\\$kept      \\= \\$this\\-\\>documentStoreEnabled"
             ]
         },
         "TrueValue": {
