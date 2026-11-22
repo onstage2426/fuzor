@@ -52,6 +52,8 @@ Breaking:
 - `SearchResult` and `FacetSearchResult` have no getters for their properties any more (`getTotalHits()`, `isExhaustive()`, …): read the readonly properties. `getIds()`, `getHit()`, `toArray()` and `toJSON()` stay.
 - `SearchOptions::$sort` is read back as `list<Sort>`. A malformed sort spec or filter, and a field in both `facets` and `facetStatsOnly`, throw when the `SearchOptions` or `FacetSearchQuery` is built instead of in the search; a filter value that is NaN or infinite also throws in `Filter::all()` / `any()` / `not()`.
 - `new Index($path, schema: …)` on an existing index opens it when the schema is the one it was created with (field lists and stop words in any order); a different schema throws a `QueryException` naming each difference. Before, any schema threw.
+- `SearchResult::$totalHits`, `$limit` and `$offset` are typed `int` (they were `?int` but never null).
+- The contents of `QueryInspection` and `QueryToken` (tokens, matched index terms, the postfix form) may change in any release; their properties stay.
 - `QueryToken::$matchType` is a `MatchType` enum (`Exact`, `Prefix`, `Fuzzy`, `None`, backed by the former strings).
 - `Index`, `SearchResult`, `IOException`, `QueryException` and `BooleanParser` are `final`. `Index` implements `\Countable`.
 - The tokenizer methods other than `Tokenizer::sortKey()` and the constructors that only `Index` calls are marked `@internal`. `Highlighter` and `Snippeter` take the index's stemmer instead of a language tag.
@@ -91,11 +93,13 @@ Fixed:
 - After a write that failed and was rolled back, later writes on the same `Index` reused cached IDs the rollback had removed; those documents could not be found.
 - `has()`, a filtered browse, and `distinct` or sorting over 1,000 or more documents left a read open on the connection, so another connection's `checkpoint()` or `close()` waited for the busy timeout.
 - With `open_basedir` set, a read-only `Index` and `Index::remove()` failed on every file.
+- In `searchBoolean()`, a `)` that closed no group removed the operator before it, so `apple berry | ) cherry` searched for `apple` alone and `cherry & ) apple` for either word. The `)` is now dropped and the operator kept.
+- `Index::lastModified()` read only the database file, which changes at a checkpoint, so it missed commits still in the `-wal`. It now returns the later of the file's and the `-wal`'s time.
 - `Index::exists()` could create an empty database when the file was removed while it checked.
 
 Performance:
 
-Measured on 2026-11-14 against 1.7.1 with the same requests on a 44k-product catalog with HTML descriptions (i5-9600K, PHP 8.5, SQLite 3.46.1, default settings; reads are the best median of four alternating runs):
+Measured on 2026-11-18 against 1.7.1 with the same requests on a 44k-product catalog with HTML descriptions (i5-9600K, PHP 8.5, SQLite 3.46.1, default settings; reads are the best median of four alternating runs):
 
 | Operation | 1.7.1 | 2.0.0 |
 |---|---|---|
@@ -105,10 +109,10 @@ Measured on 2026-11-14 against 1.7.1 with the same requests on a 44k-product cat
 | Price range sorted by price | 14 ms | 0.4 ms |
 | Page at offset 20,000 sorted by price | 8.5 ms | 0.01 ms |
 | `distinct` browse / with a filter and sort | 52 / 71 ms | 18 / 35 ms |
-| `update()` of 200 documents, price only / title changed | 320 / 350 ms | 33 / 136 ms |
+| `update()` of 200 documents, price only / title changed | 320 / 350 ms | 33 / 141 ms |
 | `delete()` of 50 documents | 490 ms | 11 ms |
-| `insert()` of all documents | 18.5 s, 2.0 GB | 24.4 s, 344 MB |
-| `rebuild()` | 18.1 s, 2.0 GB | 22.9 s, 208 MB |
+| `insert()` of all documents | 18.5 s, 2.0 GB | 24.3 s, 348 MB |
+| `rebuild()` | 18.1 s, 2.0 GB | 23.3 s, 212 MB |
 | `snapshotTo()` (index file 310 / 363 MB) | 1.5–1.7 s | 1.7–2.4 s |
 | Two-word search | 1.9 ms | 15 ms |
 | Three-word search | 1.8 ms | 37 ms |
