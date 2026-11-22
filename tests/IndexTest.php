@@ -3420,6 +3420,37 @@ class IndexTest extends TestCase
         $this->assertSame([], $index->inspectQuery('t-shirt')->negations);
     }
 
+    public function testInspectQueryEndingInAPhraseHasNoWordBeingTyped(): void
+    {
+        $index = new Index($this->dbPath);
+        $index->insert([['id' => 1, 'title' => 'red shirt']]);
+
+        $isLast = fn(string $q): array => array_map(
+            fn(QueryToken $t): bool => $t->isLast,
+            $index->inspectQuery($q)->tokens,
+        );
+        $this->assertSame([false, false], $isLast('"red shirt"'));
+        $this->assertSame([false, true], $isLast('red shi'));
+    }
+
+    public function testNewTermsOfAnUpdateAreCountedPerDocument(): void
+    {
+        $index = new Index($this->dbPath);
+        $index->insert([
+            ['id' => 1, 'title' => 'alpha'],
+            ['id' => 2, 'title' => 'beta'],
+            ['id' => 3, 'title' => 'gamma'],
+        ]);
+        $index->update([
+            ['id' => 1, 'title' => 'alpha zeta zeta zeta'],
+            ['id' => 2, 'title' => 'beta zeta'],
+        ]);
+
+        $token = $index->inspectQuery('zeta', false)->tokens[0];
+        $this->assertSame(4, $token->numHits);
+        $this->assertSame(2, $token->numDocs);
+    }
+
     public function testInspectQueryRawTokensMatchTokenizer(): void
     {
         $index = new Index($this->dbPath);
@@ -4891,6 +4922,33 @@ class IndexTest extends TestCase
             $pulled++;
             yield $doc;
         }
+    }
+
+    public function testAnUpsertInChunksCountsTheNewDocumentsOfEveryChunk(): void
+    {
+        $index = $this->chunkIndex($this->dbPath, 2);
+        $index->insert([['id' => 1, 'title' => 'one']]);
+        $index->upsert([
+            ['id' => 1, 'title' => 'one again'],
+            ['id' => 2, 'title' => 'two'],
+            ['id' => 3, 'title' => 'three'],
+            ['id' => 4, 'title' => 'four'],
+            ['id' => 5, 'title' => 'five'],
+        ]);
+        $this->assertSame(5, $index->count());
+        $index->close();
+
+        $this->assertSame(5, new Index($this->dbPath)->count(), 'the stored total');
+    }
+
+    public function testExistingIdsInTheFirstChunkThrowNamingThem(): void
+    {
+        $index = $this->chunkIndex($this->dbPath, 3);
+        $index->insert([['id' => 1, 'title' => 'first'], ['id' => 2, 'title' => 'second']]);
+
+        $this->expectException(QueryException::class);
+        $this->expectExceptionMessage('Documents already exist with ids: 1, 2. Use update() to replace them.');
+        $index->insert([['id' => 1, 'title' => 'x'], ['id' => 2, 'title' => 'y'], ['id' => 3, 'title' => 'z']]);
     }
 
     private function chunkIndex(string $path, ?int $chunkSize): Index
@@ -10145,6 +10203,42 @@ class IndexTest extends TestCase
 
         $ids = $index->search('lamp', new SearchOptions(asYouType: false, limit: 2))->getIds();
         $this->assertSame([$base + 1, $base], $ids);
+    }
+
+    public function testFieldBoostsOfOneGiveThePlainScores(): void
+    {
+        // The field-weighted rescoring with every weight 1 must equal plain BM25: a word repeated
+        // in one field (field_id), a word in two fields (field_split), a field without a boost,
+        // two query words and a one-word document.
+        $docs = [
+            ['id' => 1, 'title' => 'lamp lamp', 'body' => 'desk'],
+            ['id' => 2, 'title' => 'desk', 'body' => 'lamp'],
+            ['id' => 3, 'title' => 'lamp', 'body' => 'lamp desk lamp'],
+            ['id' => 4, 'title' => 'lamp'],
+            ['id' => 5, 'title' => 'chair', 'body' => 'table'],
+        ];
+        $scores = function (Config $config) use ($docs): array {
+            $index = new Index($this->dbPath, config: $config, force: true);
+            $index->insert($docs);
+            $scores = [];
+            foreach (['lamp', 'lamp desk'] as $q) {
+                $hits  = $index->search($q, new SearchOptions(asYouType: false, showRankingScoreDetails: true))->hits;
+                $byDoc = [];
+                foreach ($hits as $hit) {
+                    /** @var array{id: int, _rankingScoreDetails: array{bm25: array{score: float}}} $hit */
+                    $byDoc[$hit['id']] = $hit['_rankingScoreDetails']['bm25']['score'];
+                }
+                ksort($byDoc);
+                $scores[$q] = $byDoc;
+            }
+            $index->close();
+            return $scores;
+        };
+
+        $plain    = $scores(new Config());
+        $weighted = $scores(new Config(fieldBoosts: ['title' => 1.0]));
+        $this->assertSame(array_map('array_keys', $plain), array_map('array_keys', $weighted));
+        $this->assertEqualsWithDelta($plain, $weighted, 1e-9);
     }
 
     public function testFieldBoostEmptyArrayUsesNormalBM25(): void

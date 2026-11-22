@@ -15,12 +15,69 @@
     },
     "mutators": {
         "@default": true,
+        "Assignment": {
+            "ignoreSourceCodeByRegex": [
+                "\\$termDocs \\+\\= array_column\\(\\$group\\['words'\\], 'num_docs', 'id'\\);",
+                "\\$removed \\+\\= isset\\(\\$c\\['values'\\]\\) && \\$c\\['exclude'\\] \\? \\$this\\-\\>conditionRowCount\\(\\$c\\) \\: 0;",
+                "\\$pairCount \\+\\= count\\(\\$docTermIds\\);",
+                "\\$estimate \\+\\= \\$bound;"
+            ]
+        },
+        "DecrementInteger": {
+            "ignoreSourceCodeByRegex": [
+                "\\$purged \\= 0;",
+                "\\$placeholders \\= implode\\(',', array_fill\\(0, count\\(\\$chunk\\), '\\(\\?,\\?\\)'\\)\\);",
+                "\\$doc    \\= json_decode\\(\\(string\\) \\$data, true, 512, JSON_THROW_ON_ERROR\\);",
+                "totalDocuments\\:  \\(int\\) \\(\\$indexInfo\\['total_documents'\\] \\?\\? 0\\),",
+                "if \\(self\\:\\:isClassInGroup\\(0, \\$group\\)\\) \\{",
+                "\\$removed   \\= 0;",
+                "\\$removed \\+\\= isset\\(\\$c\\['values'\\]\\) && \\$c\\['exclude'\\] \\? \\$this\\-\\>conditionRowCount\\(\\$c\\) \\: 0;",
+                "if \\(\\$this\\-\\>conditionRowCount\\(\\$probed\\[0\\]\\) \\* \\(1 \\- min\\(1, \\$removed / \\$documents\\)\\) \\> \\$cap\\) \\{",
+                "\\$kept    \\= 0;",
+                "\\$added   \\= 0;",
+                "if \\(\\$hits \\!\\=\\= 0 \\|\\| \\$docs \\!\\=\\= 0\\) \\{",
+                "\\$wordTypos \\= isset\\(\\$this\\-\\>typoExactWords\\(\\)\\[\\$keyword\\]\\) \\? 0 \\: \\$this\\-\\>typoBudget\\(\\$surface\\);",
+                "\\$total    \\= \\(int\\) \\(\\$this\\-\\>getInfoValues\\(\\['total_documents'\\]\\)\\['total_documents'\\] \\?\\? 0\\);",
+                "\\$estimate \\= 0;",
+                "\\$indexRows \\= \\$upTo \\=\\=\\= null \\? \\$documents \\: min\\(\\$upTo \\+ 1, \\$documents\\);",
+                "\\. implode\\(',', array_fill\\(0, count\\(\\$batch\\), '\\(\\?, \\?\\)'\\)\\)",
+                "throw new QueryException\\(\"\\{\\$what\\} \\{\\$class\\} must have a constructor without required arguments\\.\", 0, \\$e\\);",
+                "\\$documents \\= max\\(1, \\(int\\) \\(\\$this\\-\\>getInfoValues\\(\\['total_documents'\\]\\)\\['total_documents'\\] \\?\\? 0\\)\\);",
+                "\\$documents \\= \\(int\\) \\(\\$this\\-\\>getInfoValues\\(\\['total_documents'\\]\\)\\['total_documents'\\] \\?\\? 0\\);"
+            ]
+        },
+        "Division": {
+            "ignoreSourceCodeByRegex": [
+                "if \\(\\$this\\-\\>conditionRowCount\\(\\$probed\\[0\\]\\) \\* \\(1 \\- min\\(1, \\$removed / \\$documents\\)\\) \\> \\$cap\\) \\{"
+            ]
+        },
         "FalseValue": {
             "ignoreSourceCodeByRegex": [
                 "\\$this\\-\\>hasDeleted      \\= false;",
                 "\\$truncated \\= false;",
                 "if \\(\\$this\\-\\>getWordlistByKeyword\\(\\$synonym, false, false\\) \\!\\=\\= \\[\\]\\) \\{",
                 "'multiRow'   \\=\\> false,"
+            ]
+        },
+        "Increment": {
+            "ignoreSourceCodeByRegex": [
+                "\\$added\\+\\+;"
+            ]
+        },
+        "IncrementInteger": {
+            "ignoreSourceCodeByRegex": [
+                "\\$placeholders \\= implode\\(',', array_fill\\(0, count\\(\\$chunk\\), '\\(\\?,\\?\\)'\\)\\);",
+                "\\$doc    \\= json_decode\\(\\(string\\) \\$data, true, 512, JSON_THROW_ON_ERROR\\);",
+                "if \\(self\\:\\:isClassInGroup\\(0, \\$group\\)\\) \\{",
+                "\\$removed \\+\\= isset\\(\\$c\\['values'\\]\\) && \\$c\\['exclude'\\] \\? \\$this\\-\\>conditionRowCount\\(\\$c\\) \\: 0;",
+                "if \\(\\$this\\-\\>conditionRowCount\\(\\$probed\\[0\\]\\) \\* \\(1 \\- min\\(1, \\$removed / \\$documents\\)\\) \\> \\$cap\\) \\{",
+                "\\$total    \\= \\(int\\) \\(\\$this\\-\\>getInfoValues\\(\\['total_documents'\\]\\)\\['total_documents'\\] \\?\\? 0\\);",
+                "\\$indexRows \\= \\$upTo \\=\\=\\= null \\? \\$documents \\: min\\(\\$upTo \\+ 1, \\$documents\\);",
+                "\\$stmt\\-\\>execute\\(\\[\\$range\\['keyId'\\], \\.\\.\\.\\$range\\['params'\\], \\.\\.\\.\\(\\$upTo \\=\\=\\= null \\? \\[\\] \\: \\[\\$upTo \\+ 1\\]\\)\\]\\);",
+                "\\. implode\\(',', array_fill\\(0, count\\(\\$batch\\), '\\(\\?, \\?\\)'\\)\\)",
+                "throw new QueryException\\(\"\\{\\$what\\} \\{\\$class\\} must have a constructor without required arguments\\.\", 0, \\$e\\);",
+                "\\$documents \\= max\\(1, \\(int\\) \\(\\$this\\-\\>getInfoValues\\(\\['total_documents'\\]\\)\\['total_documents'\\] \\?\\? 0\\)\\);",
+                "\\$documents \\= \\(int\\) \\(\\$this\\-\\>getInfoValues\\(\\['total_documents'\\]\\)\\['total_documents'\\] \\?\\? 0\\);"
             ]
         },
         "LogicalAnd": {
@@ -35,6 +92,17 @@
             "ignoreSourceCodeByRegex": [
                 "if \\(\\!\\$this\\-\\>documentStoreEnabled \\|\\| \\$oldLengths \\=\\=\\= \\[\\]\\) \\{",
                 "if \\(is_int\\(\\$value\\) \\|\\| is_float\\(\\$value\\) && is_finite\\(\\$value\\)\\) \\{"
+            ]
+        },
+        "Minus": {
+            "ignoreSourceCodeByRegex": [
+                "if \\(\\$this\\-\\>conditionRowCount\\(\\$probed\\[0\\]\\) \\* \\(1 \\- min\\(1, \\$removed / \\$documents\\)\\) \\> \\$cap\\) \\{"
+            ]
+        },
+        "Multiplication": {
+            "ignoreSourceCodeByRegex": [
+                "if \\(\\$this\\-\\>conditionRowCount\\(\\$probed\\[0\\]\\) \\* \\(1 \\- min\\(1, \\$removed / \\$documents\\)\\) \\> \\$cap\\) \\{",
+                "if \\(\\$indexRows \\* \\$rows \\<\\= \\$documents \\* \\$values \\* self\\:\\:RANGE_COUNT_ROWS_PER_VALUE\\) \\{"
             ]
         },
         "NotIdenticalNotEqual": {
@@ -70,6 +138,25 @@
                 "if \\(\\$fieldId \\!\\=\\= null\\) \\{",
                 "\\} elseif \\(is_string\\(\\$v\\) && \\$v \\!\\=\\= ''\\) \\{",
                 "if \\(count\\(\\$tokens\\) \\!\\=\\= 1\\) \\{"
+            ]
+        },
+        "OneZeroFloat": {
+            "ignoreSourceCodeByRegex": [
+                "\\$weighted \\= \\$weightedHits\\[\\$termId\\]\\[\\$docId\\] \\?\\? 0\\.0;",
+                "\\$idfK1p1val \\= \\$termIdfMap\\[\\$termId\\] \\?\\? 0\\.0;"
+            ]
+        },
+        "Plus": {
+            "ignoreSourceCodeByRegex": [
+                "\\$whole \\= count\\(\\$deletes\\) \\+ count\\(\\$updates\\) \\+ \\$added \\> \\$kept;",
+                "\\$indexRows \\= \\$upTo \\=\\=\\= null \\? \\$documents \\: min\\(\\$upTo \\+ 1, \\$documents\\);"
+            ]
+        },
+        "PlusEqual": {
+            "ignoreSourceCodeByRegex": [
+                "\\$removed \\+\\= isset\\(\\$c\\['values'\\]\\) && \\$c\\['exclude'\\] \\? \\$this\\-\\>conditionRowCount\\(\\$c\\) \\: 0;",
+                "\\$pairCount \\+\\= count\\(\\$docTermIds\\);",
+                "\\$estimate \\+\\= \\$bound;"
             ]
         },
         "TrueValue": {
