@@ -1,6 +1,6 @@
 # Changelog
 
-## 2.0.0 - unreleased
+## 2.0.0 - 2026-11-22
 
 2.0 makes results on large indexes exact, or reports them as approximate where a cap applies. It also adds filter trees, exclusions and tools to maintain an index. Many options now use Meilisearch's names and behaviour (`filterableAttributes`, `matchingStrategy`, `typoTolerance`, `totalHits`, facet value order), so its documentation explains them as well. See `UPGRADE-2.0.md` for what calling code has to change.
 
