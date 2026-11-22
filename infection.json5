@@ -15,6 +15,11 @@
     },
     "mutators": {
         "@default": true,
+        "ArrayOneItem": {
+            "ignoreSourceCodeByRegex": [
+                "return \\$inverse;"
+            ]
+        },
         "Assignment": {
             "ignoreSourceCodeByRegex": [
                 "\\$termDocs \\+\\= array_column\\(\\$group\\['words'\\], 'num_docs', 'id'\\);",
@@ -96,6 +101,11 @@
                 "'multiRow'   \\=\\> false,"
             ]
         },
+        "Foreach_": {
+            "ignoreSourceCodeByRegex": [
+                "foreach \\(\\$ordered as \\$condition\\) \\{"
+            ]
+        },
         "Increment": {
             "ignoreSourceCodeByRegex": [
                 "\\$added\\+\\+;"
@@ -129,6 +139,11 @@
             "ignoreSourceCodeByRegex": [
                 "if \\(\\!\\$this\\-\\>documentStoreEnabled \\|\\| \\$oldLengths \\=\\=\\= \\[\\]\\) \\{",
                 "if \\(is_int\\(\\$value\\) \\|\\| is_float\\(\\$value\\) && is_finite\\(\\$value\\)\\) \\{"
+            ]
+        },
+        "MBString": {
+            "ignoreSourceCodeByRegex": [
+                "\\$tokens \\= Tokenizer\\:\\:split\\(mb_strtolower\\(trim\\(\\$term\\)\\)\\);"
             ]
         },
         "Minus": {
@@ -218,6 +233,45 @@
                 "'compound'   \\=\\> true,",
                 "\\$inverse\\[\\$id\\] \\= true;",
                 "\\$withStrings\\[\\$keyId\\] \\= true;"
+            ]
+        },
+        "UnwrapArrayColumn": {
+            "ignoreSourceCodeByRegex": [
+                "\\$termDocs \\+\\= array_column\\(\\$group\\['words'\\], 'num_docs', 'id'\\);"
+            ]
+        },
+        "UnwrapArrayFilter": {
+            "ignoreSourceCodeByRegex": [
+                "is_array\\(\\$value\\)  \\=\\> '\\[' \\. implode\\(', ', array_filter\\(\\$value, is_string\\(\\.\\.\\.\\)\\)\\) \\. '\\]',"
+            ]
+        },
+        "UnwrapArrayIntersectKey": {
+            "ignoreSourceCodeByRegex": [
+                "array_intersect_key\\(\\$docContribTermIds, \\$docScores\\),"
+            ]
+        },
+        "UnwrapArrayMap": {
+            "ignoreSourceCodeByRegex": [
+                "\\$stmt\\-\\>execute\\(array_merge\\(\\.\\.\\.array_map\\(fn\\(array \\$p\\) \\=\\> \\[\\$p\\[0\\], \\$p\\[1\\]\\], \\$chunk\\)\\)\\);"
+            ]
+        },
+        "UnwrapArrayUnique": {
+            "ignoreSourceCodeByRegex": [
+                "\\$deleted \\= \\$this\\-\\>deleteDocuments\\(array_values\\(array_unique\\(\\$ids\\)\\)\\);"
+            ]
+        },
+        "UnwrapArrayValues": {
+            "ignoreSourceCodeByRegex": [
+                "\\$list \\= array_values\\(array_unique\\(\\$list\\)\\);",
+                "\\$deleted \\= \\$this\\-\\>deleteDocuments\\(array_values\\(array_unique\\(\\$ids\\)\\)\\);",
+                "\\$stems \\= array_combine\\(array_keys\\(\\$tokens\\), \\$this\\-\\>stemTokens\\(array_values\\(\\$tokens\\)\\)\\);",
+                "return array_combine\\(array_keys\\(\\$tokens\\), \\$this\\-\\>stemTokens\\(array_values\\(\\$tokens\\)\\)\\);",
+                "return array_slice\\(array_values\\(\\$closest\\), 0, \\$this\\-\\>config\\-\\>fuzzyMaxExpansions\\);"
+            ]
+        },
+        "UnwrapTrim": {
+            "ignoreSourceCodeByRegex": [
+                "\\$tokens \\= Tokenizer\\:\\:split\\(mb_strtolower\\(trim\\(\\$term\\)\\)\\);"
             ]
         }
     }

@@ -22,6 +22,7 @@ use Fuzor\Exceptions\FuzorException;
 use Fuzor\Exceptions\IOException;
 use Fuzor\Exceptions\QueryException;
 use Fuzor\Tests\Support\EnglishStemmer;
+use Fuzor\Tests\Support\PluralStemmer;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 
@@ -3384,6 +3385,26 @@ class IndexTest extends TestCase
     }
 
     // --- inspectQuery ---
+
+    public function testAStemmedPhraseKeepsTheGapOfItsStopWord(): void
+    {
+        $index = new Index($this->dbPath, schema: new SchemaConfig(stemmer: PluralStemmer::class, stopWords: ['of']));
+        $index->insert([['id' => 1, 'title' => 'banks of england'], ['id' => 2, 'title' => 'banks england']]);
+
+        $this->assertSame([1], $index->search('"banks of england"')->getIds());
+        $this->assertSame([2], $index->search('england -"bank of england"')->getIds());
+        // The negated phrase's tokens as a list, without the stop word's gap.
+        $negation = $index->inspectQuery('x -"bank of england"')->negations[0];
+        $this->assertSame(['bank', 'england'], $negation['tokens']);
+    }
+
+    public function testStreamKeysAreTheDocumentIds(): void
+    {
+        $index = new Index($this->dbPath);
+        $index->insert([['id' => 7, 'title' => 'a'], ['id' => 9, 'title' => 'b']]);
+
+        $this->assertSame([7, 9], array_keys(iterator_to_array($index->stream(1), true)));
+    }
 
     public function testInspectQueryReportsNegationsApartFromTheSearchedWords(): void
     {

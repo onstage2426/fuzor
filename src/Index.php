@@ -3582,6 +3582,7 @@ final class Index implements \Countable
             }
             if ($fieldIdBoostMap !== []) {
                 $termDocs = [];
+                /** @infection-ignore-all Foreach_|UnwrapArrayColumn: $termDocs only picks the cheaper of two reads of the same rows */
                 foreach ($groups as $group) {
                     $termDocs += array_column($group['words'], 'num_docs', 'id');
                 }
@@ -5518,6 +5519,10 @@ final class Index implements \Countable
     {
         $inverse = [];
         if ($rest > 0 && array_sum($sizes) > $this->config->limits->facetCountDocs) {
+            /**
+             * @infection-ignore-all Foreach_|IncrementInteger|DecrementInteger: which groups are inverted changes how
+             * they are counted, not their counts (FacetClassesTest compares them with a scan at this size)
+             */
             foreach ($groups as $id => $group) {
                 if (self::isClassInGroup(0, $group)) {
                     $inverse[$id] = true;
